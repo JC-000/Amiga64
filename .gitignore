@@ -26,3 +26,4 @@ dist/
 .idea/
 .vscode/
 .serena/
+.gitignore.backup*
