@@ -26,7 +26,9 @@ vectors:
 	$(PY) -m host.vectors --out $(BUILD)/vectors --offline
 
 vice-test: runtime vectors
-	$(PY) -m tests.run_vectors --prg $(BUILD)/runner.prg --vectors $(BUILD)/vectors
+	$(PY) -m tests.run_vectors --prg $(BUILD)/runner.prg --vectors $(BUILD)/vectors --jobs 4
+	$(PY) -m host.handvec --out $(BUILD)/vectors-hand
+	$(PY) -m tests.run_vectors --prg $(BUILD)/runner.prg --vectors $(BUILD)/vectors-hand
 
 smoke:
 	$(PY) -m tests.smoke

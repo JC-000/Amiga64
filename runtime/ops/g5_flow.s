@@ -487,9 +487,9 @@ pc_from_mval:
         sta r_pc+3
         jmp dispatch_next
 
-; --- LINK An,#d16: push An, An = SP, SP += sext(d16).  Musashi order: the
-; pushed value is An BEFORE the SP decrement (matters only for LINK A7).
-; No vector stem exists for LINK — implemented but untested. ---------------
+; --- LINK An,#d16: push An, An = SP, SP += sext(d16).  LINK A7 pushes the
+; DECREMENTED A7 (Musashi m68k_op_link_16_a7: A7 -= 4 first, then writes
+; A7 itself) — verified by the hand-written vector suite. ------------------
 f4_link:
         lda op_lo
         and #$07
@@ -510,7 +510,22 @@ f4_link:
         sta m_val+2
         lda r_a0+3,y
         sta m_val+3
-        jsr push_long           ; A7 -= 4; [A7] = old An
+        cpy #$1C                ; LINK A7: pushed value is the decremented A7
+        bne @push
+        sec
+        lda m_val
+        sbc #4
+        sta m_val
+        lda m_val+1
+        sbc #0
+        sta m_val+1
+        lda m_val+2
+        sbc #0
+        sta m_val+2
+        lda m_val+3
+        sbc #0
+        sta m_val+3
+@push:  jsr push_long           ; A7 -= 4; [A7] = pushed value
         ldy g5_reg              ; An = new SP
         lda r_a7
         sta r_a0,y

@@ -41,8 +41,8 @@ Milestone-driven combination: **S1 + S4 first** (interpret a Hunk-format CLI pro
 
 ## Milestones
 
-1. **M0 — Loader**: parse Amiga Hunk format on host, produce a REU image + manifest; C64-side loader stages it via Ultimate command interface.
-2. **M1 — Core interpreter**: 68000 user-mode integer instruction set in 6502 asm, validated instruction-by-instruction against a reference (Musashi or pym68k) using the c64-test-harness.
+1. **M0 — Loader** ✅ (tag `m0-loader-green`): Hunk parser + REU image/manifest on host; chunks staged through the contract memory API; end-to-end demo with runtime relocation verified in VICE.
+2. **M1 — Core interpreter** ✅ (tag `m1-vectors-green`): full 68000 user-mode integer set in 6502/ca65, validated against 5150 sampled SingleStepTests golden vectors + 48 hand vectors for uncovered ops (all green; see `docs/PERF.md` for the analytic speed picture).
 3. **M2 — HLE exec/dos**: enough of exec.library + dos.library to run a freshly compiled "Hello, Amiga" (vbcc/gcc-m68k) to completion with console output.
 4. **M3 — Chipset shim v0**: single static playfield → VIC-II bitmap; framebuffer conversion on vblank.
 5. **M4 — AOT translator v0**: translate straight-line 68k basic blocks, falling back to the interpreter at block boundaries.
