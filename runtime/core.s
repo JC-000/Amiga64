@@ -14,6 +14,13 @@
 ;   - ea_calc/ea_load and the extension-word fetches CLOBBER op_lo/op_hi:
 ;     handlers must extract all opcode fields they need BEFORE fetching
 ;     extension words or calling ea_calc.
+;   - Instruction-stream window: fetch_word serves words from a 256-byte
+;     page-aligned C64-RAM copy (code_win) of the guest page PC is in,
+;     refilled by ONE 256-byte REU DMA on a miss.  Pure fetch cache: data
+;     reads still go to the REU; guest writes that overlap the cached page
+;     invalidate it (see WINCHK_*), as does emu_reset.  Build with
+;     FETCH_DIRECT defined to get the old one-DMA-per-word path (A/B
+;     reference); WINDOW_NOINVAL (test-only!) disables write invalidation.
 ; ===========================================================================
 
 .include "macros.inc"
@@ -43,6 +50,23 @@
 .import hle_aline                       ; HLE A-line dispatch (runtime/ops/hle.s or gen stub)
 
 ; ===========================================================================
+; Instruction-stream window state (core-internal; linker-assigned, outside
+; the $10-$7F contract register file).  The window caches the 256-byte
+; guest page (w_pg1:w_pg0 = guest address bits 23-8) that PC last fetched
+; from; w_inv nonzero forces the next fetch to refill.  code_win gets one
+; guard byte so an (undefined-behavior) odd-PC fetch at page offset $FF
+; reads allocated memory instead of a neighboring BSS variable.
+; ===========================================================================
+.segment "ZEROPAGE" : zeropage
+w_pg0:  .res 1                  ; window guest page, low  (addr bits 15-8)
+w_pg1:  .res 1                  ; window guest page, high (addr bits 23-16)
+w_inv:  .res 1                  ; 0 = window valid, nonzero = invalid
+
+.segment "BSS"
+.align $100                     ; page-aligned: in-window offset = PC low byte
+code_win: .res 257
+
+; ===========================================================================
 ; PRG load address + BASIC SYS stub
 ; ===========================================================================
 .segment "LOADADDR"
@@ -59,7 +83,10 @@ basic_stub:                             ; 10 SYS 2061
 .segment "CODE"
 
 ; ===========================================================================
-; emu_reset — clear interpreter state ($10-$7F), st_halt = 0
+; emu_reset — clear interpreter state ($10-$7F), st_halt = 0, and invalidate
+; the instruction window (the harness rewrites guest code at the same guest
+; addresses between runs, bypassing or preceding the interpreter's own
+; write-invalidation).
 ; ===========================================================================
 .proc emu_reset
         lda #0
@@ -67,6 +94,8 @@ basic_stub:                             ; 10 SYS 2061
 @lp:    sta $10,x
         dex
         bpl @lp
+        lda #1
+        sta w_inv
         rts
 .endproc
 
@@ -82,9 +111,12 @@ basic_stub:                             ; 10 SYS 2061
 ; aligned in segment DISPATCH) indexed by op_hi, patched into a self-
 ; modifying "jmp abs".  Cost of the select itself:
 ;     ldx op_hi (3) + 2x lda abs,x (4+4) + 2x sta abs (4+4) + jmp abs (3)
-;   = 22 cycles.  Full per-instruction loop overhead (run mode) excluding
-; the handler body: dispatch_next re-check (11) + halt check (5) +
-; fetch_word (~150 incl. REU DMA) + select (22) ~= 190 cycles.
+;   = 22 cycles.  The opcode fetch inlines fetch_word's window hit path
+; (saves the jsr/rts): 51 cycles on a hit.  Full per-instruction loop
+; overhead (run mode) excluding the handler body: dispatch_next re-check
+; (11) + halt check (5) + inlined fetch hit (51) + select (22) ~= 90
+; cycles (was ~190 with the direct one-DMA-per-word fetch; a window miss
+; adds a ~380-cycle refill, amortized over up to 128 in-page words).
 ; ===========================================================================
 emu_step:
         lda #1
@@ -97,13 +129,47 @@ emu_run:
 dispatch_go:
         lda st_halt             ; 3
         bne dispatch_done       ; 2 (not taken)
+.ifdef FETCH_DIRECT
         jsr fetch_word          ; op_lo/op_hi <- (PC), PC += 2
+.else
+        ; inlined fetch_word window hit path (must match the routine below)
+        lda r_pc+1              ; 3   PC page == window page, window valid?
+        eor w_pg0               ; 3
+        bne dg_miss             ; 2
+        lda r_pc+2              ; 3
+        eor w_pg1               ; 3
+        ora w_inv               ; 3   0 only if both pages match AND valid
+        bne dg_miss             ; 2
+        ldx r_pc                ; 3   in-window offset = PC low byte
+        lda code_win,x          ; 4   guest [PC]   = opcode high byte
+        sta op_hi               ; 3
+        sta t_tmp+1             ; 3
+        lda code_win+1,x        ; 4   guest [PC+1] = opcode low byte
+        sta op_lo               ; 3
+        sta t_tmp               ; 3
+        inx                     ; 2   PC += 2
+        inx                     ; 2
+        stx r_pc                ; 3
+        beq dg_wrap             ; 2   PC crossed into the next page
+.endif
+dispatch_sel:
         ldx op_hi               ; 3
         lda dispatch_lo,x       ; 4 (tables page-aligned: never +1)
         sta jvec+1              ; 4
         lda dispatch_hi,x       ; 4
         sta jvec+2              ; 4
 jvec:   jmp $FFFF               ; 3 (self-modified)
+
+.ifndef FETCH_DIRECT
+dg_wrap:                        ; PC page-cross retire (~1 in 128 fetches)
+        inc r_pc+1
+        bne dispatch_sel
+        inc r_pc+2
+        jmp dispatch_sel
+dg_miss:
+        jsr fetch_word          ; miss/invalid: refill the window and serve
+        jmp dispatch_sel
+.endif
 
 dispatch_next:                  ; <- handlers return here
         lda st_halt             ; 3
@@ -116,8 +182,23 @@ dispatch_done:
 ; ===========================================================================
 ; fetch_word — read guest big-endian word at PC into op_lo/op_hi (mirrored
 ; to t_tmp+0=lo/t_tmp+1=hi), PC += 2.  Handlers use it for extension words.
+;
+; Windowed build (default): serves from code_win when PC is inside the
+; cached page, else refills the whole page with one 256-byte REU DMA and
+; serves from the fresh copy.  An instruction or extension word run may
+; span the window edge: each word is fetched independently, and the first
+; word of the next page simply misses and refills — always correct.
+; PC is architecturally even (odd PC = 68000 address error, outside the
+; M1 subset); an odd PC at page offset $FF would fetch a stale guard byte
+; (defined memory, no crash) and wrap PC within the page — harmless UB in
+; an already-undefined state.
+; Clobbers: A, X, t_tmp+0/+1 (m_addr/m_val NOT touched, unlike the direct
+; build).  Cycles: hit 57 (+6 jsr), miss ~380 (refill DMA included).
+;
+; FETCH_DIRECT build: the v0 path, one 2-byte REU DMA per word.
 ; Clobbers: A, m_addr, m_val, t_tmp.  ~150 cycles (incl. REU DMA).
 ; ===========================================================================
+.ifdef FETCH_DIRECT
 .proc fetch_word
         lda r_pc                ; m_addr = PC
         sta m_addr
@@ -144,6 +225,54 @@ dispatch_done:
         sta t_tmp+1
         rts
 .endproc
+.else
+.proc fetch_word
+        lda r_pc+1              ; 3   PC page == window page, window valid?
+        eor w_pg0               ; 3
+        bne miss                ; 2
+        lda r_pc+2              ; 3
+        eor w_pg1               ; 3
+        ora w_inv               ; 3   0 only if both pages match AND valid
+        bne miss                ; 2
+serve:  ldx r_pc                ; 3   in-window offset = PC low byte
+        lda code_win,x          ; 4   guest [PC]   = high byte
+        sta op_hi               ; 3
+        sta t_tmp+1             ; 3
+        lda code_win+1,x        ; 4   guest [PC+1] = low byte
+        sta op_lo               ; 3
+        sta t_tmp               ; 3
+        inx                     ; 2   PC += 2
+        inx                     ; 2
+        stx r_pc                ; 3
+        beq wrap                ; 2   PC crossed into the next page
+        rts                     ; 6   hit total: 57
+wrap:   inc r_pc+1
+        bne wdone
+        inc r_pc+2
+wdone:  rts
+
+miss:                           ; refill the window with PC's guest page:
+        lda r_pc+1              ; one 256-byte REU DMA into code_win
+        sta w_pg0
+        sta REC_REUHI           ; REU offset = page << 8
+        lda r_pc+2
+        sta w_pg1
+        sta REC_REUBANK
+        lda #0
+        sta w_inv
+        sta REC_REULO
+        sta REC_C64LO           ; code_win is page-aligned
+        sta REC_LENLO           ; length $0100
+        sta REC_ACTRL           ; both addresses increment
+        lda #>code_win
+        sta REC_C64HI
+        lda #1
+        sta REC_LENHI
+        lda #REU_CMD_FETCH
+        sta REC_COMMAND         ; DMA executes here, CPU stalled ~256 cyc
+        jmp serve               ; ~60 setup + ~258 DMA, then the hit path
+.endproc
+.endif
 
 ; ===========================================================================
 ; Memory API — v0: one REU DMA per call through the REC at $DF00.
@@ -151,8 +280,72 @@ dispatch_done:
 ; Big-endian conversion happens here: the DMA bounce buffer is t_tmp+0..3
 ; (holds guest byte order), m_val holds LE.
 ; Requires I/O mapped in at $DF00 (default bank state; core never touches $01).
-; Cost per call ~= 95-115 cycles (setup ~70 + DMA 1 cycle/byte + copies).
+; Cost per call ~= 95-115 cycles (setup ~70 + DMA 1 cycle/byte + copies);
+; writes add the WINCHK_* window-overlap test (9-16 cycles, non-overlap).
 ; ===========================================================================
+
+; ---------------------------------------------------------------------------
+; WINCHK_B / WINCHK_W — invalidate the instruction window when a guest
+; write overlaps the cached page (self-modifying code, stack pushes landing
+; in the code page, harness staging over old code).  The window is a pure
+; fetch cache — the write itself still goes to the REU — so invalidation
+; is all that is needed for coherence.
+;
+; WINCHK_B: a 1-byte write overlaps iff its page equals the window page
+; (9 cycles when the page low bytes differ — the common case).
+; WINCHK_W lastoff: a (lastoff+1)-byte write overlaps iff it STARTS in the
+; window page, or starts at most lastoff bytes before it and spills across
+; the page boundary (low byte >= $100-lastoff; the +1 page compare below
+; reuses the carry from that cpx-style compare, and its carry-out keeps
+; the test correct across the $FFxxxx -> $000000 guest address wrap).
+; Clobbers A only.  Both are no-ops in FETCH_DIRECT builds; defining
+; WINDOW_NOINVAL also empties them — TEST-ONLY, breaks correctness by
+; design (used to prove the self-modifying-code test has teeth).
+; ---------------------------------------------------------------------------
+.if .defined(FETCH_DIRECT) .or .defined(WINDOW_NOINVAL)
+.macro WINCHK_B
+.endmacro
+.macro WINCHK_W lastoff
+.endmacro
+.else
+.macro WINCHK_B
+        .local kill, done
+        lda m_addr+1            ; 3
+        eor w_pg0               ; 3
+        bne done                ; 3 taken = common exit (9 cycles)
+        lda m_addr+2
+        eor w_pg1
+        bne done
+kill:   lda #1
+        sta w_inv
+done:
+.endmacro
+
+.macro WINCHK_W lastoff
+        .local chkhi, cross, kill, done
+        lda m_addr+1            ; 3
+        eor w_pg0               ; 3
+        beq chkhi               ; 2
+        lda m_addr              ; 3   page differs: overlap only possible if
+        cmp #$100 - lastoff     ; 2   the write spills into the next page
+        bcc done                ; 3 taken = common exit (16 cycles)
+cross:  lda m_addr+1            ; C=1 from the cmp: A = write page + 1
+        adc #0
+        eor w_pg0
+        bne done
+        lda m_addr+2
+        adc #0                  ; propagate the +1 carry (eor kept C)
+        eor w_pg1
+        bne done
+        beq kill                ; always
+chkhi:  lda m_addr+2
+        eor w_pg1
+        bne done
+kill:   lda #1
+        sta w_inv
+done:
+.endmacro
+.endif
 
 ; A = transfer length (1/2/4). Programs the REC for t_tmp <-> REU[m_addr].
 .proc mio_setup
@@ -211,6 +404,7 @@ dispatch_done:
 .endproc
 
 .proc mem_write8
+        WINCHK_B
         lda m_val
         sta t_tmp
         lda #1
@@ -221,6 +415,7 @@ dispatch_done:
 .endproc
 
 .proc mem_write16
+        WINCHK_W 1
         lda m_val+1
         sta t_tmp               ; high byte first (guest BE)
         lda m_val
@@ -233,6 +428,7 @@ dispatch_done:
 .endproc
 
 .proc mem_write32
+        WINCHK_W 3
         lda m_val+3
         sta t_tmp
         lda m_val+2

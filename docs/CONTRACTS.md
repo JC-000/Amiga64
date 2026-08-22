@@ -52,7 +52,7 @@ Register accessor convention: register number × 4 = ZP offset from `r_d0` ($10)
 - `emu_reset` — clear state, `st_halt`=0.
 - `emu_step` — execute exactly one guest instruction (fetch, dispatch, retire). Returns with `st_halt` set if the instruction halted/trapped.
 - `emu_run` — loop `emu_step` until `st_halt` ≠ 0.
-- `fetch_word` — read guest word at PC into `op_lo`/`op_hi` (also mirrored to `t_tmp` for extension words per handler need), PC += 2. Handlers use it for extension words.
+- `fetch_word` — read guest word at PC into `op_lo`/`op_hi` (also mirrored to `t_tmp` for extension words per handler need), PC += 2. Handlers use it for extension words. Clobbers A and X. Served from a 256-byte page-aligned instruction window (one REU DMA per page refill); `emu_reset` and any `mem_write*` overlapping the cached page invalidate it. Any future path that writes guest memory WITHOUT going through `mem_write*` (e.g. direct REU staging mid-run) must set the window-invalid flag (`w_inv`, ZP $82) or call `emu_reset` first.
 - Memory API (guest BE ↔ ZP LE conversion at this boundary, v0 = direct per-call REU DMA; internals may later add windowing/TLB — **only these entry points are stable**):
   - `mem_read8` / `mem_read16` / `mem_read32`: `m_addr` → `m_val`
   - `mem_write8` / `mem_write16` / `mem_write32`: `m_addr`, `m_val` →
