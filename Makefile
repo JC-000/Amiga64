@@ -23,7 +23,7 @@ $(BUILD)/runner.prg: $(RUNTIME_SRC) $(BUILD)/gen/dispatch.s runtime/c64.cfg
 
 vectors:
 	mkdir -p $(BUILD)/vectors
-	$(PY) -m host.vectors --out $(BUILD)/vectors
+	$(PY) -m host.vectors --out $(BUILD)/vectors --offline
 
 vice-test: runtime vectors
 	$(PY) -m tests.run_vectors --prg $(BUILD)/runner.prg --vectors $(BUILD)/vectors

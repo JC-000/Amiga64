@@ -1,0 +1,740 @@
+{
+ "commit": "e0d5ece9670205cc84a0101081837deb446f86a3",
+ "files": {
+  "ABCD": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ADD.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ADD.l": {
+   "dropped": {
+    "exception": 2922
+   },
+   "retained_pool": 5143,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ADD.w": {
+   "dropped": {
+    "exception": 2948
+   },
+   "retained_pool": 5117,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ADDA.l": {
+   "dropped": {
+    "exception": 2693
+   },
+   "retained_pool": 5372,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ADDA.w": {
+   "dropped": {
+    "exception": 2634
+   },
+   "retained_pool": 5431,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ADDX.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ADDX.l": {
+   "dropped": {
+    "exception": 2593
+   },
+   "retained_pool": 5472,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ADDX.w": {
+   "dropped": {
+    "exception": 2600
+   },
+   "retained_pool": 5465,
+   "sampled": 50,
+   "total": 8065
+  },
+  "AND.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "AND.l": {
+   "dropped": {
+    "exception": 3320
+   },
+   "retained_pool": 4745,
+   "sampled": 50,
+   "total": 8065
+  },
+  "AND.w": {
+   "dropped": {
+    "exception": 3397
+   },
+   "retained_pool": 4668,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ASL.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ASL.l": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ASL.w": {
+   "dropped": {
+    "exception": 938
+   },
+   "retained_pool": 7127,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ASR.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ASR.l": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ASR.w": {
+   "dropped": {
+    "exception": 923
+   },
+   "retained_pool": 7142,
+   "sampled": 50,
+   "total": 8065
+  },
+  "BCHG": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "BCLR": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "BSET": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "BSR": {
+   "dropped": {
+    "exception": 3980
+   },
+   "retained_pool": 4085,
+   "sampled": 50,
+   "total": 8065
+  },
+  "BTST": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "Bcc": {
+   "dropped": {
+    "exception": 2200
+   },
+   "retained_pool": 5865,
+   "sampled": 50,
+   "total": 8065
+  },
+  "CLR.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "CLR.l": {
+   "dropped": {
+    "exception": 3162
+   },
+   "retained_pool": 4903,
+   "sampled": 50,
+   "total": 8065
+  },
+  "CLR.w": {
+   "dropped": {
+    "exception": 3169
+   },
+   "retained_pool": 4896,
+   "sampled": 50,
+   "total": 8065
+  },
+  "CMP.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "CMP.l": {
+   "dropped": {
+    "exception": 3031
+   },
+   "retained_pool": 5034,
+   "sampled": 50,
+   "total": 8065
+  },
+  "CMP.w": {
+   "dropped": {
+    "exception": 3041
+   },
+   "retained_pool": 5024,
+   "sampled": 50,
+   "total": 8065
+  },
+  "CMPA.l": {
+   "dropped": {
+    "exception": 2615
+   },
+   "retained_pool": 5450,
+   "sampled": 50,
+   "total": 8065
+  },
+  "CMPA.w": {
+   "dropped": {
+    "exception": 2705
+   },
+   "retained_pool": 5360,
+   "sampled": 50,
+   "total": 8065
+  },
+  "DBcc": {
+   "dropped": {
+    "exception": 1964
+   },
+   "retained_pool": 6101,
+   "sampled": 50,
+   "total": 8065
+  },
+  "DIVS": {
+   "dropped": {
+    "exception": 3073
+   },
+   "retained_pool": 4992,
+   "sampled": 50,
+   "total": 8065
+  },
+  "DIVU": {
+   "dropped": {
+    "exception": 3102
+   },
+   "retained_pool": 4963,
+   "sampled": 50,
+   "total": 8065
+  },
+  "EOR.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "EOR.l": {
+   "dropped": {
+    "exception": 3161
+   },
+   "retained_pool": 4904,
+   "sampled": 50,
+   "total": 8065
+  },
+  "EOR.w": {
+   "dropped": {
+    "exception": 3135
+   },
+   "retained_pool": 4930,
+   "sampled": 50,
+   "total": 8065
+  },
+  "EXG": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "EXT.l": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "EXT.w": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "JMP": {
+   "dropped": {
+    "exception": 3806
+   },
+   "retained_pool": 4259,
+   "sampled": 50,
+   "total": 8065
+  },
+  "JSR": {
+   "dropped": {
+    "exception": 3882
+   },
+   "retained_pool": 4183,
+   "sampled": 50,
+   "total": 8065
+  },
+  "LEA": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "LSL.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "LSL.l": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "LSL.w": {
+   "dropped": {
+    "exception": 904
+   },
+   "retained_pool": 7161,
+   "sampled": 50,
+   "total": 8065
+  },
+  "LSR.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "LSR.l": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "LSR.w": {
+   "dropped": {
+    "exception": 962
+   },
+   "retained_pool": 7103,
+   "sampled": 50,
+   "total": 8065
+  },
+  "MOVE.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "MOVE.l": {
+   "dropped": {
+    "exception": 4795
+   },
+   "retained_pool": 3270,
+   "sampled": 50,
+   "total": 8065
+  },
+  "MOVE.q": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "MOVE.w": {
+   "dropped": {
+    "exception": 4697
+   },
+   "retained_pool": 3368,
+   "sampled": 50,
+   "total": 8065
+  },
+  "MOVEA.l": {
+   "dropped": {
+    "exception": 2686
+   },
+   "retained_pool": 5379,
+   "sampled": 50,
+   "total": 8065
+  },
+  "MOVEA.w": {
+   "dropped": {
+    "exception": 2743
+   },
+   "retained_pool": 5322,
+   "sampled": 50,
+   "total": 8065
+  },
+  "MOVEM.l": {
+   "dropped": {
+    "exception": 3842
+   },
+   "retained_pool": 4223,
+   "sampled": 50,
+   "total": 8065
+  },
+  "MOVEM.w": {
+   "dropped": {
+    "exception": 3784
+   },
+   "retained_pool": 4281,
+   "sampled": 50,
+   "total": 8065
+  },
+  "MULS": {
+   "dropped": {
+    "exception": 3122
+   },
+   "retained_pool": 4943,
+   "sampled": 50,
+   "total": 8065
+  },
+  "MULU": {
+   "dropped": {
+    "exception": 3073
+   },
+   "retained_pool": 4992,
+   "sampled": 50,
+   "total": 8065
+  },
+  "NBCD": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "NEG.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "NEG.l": {
+   "dropped": {
+    "exception": 3034
+   },
+   "retained_pool": 5031,
+   "sampled": 50,
+   "total": 8065
+  },
+  "NEG.w": {
+   "dropped": {
+    "exception": 3154
+   },
+   "retained_pool": 4911,
+   "sampled": 50,
+   "total": 8065
+  },
+  "NEGX.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "NEGX.l": {
+   "dropped": {
+    "exception": 3146
+   },
+   "retained_pool": 4919,
+   "sampled": 50,
+   "total": 8065
+  },
+  "NEGX.w": {
+   "dropped": {
+    "exception": 3086
+   },
+   "retained_pool": 4979,
+   "sampled": 50,
+   "total": 8065
+  },
+  "NOP": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "NOT.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "NOT.l": {
+   "dropped": {
+    "exception": 3140
+   },
+   "retained_pool": 4925,
+   "sampled": 50,
+   "total": 8065
+  },
+  "NOT.w": {
+   "dropped": {
+    "exception": 3108
+   },
+   "retained_pool": 4957,
+   "sampled": 50,
+   "total": 8065
+  },
+  "OR.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "OR.l": {
+   "dropped": {
+    "exception": 3335
+   },
+   "retained_pool": 4730,
+   "sampled": 50,
+   "total": 8065
+  },
+  "OR.w": {
+   "dropped": {
+    "exception": 3415
+   },
+   "retained_pool": 4650,
+   "sampled": 50,
+   "total": 8065
+  },
+  "PEA": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ROL.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ROL.l": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ROL.w": {
+   "dropped": {
+    "exception": 991
+   },
+   "retained_pool": 7074,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ROR.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ROR.l": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ROR.w": {
+   "dropped": {
+    "exception": 878
+   },
+   "retained_pool": 7187,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ROXL.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ROXL.l": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ROXL.w": {
+   "dropped": {
+    "exception": 937
+   },
+   "retained_pool": 7128,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ROXR.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ROXR.l": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "ROXR.w": {
+   "dropped": {
+    "exception": 893
+   },
+   "retained_pool": 7172,
+   "sampled": 50,
+   "total": 8065
+  },
+  "RTR": {
+   "dropped": {
+    "exception": 4027
+   },
+   "retained_pool": 4038,
+   "sampled": 50,
+   "total": 8065
+  },
+  "RTS": {
+   "dropped": {
+    "exception": 4057
+   },
+   "retained_pool": 4008,
+   "sampled": 50,
+   "total": 8065
+  },
+  "SBCD": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "SUB.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "SUB.l": {
+   "dropped": {
+    "exception": 2972
+   },
+   "retained_pool": 5093,
+   "sampled": 50,
+   "total": 8065
+  },
+  "SUB.w": {
+   "dropped": {
+    "exception": 2944
+   },
+   "retained_pool": 5121,
+   "sampled": 50,
+   "total": 8065
+  },
+  "SUBA.l": {
+   "dropped": {
+    "exception": 2736
+   },
+   "retained_pool": 5329,
+   "sampled": 50,
+   "total": 8065
+  },
+  "SUBA.w": {
+   "dropped": {
+    "exception": 2679
+   },
+   "retained_pool": 5386,
+   "sampled": 50,
+   "total": 8065
+  },
+  "SUBX.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "SUBX.l": {
+   "dropped": {
+    "exception": 2584
+   },
+   "retained_pool": 5481,
+   "sampled": 50,
+   "total": 8065
+  },
+  "SUBX.w": {
+   "dropped": {
+    "exception": 2678
+   },
+   "retained_pool": 5387,
+   "sampled": 50,
+   "total": 8065
+  },
+  "SWAP": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "Scc": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "TST.b": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "TST.l": {
+   "dropped": {
+    "exception": 3102
+   },
+   "retained_pool": 4963,
+   "sampled": 50,
+   "total": 8065
+  },
+  "TST.w": {
+   "dropped": {
+    "exception": 3137
+   },
+   "retained_pool": 4928,
+   "sampled": 50,
+   "total": 8065
+  }
+ },
+ "repo": "SingleStepTests/680x0",
+ "sample_seed": 675840,
+ "suite": "68000/v1"
+}
