@@ -1029,64 +1029,6 @@ op_illegal:
         jmp emu_halt
 
 ; ===========================================================================
-; ======================= TEMP-HANDLERS-BEGIN ===============================
-; Proof-of-life handlers.  These belong to group agents per the contract
-; family map and live here only until those land:
-;   - fam_moveq -> owner G1 (runtime/ops/g1_move.s)
-;   - fam_4     -> owner G5 (runtime/ops/g5_flow.s); this stub ONLY handles
-;                  NOP ($4E71), everything else in $4x -> op_illegal.
-; To hand over: DELETE everything between TEMP-HANDLERS-BEGIN/END plus the
-; two ".export fam_moveq / fam_4  ; TEMP" lines just below.  (Deletion, not
-; .if-guarding, because gen_dispatch.py textually scans for ".export".)
-; ===========================================================================
-.export fam_moveq               ; TEMP — remove when G1 lands
-.export fam_4                   ; TEMP — remove when G5 lands
-
-fam_moveq:                      ; MOVEQ #<d8>,Dn: 0111 rrr 0 dddddddd
-        lda op_hi
-        lsr                     ; C = bit8 (must be 0)
-        bcs @ill
-        and #7                  ; reg
-        asl
-        asl
-        tax                     ; reg*4
-        ldy #0
-        lda op_lo
-        sta r_d0,x              ; Dn = sext8(d8) to 32 bits
-        bpl @pos
-        dey
-@pos:   tya
-        sta r_d0+1,x
-        sta r_d0+2,x
-        sta r_d0+3,x
-        lda r_sr                ; CCR: N/Z from long result, V=C=0, X kept
-        and #$10
-        sta w_ptmp
-        lda op_lo
-        bne @nz
-        lda w_ptmp
-        ora #$04
-        sta w_ptmp
-@nz:    lda op_lo
-        bpl @np
-        lda w_ptmp
-        ora #$08
-        sta w_ptmp
-@np:    lda w_ptmp
-        sta r_sr
-        jmp dispatch_next
-@ill:   jmp op_illegal
-
-fam_4:                          ; TEMP: only NOP ($4E71) retires
-        lda op_hi
-        cmp #$4E
-        bne @ill
-        lda op_lo
-        cmp #$71
-        bne @ill
-        jmp dispatch_next
-@ill:   jmp op_illegal
-; ======================== TEMP-HANDLERS-END ================================
 
 ; ===========================================================================
 .segment "RODATA"
