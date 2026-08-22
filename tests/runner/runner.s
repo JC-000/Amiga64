@@ -36,24 +36,12 @@
 .export test_run_case, main
 .import emu_reset, emu_step, mem_read8, mem_write8
 
-; Contract zero-page register file ($10-$7F, interpreter-owned)
-r_d0      = $10
-r_pc      = $50
-r_sr      = $54
-m_addr    = $58
-m_val     = $5C
-st_halt   = $78
-st_reason = $79
-
-; Loader/harness-reserved ZP ($02-$0F) — runner-private, survives emu_step
-cp        = $02         ; 2-byte walking pointer into buf_case
-cnt       = $04         ; init-pair loop counter
-nexp      = $05         ; number of expected-mem pairs
-expp      = $06         ; 2-byte saved pointer to expected-mem pairs
-rbidx     = $08         ; readback index
-
-buf_case   = $C000
-buf_result = $C800
+; All fixed addresses come from the resource contract (docs/RESOURCES.md):
+; contract ZP register file ($10-$7F), the runner-private loader/harness
+; scratch bank cp/cnt/nexp/expp/rbidx ($02-$08, survives emu_step), and
+; buf_case/buf_result.  Values are plain equates — no .import needed.
+.include "../../runtime/rc/zp.inc"
+.include "../../runtime/rc/ram.inc"
 
 RES_DONE   = buf_result + $00
 RES_HALT   = buf_result + $01

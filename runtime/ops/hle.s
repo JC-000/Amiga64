@@ -29,12 +29,13 @@
 
 HLE_FN_COUNT = 4                ; valid indices $A100-$A103
 
-; DOSBase guest address (docs/HLE.md env map; must match host/hle_env.py)
-DOS_BASE     = $000A00
+; DOS_BASE (guest DOSBase) and SCREEN (C64 text screen, VIC bank 0) come
+; from the resource contract (runtime/rc/guest.inc / rc/ram.inc via
+; ../macros.inc); host/hle_env.py mirrors the guest values (rescheck'd).
+
 ; Magic file handle returned by Output (must match hle_env.FH_MAGIC)
 FH_MAGIC     = $0000C0DE
 
-SCREEN       = $0400            ; C64 text screen (always RAM, VIC bank 0)
 SCREEN_COLS  = 40
 SCREEN_SIZE  = 1000             ; 40x25; v0 caps output here, no scrolling
 

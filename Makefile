@@ -1,7 +1,7 @@
 PY      := python3
 BUILD   := build
 
-.PHONY: all host-test runtime vectors vice-test smoke clean
+.PHONY: all host-test runtime vectors vice-test smoke rescheck clean
 
 all: runtime
 
@@ -15,8 +15,9 @@ $(BUILD)/gen/dispatch.s: host/gen_dispatch.py runtime/core.s $(wildcard runtime/
 	$(PY) host/gen_dispatch.py -o $@
 
 RUNTIME_SRC := $(wildcard runtime/*.s runtime/ops/*.s tests/runner/*.s)
+RUNTIME_INC := runtime/macros.inc $(wildcard runtime/rc/*.inc)
 
-$(BUILD)/runner.prg: $(RUNTIME_SRC) $(BUILD)/gen/dispatch.s runtime/c64.cfg
+$(BUILD)/runner.prg: $(RUNTIME_SRC) $(RUNTIME_INC) $(BUILD)/gen/dispatch.s runtime/c64.cfg
 	mkdir -p $(BUILD)
 	cl65 -t none -C runtime/c64.cfg -o $@ -Ln $(BUILD)/runner.lbl -m $(BUILD)/runner.map \
 		$(RUNTIME_SRC) $(BUILD)/gen/dispatch.s
@@ -32,6 +33,10 @@ vice-test: runtime vectors
 
 smoke:
 	$(PY) -m tests.smoke
+
+# Resource-contract checker: runtime/rc/*.inc vs. sources (docs/RESOURCES.md)
+rescheck:
+	$(PY) -m host.rescheck
 
 clean:
 	rm -rf $(BUILD)

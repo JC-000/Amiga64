@@ -1,5 +1,7 @@
 ; ---------------------------------------------------------------------------
-; runtime/macros.inc — shared ZP map, constants, macros.  Owner: core agent.
+; runtime/macros.inc — shared constants + macros.  Owner: core agent.
+; Address allocations live in runtime/rc/*.inc (included below) — the
+; resource contract, docs/RESOURCES.md.
 ;
 ; ca65 resolves .include against the INCLUDING FILE's directory, so:
 ;   from runtime/*.s:      .include "macros.inc"
@@ -16,51 +18,15 @@
 .ifndef AMIGA64_MACROS_INC
 AMIGA64_MACROS_INC = 1
 
-; --- Zero-page register file (contract: interpreter owns $10-$7F) ----------
-; All multi-byte values little-endian.  $02-$0F reserved for loader/harness.
+; --- Resource contract (single source of truth for all fixed addresses) ----
+; Zero page ($02-$0F harness, $10-$7F interpreter register file, $80-$82
+; fetch window), C64 RAM/I-O (screen, buffers, REC, Ultimate) and guest/REU
+; addresses all live in runtime/rc/*.inc, machine-checked by
+; host/rescheck.py (`make rescheck`).  See docs/RESOURCES.md.
 
-r_d0      = $10         ; D0..D7, 4 bytes each ($10-$2F)
-r_d1      = $14
-r_d2      = $18
-r_d3      = $1C
-r_d4      = $20
-r_d5      = $24
-r_d6      = $28
-r_d7      = $2C
-r_a0      = $30         ; A0..A7, 4 bytes each ($30-$4F); A7 = active SP
-r_a1      = $34
-r_a2      = $38
-r_a3      = $3C
-r_a4      = $40
-r_a5      = $44
-r_a6      = $48
-r_a7      = $4C
-r_pc      = $50         ; PC, 4 bytes (bits 24-31 always 0)
-r_sr      = $54         ; $54 = CCR (bit4 X, 3 N, 2 Z, 1 V, 0 C), $55 = SR hi
-op_lo     = $56         ; current opcode word, 68k bits 7-0
-op_hi     = $57         ; current opcode word, 68k bits 15-8
-m_addr    = $58         ; guest address argument for memory API (LE, 4 bytes)
-m_val     = $5C         ; value in/out for memory API (LE, 4 bytes)
-t_ea      = $60         ; resolved effective address (LE, 4 bytes)
-t_op1     = $64         ; ALU operand 1 = destination operand (LE)
-t_op2     = $68         ; ALU operand 2 = source operand (LE)
-t_res     = $6C         ; ALU result (LE)
-t_tmp     = $70         ; free scratch $70-$77, ANY core routine may clobber
-                        ;   (memory API uses $70-$73 as its REU DMA bounce
-                        ;    buffer; fetch_word mirrors the fetched word to
-                        ;    t_tmp+0=lo / t_tmp+1=hi on return)
-st_halt   = $78         ; 0 = running, nonzero = halted
-st_reason = $79         ; HALT_* reason code, valid when st_halt != 0
-
-; $7A-$7F: interpreter-internal state (contract: "rest reserved").
-; Group handlers must treat these as opaque — do not read or write.
-ea_kind   = $7A         ; internal: 0 = memory (t_ea valid), 1 = register
-ea_reg    = $7B         ; internal: ZP offset of register from r_d0 (reg*4,
-                        ;   +$20 for An register-direct)
-ea_size   = $7C         ; internal: size latched by ea_calc
-st_step   = $7D         ; internal: nonzero = emu_step (stop after 1 instr)
-w_zacc    = $7E         ; internal: ALU zero-accumulator scratch
-w_ptmp    = $7F         ; internal: ALU/EA flag scratch
+.include "rc/zp.inc"
+.include "rc/ram.inc"
+.include "rc/guest.inc"
 
 ; --- Halt reason codes -----------------------------------------------------
 HALT_OK      = $00      ; clean termination (pseudo-op $AFFF)
@@ -68,22 +34,7 @@ HALT_ALINE   = $01      ; other $Axxx opcode (M2 HLE trap hook)
 HALT_FLINE   = $02      ; $Fxxx opcode
 HALT_ILLEGAL = $03      ; illegal / unimplemented opcode
 
-; --- Fixed buffers (contract memory map) -----------------------------------
-buf_case   = $C000      ; harness writes test cases here ($C000-$C7FF)
-buf_result = $C800      ; runner writes final state here ($C800-$CFFF)
-
-; --- REU (RAM Expansion Controller) registers ------------------------------
-REC_STATUS  = $DF00
-REC_COMMAND = $DF01
-REC_C64LO   = $DF02
-REC_C64HI   = $DF03
-REC_REULO   = $DF04
-REC_REUHI   = $DF05
-REC_REUBANK = $DF06
-REC_LENLO   = $DF07
-REC_LENHI   = $DF08
-REC_IMASK   = $DF09
-REC_ACTRL   = $DF0A
+; --- REU DMA command values (registers themselves: rc/ram.inc REC_*) -------
 REU_CMD_FETCH = $91     ; execute | no-$FF00-trigger | REU -> C64
 REU_CMD_STASH = $90     ; execute | no-$FF00-trigger | C64 -> REU
 

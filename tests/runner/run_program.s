@@ -34,28 +34,13 @@
 .export test_load_chunk, test_run_program
 .import emu_reset, emu_step, mem_write8
 
-; Contract zero-page register file ($10-$7F, interpreter-owned)
-r_d0      = $10
-r_a7      = $4C
-r_pc      = $50
-m_addr    = $58
-m_val     = $5C
-st_halt   = $78
-st_reason = $79
-
-; Loader/harness-reserved ZP ($02-$0F). runner.s test_run_case uses $02-$08
-; for its own private state; these entries never run concurrently with it,
-; so reuse is safe.
-srcp      = $02         ; 2-byte walking pointer into the record payload
-lcnt      = $04         ; 2-byte remaining payload byte count
-gaddr     = $06         ; 4-byte guest-address cursor (mem_write8 input is
-                        ; not contractually preserved across calls)
-icount    = $06         ; 4-byte executed-instruction counter (run entry;
-                        ; overlays gaddr — the two entries don't coexist)
-nobud     = $0A         ; 1: budget == 0 (unlimited)
-
-buf_case   = $C000
-buf_result = $C800
+; All fixed addresses come from the resource contract (docs/RESOURCES.md):
+; contract ZP register file ($10-$7F), this file's loader/harness scratch
+; bank srcp/lcnt/gaddr/icount/nobud ($02-$0A — overlays runner.s's
+; test_run_case bank byte-for-byte; the entries never run concurrently,
+; so reuse is safe), and buf_case/buf_result.
+.include "../../runtime/rc/zp.inc"
+.include "../../runtime/rc/ram.inc"
 
 RES_DONE    = buf_result + $00
 RES_HALT    = buf_result + $01

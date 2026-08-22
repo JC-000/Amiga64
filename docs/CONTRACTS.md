@@ -18,32 +18,31 @@ Fixed interfaces for parallel work packages. **Changing anything here requires s
 
 ## Zero-page register file (interpreter owns $10–$7F)
 
-All multi-byte ZP values **little-endian** (LSB first) for 6502 arithmetic convenience. The memory API converts to/from guest big-endian at the boundary.
-
-| ZP | Name | Contents |
-|---|---|---|
-| $02–$0F | — | reserved for loader/harness, never touched by interpreter |
-| $10–$2F | `r_d0`..`r_d7` | D0–D7, 4 bytes each |
-| $30–$4F | `r_a0`..`r_a7` | A0–A7, 4 bytes each (A7 = active SP) |
-| $50–$53 | `r_pc` | PC, 4 bytes (bits 24–31 always 0) |
-| $54–$55 | `r_sr` | SR: $54 = CCR (bit4 X, 3 N, 2 Z, 1 V, 0 C — native 68k layout), $55 = SR high byte (stored, not interpreted) |
-| $56–$57 | `op_lo`,`op_hi` | current opcode word (op_hi = 68k bits 15–8) |
-| $58–$5B | `m_addr` | guest address argument for memory API |
-| $5C–$5F | `m_val` | value in/out for memory API (LE) |
-| $60–$63 | `t_ea` | resolved effective address |
-| $64–$6B | `t_op1`,`t_op2` | ALU operands (4+4, LE) |
-| $6C–$6F | `t_res` | ALU result |
-| $70–$77 | `t_tmp` | free scratch, any routine may clobber |
-| $78–$7F | `st_*` | interpreter state: `st_halt` ($78, 0=running), `st_reason` ($79), rest reserved |
+**Authoritative map: `runtime/rc/zp.inc`** (resource contract, see
+`docs/RESOURCES.md`; machine-checked by `make rescheck`). Summary: $02–$0F
+loader/harness scratch (never touched by the interpreter); $10–$7F the
+interpreter register file — `r_d0..r_d7`, `r_a0..r_a7` (A7 = active SP),
+`r_pc`, `r_sr`, `op_lo`/`op_hi`, `m_addr`, `m_val`, `t_ea`,
+`t_op1`/`t_op2`, `t_res`, `t_tmp` scratch, `st_halt`/`st_reason`, and the
+core-internal $7A–$7F; $80–$82 the fetch-window state (ZEROPAGE segment).
+All multi-byte ZP values **little-endian** (LSB first); the memory API
+converts to/from guest big-endian at the boundary. CCR layout in `r_sr`:
+bit4 X, 3 N, 2 Z, 1 V, 0 C (native 68k); $55 = SR high byte (stored, not
+interpreted).
 
 Register accessor convention: register number × 4 = ZP offset from `r_d0` ($10). Core exports macros `getreg`/`setreg` (X = register index 0–15, copies 4 bytes to/from `t_op1`/`t_res`).
 
 ## C64 memory map (interpreter build)
 
-- `$0801–$9FFF`: runner PRG (BASIC stub + code + tables). Segment `CODE`/`RODATA`.
-- `$C000–$C7FF`: **case buffer** — harness writes test cases here (`buf_case`).
-- `$C800–$CFFF`: **result buffer** — runner writes final state here (`buf_result`).
-- `$DF00–$DF0A`: REU (REC) registers. `$DF1C+`: Ultimate command interface (M0 loader only).
+**Authoritative map: `runtime/rc/ram.inc`** (C64 side) and
+**`runtime/rc/guest.inc`** (guest/REU side) — resource contract, see
+`docs/RESOURCES.md`. Summary: runner PRG at $0801–$9FFF (DISPATCH tables
+page-aligned at $0900–$0AFF); HLE console screen $0400–$07E7; `buf_case`
+$C000–$C7FF; `buf_result` $C800–$CFFF with the $CE00 page reserved as the
+hardware-harness mailbox; REC registers $DF00–$DF0A; Ultimate command
+interface $DF1C+ (M0 loader only). Guest side: 68k vector page, HLE env
+$000400–$000FFF, stack top $00F000, program load base $010000.
+
 - KERNAL/BASIC ROMs may be banked out during interpretation; interpreter must not call KERNAL.
 - Linker config: `runtime/c64.cfg` (owned by core agent, others consume).
 
