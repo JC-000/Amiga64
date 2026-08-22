@@ -115,11 +115,19 @@ def compare_case(case: Case, hdr: bytes, mem: bytes, ccr_only: bool) -> list[tup
 def prepare_target(target, prg_path: str) -> None:
     """Get a freshly acquired target to the runner's ready state."""
     if target.backend != "vice":
-        # Hardware path (untested): REU 16 MB + boot the runner PRG via REST.
+        # Hardware path: REU 16 MB + boot the runner PRG via REST, then
+        # install the mailbox dispatcher (harness_util) so call_runner()
+        # can invoke runner entry points without BASIC READY.
         from c64_test_harness.backends.ultimate64_helpers import set_reu
-        set_reu(target.client, True, 16)
+        from tests.harness_util import u64_install_dispatcher
+        client = target.transport.client
+        set_reu(client, True, 16)
         with open(prg_path, "rb") as f:
-            target.client.run_prg(f.read())
+            client.run_prg(f.read())
+        wait_ready(target.transport)
+        labels = Labels.from_file(os.path.splitext(prg_path)[0] + ".lbl")
+        u64_install_dispatcher(target, lookup_label(labels, "main"))
+        return
     wait_ready(target.transport)
 
 
@@ -206,6 +214,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--filter", default="", help="only run batches whose filename contains this")
     ap.add_argument("--max-failures", type=int, default=0, metavar="N",
                     help="stop after N field failures (0 = unlimited)")
+    ap.add_argument("--limit", type=int, default=0, metavar="N",
+                    help="run at most N cases per batch (0 = all; for "
+                         "representative subset runs on slow backends)")
     ap.add_argument("--jobs", type=int, default=1, metavar="N",
                     help="parallel VICE instances (one batch per instance)")
     ap.add_argument("--timeout", type=float, default=15.0,
@@ -245,6 +256,8 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as e:
             print(f"error: bad batch {path}: {e}", file=sys.stderr)
             return 2
+        if args.limit:
+            cases = cases[:args.limit]
         batches.append((os.path.basename(path), cases))
     total_cases = sum(len(c) for _, c in batches)
     print(f"{len(batches)} batch(es), {total_cases} case(s); "

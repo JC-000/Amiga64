@@ -1,5 +1,14 @@
 # PERF — Analytic performance projection (M1 interpreter)
 
+> **Measured reality now exists: see `docs/HARDWARE.md`** (real U64E, fw 3.14d,
+> raw data in `fixtures/bench/`). Headlines vs. this doc's estimates: 1 MHz
+> cycles/instr came out ~2× worse than the cycle-comment model; the 48 MHz
+> uniform-scaling assumption is false (bulk REU DMA caps at ~3.3 MB/s past
+> 2 MHz, and REC **register I/O is throttled to ~1 µs/store** at turbo — the
+> real v0 ceiling). Measured 48 MHz IPS: v0 ~35k/28k (ALU/mem), windowed core
+> ~80k/57k (window gain 2.28×/2.03× at 48 MHz; windowed cycles/instr is flat
+> across the sweep). Top remaining lever: fewer REC accesses per memory call.
+
 Engineering estimate from the cycle comments in `runtime/core.s` and
 `runtime/ops/*.s`. Nothing here is measured on hardware. **VICE warp is not a
 48 MHz model** — warp only removes real-time pacing from a 1 MHz machine model
