@@ -92,7 +92,7 @@ Register accessor convention: register number × 4 = ZP offset from `r_d0` ($10)
 - `host/vectors.py` samples N cases/opcode (default 50, seeded, deterministic), **filtering out**: cases taking any exception (address error, privilege, divide, illegal — detect via exception-vector fetches in the JSON transaction list or final-SR/SSP changes), trace-bit cases, and instructions outside the M1 subset. Only architectural state is kept (regs + RAM byte pairs); prefetch/bus detail is dropped. Retained initial SR is normalized to user mode with the same CCR.
 - Binary batch format (LE unless noted), one file per opcode-page or group, ≤ 2048-byte cases fit `buf_case` one at a time:
   - Batch header: `u16 case_count`
-  - Per case: `u16 case_len`, 16 × `u32` D0–D7/A0–A7, `u32 PC`, `u16 SR`, `u8 n_init_mem`, n × {`u24 addr`, `u8 val`}, `u8 n_exp_mem`, m × {`u24 addr`, `u8 val`}, 16 × `u32` expected regs, `u32` expected PC, `u16` expected SR
+  - Per case: `u16 case_len` (includes the 2-byte length field itself; next case at offset + case_len), 16 × `u32` D0–D7/A0–A7, `u32 PC`, `u16 SR`, `u8 n_init_mem`, n × {`u24 addr`, `u8 val`}, `u8 n_exp_mem`, m × {`u24 addr`, `u8 val`}, 16 × `u32` expected regs, `u32` expected PC, `u16` expected SR
 - Execution: for each case the host (via harness) writes the case into `buf_case`, calls `test_run_case` (runner entry), which: loads regs/SR/PC, writes init mem pairs via `mem_write8`, calls `emu_step` once, dumps regs/SR/PC + reads expected-mem addresses via `mem_read8` into `buf_result`. Host compares and reports (opcode, case index, field diff).
 - The runner (`tests/` side) exports `test_run_case` at a fixed label in the PRG; harness discovers addresses via the ld65 label/map file (`build/runner.lbl`).
 
