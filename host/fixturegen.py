@@ -162,3 +162,70 @@ def fixture_code_data_reloc() -> bytes:
     data = b.add_data(RELOC_FIXTURE_DATA)
     b.add_reloc32(code, data, [RELOC_FIXTURE_FIELD_OFFSET])
     return b.build()
+
+
+# --- M2 HLE hello-world fixture (docs/HLE.md) ------------------------------
+#
+# Hand-encoded AmigaOS console program: open dos.library via the ExecBase
+# pointer at guest $4, get the console handle with Output, Write the message
+# from the data hunk, RTS (the HLE env's pre-staged return address at
+# [stack_top] turns that into a clean HALT_OK).
+#
+# The message pointer is a MOVE.L #imm relocated by RELOC32 against the data
+# hunk, re-proving relocation; "dos.library" lives in the code hunk so the
+# LEA d16(PC) displacement is intra-hunk and layout-independent.
+
+HELLO_MESSAGE = b"HELLO, AMIGA\n"
+HELLO_DOSNAME = b"dos.library\0"
+HELLO_DOSNAME_OFFSET = 36     # byte offset of the name string in the code hunk
+HELLO_RELOC_OFFSET = 24       # byte offset of the MOVE.L immediate (RELOC32)
+
+LVO_OPENLIBRARY = -552        # exec.library
+LVO_OUTPUT = -60              # dos.library
+LVO_WRITE = -48               # dos.library
+
+
+def _words(data: bytes) -> list[int]:
+    if len(data) % 2:
+        raise ValueError("string must be an even number of bytes")
+    return [int.from_bytes(data[i:i + 2], "big") for i in range(0, len(data), 2)]
+
+
+def fixture_hello() -> bytes:
+    """Hello-world Hunk program for the M2 HLE demo (code + data hunk).
+
+    Code hunk (byte offsets):
+        $00  2C78 0004  movea.l ($4).w,a6       ; A6 = ExecBase
+        $04  43FA 001E  lea     dosname(pc),a1  ; disp word at $06 -> $24
+        $08  7000       moveq   #0,d0           ; any version
+        $0A  4EAE FDD8  jsr     -552(a6)        ; OpenLibrary
+        $0E  2C40       movea.l d0,a6           ; A6 = DOSBase
+        $10  4EAE FFC4  jsr     -60(a6)         ; Output
+        $14  2200       move.l  d0,d1           ; D1 = file handle
+        $16  243C 0000 0000  move.l #msg,d2     ; RELOC32 @ $18 -> data hunk
+        $1C  760D       moveq   #13,d3          ; D3 = len(HELLO_MESSAGE)
+        $1E  4EAE FFD0  jsr     -48(a6)         ; Write
+        $22  4E75       rts                     ; -> env exit stub (HALT_OK)
+        $24  "dos.library",0                    ; 12 bytes
+    """
+    lea_disp = HELLO_DOSNAME_OFFSET - 6  # d16(PC): PC = addr of the disp word
+    b = HunkBuilder()
+    code = b.add_code(
+        [
+            0x2C78, 0x0004,          # movea.l ($4).w,a6
+            0x43FA, lea_disp,        # lea dosname(pc),a1
+            0x7000,                  # moveq #0,d0
+            0x4EAE, LVO_OPENLIBRARY & 0xFFFF,   # jsr -552(a6)
+            0x2C40,                  # movea.l d0,a6
+            0x4EAE, LVO_OUTPUT & 0xFFFF,        # jsr -60(a6)
+            0x2200,                  # move.l d0,d1
+            0x243C, 0x0000, 0x0000,  # move.l #msg,d2 (imm relocated)
+            0x7600 | len(HELLO_MESSAGE),        # moveq #len,d3
+            0x4EAE, LVO_WRITE & 0xFFFF,         # jsr -48(a6)
+            0x4E75,                  # rts
+        ]
+        + _words(HELLO_DOSNAME)
+    )
+    data = b.add_data(HELLO_MESSAGE)
+    b.add_reloc32(code, data, [HELLO_RELOC_OFFSET])
+    return b.build()
