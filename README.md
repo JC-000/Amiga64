@@ -48,4 +48,4 @@ fixtures/     Small Amiga test binaries (own code only — no copyrighted ROMs o
 
 ## Development
 
-Host tooling is Python 3.11+. 6502 code assembles with `64tass` (or `ca65`). Testing uses VICE for fast iteration and real Ultimate 64 hardware for validation.
+Host tooling is Python 3.11+. 6502 code assembles with `ca65`/`ld65` (cc65 suite). Testing uses VICE for fast iteration and real Ultimate 64 hardware for validation. Interface contracts for all work packages live in `docs/CONTRACTS.md`.

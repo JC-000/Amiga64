@@ -1,0 +1,29 @@
+{
+  "_comment": "Phase A per-repo baseline. Dropped into <repo>/.claude/settings.json by claude-code-rig/bin/init-repo when a repo has no settings file. The 22 mcp__serena__* allow rules below mirror the global allow-set in ~/.claude/settings.json (canonical superset). Per-repo additions go directly into <repo>/.claude/settings.json after this baseline lands; they are not reflected back to the global. To grow the baseline, edit this file and run claude-code-rig/remediate.sh --apply.",
+  "permissions": {
+    "allow": [
+      "mcp__serena__activate_project",
+      "mcp__serena__check_onboarding_performed",
+      "mcp__serena__create_text_file",
+      "mcp__serena__delete_memory",
+      "mcp__serena__edit_memory",
+      "mcp__serena__execute_shell_command",
+      "mcp__serena__find_file",
+      "mcp__serena__find_referencing_symbols",
+      "mcp__serena__find_symbol",
+      "mcp__serena__get_current_config",
+      "mcp__serena__get_symbols_overview",
+      "mcp__serena__initial_instructions",
+      "mcp__serena__insert_before_symbol",
+      "mcp__serena__list_dir",
+      "mcp__serena__list_memories",
+      "mcp__serena__onboarding",
+      "mcp__serena__read_file",
+      "mcp__serena__read_memory",
+      "mcp__serena__replace_content",
+      "mcp__serena__replace_symbol_body",
+      "mcp__serena__search_for_pattern",
+      "mcp__serena__write_memory"
+    ]
+  }
+}

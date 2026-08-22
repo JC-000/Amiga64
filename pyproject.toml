@@ -1,0 +1,9 @@
+[project]
+name = "amiga64-host"
+version = "0.0.1"
+description = "Host-side tools for the Amiga64 translation layer (Hunk loader, vector pipeline, dispatch generator)"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["host/tests"]
