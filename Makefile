@@ -10,7 +10,7 @@ host-test:
 
 runtime: $(BUILD)/runner.prg
 
-$(BUILD)/gen/dispatch.s: host/gen_dispatch.py
+$(BUILD)/gen/dispatch.s: host/gen_dispatch.py runtime/core.s $(wildcard runtime/ops/*.s)
 	mkdir -p $(BUILD)/gen
 	$(PY) host/gen_dispatch.py -o $@
 

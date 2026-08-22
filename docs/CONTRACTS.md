@@ -83,6 +83,7 @@ Register accessor convention: register number × 4 = ZP offset from `r_d0` ($10)
 | $E0–$EF | `fam_shift` — ASL/ASR/LSL/LSR/ROL/ROR/ROXL/ROXR | G4 |
 | $F0–$FF | `op_fline` — halt reason FLINE | core |
 
+- Cross-group op label names are pinned: `op_scc`, `op_dbcc` (fam_5), `op_eor` (fam_b), `op_exg`, `op_mulu`, `op_muls`, `op_abcd` (fam_c), `op_divu`, `op_divs`, `op_sbcd` (fam_8), `op_movem`, `op_nbcd` (fam_4). Until the owning group exports one, gen_dispatch.py emits an exported `jmp op_illegal` stub for it so importers always link.
 - Unimplemented secondary decodes jump to `op_illegal` (halt reason ILLEGAL). The suite must never silently skip — an unimplemented op fails its vectors.
 - File ownership: `runtime/ops/g1_move.s`, `g2_arith.s`, `g3_logic.s`, `g4_shift.s`, `g5_flow.s`, `g6_muldiv.s`. One agent per file; no edits outside your file (+ your test list).
 
