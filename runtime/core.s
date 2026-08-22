@@ -40,6 +40,7 @@
 ; --- Imports ---------------------------------------------------------------
 .import dispatch_lo, dispatch_hi        ; generated: build/gen/dispatch.s
 .import main                            ; runner entry (tests/runner owns it)
+.import hle_aline                       ; HLE A-line dispatch (runtime/ops/hle.s or gen stub)
 
 ; ===========================================================================
 ; PRG load address + BASIC SYS stub
@@ -1017,8 +1018,7 @@ op_aline:                       ; $AFFF = clean HALT; other $Axxx = trap hook
         bne @trap
         lda #HALT_OK
         jmp emu_halt
-@trap:  lda #HALT_ALINE
-        jmp emu_halt
+@trap:  jmp hle_aline           ; HLE dispatch (stub = halt ALINE until runtime/ops/hle.s lands)
 
 op_fline:
         lda #HALT_FLINE

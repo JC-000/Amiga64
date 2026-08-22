@@ -68,6 +68,7 @@ CROSS_OPS: list[str] = [
     "op_abcd",    # G6, imported by fam_c (G3)
     "op_sbcd",    # G6, imported by fam_8 (G3)
     "op_nbcd",    # G6, imported by fam_4 (G5)
+    "hle_aline",  # M2 HLE, imported by op_aline (core); stub preserves halt-ALINE
 ]
 
 # Matches ".export a, b" / ".exportzp x" (ca65 directives, case-insensitive).
