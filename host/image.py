@@ -34,6 +34,7 @@ from typing import Any
 from .hunk import Executable, HunkError
 
 BASE_ADDR = 0x010000  # guest load address of the first segment
+PROG_END = 0x0EFFFF   # last byte of the program load region (rc/guest.inc)
 STACK_TOP = 0x00F000  # initial A7
 ADDRESS_SPACE = 1 << 24  # 24-bit guest address space
 _ALIGN = 4
@@ -69,6 +70,11 @@ def build_image(exe: Executable) -> tuple[list[Chunk], dict[str, Any]]:
     if addr > ADDRESS_SPACE:
         raise HunkError(
             f"image ends at ${addr:X}, beyond the 24-bit address space"
+        )
+    if addr - 1 > PROG_END:
+        raise HunkError(
+            f"image ends at ${addr - 1:06X}, past the program load region "
+            f"(${BASE_ADDR:06X}-${PROG_END:06X}; the HLE library tables follow)"
         )
 
     chunks: list[Chunk] = []

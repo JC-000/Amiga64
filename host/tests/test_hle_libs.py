@@ -162,15 +162,19 @@ def test_env_gaps_staged(mem):
 
 
 def test_program_reaching_library_region_rejected():
-    """host/image.py does not bound the load region (no grant to add it);
-    drivers call hle_env.check_program_fits(manifest) before staging."""
+    """host/image.py bounds the load region for every driver (supervisor
+    fix R3); hle_env.check_program_fits stays as a second guard."""
     from host import fixturegen, hunk
     b = fixturegen.HunkBuilder()
     b.add_code([0x4E75])
     b.add_bss(0x0F0000 - 0x010000)           # ends exactly at $0F0004+
-    _, manifest = image.build_image(hunk.parse(b.build()))
+    with pytest.raises(hunk.HunkError, match="load region"):
+        image.build_image(hunk.parse(b.build()))
+    # the second guard still rejects a manifest that reaches the tables
     with pytest.raises(ValueError, match="load region"):
-        hle_env.check_program_fits(manifest)
+        hle_env.check_program_fits(
+            {"segments": [{"guest_addr": 0x010000, "size": 0x0E0001,
+                           "kind": "bss"}]})
     b = fixturegen.HunkBuilder()
     b.add_code([0x4E75])
     b.add_bss(0x0F0000 - 0x010000 - 8)       # last byte $0EFFFF: fits

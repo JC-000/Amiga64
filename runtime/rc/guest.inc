@@ -73,6 +73,9 @@ STACK_TOP = $00F000     ; initial A7 (host/image.py STACK_TOP); [A7] = EXIT_ADDR
 .ifndef PROG_BASE
 PROG_BASE = $010000     ; guest load address of the first program segment
 .endif
+.ifndef PROG_END
+PROG_END  = $0EFFFF     ; last byte of the program load region (host/image.py PROG_END)
+.endif
 
 ; @region hle $0F0000-$0FFFFF HLE library bases + their full vector tables (WS-B1, docs/WAVE4_BRIEF.md C4 amendment 2026-09-24)
 .ifndef ENV_LIBS
@@ -108,6 +111,7 @@ dosio_rd_end  = $FFFFFF ; last RAMDISK byte (inclusive)
 .assert EXEC_BASE - 828 >= ENV_LIBS,  error, "deepest exec.library vector slot (LVO -828) must stay inside the library region"
 .assert DOS_BASE - 1158 >= EXEC_BASE + 632, error, "dos.library vector table must not overlap ExecBase"
 .assert DOS_BASE + 70 <= $100000,     error, "DOSBase must end inside the library region"
+.assert PROG_END < ENV_LIBS,          error, "program load region must end below the library tables"
 .assert STACK_TOP < PROG_BASE,        error, "guest stack must sit below the program load base"
 .assert HEAP_BASE > PROG_BASE,        error, "AllocMem pool must sit above the program load region"
 .assert FH_POOL >= $000C00 .and FH_POOL_END <= $000FFF, error, "FileHandle pool must stay inside the WS-B2 env sub-region $000C00-$000FFF"

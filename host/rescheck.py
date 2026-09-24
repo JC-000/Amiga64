@@ -108,6 +108,7 @@ HOST_MIRRORS = {
     "DOS_BASE": ("host/hle_env.py", "DOS_BASE"),
     "STACK_TOP": ("host/image.py", "STACK_TOP"),
     "PROG_BASE": ("host/image.py", "BASE_ADDR"),
+    "PROG_END": ("host/image.py", "PROG_END"),
 }
 
 # --- rc-file model ----------------------------------------------------------

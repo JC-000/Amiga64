@@ -42,6 +42,7 @@ import struct
 
 from .fixturegen import OP_HALT
 from .hle_dos_env import DOS_FILE_FUNCS
+from . import image as _image
 from .image import STACK_TOP, Chunk
 
 # --- Env memory map (guest addresses; mirrors runtime/rc/guest.inc) --------
@@ -66,7 +67,7 @@ ENV_LIBS = 0x0F0000          # first byte of the staged library area
 LIBS_REGION_END = 0x0FFFFF   # last byte of the region (inclusive)
 EXEC_BASE = 0x0F0400         # ExecBase; slots LVO -6..-828 below it
 DOS_BASE = 0x0F0C00          # DOSBase; slots LVO -6..-1158 below it
-PROG_END = 0x0EFFFF          # last byte of the program load region
+PROG_END = _image.PROG_END   # last byte of the program load region (one source)
 
 # HLE heap (exec AllocMem/FreeMem + pools), contract C4
 HEAP_BASE = 0x100000         # first byte (8-byte aligned)

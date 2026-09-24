@@ -175,3 +175,14 @@ def test_entry_is_first_hunk_base():
     exe = hunk.parse(fixturegen.fixture_minimal_halt())
     _, manifest = image.build_image(exe)
     assert manifest["entry"] == 0x010000
+
+
+def test_image_past_load_region_is_rejected():
+    """R3 (b1-review): a program reaching into the library tables must fail
+    in build_image itself, for every driver — not only in run_vbcc."""
+    from host.image import PROG_END, BASE_ADDR
+    fits = make_exe(Segment(kind="bss", data=b"", alloc_size=PROG_END + 1 - BASE_ADDR))
+    image.build_image(fits)
+    too_big = make_exe(Segment(kind="bss", data=b"", alloc_size=PROG_END + 2 - BASE_ADDR))
+    with pytest.raises(HunkError, match="program load region"):
+        image.build_image(too_big)
