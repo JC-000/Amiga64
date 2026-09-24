@@ -198,3 +198,21 @@ def test_host_mirror_mismatch_fails(tmp_path):
 
 def test_missing_rc_file_fails(tmp_path):
     assert rescheck.run_checks(tmp_path) == 1
+
+
+def test_unregistered_source_fails(tmp_path):
+    """A runtime .s file with no registered owner is a violation."""
+    import shutil
+    from host import rescheck
+    root = tmp_path / "repo"
+    shutil.copytree(ROOT, root, ignore=shutil.ignore_patterns(
+        "build", ".git", ".claude", "__pycache__", "*.o"))
+    (root / "runtime/ops/zz_new.s").write_text("; empty\n")
+    assert rescheck.run_checks(root) == 1
+
+
+def test_hle_family_globs_are_scanned():
+    from host import rescheck
+    owners, unregistered = rescheck.source_owners(ROOT)
+    assert owners["runtime/ops/hle_dos.s"] == "hle"
+    assert unregistered == []
