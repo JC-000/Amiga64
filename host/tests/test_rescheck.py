@@ -187,7 +187,7 @@ def test_host_mirror_mismatch_fails(tmp_path):
     for name, rel in rescheck.RC_FILES.items():
         src = (ROOT / rel).read_text()
         if name == "guest":
-            src = src.replace("DOS_BASE  = $000A00", "DOS_BASE  = $000A80")
+            src = src.replace("DOS_BASE  = $0F0C00", "DOS_BASE  = $0F0C80")
         (tmp_path / rel).write_text(src)
     (tmp_path / "host/hle_env.py").write_text(
         (ROOT / "host/hle_env.py").read_text())

@@ -16,6 +16,8 @@ message, plus the architectural end state.  Exit code 0 = all checks passed.
 
 The screen region is cleared to spaces before the run (the boot screen has
 text there), so the assertion sees only what dos.library/Write printed.
+Output() returns the BPTR of the console FileHandle staged by hle_env
+(contract C2; the v0 magic handle $C0DE is retired).
 """
 
 from __future__ import annotations
@@ -73,7 +75,7 @@ def expected_end_state(manifest: dict) -> dict[str, int]:
     msg_addr = manifest["segments"][1]["guest_addr"]
     return {
         "D0": len(fixturegen.HELLO_MESSAGE),        # Write's return value
-        "D1": hle_env.FH_MAGIC,                     # Output's file handle
+        "D1": hle_env.FH_CONOUT >> 2,               # Output(): console BPTR
         "D2": msg_addr,                             # relocated message ptr
         "D3": len(fixturegen.HELLO_MESSAGE),
         "A1": entry + fixturegen.HELLO_DOSNAME_OFFSET,  # lea dosname(pc)
