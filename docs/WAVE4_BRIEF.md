@@ -71,6 +71,12 @@ in the one fake DOSBase; an LVO is claimed by exactly one table.
 - Guest: program load region is now `$010000-$0FFFFF`; **HLE heap
   `HEAP_BASE $100000`–`HEAP_END $7FFFFF`** (WS-B1, AllocMem/FreeMem);
   `$800000-$FFFFFF` free (WS-B2 may claim a ramdisk sub-region there).
+- **C4 amendment (2026-09-24, b1-review F1):** the env region cannot hold
+  real library tables (exec negatives ~830 B + ExecBase 632 B + dos
+  negatives 1158 B). New region **`hle $0F0000-$0FFFFF` — library bases and
+  their full vector tables** (WS-B1); program load region shrinks to
+  `$010000-$0EFFFF`. Every LVO slot down to the deepest known LVO of each
+  library is staged (implemented or sentinel); no two tables overlap.
 - Env region split: WS-B1 `$000400-$000BFF`, WS-B2 `$000C00-$000FFF`
   (file-handle pool etc.) — equates only, the region line stays as is.
 - ZP: only WS-A may claim new ZP (from `$83` up, via `rc/zp.inc`). WS-B uses
