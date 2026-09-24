@@ -20,6 +20,10 @@ D2, D3), jsr's each through ``LVO(A6)``, and records per step
 The host then checks every step against hand-written expectations and
 reads RAMDISK files and guest buffers back.
 
+Leg ``selection`` (review ruling 1) builds a TEST-ONLY ``DOSIO_FAKE_UCI``
+variant whose detection always reports a UCI, and checks that the backend
+stays RAMDISK unless the host wrote the opt-in key to ``dosio_want_uci``.
+
 Scenario ``codepage`` points A6 at an in-page library (slot words inside
 the program's own code page) and Reads new code over the program's exit
 stub: it only passes if the bulk DMA into guest memory invalidated the
@@ -140,7 +144,7 @@ class Step:
 @dataclass
 class Scenario:
     name: str
-    files: dict[str, bytes] | None     # None: do not stage a RAMDISK
+    files: dict[str, bytes] | list | None  # None: no RAMDISK (list: RdFile)
     names: list[str]
     steps: list[Step]
     zap_header: bool = False           # stage an invalid RAMDISK header
@@ -150,6 +154,7 @@ class Scenario:
     expect_buf: dict[int, bytes] = field(default_factory=dict)
     expect_d0: int | None = None       # final D0 (program exit)
     expect_fh_args: dict[int, int] = field(default_factory=dict)
+    extra: list = field(default_factory=list)   # extra Chunks staged last
 
 
 def name_addr(names: list[str], name: str) -> int:
@@ -313,7 +318,153 @@ def scenarios() -> list[Scenario]:
     ]
     sc4 = Scenario("codepage", {"patch": PATCH}, n4, s4, inpage=True,
                    expect_d0=0x63, expect_fh_args={0: de.FH_KIND_FILE0})
-    return [sc1, sc2, sc3, sc4]
+    return [sc1, sc2, sc3, sc4] + fix1_scenarios()
+
+
+def fix1_scenarios() -> list[Scenario]:
+    """Review fix round 1 (adversarial review of 2e90271): extent limit,
+    directory capacity, stale directory after auto-format, AmigaOS sharing,
+    guest-corrupted fh_Args, Open(NULL)."""
+    bp = de.fh_bptr
+    O, R, W, S, C = "Open", "Read", "Write", "Seek", "Close"
+    OLD, NEW, RW = de.MODE_OLDFILE, de.MODE_NEWFILE, de.MODE_READWRITE
+    BEG, CUR, END = s32(de.OFFSET_BEGINNING), de.OFFSET_CURRENT, de.OFFSET_END
+    E_NF, E_INV, E_USE, E_FULL = (de.ERROR_OBJECT_NOT_FOUND,
+                                  de.ERROR_INVALID_LOCK,
+                                  de.ERROR_OBJECT_IN_USE, de.ERROR_DISK_FULL)
+    out = []
+
+    # ---- diskfull: the 64 KB per-file extent returns ERROR_DISK_FULL -------
+    n = ["big"]
+    st = [
+        Step(O, name_addr(n, "big"), NEW, d0=bp(0), ioerr=0),             # 0
+        Step(W, d2=0x010000, d3=de.RD_NEW_CAP, ref=0, d0=de.RD_NEW_CAP,
+             ioerr=0),                                                     # 1 fill
+        Step(W, d2=0x010000, d3=1, ref=0, d0=NEG1, ioerr=E_FULL),          # 2 +1 byte
+        Step(S, d2=0, d3=END, ref=0, d0=de.RD_NEW_CAP),                    # 3 nothing
+        Step(S, d2=0, d3=CUR, ref=0, d0=de.RD_NEW_CAP),                    # 4 written
+        Step(W, d2=0x010000, d3=NEG1, ref=0, d0=NEG1, ioerr=E_FULL),       # 5 len -1
+        Step(S, d2=1, d3=END, ref=0, d0=NEG1,
+             ioerr=de.ERROR_SEEK_ERROR),                                   # 6 END+1
+        Step(S, d2=0, d3=BEG, ref=0, d0=de.RD_NEW_CAP),                    # 7
+        Step(R, d2=BUF, d3=NEG1, ref=0, d0=de.RD_NEW_CAP),                 # 8 len -1
+        Step(S, d2=0, d3=CUR, ref=0, d0=de.RD_NEW_CAP),                    # 9 at EOF
+        Step(C, ref=0, d0=TRUE),                                           # 10
+    ]
+    out.append(Scenario("diskfull", None, n, st, zap_header=True))
+
+    # ---- dirfull: all 32 directory entries allocatable (2 MB region) --------
+    n = [f"f{i:02d}" for i in range(de.RD_ENTRIES + 1)]
+    st = []
+    for i in range(de.RD_ENTRIES):
+        st.append(Step(O, name_addr(n, n[i]), NEW, d0=bp(0), ioerr=0))
+        st.append(Step(C, ref=len(st) - 1, d0=TRUE))
+    st.append(Step(O, name_addr(n, n[-1]), NEW, d0=0, ioerr=E_FULL))      # 33rd
+    st.append(Step(O, name_addr(n, n[-2]), OLD, d0=bp(0), ioerr=E_FULL))  # last one
+    st.append(Step(W, d2=SRC, d3=16, ref=len(st) - 1, d0=16))             # usable
+    st.append(Step(C, ref=len(st) - 2, d0=TRUE))
+    out.append(Scenario("dirfull", None, n, st, zap_header=True,
+                        expect_files={n[0]: b"", n[-2]: SRC_DATA[:16]}))
+
+    # ---- staledir: auto-format must wipe directory entries ---------------
+    n = ["ghost", "fresh"]
+    st = [
+        Step(O, name_addr(n, "ghost"), OLD, d0=0, ioerr=E_NF),            # 0 wiped
+        Step(O, name_addr(n, "fresh"), NEW, d0=bp(0), ioerr=E_NF),        # 1
+        Step(W, d2=SRC, d3=3, ref=1, d0=3),                               # 2
+        Step(C, ref=1, d0=TRUE),                                          # 3
+        Step(O, name_addr(n, "ghost"), RW, d0=bp(0), ioerr=E_NF),         # 4 new, empty
+        Step(S, d2=0, d3=END, ref=4, d0=0),                               # 5
+        Step(S, d2=0, d3=CUR, ref=4, d0=0),                               # 6 size 0
+        Step(C, ref=4, d0=TRUE),                                          # 7
+    ]
+    out.append(Scenario("staledir", {"ghost": b"BOO!"}, n, st, zap_header=True,
+                        expect_files={"fresh": SRC_DATA[:3], "ghost": b""}))
+
+    # ---- lock: MODE_NEWFILE exclusive, OLDFILE/READWRITE shared ----------
+    n = ["a", "A", "b"]
+    st = [
+        Step(O, name_addr(n, "a"), OLD, d0=bp(0), ioerr=0),               # 0 shared
+        Step(S, d2=0, d3=END, ref=0, d0=0),                               # 1 pos 4
+        Step(O, name_addr(n, "A"), NEW, d0=0, ioerr=E_USE),               # 2 in use
+        Step(W, d2=SRC, d3=2, ref=0, d0=2),                               # 3 untouched
+        Step(O, name_addr(n, "a"), RW, d0=bp(1), ioerr=E_USE),            # 4 shares
+        Step(O, name_addr(n, "a"), OLD, d0=bp(2), ioerr=E_USE),           # 5 shares
+        Step(C, ref=0, d0=TRUE), Step(C, ref=4, d0=TRUE),                 # 6 7
+        Step(O, name_addr(n, "A"), NEW, d0=0, ioerr=E_USE),               # 8 slot 2 open
+        Step(C, ref=5, d0=TRUE),                                          # 9
+        Step(O, name_addr(n, "A"), NEW, d0=bp(0), ioerr=E_USE),           # 10 exclusive
+        Step(O, name_addr(n, "a"), OLD, d0=0, ioerr=E_USE),               # 11
+        Step(O, name_addr(n, "a"), RW, d0=0, ioerr=E_USE),                # 12
+        Step(O, name_addr(n, "a"), NEW, d0=0, ioerr=E_USE),               # 13
+        Step(O, name_addr(n, "b"), NEW, d0=bp(1), ioerr=E_USE),           # 14 other file
+        Step(W, d2=SRC + 8, d3=1, ref=10, d0=1),                          # 15
+        Step(C, ref=10, d0=TRUE),                                         # 16
+        Step(O, name_addr(n, "a"), OLD, d0=bp(0), ioerr=E_USE),           # 17 released
+        Step(C, ref=17, d0=TRUE), Step(C, ref=14, d0=TRUE),               # 18 19
+    ]
+    out.append(Scenario("lock", {"a": b"ABCD"}, n, st,
+                        expect_files={"a": SRC_DATA[8:9], "b": b""}))
+
+    # ---- fhargs: guest corrupts fh_Args; Close still releases the slot ----
+    n = ["k"]
+    fa = de.fh_addr(0) + de.FH_ARGS_OFF
+    st = [
+        Step(O, name_addr(n, "k"), OLD, d0=bp(0)),                        # 0
+        Step(R, d2=fa, d3=4, ref=0, d0=4),                                # 1 fh_Args := $11
+        Step(R, d2=BUF, d3=1, ref=0, d0=NEG1, ioerr=E_INV),               # 2 Read refuses
+        Step(W, d2=SRC, d3=1, ref=0, d0=NEG1, ioerr=E_INV),               # 3 Write refuses
+        Step(S, d2=0, d3=BEG, ref=0, d0=NEG1, ioerr=E_INV),               # 4 Seek refuses
+        Step(C, ref=0, d0=TRUE, ioerr=E_INV),                             # 5 Close works
+        Step(O, name_addr(n, "k"), OLD, d0=bp(0)),                        # 6 slot 0 free
+        Step(C, ref=6, d0=TRUE),                                          # 7
+        Step(C, ref=0, d0=FALSE, ioerr=E_INV),                            # 8 now closed
+    ]
+    out.append(Scenario("fhargs", {"k": b"\0\0\0\x11"}, n, st,
+                        expect_fh_args={0: de.FH_KIND_DEAD}))
+
+    # ---- wrap512 (item 11): no DMA may straddle a 512 KB REU block ----------
+    # The REC increments only the low 19 address bits, so a transfer across
+    # $x7FFFF -> $x80000 would wrap to the start of the same block.
+    # (a) guest side: a buffer straddling $180000 (Read and Write);
+    # (b) RAMDISK side: file data straddling $E80000 (an extent placed at
+    #     $E7FF00, accessed through an odd guest buffer so a chunk spans it).
+    gbuf = 0x17FF80
+    wdata = pattern(512, 5, 0x11)
+    gdata = pattern(256, 3, 0x77)
+    sentinel = bytes((0xA5 ^ i) & 0xFF for i in range(0x80))
+    pad_cap = 0xE7FF00 - de.RD_DATA           # places file "w" at $E7FF00
+    files = [de.RdFile("pad", b"", capacity=pad_cap),
+             de.RdFile("w", wdata), de.RdFile("g", gdata)]
+    n = ["w", "g", "gw"]
+    st = [
+        Step(O, name_addr(n, "w"), OLD, d0=bp(0), ioerr=0),               # 0
+        Step(R, d2=BUF + 0x80, d3=512, ref=0, d0=512, byte=wdata[0]),     # 1 disk straddle
+        Step(S, d2=0, d3=BEG, ref=0, d0=512),                             # 2
+        Step(W, d2=SRC + 0x80, d3=512, ref=0, d0=512),                    # 3 disk straddle
+        Step(C, ref=0, d0=TRUE),                                          # 4
+        Step(O, name_addr(n, "g"), OLD, d0=bp(0), ioerr=0),               # 5
+        Step(R, d2=gbuf, d3=256, ref=5, d0=256, byte=gdata[0]),           # 6 guest straddle
+        Step(C, ref=5, d0=TRUE),                                          # 7
+        Step(O, name_addr(n, "gw"), NEW, d0=bp(0), ioerr=0),              # 8
+        Step(W, d2=gbuf, d3=256, ref=8, d0=256),                          # 9 guest straddle
+        Step(C, ref=8, d0=TRUE),                                          # 10
+    ]
+    out.append(Scenario(
+        "wrap512", files, n, st,
+        extra=[Chunk(0x100000, sentinel), Chunk(gbuf, bytes(256)),
+               Chunk(0x180080, sentinel)],
+        expect_files={"w": SRC_DATA[0x80:0x280], "g": gdata, "gw": gdata,
+                      "pad": b""},
+        expect_buf={BUF + 0x80: wdata, gbuf: gdata,
+                    0x100000: sentinel, 0x180080: sentinel,
+                    0xE00000: de.RD_MAGIC}))
+
+    # ---- nullname: Open(NULL) ----------------------------------------------
+    st = [Step(O, 0, NEW, d0=0, ioerr=E_NF),
+          Step(O, 0, OLD, d0=0, ioerr=E_NF)]
+    out.append(Scenario("nullname", None, [], st, zap_header=True))
+    return out
 
 
 # --- Staging --------------------------------------------------------------------
@@ -356,6 +507,7 @@ def scenario_chunks(sc: Scenario) -> tuple[list[Chunk], dict]:
         chunks += de.ramdisk_chunks(sc.files)
     if sc.zap_header:
         chunks.append(Chunk(de.RD_BASE, bytes(de.RD_HDR_SIZE)))
+    chunks += sc.extra
     return chunks, manifest
 
 
@@ -364,6 +516,7 @@ def scenario_chunks(sc: Scenario) -> tuple[list[Chunk], dict]:
 PEEK_CODE_AT = 0xC000        # buf_case: free between staging records
 PEEK_DST = 0xC800            # buf_result (runner result area, $C800-$CDFF)
 PEEK_MAX = 0x400
+REU_BLOCK = 0x80000          # REC address counter wraps within 512 KB
 
 
 def peek_routine(src: int, n: int, rec_dirty: int) -> bytes:
@@ -395,7 +548,9 @@ class Guest:
         t = self.sess.target
         out = bytearray()
         while n > 0:
-            k = min(n, PEEK_MAX)
+            # never let one REU DMA straddle a 512 KB block: the REC address
+            # counter wraps inside the block (VICE reu.c, review item 11)
+            k = min(n, PEEK_MAX, REU_BLOCK - (addr & (REU_BLOCK - 1)))
             write_bytes(t.transport, PEEK_CODE_AT,
                         peek_routine(addr, k, self.rec_dirty))
             call_runner(t, PEEK_CODE_AT, self.sess.timeout)
@@ -452,6 +607,105 @@ def check_scenario(sess, g: Guest, sc: Scenario, res) -> None:
                    res.regs["D0"] == sc.expect_d0, f"got {res.regs['D0']:08X}")
 
 
+UCI_OPT_IN = de.UCI_OPT_IN_KEY  # docs/HLE_DOS.md "Backend selection"
+
+
+def build_fake_uci(prg: str) -> tuple[str, str]:
+    """TEST-ONLY variant: dosio_uci_detect always reports a UCI
+    (DOSIO_FAKE_UCI), with a tiny fence and poll budget so the UCI init's
+    timeouts against VICE's open bus finish quickly."""
+    import glob
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    bdir = os.path.dirname(prg)
+    disp = os.path.join(bdir, "gen", "dispatch.s")
+    if not os.path.exists(disp):
+        raise FileNotFoundError(f"{disp} (build the runtime with make first)")
+    out = os.path.join(bdir, "fakeuci")
+    os.makedirs(out, exist_ok=True)
+    fprg, flbl = os.path.join(out, "runner.prg"), os.path.join(out, "runner.lbl")
+    srcs = sorted(glob.glob(os.path.join(root, "runtime", "*.s"))
+                  + glob.glob(os.path.join(root, "runtime", "ops", "*.s"))
+                  + glob.glob(os.path.join(root, "tests", "runner", "*.s")))
+    cmd = ["cl65", "-t", "none", "-C", os.path.join(root, "runtime", "c64.cfg"),
+           "--asm-define", "DOSIO_FAKE_UCI=1",
+           "--asm-define", "DOSIO_UCI_FENCE_OUTER=1",
+           "--asm-define", "DOSIO_UCI_FENCE_INNER=1",
+           "--asm-define", "DOSIO_UCI_POLLS_HI=1",
+           "-o", fprg, "-Ln", flbl] + srcs + [disp]
+    r = subprocess.run(cmd, capture_output=True, text=True, cwd=root)
+    if r.returncode != 0:
+        raise RuntimeError(r.stdout + r.stderr)
+    return fprg, flbl
+
+
+def selection_checks(prg: str, timeout: float,
+                     budget: int) -> tuple[list[str], list[str]]:
+    """Backend selection (review ruling 1): RAMDISK unless the host opted in.
+
+    Runs on the DOSIO_FAKE_UCI build, where detection always says "UCI":
+    boot state, want=0 and want=non-key must all give RAMDISK (and a real
+    scenario must run on it); only the exact opt-in key gives ULTDOS."""
+    from c64_test_harness import (Labels, UnifiedManager, ViceConfig,
+                                  read_bytes, write_bytes)
+    from tests.harness_util import REU_VICE_ARGS, lookup_label
+    from tests.run_program import Session
+    from tests.run_vectors import prepare_target
+
+    fprg, flbl = build_fake_uci(prg)
+    labels = Labels.from_file(flbl)
+    cfg = ViceConfig(prg_path=fprg, warp=True, sound=False,
+                     extra_args=list(REU_VICE_ARGS))
+    with UnifiedManager(backend="vice", vice_config=cfg) as mgr:
+        target = mgr.acquire()
+        try:
+            prepare_target(target, fprg)
+            sess = Session(target=target, labels=labels, timeout=timeout)
+            t = target.transport
+            want = lookup_label(labels, "dosio_want_uci")
+            be = lookup_label(labels, "dosio_backend")
+
+            def backend_after_init() -> int:
+                sess._call("hle_dos_init")
+                return read_bytes(t, be, 1)[0]
+
+            got = backend_after_init()                     # boot BSS state
+            sess.check("fakeuci: boot default backend = RAMDISK", got == 0,
+                       f"got {got}")
+            for val in (b"\0\0\0\0", b"\x01\x01\x01\x01", b"UCI?", b"\xFF" * 4):
+                write_bytes(t, want, val)
+                got = backend_after_init()
+                sess.check(f"fakeuci: want={val.hex()} -> RAMDISK", got == 0,
+                           f"got {got}")
+            # a real scenario still runs on RAMDISK with detection saying UCI
+            write_bytes(t, want, b"\0\0\0\0")
+            sc = next(s for s in scenarios() if s.name == "writes")
+            chunks, manifest = scenario_chunks(sc)
+            sess.stage(chunks)
+            sess._call("hle_dos_init")
+            res = sess.run_program(manifest["entry"], manifest["stack_top"],
+                                   budget)
+            g = Guest(sess, labels)
+            check_scenario(sess, g, Scenario("fakeuci-writes", sc.files,
+                                             sc.names, sc.steps,
+                                             expect_files=sc.expect_files),
+                           res)
+            got = read_bytes(t, be, 1)[0]
+            sess.check("fakeuci: backend still RAMDISK after the run",
+                       got == 0, f"got {got}")
+            write_bytes(t, want, UCI_OPT_IN)               # explicit opt-in
+            got = backend_after_init()
+            sess.check("fakeuci: want='UCI!' -> ULTDOS (proves the flag "
+                       "made detection say UCI)", got == 1, f"got {got}")
+            write_bytes(t, want, b"\0\0\0\0")
+            got = backend_after_init()
+            sess.check("fakeuci: opt-out again -> RAMDISK", got == 0,
+                       f"got {got}")
+        finally:
+            mgr.release(target)
+    return sess.checks, sess.failures
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python3 -m tests.run_dos",
                                  description=__doc__.split("\n")[0])
@@ -470,9 +724,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: not found: {p}", file=sys.stderr)
             return 2
     scs = scenarios()
+    run_selection = True
     if args.only:
         want = set(args.only.split(","))
         scs = [s for s in scs if s.name in want]
+        run_selection = "selection" in want
 
     from c64_test_harness import Labels, UnifiedManager, ViceConfig, read_bytes
     from tests.harness_util import REU_VICE_ARGS, lookup_label
@@ -511,6 +767,15 @@ def main(argv: list[str] | None = None) -> int:
                 sess.check("dosio_backend exported", False, str(e))
         finally:
             mgr.release(target)
+
+    if run_selection:
+        print("[selection] DOSIO_FAKE_UCI build (second VICE instance)")
+        try:
+            ok, bad = selection_checks(prg, args.timeout, args.budget)
+            sess.checks += ok
+            sess.failures += bad
+        except Exception as e:  # noqa: BLE001 - report, don't mask
+            sess.check("selection: ran", False, f"{type(e).__name__}: {e}")
 
     n_ok, n_bad = len(sess.checks), len(sess.failures)
     print(f"{n_ok}/{n_ok + n_bad} checks passed")

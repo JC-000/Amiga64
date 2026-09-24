@@ -55,6 +55,7 @@ DOSTRUE = 0xFFFFFFFF
 DOSFALSE = 0
 
 ERROR_NO_FREE_STORE = 103
+ERROR_OBJECT_IN_USE = 202
 ERROR_OBJECT_NOT_FOUND = 205
 ERROR_OBJECT_TOO_LARGE = 207
 ERROR_ACTION_NOT_KNOWN = 209
@@ -63,6 +64,11 @@ ERROR_INVALID_LOCK = 211
 ERROR_DEVICE_NOT_MOUNTED = 218
 ERROR_SEEK_ERROR = 219
 ERROR_DISK_FULL = 221
+
+# --- Backend selection (review ruling 1) ---------------------------------------
+# ULTDOS is opt-in: the host writes this 4-byte key to the exported BSS
+# symbol ``dosio_want_uci`` before the run; anything else -> RAMDISK.
+UCI_OPT_IN_KEY = b"UCI!"
 
 # --- FileHandle pool (guest $000C00-$000FFF, C2/C4) ----------------------------
 FH_POOL = 0x000C00           # slot n at FH_POOL + FH_SIZE * n (longword aligned)
@@ -81,8 +87,8 @@ def fh_bptr(slot: int) -> int:
     return fh_addr(slot) >> 2
 
 
-# --- RAMDISK (guest/REU $F00000-$FFFFFF) ----------------------------------------
-RD_BASE = 0xF00000           # mirrors rc/guest.inc dosio_rd_base
+# --- RAMDISK (guest/REU $E00000-$FFFFFF, 2 MB) ---------------------------------
+RD_BASE = 0xE00000           # mirrors rc/guest.inc dosio_rd_base
 RD_END = 0xFFFFFF            # mirrors rc/guest.inc dosio_rd_end (inclusive)
 RD_MAGIC = b"RDSK"
 RD_VERSION = 1
@@ -94,6 +100,8 @@ RD_DATA = RD_BASE + 0x1000                      # first data byte (page aligned)
 RD_NAME_OFF = 32
 RD_NAME_MAX = 31                                # chars, excl. NUL
 RD_NEW_CAP = 0x10000                            # extent of a guest-created file
+# 32 x 64 KB = the whole 2 MB region; the 4 KB header/directory page comes
+# out of the last allocated extent (60 KB).  Per-file limit: 64 KB.
 RD_FLAG_USED = 0x01
 
 # Header: magic[4] u8 version u8 n_entries u16 0 u32 free_ptr u32 data_end
@@ -199,6 +207,12 @@ def parse_directory(read: Callable[[int, int], bytes],
             continue
         ent = read(base, RD_ENT_SIZE)
         _, nlen, _, size, cap, addr = struct.unpack_from("<BBHIII", ent)
+        if not (1 <= nlen <= RD_NAME_MAX and size <= cap
+                and RD_DATA <= addr and addr + cap <= RD_END + 1):
+            # garbage entry (e.g. a directory that was never zeroed): refuse
+            # instead of reading megabytes of "data" back through the host
+            raise ValueError(f"corrupt RAMDISK entry {i}: nlen={nlen} "
+                             f"size=${size:X} cap=${cap:X} addr=${addr:X}")
         name = ent[RD_NAME_OFF:RD_NAME_OFF + nlen].decode("latin-1")
         e = RdEntry(i, name, size, cap, addr)
         if with_data and size:

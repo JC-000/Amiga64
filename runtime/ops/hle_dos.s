@@ -15,10 +15,14 @@
 ;                      lazily on the first HLE DOS call after boot (BSS is
 ;                      not cleared at boot; guarded by hle_dos_magic).
 ;
-; Backends (selected at init, docs/HLE_DOS.md "Backend seam"):
-;   0 = RAMDISK  (runtime/ops/dosio_ram.s) — guest/REU $F00000-$FFFFFF
-;   1 = ULTDOS   (runtime/ops/dosio_uci.s) — Ultimate Command Interface,
-;       chosen when $DF1D identifies the UCI.  HARDWARE-UNVALIDATED.
+; Backends (selected at init, docs/HLE_DOS.md "Backend selection"):
+;   0 = RAMDISK  (runtime/ops/dosio_ram.s) — guest/REU $E00000-$FFFFFF.
+;       ALWAYS the default.
+;   1 = ULTDOS   (runtime/ops/dosio_uci.s) — Ultimate Command Interface.
+;       OPT-IN ONLY (review ruling 1, until the hardware leg passes): used
+;       iff the host wrote the 4-byte key "UCI!" to dosio_want_uci before
+;       the run AND $DF1D identifies the UCI.  A 4-byte key, not a flag
+;       byte, because BSS holds power-on garbage.  HARDWARE-UNVALIDATED.
 ;
 ; Guest-memory access rules (C1): bulk transfers program the REC directly
 ; (dosio_dma), always followed by jsr mem_rec_dirty; guest bytes written by
@@ -32,6 +36,8 @@
 
 .export hle_dos_dispatch, hle_dos_read, hle_dos_write
 .export hle_dos_init, hle_dos_ioerr, hle_dos_magic, dosio_backend
+.export dosio_want_uci
+.export dosio_lockcheck, dosio_curfid     ; sharing rules (backends call it)
 ; backend parameter block + DMA helpers (docs/HLE_DOS.md "Backend seam")
 .export dosio_buf, dosio_name, dosio_nlen, dosio_mode, dosio_slot
 .export dosio_len, dosio_arg, dosio_err
@@ -67,6 +73,7 @@ MODE_OLDFILE   = 1005
 MODE_NEWFILE   = 1006
 MODE_READWRITE = 1004
 ERROR_NO_FREE_STORE          = 103
+ERROR_OBJECT_IN_USE          = 202
 ERROR_OBJECT_NOT_FOUND       = 205
 ERROR_ACTION_NOT_KNOWN       = 209
 ERROR_INVALID_COMPONENT_NAME = 210
@@ -93,6 +100,11 @@ BE_NVEC    = 18
 hle_dos_magic: .res 4           ; "DOS!" once hle_dos_init has run
 hle_dos_ioerr: .res 4           ; IoErr() value, LE (pr_Result2 stand-in)
 dosio_backend: .res 1           ; 0 RAMDISK, 1 ULTDOS
+dosio_want_uci: .res 4          ; host opt-in key "UCI!" -> ULTDOS if detected
+dosio_fid:     .res FH_SLOTS    ; per slot: backend file id (sharing rules)
+dosio_excl:    .res FH_SLOTS    ; per slot: nonzero = exclusive (MODE_NEWFILE)
+dosio_curfid:  .res 1           ; file id of the Open in progress (backend)
+dosio_lk:      .res 1
 dosio_vec:     .res BE_NVEC
 dosio_sopen:   .res FH_SLOTS    ; nonzero = slot in use
 dosio_pos0:    .res FH_SLOTS    ; per-slot file position, 32-bit LE split
@@ -108,10 +120,14 @@ dosio_slot:    .res 1
 dosio_len:     .res 2           ; chunk length in / bytes transferred out
 dosio_arg:     .res 4           ; position / size argument
 dosio_err:     .res 1           ; AmigaOS error code when a backend fails (C=1)
-; DMA helper arguments
+; DMA helper arguments (contiguous: dosio_dma saves/restores all 7 bytes)
 dosio_dc64:    .res 2
 dosio_dreu:    .res 3
 dosio_dlen:    .res 2
+dosio_dsave:   .res 7
+dosio_dcmd:    .res 1
+dosio_droom:   .res 2
+dosio_dx:      .res 1
 ; generic-layer scratch
 dosio_ga:      .res 4           ; walking guest address
 dosio_rem:     .res 4           ; bytes still to transfer
@@ -164,9 +180,17 @@ hle_dos_init:
         sta hle_dos_ioerr+1
         sta hle_dos_ioerr+2
         sta hle_dos_ioerr+3
+        ldx #3                  ; ULTDOS only with the host's opt-in key
+@key:   lda dosio_want_uci,x
+        cmp uci_key,x
+        bne @ram
+        dex
+        bpl @key
         jsr dosio_uci_detect    ; C=1: Ultimate Command Interface present
         lda #0
         rol a
+        .byte $2C               ; bit abs: skip the lda #0
+@ram:   lda #0
         sta dosio_backend
         ldy #0
         cmp #0
@@ -288,12 +312,35 @@ dosio_ioerr:
         jmp dosio_ret
 
 ; ===========================================================================
-; dosio_getfh — validate the FileHandle BPTR in D1.
+; dosio_getfh — validate the FileHandle BPTR in D1 (Read/Write/Seek).
 ; Valid iff D1 << 2 is exactly a pool slot's address, the slot is open and
 ; the guest fh_Args still holds $10+n.  C=0: X = dosio_slot = n,
 ; dosio_fh = guest address.  C=1: invalid (dosio_err = ERROR_INVALID_LOCK).
+; dosio_getslot — the same WITHOUT the fh_Args test (Close, review ruling
+; 8: a guest that scribbled over fh_Args can still release its slot).
 ; ===========================================================================
 dosio_getfh:
+        jsr dosio_getslot
+        bcs dosio_gbad
+        jsr dosio_fh_args_addr
+        jsr mem_read32
+        ldx dosio_slot
+        lda m_val+3
+        ora m_val+2
+        ora m_val+1
+        bne dosio_gbad
+        txa
+        clc
+        adc #FH_KIND_FILE0
+        cmp m_val
+        bne dosio_gbad
+        clc
+        rts
+dosio_gbad:
+        sec
+        rts
+
+dosio_getslot:
         lda #ERROR_INVALID_LOCK
         sta dosio_err
         lda r_d1+3
@@ -324,18 +371,6 @@ dosio_getfh:
 @found: lda dosio_sopen,x
         beq @bad
         stx dosio_slot
-        jsr dosio_fh_args_addr
-        jsr mem_read32
-        ldx dosio_slot
-        lda m_val+3
-        ora m_val+2
-        ora m_val+1
-        bne @bad
-        txa
-        clc
-        adc #FH_KIND_FILE0
-        cmp m_val
-        bne @bad
         clc
         rts
 
@@ -358,7 +393,15 @@ dosio_fh_args_addr:
 ; $A130 Open — name D1 (C string), accessMode D2.  D0 = BPTR or 0 (IoErr).
 ; ===========================================================================
 dosio_open:
-        lda #ERROR_ACTION_NOT_KNOWN
+        lda #ERROR_OBJECT_NOT_FOUND ; Open(NULL): no object (review ruling 5)
+        sta dosio_err
+        lda r_d1
+        ora r_d1+1
+        ora r_d1+2
+        ora r_d1+3
+        bne :+
+        jmp dosio_fail0
+:       lda #ERROR_ACTION_NOT_KNOWN
         sta dosio_err
         lda r_d2+3              ; mode: D2 must be $3EC/$3ED/$3EE
         ora r_d2+2
@@ -428,6 +471,15 @@ dosio_open:
         ldx dosio_slot
         lda #1
         sta dosio_sopen,x
+        lda dosio_curfid        ; sharing bookkeeping (dosio_lockcheck)
+        sta dosio_fid,x
+        ldy #0
+        lda dosio_mode
+        cmp #1                  ; MODE_NEWFILE -> exclusive
+        bne :+
+        iny
+:       tya
+        sta dosio_excl,x
         lda #0
         sta dosio_pos0,x
         sta dosio_pos1,x
@@ -485,6 +537,38 @@ dosio_open:
         jmp dosio_ret
 
 ; ===========================================================================
+; dosio_lockcheck — AmigaOS sharing rules (review ruling 7), called by a
+; backend's open once it knows which file the name refers to and BEFORE any
+; side effect (create/truncate).  A = backend file id.  Refused (C=1,
+; dosio_err = ERROR_OBJECT_IN_USE) when an open handle on the same id is
+; exclusive, or when this Open is MODE_NEWFILE (exclusive) and any handle
+; has the file open.  Otherwise C=0 and dosio_curfid := A.  Clobbers A/X.
+; ===========================================================================
+dosio_lockcheck:
+        sta dosio_lk
+        ldx #FH_SLOTS - 1
+@l:     lda dosio_sopen,x
+        beq @n
+        lda dosio_fid,x
+        cmp dosio_lk
+        bne @n
+        lda dosio_excl,x
+        bne @busy
+        lda dosio_mode
+        cmp #1                  ; MODE_NEWFILE wants the file to itself
+        beq @busy
+@n:     dex
+        bpl @l
+        lda dosio_lk
+        sta dosio_curfid
+        clc
+        rts
+@busy:  lda #ERROR_OBJECT_IN_USE
+        sta dosio_err
+        sec
+        rts
+
+; ===========================================================================
 ; $A131 Close — fh D1.  D0 = DOSTRUE (-1), or DOSFALSE (0) + IoErr for an
 ; invalid handle.  Close(0) is a harmless DOSTRUE no-op (V36+ behaviour).
 ; ===========================================================================
@@ -495,7 +579,7 @@ dosio_close:
         ora r_d1+3
         bne :+
         jmp dosio_retm1
-:       jsr dosio_getfh
+:       jsr dosio_getslot       ; not fh_Args (review ruling 8)
         bcc :+
         jmp dosio_fail0
 :       ldy #BE_CLOSE
@@ -899,13 +983,83 @@ dosio_buf_to_guest:             ; guest[ga] <- dosio_buf[0 .. dosio_len-1]
         jmp dosio_stash_guest
 
 ; ===========================================================================
-; dosio_dma — one REC transfer.  A = REU_CMD_FETCH (REU -> C64) or
+; dosio_dma — REC transfer.  A = REU_CMD_FETCH (REU -> C64) or
 ; REU_CMD_STASH (C64 -> REU); dosio_dc64 / dosio_dreu (24-bit) /
 ; dosio_dlen (1..$FFFF; never 0 = 64 KB).  Ends with jsr mem_rec_dirty (C1).
+; The REC's REU address counter only increments the low 19 bits (VICE
+; reu.c; the 1541U reportedly the same), so a transfer that would straddle
+; a 512 KB block boundary ($x7FFFF -> $x80000) is split into two DMAs
+; (review item 11).  dosio_dc64/dreu/dlen, X and Y are preserved.
 ; Clobbers A.
 ; ===========================================================================
 dosio_dma:
-        pha
+        sta dosio_dcmd
+        stx dosio_dx
+        lda dosio_dreu+2        ; a straddle is only possible when the
+        and #7                  ; transfer starts in the block's last 64 KB
+        cmp #7                  ; (bank bits 16-18 all set) ...
+        beq :+
+        jmp @one
+:
+        sec                     ; ... and room = $10000 - dreu(15:0) < dlen
+        lda #0
+        sbc dosio_dreu
+        sta dosio_droom
+        lda #0
+        sbc dosio_dreu+1
+        sta dosio_droom+1
+        ora dosio_droom
+        beq @one1               ; dreu(15:0) = 0: 64 KB of room
+        lda dosio_droom         ; room - dlen borrows -> dlen > room: split
+        cmp dosio_dlen
+        lda dosio_droom+1
+        sbc dosio_dlen+1
+        bcc :+
+@one1:  jmp @one
+:
+        ldx #6                  ; save the caller's arguments
+@sv:    lda dosio_dc64,x
+        sta dosio_dsave,x
+        dex
+        bpl @sv
+        lda dosio_droom         ; part 1: up to the block end
+        sta dosio_dlen
+        lda dosio_droom+1
+        sta dosio_dlen+1
+        jsr dosio_dma1
+        clc                     ; part 2: the rest, from the next block
+        lda dosio_dsave         ; dc64 += room
+        adc dosio_droom
+        sta dosio_dc64
+        lda dosio_dsave+1
+        adc dosio_droom+1
+        sta dosio_dc64+1
+        lda #0                  ; dreu = next block start (low 16 bits 0)
+        sta dosio_dreu
+        sta dosio_dreu+1
+        lda dosio_dsave+4
+        clc
+        adc #1
+        sta dosio_dreu+2
+        sec                     ; dlen = original - room
+        lda dosio_dsave+5
+        sbc dosio_droom
+        sta dosio_dlen
+        lda dosio_dsave+6
+        sbc dosio_droom+1
+        sta dosio_dlen+1
+        jsr dosio_dma1
+        ldx #6                  ; restore the caller's arguments
+@rs:    lda dosio_dsave,x
+        sta dosio_dc64,x
+        dex
+        bpl @rs
+        ldx dosio_dx
+        jmp mem_rec_dirty
+@one:   jsr dosio_dma1
+        jmp mem_rec_dirty       ; C1: we programmed the REC
+
+dosio_dma1:                     ; one DMA from dosio_dc64/dreu/dlen/dcmd
         lda dosio_dc64
         sta REC_C64LO
         lda dosio_dc64+1
@@ -922,9 +1076,9 @@ dosio_dma:
         sta REC_LENHI
         lda #0
         sta REC_ACTRL           ; both addresses increment
-        pla
+        lda dosio_dcmd
         sta REC_COMMAND         ; DMA executes here
-        jmp mem_rec_dirty       ; C1: we programmed the REC
+        rts
 
 ; ===========================================================================
 ; dosio_stash_guest — dosio_dma STASH of guest memory, then re-write the
@@ -983,6 +1137,7 @@ dosio_stash_guest:
 
 ; ===========================================================================
 .segment "RODATA"
+uci_key: .byte 'U', 'C', 'I', '!'   ; dosio_want_uci opt-in key (host mirror: UCI_OPT_IN_KEY)
 fh_lo:
         .repeat FH_SLOTS, n
         .byte <(FH_POOL + FH_SIZE * n)

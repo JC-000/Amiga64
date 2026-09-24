@@ -347,10 +347,14 @@ class DosTarget:
         cmd = msg[1]
         if cmd == DOS_OPEN:                           # dos.cc:111-124
             name = msg[3:].split(b"\0")[0].decode("latin-1")
+            # FatFS long names are case-insensitive: resolve to the stored key
+            name = next((k for k in self.fs if k.lower() == name.lower()), name)
             flags = msg[2]
             if self.file is not None:
                 dev.violations.append(f"OPEN on busy target (leaks {self.file})")
             self.file = None
+            if dev.readonly and flags & FA_WRITE:
+                return [b""], b"WRITE PROTECTED"
             exists = name in self.fs                  # filemanager.cc:668-689
             if exists and flags & FA_CREATE_NEW:
                 return [b""], b"FILE EXISTS"
@@ -421,6 +425,8 @@ class DosTarget:
 class UciDevice:
     fs: dict = field(default_factory=dict)
     latency: int = 3                  # status polls before a reply is valid
+    readonly: bool = False            # FA_WRITE opens fail "WRITE PROTECTED"
+    hang_cmds: set = field(default_factory=set)  # processed, reply never posted
     state: int = 0                    # 2-bit protocol state (vhd:48-52)
     newcmd: int = 0
     error: int = 0
@@ -444,7 +450,7 @@ class UciDevice:
 
     # firmware task progress, driven by C64 status polls
     def _tick(self):
-        if not self.phase:
+        if not self.phase or self.phase == "hang":
             return
         self.pending -= 1
         if self.pending > 0:
@@ -518,6 +524,8 @@ class UciDevice:
                     blocks, st = tgt.parse(msg, self)
                 self.blocks, self.pending_status = blocks, st
                 self.phase, self.pending = "accept", self.latency
+                if msg and len(msg) > 1 and msg[1] in self.hang_cmds:
+                    self.phase = "hang"       # firmware never replies
             else:
                 self.error = 1
                 self.violations.append("PUSH while not idle")
@@ -567,6 +575,26 @@ dosio_slot: .res 1
 dosio_len:  .res 2
 dosio_arg:  .res 4
 dosio_err:  .res 1
+dosio_curfid: .res 1
+lc_fail:    .res 1                ; test knob: nonzero -> lockcheck refuses
+lc_arg:     .res 1                ; last file id passed to dosio_lockcheck
+lc_calls:   .res 1
+.export dosio_curfid, lc_fail, lc_arg, lc_calls, dosio_lockcheck
+.segment "CODE"
+; stand-in for hle_dos.s dosio_lockcheck (the real one is VICE-tested):
+; A = file id -> C=1 + dosio_err=202 when lc_fail, else curfid := A
+dosio_lockcheck:
+        sta lc_arg
+        inc lc_calls
+        ldx lc_fail
+        bne @no
+        sta dosio_curfid
+        clc
+        rts
+@no:    lda #202
+        sta dosio_err
+        sec
+        rts
 """
 
 CFG = """
@@ -603,7 +631,9 @@ def build(tmp_path_factory):
     r = subprocess.run(
         ["cl65", "-t", "none", "-C", str(d / "t.cfg"), "-o", str(out),
          "-Ln", str(lbl), "--asm-define", "DOSIO_UCI_FENCE_OUTER=1",
-         "--asm-define", "DOSIO_UCI_FENCE_INNER=1", str(src), str(d / "shim.s")],
+         "--asm-define", "DOSIO_UCI_FENCE_INNER=1",
+         "--asm-define", "DOSIO_UCI_POLLS_HI=4",   # 1024-poll timeouts
+         str(src), str(d / "shim.s")],
         capture_output=True, text=True, cwd=ROOT)
     assert r.returncode == 0, r.stdout + r.stderr
     labels = {}
@@ -893,3 +923,123 @@ def test_setsize_updates_cached_size(build):
     h.poke("dosio_arg", struct.pack("<I", 1234))
     h.call("dosio_uci_setsize")
     assert h.size(0) == 1234
+
+
+# =============================================================================
+# Review fix round 1
+# =============================================================================
+
+def test_stale_error_bit_is_cleared_before_push(build):
+    # ruling 3: an ERROR bit left by someone else must not turn an accepted
+    # push into a fake refusal (and leave the reply pending).
+    h = Harness(build, fs={"f": bytearray(b"12345")})
+    h.call("dosio_uci_init")
+    h.dev.error = 1
+    assert h.open(0, "f", MODE_OLD) == 0
+    assert h.size(0) == 5
+    assert h.dev.error == 0
+    assert_clean(h)
+
+
+def test_lost_open_reply_never_double_opens(build):
+    # ruling 3: when the OPEN reply never comes, the file may be open in the
+    # firmware -> no second OPEN on that target (read-only retry path), the
+    # target is closed instead and the Open fails.
+    h = Harness(build, fs={"f": bytearray(b"12345")})
+    h.call("dosio_uci_init")
+    h.dev.log.clear()
+    h.dev.hang_cmds = {DOS_OPEN}
+    assert h.open(0, "f", MODE_OLD) == 1
+    assert h.err() == de.ERROR_DEVICE_NOT_MOUNTED
+    opens = [m for m in cmds(h) if m[1] == DOS_OPEN]
+    assert len(opens) == 1, cmds(h)
+    h.dev.hang_cmds = set()
+    assert bytes([1, DOS_CLOSE]) in cmds(h)
+    assert h.dev.targets[1].file is None
+    assert_clean(h)
+    assert h.open(0, "f", MODE_OLD) == 0      # target 1 usable again
+    assert_clean(h)
+
+
+def test_readonly_retry_after_definitive_refusal(build):
+    h = Harness(build, fs={"ro": bytearray(b"xyz")})
+    h.dev.readonly = True
+    h.call("dosio_uci_init")
+    h.dev.log.clear()
+    assert h.open(0, "ro", MODE_OLD) == 0
+    opens = [m for m in cmds(h) if m[1] == DOS_OPEN]
+    assert opens == [b"\x01\x02\x03ro", b"\x01\x02\x01ro"]
+    assert h.size(0) == 3
+    assert_clean(h)                            # no OPEN on a busy target
+
+
+def test_newfile_is_never_retried_readonly(build):
+    h = Harness(build)
+    h.dev.readonly = True
+    h.call("dosio_uci_init")
+    h.dev.log.clear()
+    assert h.open(0, "n", MODE_NEW) == 1
+    assert len([m for m in cmds(h) if m[1] == DOS_OPEN]) == 1
+    assert_clean(h)
+
+
+def test_file_info_failure_fails_the_open(build):
+    # ruling 4: no unknown-size handles.
+    h = Harness(build, fs={"f": bytearray(b"12345")})
+    h.call("dosio_uci_init")
+    real = h.dev.targets[1].parse
+
+    def no_info(msg, dev):
+        if msg[1] == DOS_INFO:
+            return [b""], b"88,NO INFORMATION AVAILABLE"
+        return real(msg, dev)
+    h.dev.targets[1].parse = no_info
+    h.dev.log.clear()
+    assert h.open(0, "f", MODE_OLD) == 1
+    assert h.err() == de.ERROR_OBJECT_NOT_FOUND
+    assert cmds(h)[-1] == bytes([1, DOS_CLOSE])
+    assert h.dev.targets[1].file is None
+    h.dev.targets[1].parse = real
+    assert h.open(0, "f", MODE_OLD) == 0      # target released
+    assert h.dev.targets[1].file == "f"
+    assert_clean(h)
+
+
+def test_lock_check_precedes_open_and_ids_follow_names(build):
+    # ruling 7: the backend asks dosio_lockcheck (hle_dos.s) BEFORE sending
+    # OPEN, with a file id shared by handles on the same name.
+    h = Harness(build, fs={"a": bytearray(b"A"), "b": bytearray(b"B")})
+    h.call("dosio_uci_init")
+    assert h.open(0, "a", MODE_OLD) == 0
+    fid_a = h.peek("lc_arg", 1)[0]
+    h.poke("dosio_curfid", b"\0")
+    assert h.open(1, "A", MODE_OLD) == 0      # same file, other target
+    assert h.peek("lc_arg", 1)[0] == fid_a
+    h.close(0)
+    h.close(1)
+    assert h.open(2, "b", MODE_OLD) == 0
+    fid_b = h.peek("lc_arg", 1)[0]
+    assert h.open(3, "a", MODE_OLD) == 0
+    assert h.peek("lc_arg", 1)[0] != fid_b     # different file, different id
+    h.close(2)
+    h.close(3)
+    h.dev.log.clear()
+    h.poke("lc_fail", b"\1")
+    assert h.open(4, "a", MODE_NEW) == 1
+    assert h.err() == de.ERROR_OBJECT_IN_USE
+    assert not [m for m in cmds(h) if m[1] == DOS_OPEN]   # nothing sent
+    assert h.dev.fs["a"] == b"A"                             # not truncated
+    assert_clean(h)
+
+
+def test_open_fid_distinct_while_other_target_holds_stale_id(build):
+    h = Harness(build, fs={"a": bytearray(b"A"), "b": bytearray(b"B"),
+                           "c": bytearray(b"C")})
+    h.call("dosio_uci_init")
+    h.open(0, "a", MODE_OLD)                   # target 1
+    h.open(1, "a", MODE_OLD)                   # target 2, same id
+    fid_a = h.peek("lc_arg", 1)[0]
+    h.close(0)                                 # target 1 free, 2 keeps fid_a
+    h.open(2, "c", MODE_OLD)                   # target 1 again
+    assert h.peek("lc_arg", 1)[0] != fid_a
+    assert_clean(h)

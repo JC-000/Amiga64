@@ -60,11 +60,11 @@ HEAP_BASE = $100000     ; first byte of the AllocMem pool
 HEAP_END  = $7FFFFF     ; last byte of the AllocMem pool (inclusive)
 .endif
 
-; @region free $800000-$EFFFFF UNALLOCATED guest space - claim via this file + rescheck green
+; @region free $800000-$DFFFFF UNALLOCATED guest space - claim via this file + rescheck green
 
-; @region hle $F00000-$FFFFFF HLE DOS RAMDISK - dos.library file store (WS-B2, docs/HLE_DOS.md: header + 32-entry directory, data from +$1000)
+; @region hle $E00000-$FFFFFF HLE DOS RAMDISK - dos.library file store, 2 MB (WS-B2, docs/HLE_DOS.md: header + 32-entry directory, data from +$1000)
 .ifndef dosio_rd_base
-dosio_rd_base = $F00000 ; RAMDISK header (magic "RDSK"); directory at +$20
+dosio_rd_base = $E00000 ; RAMDISK header (magic "RDSK"); directory at +$20
 .endif
 .ifndef dosio_rd_end
 dosio_rd_end  = $FFFFFF ; last RAMDISK byte (inclusive)

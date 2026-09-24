@@ -2,9 +2,11 @@
 
 Owner: WS-B2 (`m2-dos`). This covers dos.library file handles for guest
 programs: Open, Close, Read, Write, Seek and IoErr, with a backend seam.
-The **RAMDISK** backend is proven under VICE. The **ULTDOS** backend, which
-talks to the Ultimate Command Interface, is written and pinned byte for byte
-against the firmware source, but it is **hardware-UNVALIDATED**.
+The **RAMDISK** backend is proven under VICE and is **always the default**.
+The **ULTDOS** backend, which talks to the Ultimate Command Interface, is
+written and pinned byte for byte against the firmware source, but it is
+**hardware-UNVALIDATED** and therefore **opt-in only** (see Backend
+selection).
 
 Binding contracts are in `docs/WAVE4_BRIEF.md`:
 
@@ -22,7 +24,7 @@ and is owned by WS-B1.
 | `runtime/ops/dosio_ram.s` | RAMDISK backend |
 | `runtime/ops/dosio_uci.s` | ULTDOS backend (UCI DOS target) |
 | `host/hle_dos_env.py` | LVO table `DOS_FILE_FUNCS`, merged into DOSBase by `host/hle_env.py`. Also the guest-layout mirror, and the RAMDISK image builder and parser used to stage files and read them back |
-| `runtime/rc/guest.inc` | `FH_POOL`/`FH_POOL_END` (in `$000C00-$000FFF`), and the `hle` region `$F00000-$FFFFFF` (`dosio_rd_base`/`dosio_rd_end`) |
+| `runtime/rc/guest.inc` | `FH_POOL`/`FH_POOL_END` (in `$000C00-$000FFF`), and the `hle` region `$E00000-$FFFFFF`, 2 MB (`dosio_rd_base`/`dosio_rd_end`) |
 
 ## Function table
 
@@ -54,13 +56,14 @@ implemented. If WS-B1's vbcc run traps on one of them, see Limitations.
   - MODE_READWRITE 1004: open, or create if missing, never truncating.
   - Any other value → 0 with ERROR_ACTION_NOT_KNOWN (209).
   - Every handle can both read and write, as on AmigaOS.
+- **Open(NULL)** (D1 = 0) → 0 with ERROR_OBJECT_NOT_FOUND (205). The dos.library Open autodoc does not define a NULL name; there is no object, so 205 (review ruling 5).
 - **Names** are read through the memory API, at most 63 characters.
   - An empty name, or one with no NUL within 63 characters → ERROR_INVALID_COMPONENT_NAME (210).
   - RAMDISK names are at most 31 characters (longer → 210). They compare case-insensitively (ASCII) and are stored with case preserved.
   - Names are taken verbatim. There are no paths and no device prefixes, so `RAM:x` is a file literally named `RAM:x`.
 - **Read** is clamped to `size - position`. At EOF it returns 0 and leaves IoErr unchanged. A length of 0 returns 0.
 - **Write** with a length of 0 returns 0.
-  - For RAMDISK, a write whose end position would exceed the file's extent fails as a whole: D0 = -1, ERROR_DISK_FULL (221), nothing is written.
+  - For RAMDISK, a write whose end position would exceed the file's extent fails as a whole: D0 = -1, ERROR_DISK_FULL (221), nothing is written. **Per-file limit: 64 KB** for guest-created files; host-staged files are limited by their staged capacity. Tested by the `diskfull` scenario.
   - A successful write extends the file size to the end position when that is larger.
 - **Seek** modes are OFFSET_BEGINNING -1, OFFSET_CURRENT 0 and OFFSET_END 1.
   - The target must lie in 0..size. Seeking past EOF is an error, as on AmigaOS.
@@ -69,9 +72,16 @@ implemented. If WS-B1's vbcc run traps on one of them, see Limitations.
 - **Invalid handles** fail with ERROR_INVALID_LOCK (211). That is DOSFALSE for Close, and -1 for Read, Write and Seek. A handle is invalid when any of these holds:
   - D1 << 2 is not exactly a pool slot address.
   - The slot is closed.
-  - The guest `fh_Args` no longer reads `$10+n`.
+  - For Read, Write and Seek only: the guest `fh_Args` no longer reads `$10+n`. **Close** validates by slot address and open state alone (review ruling 8), so a guest that scribbled over `fh_Args` can still release its slot; Close then writes `fh_Args = $FFFFFFFF`.
 
   AmigaOS has no dedicated code for this; 211 is the project's choice.
+- **Sharing (AmigaOS locking, review ruling 7)**: MODE_NEWFILE takes an exclusive lock. Open fails with 0 and ERROR_OBJECT_IN_USE (202) when:
+  - it is MODE_NEWFILE and any handle has the file open, or
+  - any mode, while an exclusive (MODE_NEWFILE) handle has the file open.
+
+  MODE_OLDFILE and MODE_READWRITE share with each other. The check runs before any side effect, so a refused NEWFILE never truncates.
+  - The generic check is `dosio_lockcheck` in `hle_dos.s`.
+  - Identity is the backend's file id (`dosio_curfid`). On RAMDISK it is the directory index. On ULTDOS it is the name, compared case-insensitively against the other target's open file (`uci_pick_fid`).
 - **Handle exhaustion**: 8 slots. A 9th Open → 0 with ERROR_NO_FREE_STORE (103).
 - **IoErr** is set only by failing calls, so it is sticky like `pr_Result2`. `hle_dos_init` resets it to 0.
   - It lives in C64 BSS as `hle_dos_ioerr` (u32 LE, exported).
@@ -97,7 +107,7 @@ failure it returns C=1 with an AmigaOS code in `dosio_err`.
 | Op | Contract |
 |---|---|
 | `init` | Once per `hle_dos_init` |
-| `open` | `dosio_name`, `dosio_nlen` (1-63), `dosio_mode` (0 OLD / 1 NEW / 2 RW) |
+| `open` | `dosio_name`, `dosio_nlen` (1-63), `dosio_mode` (0 OLD / 1 NEW / 2 RW). Once it knows which file the name refers to, and before any side effect, it must call `dosio_lockcheck` (A = file id). That call either refuses with ERROR_OBJECT_IN_USE or sets `dosio_curfid` |
 | `close` | Release the slot's backend state |
 | `size` | → `dosio_arg` = current file size |
 | `setsize` | File size := `dosio_arg`. Called after a write that grew the file |
@@ -114,10 +124,73 @@ failure it returns C=1 with an AmigaOS code in `dosio_err`.
   - The memory API's window-overlap check then drops any cached instruction page the DMA overwrote. This implements the CONTRACTS.md `w_inv` rule through the stable memory API. `w_inv` itself is not exported.
   - Spans are at most 256 bytes, so first and last byte cover both pages a span can touch.
   - This applies to guest buffers and also to RAMDISK metadata and data writes (the RAMDISK is guest space too).
-- **Selection** happens in `hle_dos_init`. `dosio_uci_detect` reads `$DF1D`: `$C9` means the UCI is present (`$49` while its IRQ is pending), and gives ULTDOS (`dosio_backend = 1`). Anything else gives RAMDISK (`dosio_backend = 0`). VICE reads `$FF` there, so it gets RAMDISK; `tests/run_dos.py` asserts this.
-- **Init**: BSS is not cleared at boot, so every entry first checks `hle_dos_magic == "DOS!"` and runs `hle_dos_init` lazily. `hle_dos_init` is exported and host-callable (jsr/rts) for a future runner HLE-init hook. `tests/run_dos.py` calls it between programs.
+### 512 KB REU blocks (review item 11)
 
-## RAMDISK format (guest/REU `$F00000-$FFFFFF`)
+The REC's REU address counter increments only the low 19 bits (VICE `reu.c`
+1085-1093; the 1541U reportedly behaves the same). A DMA that straddles
+`$x7FFFF` → `$x80000` therefore wraps to the start of the same 512 KB block.
+
+- **Guest side is safe by construction.** Every guest-memory DMA (the Read
+  stash, the Write fetch) is one `dosio_chunk` of
+  `req = min(rem, 256 - (ga & $FF))` bytes starting at `ga`. So it lies
+  inside the single 256-byte page `ga & ~$FF .. ga | $FF`. Every 512 KB
+  boundary is a multiple of 256, so it can only fall *between* pages, never
+  inside one.
+- **RAMDISK metadata is safe by placement.** The header (32 bytes at
+  `$E00000`) and the directory (`$E00020-$E0081F`, including the 8 pages
+  `rd_format` zeroes) sit at the start of block `$E00000-$E7FFFF`.
+- **RAMDISK file data was NOT safe.** Extents start at `$E01000 + k·64 KB`, so
+  the boundaries `$E80000`, `$F00000` and `$F80000` fall inside extents. A
+  chunk's REU-side address is `extent + position`, which is not
+  page-aligned relative to the guest buffer, so a chunk could straddle a
+  boundary.
+  - Reproduced: the `wrap512` scenario went RED. The write wrapped into
+    `$E00000` and destroyed the directory
+    (`build/evidence/ws-b2/fix1/red/run_dos_wrap512.txt`).
+  - Fixed in `dosio_dma`: when a transfer starts in a block's last 64 KB
+    and is longer than the room left, it is split into two DMAs at the
+    boundary. This covers every caller (guest and RAMDISK sides), and the
+    caller's arguments are preserved.
+- **Host test reads** (`tests/run_dos.py` `Guest.read`) split at 512 KB
+  blocks too.
+- **Test.** The `wrap512` scenario reads and writes a file through a guest
+  buffer straddling `$180000` (`$17FF80`, 256 bytes), and reads and writes
+  file data straddling `$E80000` (odd guest buffer). It checks:
+  - the bytes on both sides of each boundary;
+  - that the sentinels at `$100000-$10007F` and `$180080-$1800FF` are
+    untouched;
+  - that the RAMDISK header and every file survive.
+
+  The `nosplit` mutant (split disabled) turns it red.
+
+### Backend selection (review ruling 1)
+
+`hle_dos_init` picks the backend. **RAMDISK (`dosio_backend = 0`) is always
+the default.** ULTDOS (`dosio_backend = 1`) is used only when both hold:
+
+1. The host wrote the 4-byte key `"UCI!"` (`hle_dos_env.UCI_OPT_IN_KEY`) to the exported BSS symbol `dosio_want_uci`, before the run or before calling `hle_dos_init`.
+2. `dosio_uci_detect` sees the UCI: `$DF1D` reads `$C9` (`$49` while its IRQ is pending).
+
+The opt-in is a 4-byte key rather than a flag byte because BSS holds
+power-on garbage (it is never cleared). A garbage nonzero byte must not
+switch a program onto an unvalidated backend. The backend stays opt-in until
+the hardware leg passes.
+
+`tests/run_dos.py`'s `selection` leg builds a TEST-ONLY `DOSIO_FAKE_UCI`
+variant whose detection always reports a UCI. On that build it checks:
+
+- the boot state, `want = 0`, `$01010101`, `"UCI?"` and `$FFFFFFFF` all give RAMDISK;
+- the `writes` scenario runs correctly;
+- the key gives ULTDOS;
+- clearing the key gives RAMDISK again.
+
+The plain VICE build reads `$FF` at `$DF1D` and is asserted to use RAMDISK.
+
+### Init
+
+BSS is not cleared at boot, so every entry first checks `hle_dos_magic == "DOS!"` and runs `hle_dos_init` lazily. `hle_dos_init` is exported and host-callable (jsr/rts) for a future runner HLE-init hook. `tests/run_dos.py` calls it between programs.
+
+## RAMDISK format (guest/REU `$E00000-$FFFFFF`, 2 MB)
 
 This is a flat, non-hierarchical store. All integers are **little-endian**:
 the store is C64-side metadata that the guest never sees.
@@ -150,7 +223,8 @@ Each directory entry (64 bytes) has this layout:
 - **Host staging**: `hle_dos_env.ramdisk_chunks({"name": bytes, ...})` lays files out from `+$1000`, each extent page aligned with a capacity of max(len, 64 KB). Stage the chunks with the program.
 - **Host read-back**: `hle_dos_env.parse_directory(read_fn)` reads files back after a run.
 - **Auto-format**: an invalid header (wrong magic, version or entry count) is formatted in place on the first Open. This writes a fresh header and zeroes the 2 KB directory.
-- **Guest-created files** get an extent of `RD_NEW_CAP` = 64 KB, or whatever space remains.
+- **Guest-created files** get an extent of `RD_NEW_CAP` = 64 KB, or whatever space remains. 32 × 64 KB is exactly the 2 MB region, and the 4 KB header/directory page comes out of it. All 32 directory entries are allocatable, but the 32nd guest-created extent is 60 KB (tested by `dirfull`).
+  - This is where ruling 6's "32 × 64 KB" comes up 4 KB short. Growing the region further would reach into `$DFxxxx`, which the ruling did not grant.
 - **Not supported**: delete, rename, or growing past the extent.
 
 ## ULTDOS backend: UCI mapping (HARDWARE-UNVALIDATED)
@@ -178,7 +252,7 @@ Hardware-tested 6502 is `~/Documents/c64-https` at `1b9b49e`.
 | Open OLDFILE | `t 02 03 name…` (FA_READ\|FA_WRITE). On failure, retry `t 02 01 name…` for read-only media | status starts `"00"` |
 | Open NEWFILE | `t 02 0B name…` (FA_READ\|FA_WRITE\|FA_CREATE_ALWAYS: create or truncate) | `"00"` |
 | Open READWRITE | `t 02 13 name…` (FA_READ\|FA_WRITE\|FA_OPEN_ALWAYS) | `"00"` |
-| (after Open) | `t 07` FILE_INFO. The reply's first 4 bytes are the size (u32 LE), cached per slot | `"00"`. Otherwise the size is unknown and set to `$7FFFFFFF` |
+| (after Open) | `t 07` FILE_INFO. The reply's first 4 bytes are the size (u32 LE), cached per slot | `"00"` with at least 4 bytes. Otherwise the Open **fails**: `t 03` closes the target and IoErr = ERROR_OBJECT_NOT_FOUND (205). No unknown-size handles (review ruling 4) |
 | Close | `t 03` | ignored |
 | Seek | `t 06 p0 p1 p2 p3` (absolute position, u32 LE). hle_dos.s has already bounds-checked it | `"00"`, else ERROR_SEEK_ERROR |
 | Read chunk | `t 04 lo hi` (u16 LE, ≤ 256). Response bytes go to `dosio_buf` | Count of bytes received. The success status is empty |
@@ -186,8 +260,20 @@ Hardware-tested 6502 is `~/Documents/c64-https` at `1b9b49e`.
 | init | ABORT, wait for idle, clear ERROR, then `1 03` and `2 03` to close anything a previous run leaked | none |
 
 - **Target limit**: there are two DOS targets, so at most **two files** can be open at once on ULTDOS. A third Open fails with ERROR_NO_FREE_STORE. The driver never sends OPEN to a busy target, because the firmware would leak the old handle (dos.cc:113).
-- **Error mapping**: any failed open → ERROR_OBJECT_NOT_FOUND (205). A transport timeout or ERROR bit on read or seek → ERROR_SEEK_ERROR (219). A write status other than `"00"` → ERROR_DISK_FULL (221).
-- **Timeouts**: every wait is bounded at 65536 status polls, each including a fence. On timeout the driver aborts and fails.
+- **Error mapping**:
+  - An Open refused with a definitive status → ERROR_OBJECT_NOT_FOUND (205).
+  - A sharing conflict → ERROR_OBJECT_IN_USE (202), with nothing sent.
+  - A transport timeout or ERROR bit on read or seek → ERROR_SEEK_ERROR (219).
+  - A write status other than `"00"` → ERROR_DISK_FULL (221).
+- **Stale ERROR bit (review ruling 3)**: `uci_begin` writes `$08` (clear ERROR) once the interface is idle, before the command bytes. The only setter of that bit is a PUSH while busy (VHDL 155-160). A bit left by someone else therefore can no longer make our accepted PUSH look refused.
+- **No double OPEN (review ruling 3)**: the MODE_OLDFILE read-only retry happens only after a *definitive* refusal, that is, a reply with a non-`"00"` status.
+  - If the OPEN transaction itself failed (timeout, refused push), the firmware may already have the file open.
+  - In that case the driver sends `t 03` and fails with ERROR_DEVICE_NOT_MOUNTED (218). It never sends a second OPEN to that target.
+- **Timeouts**: every wait is bounded at 256 × `DOSIO_UCI_POLLS_HI` status polls (default 65536), each including a fence. On timeout the driver aborts and fails.
+- **Throughput (review nit 9)**: roughly **65 bytes/s at 1 MHz**.
+  - Every UCI register access is followed by the turbo fence from c64-https: 5 × 217 loop iterations, about 7.6k cycles, about 5.5 ms at 1 MHz.
+  - Each payload byte costs about two register accesses (data plus status poll).
+  - Speed scales with the CPU clock, to about 3 KB/s at 48 MHz. The fence is tuned for correctness at turbo speed, not for throughput.
 
 **What is pinned.** `host/tests/test_hle_dos_uci.py` assembles
 `dosio_uci.s` standalone with cl65 and **executes** it in a small 6502
@@ -203,8 +289,18 @@ valid" hazard, with a configurable latency. The tests assert:
 - no seek past EOF;
 - the resulting file-system state.
 
-Mutation checks (a bit-0 wait, `$06` acknowledge, CREATE_NEW for NEWFILE)
-each turn tests red.
+The fix round added tests for:
+
+- a stale ERROR bit before a push;
+- a lost OPEN reply, which must not lead to a second OPEN;
+- a read-only retry after a definitive refusal;
+- NEWFILE never being retried read-only;
+- a FILE_INFO failure failing the Open;
+- the sharing check preceding the OPEN, with file ids following names.
+
+Each mutation check turns tests red. The original ones are a bit-0 wait,
+a `$06` acknowledge and CREATE_NEW for NEWFILE; the fix-round mutants are
+listed in `build/evidence/ws-b2/fix1/mutants.txt`.
 
 **Not proven.**
 
@@ -221,7 +317,7 @@ leg (WS-A owns the device this wave).
 
 - `host/tests/test_hle_dos_env.py`: the LVO table and index range, collision-free merging into DOSBase, env slot staging, the `rc/guest.inc` mirrors, asm/host constant mirrors, and a RAMDISK format round-trip.
 - `host/tests/test_hle_dos_uci.py`: the UCI byte-level test described above.
-- `tests/run_dos.py` (VICE, RAMDISK end to end): `python3 -m tests.run_dos --prg build/ws-b2/runner.prg`.
+- `tests/run_dos.py`: RAMDISK end to end in VICE, plus the backend-selection leg on a second VICE instance. Run it with `python3 -m tests.run_dos --prg build/ws-b2/runner.prg`. The PRG's directory must contain `gen/dispatch.s`, as `make runtime` leaves it, for the `DOSIO_FAKE_UCI` variant build.
 
 ### Why `run_dos.py` uses a test env
 
@@ -249,6 +345,13 @@ The guest is a hand-encoded "call script" interpreter. It walks a table of
 | `writes` | Auto-format of an invalid header; NEWFILE create; unaligned write of 300 bytes, then read back; overwrite in the middle; size persistence across reopen; OLDFILE append; READWRITE create, and open-existing without truncation; NEWFILE truncation. The host reads every file back from the RAMDISK |
 | `handles` | 8 handles, then exhaustion (103); slot reuse; independent positions; shared size across handles |
 | `codepage` | A Read over the executing code page. Only passes if the fetch window was invalidated. With a `DOSIO_NOINVAL` build it FAILS (teeth) |
+| `diskfull` | The 64 KB extent filled exactly; one more byte, and a length of -1, fail with 221 and write nothing; Seek to END+1 fails; a Read of length -1 is clamped to the file |
+| `dirfull` | All 32 directory entries allocatable in the 2 MB region; the 33rd create fails with 221; the last (60 KB) extent is usable |
+| `staledir` | A directory with a used entry but an invalid header. Auto-format must wipe the entry, so the stale name is not found and a new file of that name is empty |
+| `lock` | OLDFILE and READWRITE share; NEWFILE refused (202) while any handle is open, without truncating; every Open refused while a NEWFILE handle is open; released on Close; case-insensitive identity |
+| `fhargs` | The guest overwrites `fh_Args` through a Read into the handle pool. Read, Write and Seek refuse (211), Close still releases the slot, and the slot is reusable |
+| `nullname` | Open(NULL) → 0 with 205 |
+| `selection` | Backend selection, described above |
 
 ### REC-shadow leg
 
@@ -265,6 +368,6 @@ reprograms every register.
   - The supervisor's end-to-end fopen test must stage a RAMDISK with `hle_dos_env.ramdisk_chunks` if the program opens existing files. It is not needed for NEWFILE, because of auto-format.
 - **Init**: there is no runner HLE-init hook yet. Handles leak across programs run in one boot unless something calls `hle_dos_init`.
 - **Missing functions**: no DeleteFile, Rename, Lock/Examine or IsInteractive, and no NIL:/`*`/CONSOLE: names through Open. Add them only when a real program traps on them.
-- **RAMDISK**: 32 files, 31-character names, fixed extents (64 KB for guest-created files), no deletion.
-- **ULTDOS**: two open files at most; names relative to the firmware's current path; unvalidated on hardware.
+- **RAMDISK**: 32 files, 31-character names, fixed extents (64 KB for guest-created files, 60 KB for the 32nd), no deletion.
+- **ULTDOS**: opt-in only; two open files at most; names relative to the firmware's current path; about 65 B/s at 1 MHz; unvalidated on hardware.
 - **Checker coverage**: `host/rescheck.py` `FILE_OWNERS` (supervisor-frozen) does not list `hle_dos.s`/`dosio_*.s`, so their raw-literal scan does not run. The files use only rc equates and contain no raw addresses.

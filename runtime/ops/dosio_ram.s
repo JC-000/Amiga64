@@ -4,7 +4,7 @@
 ; mirror: host/hle_dos_env.py (ramdisk_image / parse_directory).
 ;
 ; A flat, non-hierarchical file store in guest/REU space
-; [dosio_rd_base, dosio_rd_end] (rc/guest.inc):
+; [dosio_rd_base, dosio_rd_end] = $E00000-$FFFFFF, 2 MB (rc/guest.inc):
 ;   +$0000  header, 32 bytes:  "RDSK", u8 version (1), u8 entries (32),
 ;           u16 0, u32 free_ptr (next unallocated REU address),
 ;           u32 data_end (dosio_rd_end + 1), 16 reserved
@@ -16,8 +16,11 @@
 ; Integers little-endian (C64-side metadata, not guest-visible data).
 ; Names compare case-insensitively (ASCII), stored case-preserved.
 ; A missing/invalid header is formatted in place on the first Open.
-; Guest-created files get an extent of RD_NEW_CAP bytes (or what is left);
-; writes past the extent fail with ERROR_DISK_FULL.  No delete/rename.
+; Guest-created files get an extent of RD_NEW_CAP (64 KB) bytes, or what is
+; left: 32 x 64 KB fills the 2 MB region exactly, so the 4 KB directory
+; page comes out of the last extent (60 KB).  Writes past the extent fail
+; with ERROR_DISK_FULL.  File id for the sharing rules = directory index.
+; No delete/rename.
 ;
 ; Backend contract (hle_dos.s "Backend seam"): entered by jmp from
 ; dosio_be with X = dosio_slot; C=0 success, C=1 failure with dosio_err.
@@ -33,6 +36,7 @@
 .import dosio_buf, dosio_name, dosio_nlen, dosio_mode, dosio_slot
 .import dosio_len, dosio_arg, dosio_err
 .import dosio_dma, dosio_stash_guest, dosio_dc64, dosio_dreu, dosio_dlen
+.import dosio_lockcheck
 
 RD_VERSION   = 1
 RD_HDR_SIZE  = $20
@@ -363,6 +367,7 @@ dosio_ram_open:
         plp
         lda dosio_rd_free
         sta dosio_rd_i
+        jsr dosio_lockcheck     ; new entry: never refused; sets dosio_curfid
         jsr rd_ent_store
         jsr rd_hdr_dma
         jsr dosio_stash_guest
@@ -371,7 +376,10 @@ dosio_ram_open:
 @fail:  sec
         rts
 
-@found: lda dosio_mode          ; MODE_NEWFILE on an existing file: truncate
+@found: lda dosio_rd_i           ; sharing rules first: no side effect
+        jsr dosio_lockcheck     ; on refusal (C=1, ERROR_OBJECT_IN_USE)
+        bcs @fail
+        lda dosio_mode          ; MODE_NEWFILE on an existing file: truncate
         cmp #1
         bne @slot
         lda #0

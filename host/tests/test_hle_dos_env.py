@@ -90,6 +90,7 @@ def test_asm_mirrors_hle_dos_constants():
         assert eq[f"HLE_DOS_IDX_{name.upper()}"] == idx
     for name in ("MODE_OLDFILE", "MODE_NEWFILE", "MODE_READWRITE",
                  "ERROR_NO_FREE_STORE", "ERROR_OBJECT_NOT_FOUND",
+                 "ERROR_OBJECT_IN_USE",
                  "ERROR_ACTION_NOT_KNOWN", "ERROR_INVALID_COMPONENT_NAME",
                  "ERROR_INVALID_LOCK", "ERROR_SEEK_ERROR", "ERROR_DISK_FULL"):
         assert eq[name] == getattr(de, name), name
@@ -148,3 +149,30 @@ def test_ramdisk_chunks_stage_full_directory_page():
 def test_parse_directory_rejects_unformatted():
     with pytest.raises(ValueError):
         de.parse_ramdisk_bytes(bytes(64))
+
+
+# --- review fix round 1 -------------------------------------------------------
+
+def test_ramdisk_region_is_2mb_at_e00000():
+    # ruling 6: 32 entries x 64 KB extents; the directory page comes out of
+    # the last extent (documented in docs/HLE_DOS.md).
+    assert de.RD_BASE == 0xE00000 and de.RD_END == 0xFFFFFF
+    room = de.RD_END + 1 - de.RD_DATA
+    assert room >= (de.RD_ENTRIES - 1) * de.RD_NEW_CAP + 1
+    assert room == de.RD_ENTRIES * de.RD_NEW_CAP - (de.RD_DATA - de.RD_BASE)
+
+
+def test_parse_directory_rejects_garbage_entries():
+    img = bytearray(de.ramdisk_image({"f": b"abc"}))
+    off = de.RD_DIR - de.RD_BASE
+    img[off + 4:off + 8] = (0x7FFFFFFF).to_bytes(4, "little")  # size > cap
+    with pytest.raises(ValueError):
+        de.parse_ramdisk_bytes(bytes(img))
+
+
+def test_uci_opt_in_key_mirrors_asm():
+    src = (ROOT / "runtime/ops/hle_dos.s").read_text()
+    assert 'dosio_want_uci' in src
+    key = de.UCI_OPT_IN_KEY.decode()
+    assert f'UCI_OPT_IN_KEY = "{key}"' in src or all(
+        f"'{c}'" in src for c in key)

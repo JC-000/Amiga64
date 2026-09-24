@@ -53,6 +53,7 @@
 
 .import dosio_buf, dosio_name, dosio_nlen, dosio_mode, dosio_slot
 .import dosio_len, dosio_arg, dosio_err
+.import dosio_lockcheck, dosio_curfid ; hle_dos.s sharing rules (stubbed in the host test)
 
 ; --- registers ($DF1C-$DF1F, rc/ram.inc ULT_CMD_BASE) -----------------------
 UCI_CTL = ULT_CMD_BASE + 0      ; read: status   write: control
@@ -87,6 +88,7 @@ FA_CREATE_ALWAYS = $08
 FA_OPEN_ALWAYS   = $10
 
 ERROR_NO_FREE_STORE    = 103
+ERROR_DEVICE_NOT_MOUNTED = 218
 ERROR_OBJECT_NOT_FOUND = 205
 ERROR_SEEK_ERROR       = 219
 ERROR_DISK_FULL        = 221
@@ -100,6 +102,13 @@ DOSIO_UCI_FENCE_OUTER = 5
 .ifndef DOSIO_UCI_FENCE_INNER
 DOSIO_UCI_FENCE_INNER = 217
 .endif
+; Status polls per wait = 256 * DOSIO_UCI_POLLS_HI (default 65536).  Tests
+; shrink it; each poll includes a fence (~5.5 ms at 1 MHz -> ~6 min worst
+; case per wait on a stock-speed C64, ~7 s at 48 MHz).
+.ifndef DOSIO_UCI_POLLS_HI
+DOSIO_UCI_POLLS_HI = 256
+.endif
+.assert DOSIO_UCI_POLLS_HI >= 1 .and DOSIO_UCI_POLLS_HI <= 256, error, "DOSIO_UCI_POLLS_HI must be 1..256"
 
 .segment "BSS"
 dosio_uci_tgt:  .res FH_SLOTS   ; per slot: DOS target 1/2
@@ -115,6 +124,12 @@ dosio_uci_rn:   .res 2          ; response bytes received
 dosio_uci_st:   .res 2          ; first two status bytes
 dosio_uci_sn:   .res 1          ; status bytes received (saturating)
 dosio_uci_i:    .res 1
+dosio_uci_def:  .res 1          ; 1 = last open got a definitive status
+dosio_uci_fid:  .res 3          ; [1],[2]: file id of the target's open file
+dosio_uci_nl:   .res 3          ; [1],[2]: name length of the target's file
+dosio_uci_nm:   .res 128        ; names: target 1 at +0, target 2 at +64
+dosio_uci_ty:   .res 1          ; scratch: target under examination
+dosio_uci_off:  .res 1          ; scratch: name-buffer offset
 
 .segment "CODE"
 
@@ -146,6 +161,7 @@ uci_status:                     ; A = status register (flags from A)
 uci_to_reset:
         lda #0
         sta dosio_uci_to
+        lda #<(256 - DOSIO_UCI_POLLS_HI)
         sta dosio_uci_to+1
         rts
 
@@ -186,7 +202,10 @@ uci_begin:
         beq @go
         sec
         rts
-@go:    lda dosio_uci_t
+@go:    lda #CTL_CLRERR         ; idle: drop a stale ERROR bit so it cannot
+        sta UCI_CTL             ; fake a refusal of our push (review ruling 3)
+        jsr uci_fence
+        lda dosio_uci_t
         ; fall through
 uci_put:                        ; A = command byte
         sta UCI_CMD
@@ -306,6 +325,10 @@ uci_cmd_slot:
 
 ; C=1 when the command interface identifies itself at $DF1D.
 dosio_uci_detect:
+.ifdef DOSIO_FAKE_UCI
+        sec                     ; TEST-ONLY build: pretend a UCI is present
+        rts                     ; (tests/run_dos.py "selection" leg)
+.endif
         lda UCI_CMD
         and #$7F
         cmp #UCI_ID
@@ -350,40 +373,56 @@ dosio_uci_open:
         sec
         rts
 @tgt:   sta dosio_uci_tgt,x
-        ldy dosio_mode
+        jsr uci_pick_fid        ; sharing rules BEFORE anything reaches the
+        jsr dosio_lockcheck     ; firmware (NEWFILE truncates there)
+        bcc :+
+        rts                     ; C=1, ERROR_OBJECT_IN_USE
+:       ldy dosio_mode
         lda uci_mode_flags,y
         jsr uci_open_try
         bcc @opened
-        ldy dosio_mode          ; MODE_OLDFILE: retry read-only
+        lda dosio_uci_def       ; no definitive answer: the file may be open
+        beq @lost               ; in the firmware -> never OPEN again
+        ldy dosio_mode          ; MODE_OLDFILE refused: retry read-only
         bne @nf
         lda #FA_READ
         jsr uci_open_try
         bcc @opened
+        lda dosio_uci_def
+        beq @lost
 @nf:    lda #ERROR_OBJECT_NOT_FOUND
         sta dosio_err
         sec
         rts
+@lost:  jsr uci_close_tgt
+        lda #ERROR_DEVICE_NOT_MOUNTED
+        sta dosio_err
+        sec
+        rts
 @opened:
-        ldx dosio_slot
-        ldy dosio_uci_tgt,x
-        lda #1
-        sta dosio_uci_busy,y
         lda #4                  ; FILE_INFO -> size (u32 LE, first 4 bytes)
         sta dosio_uci_max
         lda #0
         sta dosio_uci_max+1
+        ldx dosio_slot
         lda #DOS_CMD_FILE_INFO
         jsr uci_cmd_slot
-        bcs @unk
+        bcs @noinfo
         jsr uci_exec
-        bcs @unk
+        bcs @noinfo
         jsr uci_ok
-        bcs @unk
+        bcs @noinfo
         lda dosio_uci_rn+1
         bne @sz
         lda dosio_uci_rn
         cmp #4
-        bcc @unk
+        bcs @sz
+@noinfo:                        ; no size, no handle (review ruling 4)
+        jsr uci_close_tgt
+        lda #ERROR_OBJECT_NOT_FOUND
+        sta dosio_err
+        sec
+        rts
 @sz:    ldx dosio_slot
         lda dosio_buf
         sta dosio_uci_s0,x
@@ -393,21 +432,42 @@ dosio_uci_open:
         sta dosio_uci_s2,x
         lda dosio_buf+3
         sta dosio_uci_s3,x
-        clc
-        rts
-@unk:   ldx dosio_slot          ; size unknown: reads run to the real EOF
-        lda #$FF
-        sta dosio_uci_s0,x
-        sta dosio_uci_s1,x
-        sta dosio_uci_s2,x
-        lda #$7F
-        sta dosio_uci_s3,x
+        ldy dosio_uci_tgt,x     ; target now holds this file
+        lda #1
+        sta dosio_uci_busy,y
+        lda dosio_curfid
+        sta dosio_uci_fid,y
+        lda dosio_nlen
+        sta dosio_uci_nl,y
+        jsr uci_name_off        ; X = name-buffer offset of target Y
+        ldy #0
+@cp:    lda dosio_name,y
+        sta dosio_uci_nm,x
+        inx
+        iny
+        cpy dosio_nlen
+        bne @cp
         clc
         rts
 
+; CLOSE on the slot's target without touching the busy bookkeeping (open
+; failure clean-up; "84,NO FILE TO CLOSE" is fine).
+uci_close_tgt:
+        jsr uci_nomax
+        ldx dosio_slot
+        lda #DOS_CMD_CLOSE_FILE
+        jsr uci_cmd_slot
+        bcs @r
+        jsr uci_exec
+@r:     rts
+
 ; A = open flags: [t][02][flags][name...].  C=0 when the status is "00,OK".
+; dosio_uci_def = 1 when a reply was received (definitive), 0 when the
+; transaction itself failed (timeout / refused push).
 uci_open_try:
         pha
+        lda #0
+        sta dosio_uci_def
         jsr uci_nomax
         ldx dosio_slot
         lda #DOS_CMD_OPEN_FILE
@@ -423,7 +483,75 @@ uci_open_try:
         bne @nm
         jsr uci_exec
         bcs @r
+        lda #1
+        sta dosio_uci_def
         jmp uci_ok
+@r:     rts
+
+; Y = target (1/2) -> X = offset of its name in dosio_uci_nm
+uci_name_off:
+        ldx #0
+        cpy #1
+        beq @r
+        ldx #64
+@r:     rts
+
+; A := file id for dosio_name: the id of a busy target holding the same name
+; (ASCII case-insensitive), else the lowest id in 1..3 no busy target uses.
+uci_pick_fid:
+        ldy #1
+@t:     sty dosio_uci_ty
+        lda dosio_uci_busy,y
+        beq @nx
+        lda dosio_uci_nl,y
+        cmp dosio_nlen
+        bne @nx
+        jsr uci_name_off
+        stx dosio_uci_off
+        ldy #0
+@cmp:   lda dosio_name,y
+        jsr uci_lower
+        sta dosio_uci_i
+        ldx dosio_uci_off
+        lda dosio_uci_nm,x
+        jsr uci_lower
+        cmp dosio_uci_i
+        bne @nx
+        inc dosio_uci_off
+        iny
+        cpy dosio_nlen
+        bne @cmp
+        ldy dosio_uci_ty        ; same file
+        lda dosio_uci_fid,y
+        rts
+@nx:    ldy dosio_uci_ty
+        iny
+        cpy #3
+        bne @t
+        lda #1                  ; fresh id
+@f:     sta dosio_uci_i
+        ldy #1
+@c:     lda dosio_uci_busy,y
+        beq @cn
+        lda dosio_uci_fid,y
+        cmp dosio_uci_i
+        beq @used
+@cn:    iny
+        cpy #3
+        bne @c
+        lda dosio_uci_i
+        rts
+@used:  lda dosio_uci_i
+        clc
+        adc #1
+        bne @f                  ; always (<= 3)
+
+uci_lower:                      ; ASCII A-Z -> a-z
+        cmp #'A'
+        bcc @r
+        cmp #'Z' + 1
+        bcs @r
+        ora #$20
 @r:     rts
 
 dosio_uci_close:
