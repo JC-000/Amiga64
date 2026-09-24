@@ -7,7 +7,11 @@
 > 2 MHz, and REC **register I/O is throttled to ~1 µs/store** at turbo — the
 > real v0 ceiling). Measured 48 MHz IPS: v0 ~35k/28k (ALU/mem), windowed core
 > ~80k/57k (window gain 2.28×/2.03× at 48 MHz; windowed cycles/instr is flat
-> across the sweep). Top remaining lever: fewer REC accesses per memory call.
+> across the sweep). Lever 2, fewer REC accesses per memory call, is now done
+> as the **REC shadow** (wave 4). Measured on firmware 3.15, same session, vs
+> the windowed core at "48 MHz": memory-bound loops **+16% to +43% IPS**, the
+> ALU loop unchanged; at 1 MHz within ±2%. See (d) and `docs/HARDWARE.md`
+> "REC shadow core".
 
 Engineering estimate from the cycle comments in `runtime/core.s` and
 `runtime/ops/*.s`. Nothing here is measured on hardware. **VICE warp is not a
@@ -39,8 +43,11 @@ guest code page, refilled by ONE 256-byte REU DMA on a miss:
 - Coherence tax: `mem_write8/16/32` test the write against the cached page
   and invalidate on overlap (self-modifying code, stack pushes near code):
   +9 cycles per byte write, +16 per word/long write on the non-overlap path.
-- Data reads/writes are otherwise unchanged: REU DMA setup dominates,
-  ~70 cycles of REC register setup + 1 cycle/byte + ZP copies per call.
+- Data reads/writes: ~70 cycles of REC register setup + 1 cycle/byte + ZP
+  copies per call in v0 and the windowed core. With the REC shadow (lever
+  d.2), a warm in-page call costs ~48 cycles of compare/setup with
+  2 REC accesses instead of 9. On hardware the access count, not the cycle
+  count, is what matters (see (d) 2).
 
 ## (a) Representative instruction classes — estimated total 6502 cycles/instr
 
@@ -101,16 +108,66 @@ of its own cycles/instruction; we spend ~400 host cycles/instruction.)
    ~27-cycle hit, the real hit is ~51–63 because of the mandatory window
    bounds/validity test, the contract's t_tmp mirror, and PC page-cross
    handling). `FETCH_DIRECT` builds keep the old path for A/B comparison.
-2. **ALU/EA path + data memory-API trims** (~1.1–1.2×) — now the top open
-   lever. ~95–115 cycles/call is mostly REC setup and ZP copies; a leaner
-   setup path, fused `ea_load`+`ea_store` REC programming for RMW, and
-   skipping dead upper-byte copies for B/W sizes save ~40–70 cycles on the
-   ~40% of instructions that touch guest data memory. Note: skipping
-   "unchanged" REC registers between calls was evaluated during the window
-   work and deliberately NOT done — it makes every memory call depend on
-   REC state surviving outside the interpreter (loader staging, Ultimate
-   firmware on real hardware), which is a correctness risk until the
-   hardware backend pins down REC ownership.
+2. **Data memory-API REC trims.** The REC register shadow is **DONE** (wave
+   4, WS-A). Measured on hardware, not estimated: every REC register access
+   costs ~0.9–1.7 µs at turbo (see `docs/HARDWARE.md`, finding 2 and the
+   3.15 re-measurement), and v0 and the windowed core paid 9 accesses per
+   call. The memory API now keeps a C64-side shadow of the REC registers it
+   owns and issues every data DMA with **autoload**. Silicon and VICE both
+   reload exactly the last-written values; see `tests/bench/rec_probe.py`. A
+   warm call therefore stores only the REU-address and length bytes that
+   changed, plus the command. Accesses per call, counted in VICE by
+   `tests/rec_budget.py`:
+
+   | Case | Accesses |
+   |---|---|
+   | cold | 9 |
+   | same address | 1 |
+   | same page | 2 |
+   | new page | 3 |
+   | new bank | 4 |
+   | size switch | 3 |
+   | store half of an RMW | 1 |
+
+   The v0 and windowed cores paid 9 in every case. Per loop iteration:
+   MOVE.L (A0) goes from 9 to 1, MOVE.L (A0)+ from 9 to 2.015, ADDQ.L #1,(A0)
+   from 18 to 2, MOVE.L (A0)+,(A1)+ from 18 to 6, and BSR/RTS from 18 to 2.
+
+   Measured IPS at "48 MHz" (38.9 MHz effective on firmware 3.15), windowed
+   base → shadow core:
+
+   | Loop | Base IPS | Shadow IPS | Change |
+   |---|---|---|---|
+   | MEM | 54.0k | 71.6k | +32% |
+   | STREAM | 52.8k | 61.5k | +16% |
+   | RMW | 40.4k | 57.8k | +43% |
+   | ALU | 76.1k | 75.2k | within the ±1.3% rep spread |
+
+   At 16 MHz the gains are +13% (MEM), +11% (STREAM) and +24% (RMW). At
+   1 MHz they are within ±2%, because the warm REC setup is ~48 cycles vs
+   v0's ~59 including jsr, and the accesses themselves are cheap at bus
+   speed. The saved time per avoided access (0.8–1.1 µs at 48 MHz) matches
+   the measured store cost, so the model is confirmed.
+
+   Correctness: the shadow depends on REC state surviving between calls.
+   That was the reason this lever was deferred before, and contract C1
+   handles it:
+   - everything else that touches the REC calls `mem_rec_dirty`: the
+     fetch-window refill inline, `emu_reset`, the boot stub,
+     `test_load_chunk`, and the U64 mailbox dispatcher before every call;
+   - the `REC_NOINVAL` / `REC_MUT_*` builds prove, in VICE and on silicon,
+     that each of these invalidations is load-bearing (`tests/rec_teeth.py`,
+     `tests/rec_matrix.py`).
+
+   Not done, and still open for the ALU/EA side of this lever:
+   - trimming the ZP copies around `ea_load` / `ea_store` / `m_val`;
+   - a dedicated fused RMW entry. The shadow already reduces the store half
+     of an RMW to the command store (1 access); a fused entry would save
+     only the ~42-cycle compare path.
+   - DMA straight into `m_val` for byte ops. Rejected: a second C64 target
+     address costs a C64-low store (~1 µs at turbo) on every byte↔word/long
+     switch, to save a 6-cycle copy.
+
 3. **Shift-count clamps for LSL/LSR/ASL** (tail latency; ~1–2% on the typical
    mix, large in shift-heavy code). Counts ≥ operand width zero-fill (C/X from
    the last shifted bit) — equivalence proven by G4's vectors — clamping the

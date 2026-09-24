@@ -5,7 +5,8 @@ Ultimate 64 Elite, 2026-08-22. Everything in `docs/PERF.md` was an analytic
 projection; the numbers here are measured. Two interpreter builds were
 measured: **v0** (pre-fetch-window core, the build that ran the full suite)
 and **windowed** (core with P1's instruction-stream fetch window, commit
-5c842ed).
+5c842ed). A later section, "REC shadow core", adds the wave-4 measurements
+(2026-09-23, **firmware 3.15**; compare only within that section).
 
 ## Device + setup
 
@@ -179,6 +180,124 @@ measured 48 MHz gain is 2.3×.
 a ~0.8–1 MHz 68000 on light code — Workbench-utility territory, matching
 PERF.md's qualitative claim. Memory-heavy code lands at ~57k IPS.
 
+## REC shadow core (wave 4, WS-A), 2026-09-23
+
+This section covers the core with the **REC register shadow**
+(`runtime/core.s` memory API; ownership contract C1 in
+`docs/WAVE4_BRIEF.md`). The data memory API now stores only the REC
+registers whose value changed since its last call, and it issues every
+data DMA with autoload. Everything was measured in **one DeviceLock
+session** (plus two short teeth-only sessions), using
+`tests/bench/u64_session.py`. Raw data is in
+`fixtures/bench/sweep_reclean.json`.
+
+**Device state differs from the 2026-08-22 runs above.** The firmware is
+now **3.15** (git bce4535e), FPGA 125, core 1.4F. On this firmware
+`Cartridge` has no `"REU"` preset; the harness `set_reu` adapts to that.
+The session found this config left by another project's lane: Turbo
+Control `Manual`, CPU Speed `48`, REU `Disabled` / `2 MB`, Cartridge
+`""`, Cartridge Preference `Auto`, Badline Timing `Enabled`, Bus
+Operation Mode `Quiet`. That is not the `" 1"` / REU-512 KB state
+recorded above. The session snapshotted that config right after acquiring
+the lock and restored it exactly before releasing the lock (re-read diff:
+empty, in all three sessions). The C64 was reset at the end. No firmware
+or persistent-storage changes were made. The harness baseline reset on
+entry was disabled with `U64_BASELINE_ON_ENTRY=0`. **Do not compare the
+numbers below with the 3.14d tables above.** For example, the calibrated
+clock at the "48" step is now 38.4–39.4 MHz, where 3.14d measured 46.2.
+Only the same-session base-vs-new deltas below are claims.
+
+### REC semantics on silicon (`tests/bench/rec_probe.py`)
+
+The same 6502 probe was run on VICE and on the U64E. Both gave
+byte-identical results:
+
+- **Without autoload** (`$91`), a transfer leaves the C64 address
+  register and the REU address register advanced by the transfer
+  length, and LEN = `$0001`.
+- **With autoload** (`$B1`), after every transfer the registers hold
+  exactly the values last *written* by the CPU. A single-register write
+  (REU-low, then length-low, then C64-low) is also what the next
+  autoloaded transfer reloads.
+- The data landed where the register model predicts.
+
+The bank register reads back as `$F8|bank` on both, and ACTRL reads as
+`$3F`. Neither matters here, because the core never reads REC registers.
+Conclusion: shadowing the registers is valid only together with autoload,
+and with autoload it is exact on both targets.
+
+### Correctness on silicon (new core, 1 MHz)
+
+| Suite | Result |
+|---|---|
+| REC probe | identical to VICE (above) |
+| Hand vectors | **48/48** (7.7 s) |
+| run_program fixtures (minimal + reloc + budget demos) | **48/48 checks** |
+| **Full SingleStepTests suite, 103 batches** | **5150/5150, 0 field failures** (894.8 s) |
+| C1 teeth, normal build (refill, reset_case, load_chunk, mailbox) | 4/4 legs pass |
+| C1 teeth, `REC_NOINVAL` build | 4/4 legs **fail** (as required) |
+| C1 teeth, `REC_MUT_DIRTY` build | load_chunk and mailbox **fail**; refill and reset_case pass (their invalidation is intact) |
+
+The `mailbox` leg is hardware-only. It scribbles over the REC, then calls
+`mem_read8` directly through the mailbox dispatcher (the
+`run_program.peek_guest` path). It proves that the dispatcher's
+`jsr mem_rec_dirty` (in `tests/harness_util.py`) is load-bearing: with
+that seam emptied, the call returned the stale bounce-buffer byte.
+
+**No hardware-vs-VICE divergence was found.** The REC state held across
+REST DMA, mailbox dispatch and firmware activity between calls. That
+state is exactly what C1 invalidates on every host entry, so the silicon
+result shows the invalidation is sufficient. It does not show that the
+firmware never touches the REC.
+
+### REC register access cost on 3.15
+
+`$DF0A` store cost, calibrated as in finding 2: **4.2 µs at 1 MHz**
+(= 4 cycles, full bus speed), **1.72 µs at 16 MHz**, and **0.91 µs at
+48 MHz**. This matches the 3.14d finding: about 1 µs per REC access at
+turbo, independent of CPU clock.
+
+### 68k IPS, base (windowed, 158e684) vs REC-shadow core
+
+Method: two-point deltas, as described above. Each speed step ran in ABBA
+order (base, new, new, base) in one session. Values are the means of the
+two samples. The cycles-per-instruction figure (c/instr) uses the
+calibrated effective clock.
+
+REC accesses per loop iteration were counted in VICE by
+`tests/rec_budget.py` and are exact, not estimated:
+
+| Loop | Base | New |
+|---|---|---|
+| ALU | 0 | 0 |
+| MEM | 9 | 1 |
+| STREAM | 9 | ≈2 |
+| RMW | 18 | 2 |
+
+| MHz (eff) | ALU base → new | MEM `MOVE.L (A0),D1` | STREAM `MOVE.L (A0)+,D1` | RMW `ADDQ.L #1,(A0)` |
+|---|---|---|---|---|
+| 1 (0.96) | 1 609 → 1 608 (±0%) | 1 658 → 1 682 (**+1.4%**) | 1 571 → 1 562 (−0.5%, noise) | 1 484 → 1 519 (**+2.3%**) |
+| 16 (13.6) | 25 955 → 25 626 (−1.3%) | 22 990 → 26 081 (**+13.4%**) | 21 476 → 23 752 (**+10.6%**) | 18 467 → 22 975 (**+24.4%**) |
+| 48 (38.9) | 76 070 → 75 183 (−1.2%) | 54 049 → 71 563 (**+32.4%**) | 52 847 → 61 518 (**+16.4%**) | 40 412 → 57 757 (**+42.9%**) |
+
+c/instr at 48 MHz, base → new: MEM 721 → 544, STREAM 737 → 633, RMW
+964 → 674, ALU 512 → 518.
+
+The ALU change stays inside the rep-to-rep spread. The two base samples
+themselves differ by 1.3% at 16 MHz and 1.1% at 48 MHz. At 1 MHz, where
+the clock is exact, ALU c/instr is identical (596 vs 594).
+
+**Finding 8. The saved time matches the access count.** Dividing the time
+saved per instruction by the REC accesses saved per instruction gives
+**0.76–1.13 µs per avoided access at 48 MHz**, and 1.28–1.33 µs at
+16 MHz. This agrees with the measured `$DF0A` store cost above, so the
+gain is exactly lever 2's mechanism. At 1 MHz the accesses cost only
+4 cycles each, so the effect is within ±2%. The warm path is cycle-neutral
+(~48 cycles of REC setup vs v0's ~59 incl. jsr, plus shadow compares).
+At 48 MHz the memory-bound loops are now 544–674 c/instr against 512 for
+the pure-ALU loop. What remains is mostly CPU work, plus one command
+store and the DMA itself per call.
+
 ## Reproduction
 
 - Suites: `U64_HOST=<ip> python3 -m tests.run_vectors --prg build/h1/runner.prg
@@ -187,3 +306,12 @@ PERF.md's qualitative claim. Memory-heavy code lands at ~57k IPS.
 - Benches: session scratchpad `u64/bench.py` (+ `sweep_v0.json`,
   `sweep_windowed.json`); hand-assembled 6502 loops were functionally
   verified in VICE before touching hardware.
+- REC shadow core (wave 4): `U64_HOST=<ip> U64_BASELINE_ON_ENTRY=0 python3
+  -m tests.bench.u64_session --new build/ws-a/runner.prg --base
+  build/base/runner.prg --noinval build/ws-a-noinval/runner.prg`. This runs
+  every phase (REC probe, hand, full suite, run_program, C1 teeth, ABBA IPS
+  bench) under one DeviceLock hold, with config snapshot/restore. The noinval
+  PRG comes from `python3 -m tests.rec_build --out build/ws-a-noinval
+  REC_NOINVAL`. The base PRG is `make runtime BUILD=build/base` on the
+  158e684 sources. `tests/bench/u64bench.py` now takes `--prg` instead of the
+  hardcoded `build/h1` path.

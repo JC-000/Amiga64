@@ -21,6 +21,17 @@
 ;     invalidate it (see WINCHK_*), as does emu_reset.  Build with
 ;     FETCH_DIRECT defined to get the old one-DMA-per-word path (A/B
 ;     reference); WINDOW_NOINVAL (test-only!) disables write invalidation.
+;   - REC shadow (docs/WAVE4_BRIEF.md C1): the data memory API keeps a copy
+;     of the REC registers it programmed (m_rlen/m_rlo/m_rhi/m_rbk + the
+;     validity flag m_rok) and issues every data DMA with AUTOLOAD, so the
+;     REC holds exactly those values between calls and a warm call only
+;     stores the registers that differ.  Anything else that touches the
+;     REC calls mem_rec_dirty (the window refill does it inline).
+;     REC_NOINVAL (test-only!) empties every invalidation -- used to prove
+;     the C1 teeth test (tests/rec_teeth.py) catches a missing one; the
+;     finer test-only mutants REC_MUT_DIRTY / REC_MUT_RESET / REC_MUT_REFILL
+;     drop just the mem_rec_dirty body / the emu_reset / the window-refill
+;     invalidation, one leg of that test per mutant.
 ; ===========================================================================
 
 .include "macros.inc"
@@ -62,6 +73,15 @@
 w_pg0:  .res 1                  ; window guest page, low  (addr bits 15-8)
 w_pg1:  .res 1                  ; window guest page, high (addr bits 23-16)
 w_inv:  .res 1                  ; 0 = window valid, nonzero = invalid
+; REC shadow (see the memory API below).  m_rok = 0: REC contents unknown,
+; the next data call programs every register; nonzero: the REC holds
+; C64 address t_tmp, length-high 0, address control 0 and the shadowed
+; bytes below (true after any data DMA because it autoloads).
+m_rok:  .res 1                  ; REC shadow valid flag
+m_rlen: .res 1                  ; REC_LENLO   as last programmed (1/2/4)
+m_rlo:  .res 1                  ; REC_REULO   as last programmed
+m_rhi:  .res 1                  ; REC_REUHI   as last programmed
+m_rbk:  .res 1                  ; REC_REUBANK as last programmed
 
 .segment "BSS"
 .align $100                     ; page-aligned: in-window offset = PC low byte
@@ -79,7 +99,9 @@ basic_stub:                             ; 10 SYS 2061
         .word 10                        ; line number
         .byte $9E, "2061", $00          ; SYS 2061 ($080D)
 @next:  .word $0000                     ; end of program
-        jmp main                        ; $080D
+        lda #0                          ; $080D: ZP comes up with garbage --
+        sta m_rok                       ; REC shadow invalid at boot (always,
+        jmp main                        ; even in REC_NOINVAL builds)
 
 .segment "CODE"
 
@@ -87,7 +109,8 @@ basic_stub:                             ; 10 SYS 2061
 ; emu_reset — clear interpreter state ($10-$7F), st_halt = 0, and invalidate
 ; the instruction window (the harness rewrites guest code at the same guest
 ; addresses between runs, bypassing or preceding the interpreter's own
-; write-invalidation).
+; write-invalidation) and the REC shadow (C1: host tooling may have left
+; the REC in any state).
 ; ===========================================================================
 .proc emu_reset
         lda #0
@@ -95,6 +118,9 @@ basic_stub:                             ; 10 SYS 2061
 @lp:    sta $10,x
         dex
         bpl @lp
+.if .not (.defined(REC_NOINVAL) .or .defined(REC_MUT_RESET))
+        sta m_rok               ; C1: emu_reset implies mem_rec_dirty
+.endif
         lda #1
         sta w_inv
         rts
@@ -261,6 +287,9 @@ miss:                           ; refill the window with PC's guest page:
         sta REC_REUBANK
         lda #0
         sta w_inv
+.if .not (.defined(REC_NOINVAL) .or .defined(REC_MUT_REFILL))
+        sta m_rok               ; C1: data-path REC shadow is now stale
+.endif
         sta REC_REULO
         sta REC_C64LO           ; code_win is page-aligned
         sta REC_LENLO           ; length $0100
@@ -276,13 +305,32 @@ miss:                           ; refill the window with PC's guest page:
 .endif
 
 ; ===========================================================================
-; Memory API — v0: one REU DMA per call through the REC at $DF00.
+; Memory API — one REU DMA per call through the REC at $DF00, with a REC
+; register shadow.
 ; Guest 24-bit address in m_addr (LE, byte 3 ignored), value in m_val (LE).
 ; Big-endian conversion happens here: the DMA bounce buffer is t_tmp+0..3
 ; (holds guest byte order), m_val holds LE.
 ; Requires I/O mapped in at $DF00 (default bank state; core never touches $01).
-; Cost per call ~= 95-115 cycles (setup ~70 + DMA 1 cycle/byte + copies);
-; writes add the WINCHK_* window-overlap test (9-16 cycles, non-overlap).
+;
+; REC shadow (lever d.2, docs/PERF.md; ownership contract C1 in
+; docs/WAVE4_BRIEF.md).  On the U64E every REC register access costs ~1 us
+; at turbo regardless of CPU clock (docs/HARDWARE.md finding 2), so the
+; data path programs only what changed:
+;   - every data DMA is issued with AUTOLOAD ($20): afterwards the REC
+;     reloads the address/length registers with the values last WRITTEN,
+;     so the REC state between calls is exactly the programmed one
+;     (verified on VICE and on the U64E by tests/bench/rec_probe.py);
+;   - C64 address (= t_tmp), length-high (0) and address control (0) are
+;     the same for every data call: written only by the cold path;
+;   - length-low / REU address low / high / bank are compared against the
+;     shadow (m_rlen/m_rlo/m_rhi/m_rbk) and stored only when different.
+; REC accesses per call: cold (m_rok = 0) 9; warm 1 (same address and
+; size, e.g. the store half of a read-modify-write) to 5 (everything
+; differs); typical warm in-page call 2.  Anything else that programs the
+; REC must call mem_rec_dirty before the next call here (C1).
+; Cost per warm in-page call ~48 cycles of REC setup (v0 ~59 incl. jsr),
+; +1 cycle/byte DMA + copies; writes add the WINCHK_* window-overlap test
+; (9-16 cycles, non-overlap).
 ; ===========================================================================
 
 ; ---------------------------------------------------------------------------
@@ -348,28 +396,88 @@ done:
 .endmacro
 .endif
 
-; A = transfer length (1/2/4). Programs the REC for t_tmp <-> REU[m_addr].
-.proc mio_setup
-        sta REC_LENLO           ; 4
+REU_CMD_FETCH_AL = REU_CMD_FETCH | $20    ; + autoload (see above)
+REU_CMD_STASH_AL = REU_CMD_STASH | $20
+
+; ---------------------------------------------------------------------------
+; MIO_PROG len — program the REC for t_tmp <-> REU[m_addr], len bytes,
+; touching only registers whose shadow differs.  Clobbers A.  Inlined in
+; each entry (saves the jsr/rts of the v0 mio_setup).  Warm cycles: 42
+; (nothing changes) .. 48 (low byte changes, the common case) .. ~70.
+; ---------------------------------------------------------------------------
+.macro MIO_PROG len
+        .local warm, lenok, look, hiok, done
+        lda m_rok               ; 3
+        bne warm                ; 3
+        lda #len                ; cold: REC state unknown
+        jsr mio_full
+        jmp done
+warm:   lda #len                ; 2
+        cmp m_rlen              ; 3
+        beq lenok               ; 3
+        sta m_rlen
+        sta REC_LENLO
+lenok:  lda m_addr              ; 3
+        cmp m_rlo               ; 3
+        beq look                ; 2
+        sta m_rlo               ; 3
+        sta REC_REULO           ; 4
+look:   lda m_addr+1            ; 3
+        cmp m_rhi               ; 3
+        beq hiok                ; 3
+        sta m_rhi
+        sta REC_REUHI
+hiok:   lda m_addr+2            ; 3
+        cmp m_rbk               ; 3
+        beq done                ; 3
+        sta m_rbk
+        sta REC_REUBANK
+done:
+.endmacro
+
+; mio_full — A = transfer length.  Cold path: program every register the
+; data path relies on, load the shadow, mark it valid.  8 REC stores.
+.proc mio_full
+        sta m_rlen
+        sta REC_LENLO
         lda #0
-        sta REC_LENHI           ; 4
-        sta REC_C64HI           ; 4  C64 base = $0070 (t_tmp)
-        sta REC_ACTRL           ; 4  both addresses increment
+        sta REC_LENHI
+        sta REC_C64HI           ; C64 base = $0070 (t_tmp)
+        sta REC_ACTRL           ; both addresses increment
         lda #<t_tmp
-        sta REC_C64LO           ; 4
+        sta REC_C64LO
         lda m_addr
+        sta m_rlo
         sta REC_REULO
         lda m_addr+1
+        sta m_rhi
         sta REC_REUHI
         lda m_addr+2
+        sta m_rbk
         sta REC_REUBANK
+        lda #1
+        sta m_rok
+        rts
+.endproc
+
+; ---------------------------------------------------------------------------
+; mem_rec_dirty — REC-ownership seam (docs/WAVE4_BRIEF.md contract C1).
+; Any code that programs the REC ($DF02-$DF0A) or issues a REC command
+; outside the memory API calls this before the next memory-API call:
+; the next call then reprograms every register.  Clobbers A only.
+; REC_NOINVAL (test-only) empties it.
+; ---------------------------------------------------------------------------
+.proc mem_rec_dirty
+.if .not (.defined(REC_NOINVAL) .or .defined(REC_MUT_DIRTY))
+        lda #0
+        sta m_rok
+.endif
         rts
 .endproc
 
 .proc mem_read8
-        lda #1
-        jsr mio_setup
-        lda #REU_CMD_FETCH
+        MIO_PROG 1
+        lda #REU_CMD_FETCH_AL
         sta REC_COMMAND         ; DMA executes here, CPU stalled
         lda t_tmp
         sta m_val
@@ -377,9 +485,8 @@ done:
 .endproc
 
 .proc mem_read16
-        lda #2
-        jsr mio_setup
-        lda #REU_CMD_FETCH
+        MIO_PROG 2
+        lda #REU_CMD_FETCH_AL
         sta REC_COMMAND
         lda t_tmp               ; guest [addr] = high byte
         sta m_val+1
@@ -389,9 +496,8 @@ done:
 .endproc
 
 .proc mem_read32
-        lda #4
-        jsr mio_setup
-        lda #REU_CMD_FETCH
+        MIO_PROG 4
+        lda #REU_CMD_FETCH_AL
         sta REC_COMMAND
         lda t_tmp
         sta m_val+3
@@ -408,9 +514,8 @@ done:
         WINCHK_B
         lda m_val
         sta t_tmp
-        lda #1
-        jsr mio_setup
-        lda #REU_CMD_STASH
+        MIO_PROG 1
+        lda #REU_CMD_STASH_AL
         sta REC_COMMAND
         rts
 .endproc
@@ -421,9 +526,8 @@ done:
         sta t_tmp               ; high byte first (guest BE)
         lda m_val
         sta t_tmp+1
-        lda #2
-        jsr mio_setup
-        lda #REU_CMD_STASH
+        MIO_PROG 2
+        lda #REU_CMD_STASH_AL
         sta REC_COMMAND
         rts
 .endproc
@@ -438,9 +542,8 @@ done:
         sta t_tmp+2
         lda m_val
         sta t_tmp+3
-        lda #4
-        jsr mio_setup
-        lda #REU_CMD_STASH
+        MIO_PROG 4
+        lda #REU_CMD_STASH_AL
         sta REC_COMMAND
         rts
 .endproc
@@ -1225,15 +1328,6 @@ op_illegal:
         lda #HALT_ILLEGAL
         jmp emu_halt
 
-; ---------------------------------------------------------------------------
-; mem_rec_dirty — REC-ownership seam (docs/WAVE4_BRIEF.md contract C1).
-; Any code that programs the REC ($DF02-$DF0A) or issues a REC command
-; outside the memory API calls this before the next memory-API call.
-; Clobbers A only.  v0 memory API reprograms every register per call, so
-; this is a no-op until the REC-shadow work lands (WS-A owns the body).
-; ---------------------------------------------------------------------------
-mem_rec_dirty:
-        rts
 
 ; ===========================================================================
 

@@ -126,7 +126,12 @@ def prepare_target(target, prg_path: str) -> None:
             client.run_prg(f.read())
         wait_ready(target.transport)
         labels = Labels.from_file(os.path.splitext(prg_path)[0] + ".lbl")
-        u64_install_dispatcher(target, lookup_label(labels, "main"))
+        try:    # C1: dispatcher invalidates the REC shadow before each call
+            rec_dirty = lookup_label(labels, "mem_rec_dirty")
+        except KeyError:
+            rec_dirty = None
+        u64_install_dispatcher(target, lookup_label(labels, "main"),
+                               rec_dirty_addr=rec_dirty)
         return
     wait_ready(target.transport)
 
