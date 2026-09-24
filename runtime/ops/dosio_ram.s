@@ -14,13 +14,17 @@
 ;           name[32] (<= 31 chars, NUL padded)
 ;   +$1000  file data: one contiguous extent per file, never moved
 ; Integers little-endian (C64-side metadata, not guest-visible data).
-; Names compare case-insensitively (ASCII), stored case-preserved.
+; Names compare case-insensitively (ASCII), stored case-preserved; a
+; leading "RAM:" (any case) is stripped first — the RAMDISK is the flat
+; root of RAM: — so "RAM:x" and "x" are the same file.
 ; A missing/invalid header is formatted in place on the first Open.
 ; Guest-created files get an extent of RD_NEW_CAP (64 KB) bytes, or what is
 ; left: 32 x 64 KB fills the 2 MB region exactly, so the 4 KB directory
 ; page comes out of the last extent (60 KB).  Writes past the extent fail
 ; with ERROR_DISK_FULL.  File id for the sharing rules = directory index.
-; No delete/rename.
+; DeleteFile clears the "used" flag and sets RD_FLAG_EXTENT: the entry
+; keeps its extent (data/capacity), and the next create that picks that
+; entry reuses the extent instead of allocating from free_ptr.  No rename.
 ;
 ; Backend contract (hle_dos.s "Backend seam"): entered by jmp from
 ; dosio_be with X = dosio_slot; C=0 success, C=1 failure with dosio_err.
@@ -31,12 +35,12 @@
 
 .export dosio_ram_init, dosio_ram_open, dosio_ram_close, dosio_ram_size
 .export dosio_ram_seek, dosio_ram_rdchunk, dosio_ram_wrchunk
-.export dosio_ram_wcheck, dosio_ram_setsize
+.export dosio_ram_wcheck, dosio_ram_setsize, dosio_ram_delete
 
 .import dosio_buf, dosio_name, dosio_nlen, dosio_mode, dosio_slot
 .import dosio_len, dosio_arg, dosio_err
 .import dosio_dma, dosio_stash_guest, dosio_dc64, dosio_dreu, dosio_dlen
-.import dosio_lockcheck, dosio_anyopen
+.import dosio_lockcheck, dosio_anyopen, dosio_delcheck
 
 RD_VERSION   = 1
 RD_HDR_SIZE  = $20
@@ -47,6 +51,7 @@ RD_NAME_OFF  = 32
 RD_NAME_MAX  = 31
 RD_NEW_CAP   = $10000  ; @value
 RD_FLAG_USED = $01
+RD_FLAG_EXTENT = $02            ; entry owns an extent (kept after a delete)
 ; header fields
 RH_FREE      = 8
 RH_END       = 12
@@ -63,6 +68,7 @@ ERROR_DISK_FULL              = 221
 ERROR_NOT_A_DOS_DISK         = 225
 
 FH_SLOTS = 8                    ; must match hle_dos.s
+NAME_BUF = 64                   ; sizeof(dosio_name) in hle_dos.s (63 + NUL)
 
 .assert RD_HDR_SIZE + RD_ENTRIES * RD_ENT_SIZE <= RD_DATA_OFF, error, "RAMDISK directory overlaps the data area"
 .assert dosio_rd_base + RD_DATA_OFF < dosio_rd_end, error, "RAMDISK region too small"
@@ -74,6 +80,7 @@ dosio_rd_ent:  .res RD_ENT_SIZE
 dosio_rd_i:    .res 1           ; directory index being examined
 dosio_rd_free: .res 1           ; first free entry ($FF = none)
 dosio_rd_ch:   .res 1           ; name-compare scratch
+dosio_rd_ext:  .res 1           ; create: nonzero = reuse the entry's extent
 dosio_rd_idx:  .res FH_SLOTS    ; per slot: directory index
 dosio_rd_d0:   .res FH_SLOTS    ; per slot: data address (24-bit)
 dosio_rd_d1:   .res FH_SLOTS
@@ -233,68 +240,22 @@ rd_format:
 ; Open: dosio_name/dosio_nlen (1..63), dosio_mode 0 OLD / 1 NEW / 2 RW.
 ; ---------------------------------------------------------------------------
 dosio_ram_open:
-        lda #ERROR_INVALID_COMPONENT_NAME
-        sta dosio_err
-        lda dosio_nlen
-        cmp #RD_NAME_MAX + 1
+        jsr rd_name             ; strip "RAM:", check the length
         bcc :+
         jmp @fail
-:       jsr rd_hdr_dma          ; load + validate the header
-        lda #REU_CMD_FETCH
-        jsr dosio_dma
-        ldx #3
-@mg:    lda dosio_rd_hdr,x
-        cmp rd_magic,x
-        bne @fmt
-        dex
-        bpl @mg
-        lda dosio_rd_hdr+4
-        cmp #RD_VERSION
-        bne @fmt
-        lda dosio_rd_hdr+5
-        cmp #RD_ENTRIES
-        beq @scan
-@fmt:   jsr dosio_anyopen       ; never format under open handles (review
+:       jsr rd_hdr_load         ; C=0: header valid
+        bcc @scan
+        jsr dosio_anyopen       ; never format under open handles (review
         bcc :+                  ; fix2 item 1): their entries would be wiped
         lda #ERROR_NOT_A_DOS_DISK ; and reused; leave the header untouched
         sta dosio_err
         jmp @fail
 :       jsr rd_format           ; leaves dosio_rd_hdr = fresh header
 
-@scan:  lda #$FF
-        sta dosio_rd_free
-        lda #0
-        sta dosio_rd_i
-@ent:   lda dosio_rd_i
-        jsr rd_ent_load
-        lda dosio_rd_ent+RE_FLAGS
-        and #RD_FLAG_USED
-        bne @used
-        lda dosio_rd_free
-        bpl @next
-        lda dosio_rd_i
-        sta dosio_rd_free
-        jmp @next
-@used:  lda dosio_rd_ent+RE_NLEN
-        cmp dosio_nlen
-        bne @next
-        ldy #0
-@cmp:   lda dosio_rd_ent+RD_NAME_OFF,y
-        jsr rd_lower
-        sta dosio_rd_ch
-        lda dosio_name,y
-        jsr rd_lower
-        cmp dosio_rd_ch
-        bne @next
-        iny
-        cpy dosio_nlen
-        bne @cmp
+@scan:  jsr rd_find
+        bcs :+
         jmp @found
-@next:  inc dosio_rd_i
-        lda dosio_rd_i
-        cmp #RD_ENTRIES
-        bne @ent
-
+:
         ; --- not found ---
         lda #ERROR_OBJECT_NOT_FOUND
         sta dosio_err
@@ -304,7 +265,22 @@ dosio_ram_open:
         sta dosio_err
         lda dosio_rd_free
         bmi @fail1              ; directory full
-        ; avail = data_end - free_ptr ; cap = min(avail, RD_NEW_CAP)
+        jsr rd_ent_load         ; a deleted file's entry keeps its extent:
+        jsr rd_ext_ok           ; reuse it (no allocation, header as is)
+        lda #0                  ; if it is sane
+        rol a
+        eor #1
+        sta dosio_rd_ext
+        beq @alloc
+        ldx #3
+@ke:    lda dosio_rd_ent+RE_CAP,x
+        sta dosio_arg,x
+        lda dosio_rd_ent+RE_DATA,x
+        sta dosio_rd_hdr+RH_FREE,x ; (header copy only; not stored back)
+        dex
+        bpl @ke
+        jmp @cap
+@alloc: ; avail = data_end - free_ptr ; cap = min(avail, RD_NEW_CAP)
         sec
         lda dosio_rd_hdr+RH_END
         sbc dosio_rd_hdr+RH_FREE
@@ -342,7 +318,7 @@ dosio_ram_open:
 @ze:    sta dosio_rd_ent,x
         dex
         bpl @ze
-        lda #RD_FLAG_USED
+        lda #RD_FLAG_USED | RD_FLAG_EXTENT
         sta dosio_rd_ent+RE_FLAGS
         lda dosio_nlen
         sta dosio_rd_ent+RE_NLEN
@@ -359,6 +335,8 @@ dosio_ram_open:
         iny
         cpy dosio_nlen
         bne @nm
+        lda dosio_rd_ext
+        bne @hdrok              ; reused extent: free_ptr unchanged
         clc                     ; header: free_ptr += cap
         ldx #0
         php
@@ -371,16 +349,18 @@ dosio_ram_open:
         cpx #4
         bne @fp
         plp
-        lda dosio_rd_free
+@hdrok: lda dosio_rd_free
         sta dosio_rd_i
         jsr dosio_lockcheck     ; sets dosio_curfid.  Refusal is possible only
         bcc :+                  ; if the guest scribbled on the directory
         jmp @fail               ; under an open handle: fail, change nothing
 :       lda dosio_rd_i          ; (lockcheck clobbers A)
         jsr rd_ent_store
+        lda dosio_rd_ext
+        bne :+                  ; header unchanged when an extent was reused
         jsr rd_hdr_dma
         jsr dosio_stash_guest
-        jmp @slot
+:       jmp @slot
 
 @fail:  sec
         rts
@@ -417,6 +397,183 @@ dosio_ram_open:
         lda dosio_rd_ent+RE_CAP+3
         sta dosio_rd_c3,x
         clc
+        rts
+
+; ---------------------------------------------------------------------------
+; rd_name — strip a leading "RAM:" (ASCII case-insensitive) from
+; dosio_name/dosio_nlen, then require 1..RD_NAME_MAX characters.
+; C=1 + ERROR_INVALID_COMPONENT_NAME otherwise ("RAM:" alone is empty).
+; ---------------------------------------------------------------------------
+rd_name:
+        lda dosio_nlen
+        cmp #4
+        bcc @len
+        ldy #3
+@pf:    lda dosio_name,y
+        jsr rd_lower
+        cmp rd_prefix,y
+        bne @len
+        dey
+        bpl @pf
+        ldx #0                  ; shift left by 4, NUL included
+        ldy #4
+@sh:    lda dosio_name,y
+        sta dosio_name,x
+        inx
+        iny
+        cpy #NAME_BUF
+        bne @sh
+        sec
+        lda dosio_nlen
+        sbc #4
+        sta dosio_nlen
+@len:   lda #ERROR_INVALID_COMPONENT_NAME
+        sta dosio_err
+        lda dosio_nlen
+        beq @bad
+        cmp #RD_NAME_MAX + 1
+        bcs @bad
+        clc
+        rts
+@bad:   sec
+        rts
+
+; rd_ext_ok — C=0 when dosio_rd_ent is flagged RD_FLAG_EXTENT and its
+; extent lies inside the data area: RD_DATA <= data, data + cap <=
+; dosio_rd_end + 1.  (Only DeleteFile sets the flag; the range check keeps a
+; guest that scribbled on the directory from aiming writes outside the
+; RAMDISK.)  Clobbers A/X, dosio_arg.
+rd_ext_ok:
+        lda dosio_rd_ent+RE_FLAGS
+        and #RD_FLAG_EXTENT
+        beq @bad
+        clc                     ; arg = data + cap (carry out = too big)
+        ldx #0
+        php
+@add:   plp
+        lda dosio_rd_ent+RE_DATA,x
+        adc dosio_rd_ent+RE_CAP,x
+        sta dosio_arg,x
+        php
+        inx
+        cpx #4
+        bne @add
+        plp
+        bcs @bad
+        lda #<(dosio_rd_end + 1) ; end - arg must not borrow
+        cmp dosio_arg
+        lda #>(dosio_rd_end + 1)
+        sbc dosio_arg+1
+        lda #^(dosio_rd_end + 1)
+        sbc dosio_arg+2
+        lda #<((dosio_rd_end + 1) >> 24)
+        sbc dosio_arg+3
+        bcc @bad
+        lda dosio_rd_ent+RE_DATA ; data - RD_DATA must not borrow
+        cmp #<(dosio_rd_base + RD_DATA_OFF)
+        lda dosio_rd_ent+RE_DATA+1
+        sbc #>(dosio_rd_base + RD_DATA_OFF)
+        lda dosio_rd_ent+RE_DATA+2
+        sbc #^(dosio_rd_base + RD_DATA_OFF)
+        lda dosio_rd_ent+RE_DATA+3
+        sbc #0
+        bcc @bad
+        clc
+        rts
+@bad:   sec
+        rts
+
+; rd_hdr_load — fetch the header; C=1 when it is not a valid RAMDISK
+; header (magic, version, entry count).
+rd_hdr_load:
+        jsr rd_hdr_dma
+        lda #REU_CMD_FETCH
+        jsr dosio_dma
+        ldx #3
+@mg:    lda dosio_rd_hdr,x
+        cmp rd_magic,x
+        bne @bad
+        dex
+        bpl @mg
+        lda dosio_rd_hdr+4
+        cmp #RD_VERSION
+        bne @bad
+        lda dosio_rd_hdr+5
+        cmp #RD_ENTRIES
+        bne @bad
+        clc
+        rts
+@bad:   sec
+        rts
+
+; rd_find — look dosio_name up.  C=0: found, dosio_rd_i = index,
+; dosio_rd_ent = its entry.  C=1: not found; dosio_rd_free = first unused
+; entry ($FF = none).
+rd_find:
+        lda #$FF
+        sta dosio_rd_free
+        lda #0
+        sta dosio_rd_i
+@ent:   lda dosio_rd_i
+        jsr rd_ent_load
+        lda dosio_rd_ent+RE_FLAGS
+        and #RD_FLAG_USED
+        bne @used
+        lda dosio_rd_free
+        bpl @next
+        lda dosio_rd_i
+        sta dosio_rd_free
+        jmp @next
+@used:  lda dosio_rd_ent+RE_NLEN
+        cmp dosio_nlen
+        bne @next
+        ldy #0
+@cmp:   lda dosio_rd_ent+RD_NAME_OFF,y
+        jsr rd_lower
+        sta dosio_rd_ch
+        lda dosio_name,y
+        jsr rd_lower
+        cmp dosio_rd_ch
+        bne @next
+        iny
+        cpy dosio_nlen
+        bne @cmp
+        clc
+        rts
+@next:  inc dosio_rd_i
+        lda dosio_rd_i
+        cmp #RD_ENTRIES
+        bne @ent
+        sec
+        rts
+
+; ---------------------------------------------------------------------------
+; Delete: dosio_name/dosio_nlen.  Not found (or no valid RAMDISK: nothing
+; is formatted) -> ERROR_OBJECT_NOT_FOUND; open -> dosio_delcheck refuses
+; with ERROR_OBJECT_IN_USE.  Else the entry is freed but keeps its extent
+; (RD_FLAG_EXTENT) for the next create to reuse.
+; ---------------------------------------------------------------------------
+dosio_ram_delete:
+        jsr rd_name
+        bcs @fail
+        lda #ERROR_OBJECT_NOT_FOUND
+        sta dosio_err
+        jsr rd_hdr_load
+        bcs @fail
+        jsr rd_find
+        bcs @nf
+        lda dosio_rd_i
+        jsr dosio_delcheck      ; C=1: some handle has it open (202)
+        bcs @fail
+        lda #RD_FLAG_EXTENT     ; free the entry, keep the extent
+        sta dosio_rd_ent+RE_FLAGS
+        lda dosio_rd_i
+        jsr rd_ent_store
+        clc
+        rts
+@nf:    lda #ERROR_OBJECT_NOT_FOUND
+        sta dosio_err
+@fail:  sec
         rts
 
 rd_lower:                       ; ASCII A-Z -> a-z
@@ -513,3 +670,4 @@ dosio_ram_wcheck:
 
 .segment "RODATA"
 rd_magic: .byte "RDSK"
+rd_prefix: .byte "ram:"         ; stripped from names (compared lowercased)

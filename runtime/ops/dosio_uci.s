@@ -22,7 +22,9 @@
 ;    [flags][name], CLOSE [t][03], SEEK [t][06][u32 LE]), 154-182
 ;    (FILE_INFO [t][07] -> u32 LE size first), 467-492 (READ_DATA
 ;    [t][04][u16 LE], WRITE_DATA [t][05][x][x][payload]), 784-802 (reads
-;    arrive in <= 512-byte blocks; success status is EMPTY).
+;    arrive in <= 512-byte blocks; success status is EMPTY), 208-221
+;    (DELETE_FILE [t][09][name] -> "00,OK" or the FatFS error string,
+;    file_system.cc 28-60; it never touches the target's open file).
 ;  - Open flags: software/filesystem/fs_errors_flags.h 44-53; semantics
 ;    software/filemanager/filemanager.cc fopen_impl 668-689.
 ;  - 6502 transaction shape (hardware-tested): c64-https src/net/uci/
@@ -36,7 +38,9 @@
 ;   MODE_NEWFILE   -> FA_READ|FA_WRITE|FA_CREATE_ALWAYS ($0B) create/truncate
 ;   MODE_READWRITE -> FA_READ|FA_WRITE|FA_OPEN_ALWAYS   ($13) create if missing
 ;   Open ok -> FILE_INFO for the size (cached per slot; kept current by
-;   hle_dos.s via setsize).  At most 2 files open (DOS targets 1, 2); a
+;   hle_dos.s via setsize).
+;   DeleteFile -> DELETE_FILE on target 1 (any time: not a file operation),
+;   after dosio_delcheck refused nothing (file id as uci_pick_fid).  At most 2 files open (DOS targets 1, 2); a
 ;   third Open fails ERROR_NO_FREE_STORE.  Names are sent verbatim,
 ;   relative to the target's current path (firmware default "/").
 ;
@@ -49,11 +53,12 @@
 
 .export dosio_uci_detect, dosio_uci_init, dosio_uci_open, dosio_uci_close
 .export dosio_uci_size, dosio_uci_seek, dosio_uci_rdchunk, dosio_uci_wrchunk
-.export dosio_uci_wcheck, dosio_uci_setsize
+.export dosio_uci_wcheck, dosio_uci_setsize, dosio_uci_delete
 
 .import dosio_buf, dosio_name, dosio_nlen, dosio_mode, dosio_slot
 .import dosio_len, dosio_arg, dosio_err
 .import dosio_lockcheck, dosio_curfid ; hle_dos.s sharing rules (stubbed in the host test)
+.import dosio_delcheck
 
 ; --- registers ($DF1C-$DF1F, rc/ram.inc ULT_CMD_BASE) -----------------------
 UCI_CTL = ULT_CMD_BASE + 0      ; read: status   write: control
@@ -82,6 +87,7 @@ DOS_CMD_READ_DATA  = $04
 DOS_CMD_WRITE_DATA = $05
 DOS_CMD_FILE_SEEK  = $06
 DOS_CMD_FILE_INFO  = $07
+DOS_CMD_DELETE_FILE = $09
 FA_READ          = $01
 FA_WRITE         = $02  ; @value
 FA_CREATE_ALWAYS = $08  ; @value
@@ -677,6 +683,41 @@ dosio_uci_wrchunk:
         bcs @err
         rts
 @err:   lda #ERROR_DISK_FULL
+        sta dosio_err
+        sec
+        rts
+
+; [1][09][name...] — delete; "00" = done.  The sharing check comes first
+; (nothing is sent while any handle has the file open).  A refusal with a
+; status -> ERROR_OBJECT_NOT_FOUND; no reply (timeout / refused push) ->
+; ERROR_DEVICE_NOT_MOUNTED (the file may or may not be gone).
+dosio_uci_delete:
+        jsr uci_pick_fid        ; the id an open handle on this name has
+        jsr dosio_delcheck
+        bcc :+
+        rts                     ; C=1, ERROR_OBJECT_IN_USE
+:       jsr uci_nomax
+        lda #1
+        jsr uci_begin
+        bcs @lost
+        lda #DOS_CMD_DELETE_FILE
+        jsr uci_put
+        ldy #0
+@nm:    lda dosio_name,y
+        jsr uci_put
+        iny
+        cpy dosio_nlen
+        bne @nm
+        jsr uci_exec
+        bcs @lost
+        jsr uci_ok
+        bcs @nf
+        rts
+@nf:    lda #ERROR_OBJECT_NOT_FOUND
+        sta dosio_err
+        sec
+        rts
+@lost:  lda #ERROR_DEVICE_NOT_MOUNTED
         sta dosio_err
         sec
         rts

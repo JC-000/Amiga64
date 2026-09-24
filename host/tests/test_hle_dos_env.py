@@ -41,6 +41,17 @@ def test_real_dos_library_lvos():
     assert de.LVO_READ == -42 and de.LVO_WRITE == -48
     assert de.DOS_FILE_FUNCS["Seek"][0] == -66
     assert de.DOS_FILE_FUNCS["IoErr"][0] == -132
+    # m2-post: DeleteFile is the 8th function, ChangeMode the 75th (V36)
+    assert de.DOS_FILE_FUNCS["DeleteFile"][0] == -72
+    assert de.DOS_FILE_FUNCS["ChangeMode"][0] == -450
+
+
+def test_changemode_constants_match_dos_h():
+    # dos/dos.h: CHANGE_LOCK 0, CHANGE_FH 1; SHARED_LOCK -2, EXCLUSIVE_LOCK -1
+    assert (de.CHANGE_LOCK, de.CHANGE_FH) == (0, 1)
+    assert (de.SHARED_LOCK, de.EXCLUSIVE_LOCK) == (-2, -1)
+    eq = de.asm_equates(ROOT / "runtime/ops/hle_dos.s")
+    assert eq["CHANGE_FH"] == de.CHANGE_FH
 
 
 def test_merged_into_dosbase_without_lvo_collision():

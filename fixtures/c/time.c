@@ -1,6 +1,7 @@
 /* fixtures/c/time.c — time() goes through dos DateStamp (-192).  The HLE
- * clock is stopped at DateStamp 0/0/0 = 1978-01-01 00:00:00, which vc.lib
- * converts to Unix time 252460800 (2922 days after 1970-01-01). */
+ * clock starts every run at DateStamp 0/0/0 = 1978-01-01 00:00:00 and
+ * ticks once (1/50 s) per call, so the first two calls both give Unix
+ * time 252460800 (2922 days after 1970-01-01; see tspin.c). */
 #include <stdio.h>
 #include <time.h>
 

@@ -61,7 +61,7 @@ INPAGE_BASE = 0x0100F0     # codepage scenario: library base inside code page
 PATCH_OFF = 0x44           # code offset of the exit stub ("done:")
 
 LVO = {"Open": -30, "Close": -36, "Read": de.LVO_READ, "Write": de.LVO_WRITE,
-       "Seek": -66, "IoErr": -132}
+       "Seek": -66, "IoErr": -132, "Delete": -72, "ChangeMode": -450}
 
 
 def script_code(a6_base: int) -> list[int]:
@@ -155,6 +155,8 @@ class Scenario:
     expect_d0: int | None = None       # final D0 (program exit)
     expect_fh_args: dict[int, int] = field(default_factory=dict)
     extra: list = field(default_factory=list)   # extra Chunks staged last
+    expect_absent: list[str] = field(default_factory=list)   # not on RAMDISK
+    expect_addr: dict[str, int] = field(default_factory=dict)  # extent address
 
 
 def name_addr(names: list[str], name: str) -> int:
@@ -526,6 +528,125 @@ def fix1_scenarios() -> list[Scenario]:
     st = [Step(O, 0, NEW, d0=0, ioerr=E_NF),
           Step(O, 0, OLD, d0=0, ioerr=E_NF)]
     out.append(Scenario("nullname", None, [], st, zap_header=True))
+    return out + post_scenarios()
+
+
+def post_scenarios() -> list[Scenario]:
+    """m2-post: DeleteFile, extent reuse, "RAM:" prefix, ChangeMode."""
+    bp = de.fh_bptr
+    O, R, W, C, D, CM = "Open", "Read", "Write", "Close", "Delete", "ChangeMode"
+    OLD, NEW, RW = de.MODE_OLDFILE, de.MODE_NEWFILE, de.MODE_READWRITE
+    E_NF, E_INV, E_USE, E_FULL, E_NAME, E_ACT = (
+        de.ERROR_OBJECT_NOT_FOUND, de.ERROR_INVALID_LOCK,
+        de.ERROR_OBJECT_IN_USE, de.ERROR_DISK_FULL,
+        de.ERROR_INVALID_COMPONENT_NAME, de.ERROR_ACTION_NOT_KNOWN)
+    EXCL = s32(de.EXCLUSIVE_LOCK)
+    out = []
+
+    # ---- delete: DeleteFile semantics + the RAM: prefix ----------------------
+    n = ["a", "nosuch", "A", "RAM:b", "ram:C", "RAM:", "Ram:" + "y" * 31]
+    na = lambda x: name_addr(n, x)              # noqa: E731
+    st = [
+        Step(D, na("nosuch"), d0=FALSE, ioerr=E_NF),                      # 0
+        Step(O, na("a"), OLD, d0=bp(0), ioerr=E_NF),                      # 1
+        Step(D, na("A"), d0=FALSE, ioerr=E_USE),                          # 2 open
+        Step(C, ref=1, d0=TRUE, ioerr=E_USE),                             # 3
+        Step(D, na("a"), d0=TRUE, ioerr=E_USE),                           # 4 sticky
+        Step(O, na("a"), OLD, d0=0, ioerr=E_NF),                          # 5 gone
+        Step(D, na("RAM:b"), d0=TRUE, ioerr=E_NF),                        # 6 prefix
+        Step(O, na("ram:C"), OLD, d0=bp(0), ioerr=E_NF),                  # 7 prefix
+        Step(R, d2=BUF, d3=4, ref=7, d0=1, byte=ord("C")),                # 8
+        Step(C, ref=7, d0=TRUE),                                          # 9
+        Step(D, na("RAM:"), d0=FALSE, ioerr=E_NAME),                      # 10 empty
+        Step(D, 0, d0=FALSE, ioerr=E_NF),                                 # 11 NULL
+        Step(O, na("RAM:"), NEW, d0=0, ioerr=E_NAME),                     # 12
+        Step(O, na("Ram:" + "y" * 31), NEW, d0=bp(0), ioerr=E_NAME),      # 13 31 left
+        Step(C, ref=13, d0=TRUE),                                         # 14
+        Step(O, na("a"), NEW, d0=bp(0), ioerr=E_NAME),                    # 15 re-create
+        Step(W, d2=SRC, d3=3, ref=15, d0=3),                              # 16
+        Step(C, ref=15, d0=TRUE),                                         # 17
+    ]
+    # creates take the first free directory entry and reuse its extent:
+    # "y"*31 gets a's (index 0), the new "a" gets b's (index 1)
+    out.append(Scenario(
+        "delete", {"a": b"AAAA", "b": b"BB", "c": b"C"}, n, st,
+        expect_files={"a": SRC_DATA[:3], "c": b"C", "y" * 31: b""},
+        expect_absent=["b", "RAM:b", "ram:c", "Ram:" + "y" * 31],
+        expect_addr={"y" * 31: de.RD_DATA, "a": de.RD_DATA + de.RD_NEW_CAP,
+                     "c": de.RD_DATA + 2 * de.RD_NEW_CAP}))
+
+    # ---- delreuse: a full RAMDISK gets space back from a delete --------------
+    n = [f"f{i:02d}" for i in range(de.RD_ENTRIES + 2)]
+    st = []
+    for i in range(de.RD_ENTRIES):
+        st.append(Step(O, name_addr(n, n[i]), NEW, d0=bp(0), ioerr=0))
+        st.append(Step(C, ref=len(st) - 1, d0=TRUE))
+    st += [
+        Step(O, name_addr(n, n[32]), NEW, d0=0, ioerr=E_FULL),            # full
+        Step(D, name_addr(n, n[5]), d0=TRUE, ioerr=E_FULL),               # frees 5
+        Step(O, name_addr(n, n[32]), NEW, d0=bp(0), ioerr=E_FULL),        # fits
+    ]
+    st += [
+        Step(W, d2=SRC, d3=de.RD_NEW_CAP, ref=len(st) - 1,
+             d0=de.RD_NEW_CAP),                                           # 64 KB
+        Step(C, ref=len(st) - 1, d0=TRUE),
+        Step(O, name_addr(n, n[33]), NEW, d0=0, ioerr=E_FULL),            # full again
+    ]
+    out.append(Scenario(
+        "delreuse", None, n, st, zap_header=True,
+        expect_files={n[4]: b"", n[6]: b""},
+        expect_absent=[n[5], n[33]],
+        expect_addr={n[32]: de.RD_DATA + 5 * de.RD_NEW_CAP}))
+
+    # ---- changemode: CHANGE_FH + EXCLUSIVE_LOCK under the sharing rules ------
+    n = ["m", "M"]
+    st = [
+        Step(O, name_addr(n, "m"), RW, d0=bp(0), ioerr=0),                # 0
+        Step(CM, de.CHANGE_FH, bp(0), EXCL, d0=TRUE, ioerr=0),            # 1
+        Step(O, name_addr(n, "M"), OLD, d0=0, ioerr=E_USE),               # 2 excl
+        Step(O, name_addr(n, "m"), RW, d0=0, ioerr=E_USE),                # 3
+        Step(CM, de.CHANGE_FH, bp(0), EXCL, d0=TRUE, ioerr=E_USE),        # 4 again
+        Step(C, ref=0, d0=TRUE),                                          # 5
+        Step(O, name_addr(n, "m"), OLD, d0=bp(0), ioerr=E_USE),           # 6 released
+        Step(O, name_addr(n, "m"), OLD, d0=bp(1), ioerr=E_USE),           # 7 shares
+        Step(CM, de.CHANGE_LOCK, bp(0), EXCL, d0=FALSE, ioerr=E_ACT),     # 8
+        Step(CM, de.CHANGE_FH, bp(0), EXCL, d0=FALSE, ioerr=E_USE),       # 9 shared
+        Step(CM, de.CHANGE_FH, bp(0), s32(de.SHARED_LOCK), d0=FALSE,
+             ioerr=E_ACT),                                                 # 10
+        Step(C, ref=7, d0=TRUE),                                          # 11
+        Step(CM, de.CHANGE_FH, bp(1), EXCL, d0=FALSE, ioerr=E_INV),       # 12 closed
+        Step(CM, de.CHANGE_FH, bp(0), EXCL, d0=TRUE, ioerr=E_INV),        # 13 alone
+        Step(O, name_addr(n, "m"), OLD, d0=0, ioerr=E_USE),               # 14
+        Step(W, d2=SRC, d3=2, ref=6, d0=2),                               # 15
+        Step(C, ref=6, d0=TRUE),                                          # 16
+        Step(O, name_addr(n, "m"), NEW, d0=bp(0), ioerr=E_USE),           # 17 free
+        Step(C, ref=17, d0=TRUE),                                         # 18
+    ]
+    out.append(Scenario("changemode", {"m": b"MM"}, n, st,
+                        expect_files={"m": b""}))
+
+    # ---- extscribble: a forged "deleted, keeps extent" entry is not reused
+    # unless its extent lies inside the RAMDISK data area.  The guest Reads
+    # a forged entry (flags $02, extent = its own buffer BUF+$800) into the
+    # free directory entry 1; the next create must allocate from free_ptr.
+    forged = bytearray(de.RD_ENT_SIZE)
+    struct.pack_into("<BBHIII", forged, 0, 0x02, 1, 0, 0, de.RD_NEW_CAP,
+                     BUF + 0x800)
+    forged[de.RD_NAME_OFF] = ord("q")
+    n = ["s", "n"]
+    st = [
+        Step(O, name_addr(n, "s"), OLD, d0=bp(0), ioerr=0),               # 0
+        Step(R, d2=de.RD_DIR + de.RD_ENT_SIZE, d3=64, ref=0, d0=64),      # 1 forge
+        Step(C, ref=0, d0=TRUE),                                          # 2
+        Step(O, name_addr(n, "n"), NEW, d0=bp(0), ioerr=0),               # 3 entry 1
+        Step(W, d2=SRC, d3=16, ref=3, d0=16),                             # 4
+        Step(C, ref=3, d0=TRUE),                                          # 5
+    ]
+    out.append(Scenario(
+        "extscribble", {"s": bytes(forged)}, n, st,
+        expect_files={"n": SRC_DATA[:16]},
+        expect_addr={"n": de.RD_DATA + de.RD_NEW_CAP},
+        expect_buf={BUF + 0x800: bytes(16)}))
     return out
 
 
@@ -648,7 +769,7 @@ def check_scenario(sess, g: Guest, sc: Scenario, res) -> None:
         sess.check(f"{tag}: guest buffer ${addr:06X} ({len(want)} bytes)",
                    not bad, f"{len(bad)} byte(s) differ, first at +{bad[0]:X}"
                    if bad else "")
-    if sc.expect_files:
+    if sc.expect_files or sc.expect_absent or sc.expect_addr:
         try:
             files = de.parse_directory(g.read)
         except ValueError as e:
@@ -660,6 +781,14 @@ def check_scenario(sess, g: Guest, sc: Scenario, res) -> None:
                        ent is not None and ent.data == want,
                        "missing" if ent is None else
                        f"size {ent.size}, data {'ok' if ent.data == want else 'differs'}")
+        for name in sc.expect_absent:
+            sess.check(f"{tag}: file {name} absent", name.lower() not in files,
+                       "present")
+        for name, addr in sc.expect_addr.items():
+            ent = files.get(name.lower())
+            sess.check(f"{tag}: file {name} extent at ${addr:06X}",
+                       ent is not None and ent.addr == addr,
+                       "missing" if ent is None else f"at ${ent.addr:06X}")
     for slot, kind in sc.expect_fh_args.items():
         got = struct.unpack(">I", g.read(de.fh_addr(slot) + de.FH_ARGS_OFF, 4))[0]
         sess.check(f"{tag}: slot {slot} fh_Args={kind:08X}", got == kind,

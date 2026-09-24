@@ -36,6 +36,12 @@ called before every program (``--no-dos-init`` disables, to demonstrate
 the leak test's teeth).  Programs marked ``needs_dos`` are skipped while
 ``hle_dos.s`` is the supervisor stub.
 
+RAMDISK (m2-post): a program or unit with ``files`` gets a freshly
+formatted RAMDISK holding them (``hle_dos_env.ramdisk_chunks``) staged with
+it; ``expect_files`` reads the RAMDISK back afterwards
+(``hle_dos_env.parse_directory`` over ``tests.run_dos.Guest``) and compares
+contents (``None`` = the file must not exist).
+
 A HALT_ALINE inside the env's library vector tables is decoded to the
 library/LVO that the program called but the HLE does not implement.
 
@@ -51,7 +57,7 @@ import sys
 import time
 from dataclasses import dataclass
 
-from host import hle_env, hunk, image
+from host import hle_dos_env, hle_env, hunk, image
 from host.image import Chunk
 from tests.run_program import HALT_OK, Session
 
@@ -124,6 +130,12 @@ class Program:
     reason: int = HALT_OK
     where: str | None = None  # decoded unimplemented-LVO slot (HALT_ALINE)
     needs_dos: bool = False   # needs WS-B2's real hle_dos.s (skip on stub)
+    # RAMDISK: files staged before the run (a freshly formatted RAMDISK;
+    # None = leave the RAMDISK as the previous program left it) and files
+    # read back after it (value None = the file must NOT exist).
+    files: dict[str, bytes] | None = None
+    expect_files: dict[str, bytes | None] | None = None
+    budget: int | None = None  # per-program instruction cap (overrides --budget)
 
 
 def _scroll_line(n: int) -> str:
@@ -153,8 +165,54 @@ def programs() -> dict[str, Program]:
         # handle-state leak across programs (b1-review F2): run in order
         Program("leak_open", 0, ["opened 8"], needs_dos=True),
         Program("leak_check", 0, ["open ok"], needs_dos=True),
+        # --- stdio file I/O end to end on the RAMDISK (m2-post) ---------------
+        Program("fio_rw", 0, ["fwrite=11", "fgetc=h fread=10", "eof=1",
+                              "missing=NULL", "ram=via RAM:"],
+                needs_dos=True, files={},
+                expect_files={"t.txt": b"hello file\n", "ram.txt": b"via RAM:",
+                              "RAM:ram.txt": None, "nosuch.txt": None}),
+        Program("fio_seek", 0, ["end=20", "at5=5 tell=6", "cur+4=A",
+                                "last=J tell=20", "first=0"],
+                needs_dos=True, files={"in.txt": SEEK_DATA},
+                expect_files={"in.txt": SEEK_DATA}),
+        Program("fio_exit", 0, ["exit without fclose"], needs_dos=True,
+                files={}, expect_files={"unclosed.txt": b"left open 42\n"}),
+        Program("fio_fmt", 0, ["n=4 a=-123 w=word", "l=70000 b=7"],
+                needs_dos=True, files={},
+                expect_files={"fmt.txt": b"-123 word 70000\n7\n"}),
+        Program("fio_big", 0, ["straddle=1", "read 3000 bad=0 eof=1"],
+                needs_dos=True, files={},
+                expect_files={"big.bin": _big_data()}),
+        Program("fio_append", 0, [
+            "log.txt=one|two|", "new.txt=first|", "rp.txt=abXYefgh",
+            "r+ missing=NULL", "r+ while shared=NULL", "a while shared=NULL",
+            "r while append=NULL", "r after close=open"],
+            needs_dos=True, files={"log.txt": b"one\n", "rp.txt": b"abcdefgh"},
+            expect_files={"log.txt": b"one\ntwo\n", "new.txt": b"first\n",
+                          "rp.txt": b"abXYefgh", "nosuch": None}),
+        Program("fio_remove", 0, [
+            "rm=0", "rm again=1 ioerr=205", "reopen=NULL",
+            "rm open=1 ioerr=202", "rm RAM:=0"],
+            needs_dos=True, files={"gone.txt": b"bye", "keep.txt": b"keep"},
+            expect_files={"gone.txt": None, "keep.txt": b"keep",
+                          "tmp.txt": None}),
+        Program("fio_reuse", 0, ["created=32", "rm=0", "again=open",
+                                 "more=NULL"],
+                needs_dos=True, files={},
+                expect_files={"f05": None, "again": b"reused", "f04": b"",
+                              "f31": b"", "more": None}),
+        Program("tspin", 0, ["spins=48 delta=1", "clock=-1"],
+                budget=3_000_000),
     ]
     return {p.name: p for p in progs}
+
+
+SEEK_DATA = b"0123456789ABCDEFGHIJ"
+
+
+def _big_data() -> bytes:
+    """Mirror of fixtures/c/fio_big.c pat() over 3000 bytes."""
+    return bytes((i * 7 + (i >> 8) + 1) & 0xFF for i in range(3000))
 
 
 # --- HLE unit programs (fixtures/c/hle_unit/*.s, vasm) -------------------------
@@ -164,6 +222,7 @@ H = HEAP_BASE
 POISON32 = int.from_bytes(bytes([POISON_BYTE]) * 4, "big")
 NEG1 = 0xFFFF_FFFF
 FILE_FH = (0x00F000 - 44) >> 2          # BPTR of the FileHandle u_file builds
+de_bp = hle_dos_env.fh_bptr             # BPTR of WS-B2 pool slot n
 
 
 @dataclass
@@ -175,6 +234,7 @@ class Unit:
     pc: int | None = None               # expected PC when reason != HALT_OK
     heap_next: int | None = None        # ENV_STATE heap_next after the run
     seam: bool = False                  # C2 hand-off test, see run_unit()
+    files: dict[str, bytes] | None = None   # stage a fresh RAMDISK (Program)
 
 
 def units() -> dict[str, Unit]:
@@ -212,8 +272,22 @@ def units() -> dict[str, Unit]:
                         "D5": H + 20, "D6": H + 260,
                         "A4": hle_env.ENV_STACK_LOWER, "D7": 0x00F000,
                         "A5": 0}, []),
-        Unit("u_dos4", {"D5": NEG1, "D6": H, "D2": 0, "D3": 0, "D4": 0,
+        # DateStamp: the first call of a run returns tick 1 (m2-post task 4)
+        Unit("u_dos4", {"D5": NEG1, "D6": H, "D2": 0, "D3": 0, "D4": 1,
                         "A4": POISON32, "D7": NEG1}, []),
+        # m2-post: GetVar leaves its buffer alone + IoErr 205; Close on the
+        # console/NIL: handles is DOSTRUE and leaves IoErr alone
+        Unit("u_getvar", {"D5": NEG1, "D2": POISON32, "D3": POISON32,
+                          "D6": 205, "D7": NEG1, "A3": NEG1, "A4": NEG1,
+                          "A5": 205}, ["ok"], files={}),
+        Unit("u_cmode", {"A2": de_bp(0), "D2": NEG1, "D3": 0, "D4": 202,
+                         "D5": 0, "D6": 209, "A3": de_bp(1), "D7": 0,
+                         "A4": 202, "A5": NEG1}, [], files={}),
+        Unit("u_cmode2", {"A2": de_bp(0), "D4": 0, "D5": 209, "D6": 0,
+                          "D7": 211, "A3": 0, "A4": 209, "D2": 0, "A5": 211,
+                          "D3": NEG1}, [], files={}),
+        Unit("u_clock", {"D2": 6, "D3": 0, "D4": 0, "D5": 6, "D6": 0, "D7": 1,
+                         "A2": 60, "A3": 0, "A4": 6}, []),
         Unit("u_task", {"D2": hle_env.ENV_PROCESS, "D3": 0, "D4": 0, "D5": 0,
                         "D6": hle_env.EXEC_VERSION,
                         "D7": hle_env.ENV_CLI >> 2}, []),
@@ -228,7 +302,7 @@ def assemble(name: str, out_dir: str) -> bytes:
     src = os.path.join(UNIT_DIR, f"{name}.s")
     exe = os.path.join(out_dir, name)
     defs = [f"-D{n}=${getattr(hle_env, n):X}"
-            for n in ("FH_NIL", "FH_CONOUT", "FH_CONIN")]
+            for n in ("FH_NIL", "FH_CONOUT", "FH_CONIN", "ENV_CLOCK")]
     cmd = [os.path.join(home, "bin", "vasmm68k_mot"), "-quiet", "-Fhunkexe",
            "-nosym", *defs, "-o", exe, src]
     res = subprocess.run(cmd, capture_output=True, text=True)
@@ -337,7 +411,7 @@ def has_label(sess: Session, name: str) -> bool:
 
 
 def stage_and_run(sess: Session, tag: str, blob: bytes, budget: int,
-                  poison: bool):
+                  poison: bool, files: dict[str, bytes] | None = None):
     from c64_test_harness import write_bytes
     exe = hunk.parse(blob)
     chunks, manifest = image.build_image(exe)
@@ -348,6 +422,8 @@ def stage_and_run(sess: Session, tag: str, blob: bytes, budget: int,
     staged = chunks + env
     if poison:
         staged.append(Chunk(HEAP_BASE, bytes([POISON_BYTE]) * POISON_LEN))
+    if files is not None:            # a fresh, formatted RAMDISK
+        staged += hle_dos_env.ramdisk_chunks(files)
     sess.stage(staged)
     if DOS_INIT and has_label(sess, "hle_dos_init"):
         sess._call("hle_dos_init")    # fresh WS-B2 handle pool per program
@@ -390,7 +466,10 @@ def run_one(sess: Session, prog: Program, blob: bytes, budget: int,
     if prog.needs_dos and hle_dos_is_stub(sess):
         print(f"[{tag}] SKIP: needs WS-B2's hle_dos.s (stub linked)")
         return
-    res, manifest, why = stage_and_run(sess, tag, blob, budget, poison)
+    if prog.budget is not None:
+        budget = prog.budget
+    res, manifest, why = stage_and_run(sess, tag, blob, budget, poison,
+                                       files=prog.files)
     halted = res.halt != 0 and res.timeout == 0
     want = HALT_REASONS[prog.reason]
     sess.check(f"{tag}: halted {want}", halted and res.reason == prog.reason,
@@ -405,6 +484,31 @@ def run_one(sess: Session, prog: Program, blob: bytes, budget: int,
                    res.regs["A7"] == manifest["stack_top"] + 4,
                    f"A7={res.regs['A7']:08X}")
     check_screen(sess, tag, prog.lines)
+    if prog.expect_files is not None:
+        check_files(sess, tag, prog.expect_files)
+
+
+def check_files(sess: Session, tag: str,
+                want: dict[str, bytes | None]) -> None:
+    """Read the RAMDISK back through the REU (tests.run_dos.Guest, which
+    splits reads at 512 KB lines) and compare file contents."""
+    from tests.run_dos import Guest
+    g = Guest(sess, sess.labels)
+    try:
+        files = hle_dos_env.parse_directory(g.read)
+    except ValueError as e:
+        sess.check(f"{tag}: RAMDISK readable", False, str(e))
+        return
+    for name, data in want.items():
+        ent = files.get(name.lower())
+        if data is None:
+            sess.check(f"{tag}: file {name} absent", ent is None,
+                       f"present, {ent.size if ent else 0} bytes")
+            continue
+        sess.check(f"{tag}: file {name} = {len(data)} bytes",
+                   ent is not None and ent.data == data,
+                   "missing" if ent is None else
+                   f"size {ent.size}: {ent.data[:40]!r}")
 
 
 def read_heap_next(sess: Session) -> int:
@@ -438,7 +542,8 @@ def run_unit(sess: Session, u: Unit, blob: bytes, budget: int) -> None:
                    f"A7={res.regs['A7']:08X}")
         check_screen(sess, tag, [])
         return
-    res, manifest, why = stage_and_run(sess, tag, blob, budget, poison=True)
+    res, manifest, why = stage_and_run(sess, tag, blob, budget, poison=True,
+                                       files=u.files)
     halted = res.halt != 0 and res.timeout == 0
     want = HALT_REASONS[u.reason]
     sess.check(f"{tag}: halted {want}", halted and res.reason == u.reason, why)

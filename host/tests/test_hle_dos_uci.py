@@ -56,6 +56,7 @@ FA_READ, FA_WRITE, FA_CREATE_NEW, FA_CREATE_ALWAYS, FA_OPEN_ALWAYS = (
 # dos.h:11-17
 DOS_OPEN, DOS_CLOSE, DOS_READ, DOS_WRITE, DOS_SEEK, DOS_INFO = (
     0x02, 0x03, 0x04, 0x05, 0x06, 0x07)
+DOS_DELETE = 0x09                                  # dos.h:19 DOS_CMD_DELETE_FILE
 
 
 # =============================================================================
@@ -418,6 +419,18 @@ class DosTarget:
             info = struct.pack("<IHH3sB", len(self.fs[self.file]), 0, 0,
                                b"   ", 0) + name
             return [info], b"00,OK"
+        if cmd == DOS_DELETE:                         # dos.cc:208-221
+            name = msg[2:].split(b"\0")[0].decode("latin-1")
+            name = next((k for k in self.fs if k.lower() == name.lower()), name)
+            if any(t.file == name for t in dev.targets.values()):
+                dev.violations.append(f"DELETE of open file {name}")
+                return [b""], b"ACCESS DENIED"         # FatFS FR_LOCKED/DENIED
+            if dev.readonly:
+                return [b""], b"WRITE PROTECTED"
+            if name not in self.fs:                   # file_system.cc:39-40
+                return [b""], b"FILE DOESN'T EXIST"
+            del self.fs[name]
+            return [b""], b"00,OK"
         return [b""], b"21,UNKNOWN COMMAND"
 
 
@@ -579,8 +592,25 @@ dosio_curfid: .res 1
 lc_fail:    .res 1                ; test knob: nonzero -> lockcheck refuses
 lc_arg:     .res 1                ; last file id passed to dosio_lockcheck
 lc_calls:   .res 1
+dc_fail:    .res 1                ; test knob: nonzero -> delcheck refuses
+dc_arg:     .res 1                ; last file id passed to dosio_delcheck
+dc_calls:   .res 1
 .export dosio_curfid, lc_fail, lc_arg, lc_calls, dosio_lockcheck
+.export dc_fail, dc_arg, dc_calls, dosio_delcheck
 .segment "CODE"
+; stand-in for hle_dos.s dosio_delcheck: A = file id -> C=1 + 202 when
+; dc_fail (the real one refuses while any handle has the file open)
+dosio_delcheck:
+        sta dc_arg
+        inc dc_calls
+        ldx dc_fail
+        bne @no
+        clc
+        rts
+@no:    lda #202
+        sta dosio_err
+        sec
+        rts
 ; stand-in for hle_dos.s dosio_lockcheck (the real one is VICE-tested):
 ; A = file id -> C=1 + dosio_err=202 when lc_fail, else curfid := A
 dosio_lockcheck:
@@ -614,7 +644,8 @@ SEGMENTS {
 
 ENTRIES = ("dosio_uci_detect", "dosio_uci_init", "dosio_uci_open",
            "dosio_uci_close", "dosio_uci_size", "dosio_uci_seek",
-           "dosio_uci_rdchunk", "dosio_uci_wrchunk", "dosio_uci_setsize")
+           "dosio_uci_rdchunk", "dosio_uci_wrchunk", "dosio_uci_setsize",
+           "dosio_uci_delete")
 
 
 @pytest.fixture(scope="module")
@@ -720,6 +751,13 @@ class Harness:
     def close(self, slot):
         self.poke("dosio_slot", bytes([slot]))
         return self.call("dosio_uci_close")
+
+    def delete(self, name, slot=7):
+        raw = name.encode()
+        self.poke("dosio_name", raw + b"\0")
+        self.poke("dosio_nlen", bytes([len(raw)]))
+        self.poke("dosio_slot", bytes([slot]))      # stale: must not matter
+        return self.call("dosio_uci_delete")
 
 
 MODE_OLD, MODE_NEW, MODE_RW = 0, 1, 2      # generic-layer mode codes
@@ -1042,4 +1080,85 @@ def test_open_fid_distinct_while_other_target_holds_stale_id(build):
     h.close(0)                                 # target 1 free, 2 keeps fid_a
     h.open(2, "c", MODE_OLD)                   # target 1 again
     assert h.peek("lc_arg", 1)[0] != fid_a
+    assert_clean(h)
+
+
+# =============================================================================
+# m2-post: DeleteFile (dos.h:19 DOS_CMD_DELETE_FILE, dos.cc:208-221)
+# =============================================================================
+
+def test_delete_bytes_and_effect(build):
+    h = Harness(build, fs={"gone": bytearray(b"x"), "keep": bytearray(b"k")})
+    h.call("dosio_uci_init")
+    h.dev.log.clear()
+    assert h.delete("GONE") == 0
+    assert cmds(h) == [b"\x01\x09GONE"]           # [t][09][name], verbatim
+    assert "gone" not in h.dev.fs and "keep" in h.dev.fs
+    assert h.peek("dc_calls", 1)[0] == 1
+    assert_clean(h)
+
+
+def test_delete_missing_reports_not_found(build):
+    h = Harness(build)
+    h.call("dosio_uci_init")
+    assert h.delete("nosuch") == 1
+    assert h.err() == de.ERROR_OBJECT_NOT_FOUND
+    assert_clean(h)
+
+
+def test_delete_write_protected_is_a_failure(build):
+    h = Harness(build, fs={"ro": bytearray(b"1")})
+    h.dev.readonly = True
+    h.call("dosio_uci_init")
+    assert h.delete("ro") == 1
+    assert "ro" in h.dev.fs
+    assert_clean(h)
+
+
+def test_delete_asks_delcheck_with_the_open_files_id_first(build):
+    # The generic layer refuses (202) while any handle has the file open;
+    # the backend must hand it the SAME file id the open used, and send
+    # nothing to the firmware when refused.
+    h = Harness(build, fs={"a": bytearray(b"A"), "b": bytearray(b"B")})
+    h.call("dosio_uci_init")
+    assert h.open(0, "a", MODE_OLD) == 0
+    fid_a = h.peek("lc_arg", 1)[0]
+    h.dev.log.clear()
+    h.poke("dc_fail", b"\1")
+    assert h.delete("A") == 1
+    assert h.err() == de.ERROR_OBJECT_IN_USE
+    assert h.peek("dc_arg", 1)[0] == fid_a
+    assert cmds(h) == []                            # nothing sent
+    assert "a" in h.dev.fs
+    h.poke("dc_fail", b"\0")
+    assert h.delete("b") == 0                       # other file: other id
+    assert h.peek("dc_arg", 1)[0] != fid_a
+    assert h.dev.targets[1].file == "a"             # open file undisturbed
+    assert_clean(h)
+
+
+def test_delete_while_both_targets_busy(build):
+    # DELETE is not a file-slot operation: it goes to target 1 even while
+    # both targets hold open files (dos.cc:208 never touches `file`).
+    h = Harness(build, fs={"a": bytearray(b"A"), "b": bytearray(b"B"),
+                           "c": bytearray(b"C")})
+    h.call("dosio_uci_init")
+    h.open(0, "a", MODE_OLD)
+    h.open(1, "b", MODE_OLD)
+    h.dev.log.clear()
+    assert h.delete("c") == 0
+    assert cmds(h) == [b"\x01\x09c"]
+    assert h.dev.targets[1].file == "a" and h.dev.targets[2].file == "b"
+    cf, got = h.read(0, 1)
+    assert got == b"A"
+    assert_clean(h)
+
+
+def test_delete_lost_reply_reports_device_error(build):
+    h = Harness(build, fs={"f": bytearray(b"1")})
+    h.call("dosio_uci_init")
+    h.dev.hang_cmds = {DOS_DELETE}
+    assert h.delete("f") == 1
+    assert h.err() == de.ERROR_DEVICE_NOT_MOUNTED
+    h.dev.hang_cmds = set()
     assert_clean(h)
