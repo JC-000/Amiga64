@@ -94,6 +94,7 @@ FA_CREATE_ALWAYS = $08  ; @value
 FA_OPEN_ALWAYS   = $10  ; @value
 
 ERROR_NO_FREE_STORE    = 103
+ERROR_DISK_WRITE_PROTECTED = 214
 ERROR_DEVICE_NOT_MOUNTED = 218
 ERROR_OBJECT_NOT_FOUND = 205
 ERROR_SEEK_ERROR       = 219
@@ -689,8 +690,10 @@ dosio_uci_wrchunk:
 
 ; [1][09][name...] — delete; "00" = done.  The sharing check comes first
 ; (nothing is sent while any handle has the file open).  A refusal with a
-; status -> ERROR_OBJECT_NOT_FOUND; no reply (timeout / refused push) ->
-; ERROR_DEVICE_NOT_MOUNTED (the file may or may not be gone).
+; status -> ERROR_OBJECT_NOT_FOUND, except "WRITE PROTECTED" (FatFS
+; FR_WRITE_PROTECTED, file_system.cc:50-51 — the only error string that
+; starts "WR") -> ERROR_DISK_WRITE_PROTECTED; no reply (timeout / refused
+; push) -> ERROR_DEVICE_NOT_MOUNTED (the file may or may not be gone).
 dosio_uci_delete:
         jsr uci_pick_fid        ; the id an open handle on this name has
         jsr dosio_delcheck
@@ -714,7 +717,17 @@ dosio_uci_delete:
         bcs @nf
         rts
 @nf:    lda #ERROR_OBJECT_NOT_FOUND
-        sta dosio_err
+        ldx dosio_uci_sn        ; status "WR..." = write protected
+        cpx #2
+        bcc @e
+        ldx dosio_uci_st
+        cpx #'W'
+        bne @e
+        ldx dosio_uci_st+1
+        cpx #'R'
+        bne @e
+        lda #ERROR_DISK_WRITE_PROTECTED
+@e:     sta dosio_err
         sec
         rts
 @lost:  lda #ERROR_DEVICE_NOT_MOUNTED

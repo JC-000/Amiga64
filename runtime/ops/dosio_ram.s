@@ -24,7 +24,9 @@
 ; with ERROR_DISK_FULL.  File id for the sharing rules = directory index.
 ; DeleteFile clears the "used" flag and sets RD_FLAG_EXTENT: the entry
 ; keeps its extent (data/capacity), and the next create that picks that
-; entry reuses the extent instead of allocating from free_ptr.  No rename.
+; entry reuses the extent instead of allocating from free_ptr — if the
+; extent is sane and its capacity is nonzero and >= min(64 KB, fresh space
+; left) (rd_ext_ok).  No rename.
 ;
 ; Backend contract (hle_dos.s "Backend seam"): entered by jmp from
 ; dosio_be with X = dosio_slot; C=0 success, C=1 failure with dosio_err.
@@ -438,11 +440,15 @@ rd_name:
 @bad:   sec
         rts
 
-; rd_ext_ok — C=0 when dosio_rd_ent is flagged RD_FLAG_EXTENT and its
-; extent lies inside the data area: RD_DATA <= data, data + cap <=
-; dosio_rd_end + 1.  (Only DeleteFile sets the flag; the range check keeps a
-; guest that scribbled on the directory from aiming writes outside the
-; RAMDISK.)  Clobbers A/X, dosio_arg.
+; rd_ext_ok — C=0 when dosio_rd_ent is flagged RD_FLAG_EXTENT, its
+; extent lies inside the data area (RD_DATA <= data, data + cap <=
+; dosio_rd_end + 1), and its capacity is worth reusing: cap != 0 and
+; cap >= min(RD_NEW_CAP, data_end - free_ptr) from the header in
+; dosio_rd_hdr — a create never gets less room than a fresh extent would
+; give it (a host-staged file with a tiny capacity is abandoned instead).
+; (Only DeleteFile sets the flag; the range check keeps a guest that
+; scribbled on the directory from aiming writes outside the RAMDISK.)
+; Clobbers A/X, dosio_arg.
 rd_ext_ok:
         lda dosio_rd_ent+RE_FLAGS
         and #RD_FLAG_EXTENT
@@ -478,7 +484,51 @@ rd_ext_ok:
         lda dosio_rd_ent+RE_DATA+3
         sbc #0
         bcc @bad
-        clc
+        jmp rd_ext_cap
+@bad:   sec
+        rts
+
+rd_ext_cap:                     ; rd_ext_ok, part 2: the capacity rule
+        lda dosio_rd_ent+RE_CAP ; cap 0: never reused
+        ora dosio_rd_ent+RE_CAP+1
+        ora dosio_rd_ent+RE_CAP+2
+        ora dosio_rd_ent+RE_CAP+3
+        beq @bad
+        sec                     ; arg = fresh space = data_end - free_ptr
+        ldx #0
+        php
+@sub:   plp
+        lda dosio_rd_hdr+RH_END,x
+        sbc dosio_rd_hdr+RH_FREE,x
+        sta dosio_arg,x
+        php
+        inx
+        cpx #4
+        bne @sub
+        plp
+        bcc @ok                 ; corrupt header (free past end): no fresh
+                                ; space, any sane extent is better
+        lda dosio_arg+3         ; arg >= RD_NEW_CAP -> arg = RD_NEW_CAP
+        ora dosio_arg+2
+        beq @cmp
+        lda #<RD_NEW_CAP
+        sta dosio_arg
+        lda #>RD_NEW_CAP
+        sta dosio_arg+1
+        lda #^RD_NEW_CAP
+        sta dosio_arg+2
+        lda #0
+        sta dosio_arg+3
+@cmp:   lda dosio_rd_ent+RE_CAP ; cap - arg must not borrow
+        cmp dosio_arg
+        lda dosio_rd_ent+RE_CAP+1
+        sbc dosio_arg+1
+        lda dosio_rd_ent+RE_CAP+2
+        sbc dosio_arg+2
+        lda dosio_rd_ent+RE_CAP+3
+        sbc dosio_arg+3
+        bcc @bad
+@ok:    clc
         rts
 @bad:   sec
         rts

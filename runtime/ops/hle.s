@@ -748,6 +748,8 @@ hle_systemtaglist:
 ; 00:00:00 for every run) advances by ONE tick (1/50 s) per call, carrying
 ; into ds_Minute (3000 ticks) and ds_Days (1440 minutes); the advanced
 ; value is stored at [D1] (ds_Days, ds_Minute, ds_Tick) and D0 = D1.
+; The carries test >= (tick >= 3000, minute >= 1440 on every call), so a
+; guest-corrupted ENV_CLOCK is normalised by the next call.
 ; A call counter, not a clock: time only moves when the program asks.
 ; ===========================================================================
 hle_datestamp:
@@ -756,28 +758,26 @@ hle_datestamp:
         inc m_val               ;                      minute lo, minute hi)
         bne :+
         inc m_val+1
-:       lda m_val               ; tick == 3000?
-        cmp #<TICKS_PER_MIN
-        bne @wr
+:       lda m_val               ; tick >= 3000? (>=, not ==: a corrupted
+        cmp #<TICKS_PER_MIN     ; clock recovers on the next call)
         lda m_val+1
-        cmp #>TICKS_PER_MIN
-        bne @wr
+        sbc #>TICKS_PER_MIN
+        bcc @min
         lda #0
         sta m_val
         sta m_val+1
         inc m_val+2             ; minute++
-        bne :+
+        bne @min
         inc m_val+3
-:       lda m_val+2             ; minute == 1440?
+@min:   lda m_val+2             ; minute >= 1440? (checked on every call)
         cmp #<MINS_PER_DAY
-        bne @wr
         lda m_val+3
-        cmp #>MINS_PER_DAY
-        bne @wr
+        sbc #>MINS_PER_DAY
+        bcc @wr
         lda #0
         sta m_val+2
         sta m_val+3
-        jsr mem_write32         ; ENV_CLOCK+4 := 0:0, then days++
+        jsr mem_write32         ; ENV_CLOCK+4 := minute 0 (tick kept), then days++
         SETADDR ENV_CLOCK, 0
         jsr mem_read32
         inc m_val

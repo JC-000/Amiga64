@@ -148,7 +148,10 @@ build: the only instruction counter lives in the test runner
 not in the core, and the hardware mailbox path has none. So the clock is a
 **call counter**: each DateStamp call first advances `ENV_CLOCK` by one
 tick (1/50 s, `TICKS_PER_SECOND`), carrying at 3000 ticks into ds_Minute
-and at 1440 minutes into ds_Days, then returns it. `ENV_CLOCK` is guest
+and at 1440 minutes into ds_Days, then returns it. The carries test `>=`
+(and the minute test runs on every call), so a guest-corrupted clock —
+tick ≥ 3000 or minute ≥ 1440 — is normalised by the next call
+(`u_clock2`). `ENV_CLOCK` is guest
 memory staged 0/0/0 (1978-01-01 00:00:00) with the env, so every run starts
 there; the first call of a run returns tick 1.
 
@@ -279,7 +282,10 @@ Bump allocator over `HEAP_BASE $100000`–`HEAP_END $7FFFFF` (7 MB), state =
     (`u_dos4`), GetVar leaving a poisoned 32-byte buffer untouched + IoErr
     205, and Close on Output()/Input()/NIL: → DOSTRUE with IoErr and the
     console intact (`u_getvar`), DateStamp's tick → minute → day carries
-    (`u_clock`), ChangeMode (`u_cmode`, `u_cmode2`, see
+    (`u_clock`), recovery from an out-of-range clock (`u_clock2`),
+    GetVar as the first dos call after boot — `hle_dos_magic` zapped, no
+    host init — so its IoErr must survive the lazy init
+    (`u_getvar_lazy`), ChangeMode (`u_cmode`, `u_cmode2`, see
     `docs/HLE_DOS.md`), the unimplemented-LVO sentinel,
     and the C2 hand-off (`u_file`/`u_file2`/`u_file3`: kinds `$10`,
     `$FFFFFFFF`, `$00000100`). Against the WS-B2 stub the hand-off is
@@ -312,8 +318,13 @@ Bump allocator over `HEAP_BASE $100000`–`HEAP_END $7FFFFF` (7 MB), state =
     `RAM:` prefix), `fio_seek` (fseek/ftell/rewind on a staged file),
     `fio_exit` (a stream left open is flushed by exit), `fio_fmt`
     (fprintf/fscanf), `fio_big` (3000 bytes through a `setvbuf` buffer
-    placed across guest `$180000`, a 512 KB REU line; the program prints
-    `straddle=1`), `fio_append` (fopen "a" on an existing and a missing
+    that is not page aligned; a staged pad file puts big.bin's extent at
+    `$E7FE00`, so the chunk at file offset `$200` crosses the 512 KB REU
+    line `$E80000` on the RAMDISK side and needs `dosio_dma`'s split — the
+    nosplit mutant turns it red. The buffer also crosses guest `$180000`,
+    but that part is regression coverage only: guest chunks are
+    page-bounded, so no guest-side DMA can straddle it. The program prints
+    `straddle=1 odd=1`), `fio_append` (fopen "a" on an existing and a missing
     file, "r+" in place, ChangeMode refusals), `fio_remove` (remove():
     202 while open, 205 when missing, `RAM:` prefix), `fio_reuse` (fill
     the RAMDISK, remove one, create again).

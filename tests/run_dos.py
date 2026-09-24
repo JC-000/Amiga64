@@ -490,7 +490,11 @@ def fix1_scenarios() -> list[Scenario]:
     # ---- wrap512 (item 11): no DMA may straddle a 512 KB REU block ----------
     # The REC increments only the low 19 address bits, so a transfer across
     # $x7FFFF -> $x80000 would wrap to the start of the same block.
-    # (a) guest side: a buffer straddling $180000 (Read and Write);
+    # (a) guest side: a buffer straddling $180000 (Read and Write).  These
+    #     steps are regression coverage only: guest chunks never cross a
+    #     256-byte page, so no guest-side DMA can straddle $180000 whether or
+    #     not dosio_dma splits (the nosplit mutant leaves them green; m2-post
+    #     fix1 F3).  The split is exercised by (b);
     # (b) RAMDISK side: file data straddling $E80000 (an extent placed at
     #     $E7FF00, accessed through an odd guest buffer so a chunk spans it).
     gbuf = 0x17FF80
@@ -508,10 +512,10 @@ def fix1_scenarios() -> list[Scenario]:
         Step(W, d2=SRC + 0x80, d3=512, ref=0, d0=512),                    # 3 disk straddle
         Step(C, ref=0, d0=TRUE),                                          # 4
         Step(O, name_addr(n, "g"), OLD, d0=bp(0), ioerr=0),               # 5
-        Step(R, d2=gbuf, d3=256, ref=5, d0=256, byte=gdata[0]),           # 6 guest straddle
+        Step(R, d2=gbuf, d3=256, ref=5, d0=256, byte=gdata[0]),           # 6 guest buf (a)
         Step(C, ref=5, d0=TRUE),                                          # 7
         Step(O, name_addr(n, "gw"), NEW, d0=bp(0), ioerr=0),              # 8
-        Step(W, d2=gbuf, d3=256, ref=8, d0=256),                          # 9 guest straddle
+        Step(W, d2=gbuf, d3=256, ref=8, d0=256),                          # 9 guest buf (a)
         Step(C, ref=8, d0=TRUE),                                          # 10
     ]
     out.append(Scenario(
@@ -647,6 +651,64 @@ def post_scenarios() -> list[Scenario]:
         expect_files={"n": SRC_DATA[:16]},
         expect_addr={"n": de.RD_DATA + de.RD_NEW_CAP},
         expect_buf={BUF + 0x800: bytes(16)}))
+
+    # ---- fix1 F1: forged extents past the END of the RAMDISK (upper bound
+    # of rd_ext_ok) and one whose end overflows 32 bits.  exthi/extcarry are
+    # the reviewer's legs (cap $100 / $200); exthi64/extcarry64 use a full
+    # 64 KB capacity so the fix1 N2 capacity rule cannot reject them first —
+    # only the range check stands between them and a reuse.
+    for tag, data, cap in (("exthi", 0xFFFFF8, 0x100),
+                           ("extcarry", 0xFFFFFF00, 0x200),
+                           ("exthi64", 0xFF0100, de.RD_NEW_CAP),
+                           ("extcarry64", 0xFFFFFF00, de.RD_NEW_CAP)):
+        forged = bytearray(de.RD_ENT_SIZE)
+        struct.pack_into("<BBHIII", forged, 0, 0x02, 1, 0, 0, cap, data)
+        forged[de.RD_NAME_OFF] = ord("q")
+        out.append(Scenario(
+            tag, {"s": bytes(forged)}, n, list(st),
+            expect_files={"n": SRC_DATA[:16], "s": bytes(forged)},
+            expect_addr={"n": de.RD_DATA + de.RD_NEW_CAP}))
+
+    # ---- fix1 N2: a deleted extent is reused only if its capacity is
+    # nonzero and >= min(64 KB, fresh space left); otherwise the create
+    # allocates a fresh extent (the small one is abandoned).
+    files = [de.RdFile("tiny", b"t", capacity=0x100),
+             de.RdFile("zero", b"", capacity=0),
+             de.RdFile("big", b"b")]                  # 64 KB
+    fresh = de.RD_DATA + 0x100 + de.RD_NEW_CAP        # free_ptr after staging
+    n = ["tiny", "zero", "big", "n1", "n2", "n3"]
+    na = lambda x: name_addr(n, x)                    # noqa: E731
+    st = [
+        Step(D, na("tiny"), d0=TRUE),                                     # 0
+        Step(O, na("n1"), NEW, d0=bp(0), ioerr=0),                        # 1 idx 0
+        Step(W, d2=SRC, d3=0x200, ref=1, d0=0x200, ioerr=0),              # 2 > $100
+        Step(C, ref=1, d0=TRUE),                                          # 3
+        Step(D, na("zero"), d0=TRUE),                                     # 4
+        Step(O, na("n2"), NEW, d0=bp(0), ioerr=0),                        # 5 idx 1
+        Step(W, d2=SRC, d3=4, ref=5, d0=4, ioerr=0),                      # 6
+        Step(C, ref=5, d0=TRUE),                                          # 7
+        Step(D, na("big"), d0=TRUE),                                      # 8
+        Step(O, na("n3"), NEW, d0=bp(0), ioerr=0),                        # 9 idx 2
+        Step(C, ref=9, d0=TRUE),                                          # 10
+    ]
+    out.append(Scenario(
+        "smallext", files, n, st,
+        expect_files={"n1": SRC_DATA[:0x200], "n2": SRC_DATA[:4], "n3": b""},
+        expect_absent=["tiny", "zero", "big"],
+        expect_addr={"n1": fresh, "n2": fresh + de.RD_NEW_CAP,
+                     "n3": de.RD_DATA + 0x100}))
+
+    # ---- fix1 N2: with NO fresh space left, min(64 KB, 0) = 0, so only the
+    # explicit "capacity 0 is never reused" rule keeps a zero extent out.
+    files = [de.RdFile("zero", b"", capacity=0),
+             de.RdFile("fill", b"F", capacity=de.RD_END + 1 - de.RD_DATA)]
+    n = ["zero", "z"]
+    st = [
+        Step(D, name_addr(n, "zero"), d0=TRUE),                           # 0
+        Step(O, name_addr(n, "z"), NEW, d0=0, ioerr=E_FULL),              # 1 no room
+    ]
+    out.append(Scenario("zerofull", files, n, st,
+                        expect_files={"fill": b"F"}, expect_absent=["z"]))
     return out
 
 

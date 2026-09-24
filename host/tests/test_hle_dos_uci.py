@@ -1106,12 +1106,35 @@ def test_delete_missing_reports_not_found(build):
     assert_clean(h)
 
 
-def test_delete_write_protected_is_a_failure(build):
+def test_delete_write_protected_maps_to_214(build):
+    # fix1 N3: the firmware's status for FR_WRITE_PROTECTED is the string
+    # "WRITE PROTECTED" (file_system.cc:50-51) -- the only error string
+    # starting "WR" -> ERROR_DISK_WRITE_PROTECTED (214).
     h = Harness(build, fs={"ro": bytearray(b"1")})
     h.dev.readonly = True
     h.call("dosio_uci_init")
     assert h.delete("ro") == 1
+    assert h.err() == de.ERROR_DISK_WRITE_PROTECTED
     assert "ro" in h.dev.fs
+    assert_clean(h)
+
+
+def test_delete_other_refusals_stay_205(build):
+    # "ACCESS DENIED" / "FILE DOESN'T EXIST" etc. are not write protection
+    h = Harness(build, fs={"d": bytearray(b"1")})
+    h.call("dosio_uci_init")
+    real = h.dev.targets[1].parse
+
+    def denied(msg, dev):
+        if msg[1] == DOS_DELETE:
+            return [b""], b"ACCESS DENIED"
+        return real(msg, dev)
+    h.dev.targets[1].parse = denied
+    assert h.delete("d") == 1
+    assert h.err() == de.ERROR_OBJECT_NOT_FOUND
+    h.dev.targets[1].parse = lambda m, d: ([b""], b"W")   # 1 status byte
+    assert h.delete("d") == 1
+    assert h.err() == de.ERROR_OBJECT_NOT_FOUND
     assert_clean(h)
 
 

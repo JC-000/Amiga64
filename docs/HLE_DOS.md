@@ -200,7 +200,13 @@ The REC's REU address counter increments only the low 19 bits (VICE `reu.c`
     untouched;
   - that the RAMDISK header and every file survive.
 
-  The `nosplit` mutant (split disabled) turns it red.
+  The `nosplit` mutant (split disabled) turns it red **through the
+  RAMDISK-side legs only** (file data across `$E80000`). The guest-buffer
+  legs (steps 6 and 9) cannot exercise the split: guest chunks are
+  page-bounded, so no guest-side DMA ever straddles `$180000`, split or not
+  (m2-post fix1 F3). They stay as regression coverage of the page-bounded
+  chunking. `run_vbcc`'s `fio_big` exercises the split from C the same way:
+  big.bin's extent is staged across `$E80000` (see `docs/HLE.md`).
 
 ### Backend selection (review ruling 1)
 
@@ -266,7 +272,12 @@ Each directory entry (64 bytes) has this layout:
   - Every `dosio_lockcheck` call handles the refusal carry. A create can only be refused if the guest scribbled on the directory under an open handle, and then the Open fails and changes nothing.
 - **Guest-created files** get an extent of `RD_NEW_CAP` = 64 KB, or whatever space remains. 32 × 64 KB is exactly the 2 MB region, and the 4 KB header/directory page comes out of it. All 32 directory entries are allocatable, but the 32nd guest-created extent is 60 KB (tested by `dirfull`).
   - This is where ruling 6's "32 × 64 KB" comes up 4 KB short. Growing the region further would reach into `$DFxxxx`, which the ruling did not grant.
-- **Delete and space reuse (m2-post)**: DeleteFile rewrites the entry's flags to `$02` (not used, extent kept); name, size, capacity and data address stay. A create picks the first unused entry as before; if that entry has bit 1 set **and** its extent lies inside the data area (`RD_DATA <= data`, `data + capacity <= $1000000`; a guest that scribbled on the directory cannot aim writes elsewhere), the new file takes over that extent — capacity included — and `free_ptr` is left alone. Otherwise it allocates from `free_ptr` as before. So a full RAMDISK (32 entries, or 2 MB) gets both an entry and 64 KB back from each delete (`delreuse` scenario, `fio_reuse`). A reused extent keeps the *deleted* file's capacity: guest-created files always have 64 KB (or the 60 KB last one); a host-staged file with an explicit small `RdFile.capacity` hands that small capacity on.
+- **Delete and space reuse (m2-post)**: DeleteFile rewrites the entry's flags to `$02` (not used, extent kept); name, size, capacity and data address stay. A create picks the first unused entry as before. It takes over that entry's extent — capacity included, `free_ptr` left alone — only when all of these hold (`rd_ext_ok`):
+  - bit 1 is set;
+  - the extent lies inside the data area: `RD_DATA <= data` and `data + capacity <= $1000000` with no 32-bit carry, so a guest that scribbled on the directory cannot aim writes elsewhere (`extscribble`, `exthi`, `extcarry`, `exthi64`, `extcarry64`);
+  - **the capacity is nonzero and at least `min(64 KB, data_end - free_ptr)`** (fix1 N2): a create never gets less room than a fresh extent would give it (`smallext`).
+
+  Otherwise it allocates from `free_ptr` as before, and a too-small extent is abandoned (leaked until the next format). So a full RAMDISK (32 entries, or 2 MB) gets both an entry and 64 KB back from each delete (`delreuse`, `fio_reuse`); when fresh space is short, a deleted extent at least that large is still reused (the 60 KB last extent qualifies once `free_ptr` is exhausted).
 - **Not supported**: rename, growing past the extent, freeing an extent back to `free_ptr` (extents are only reused through their directory entry).
 
 ## ULTDOS backend: UCI mapping (HARDWARE-UNVALIDATED)
@@ -300,7 +311,7 @@ Hardware-tested 6502 is `~/Documents/c64-https` at `1b9b49e`.
 | Read chunk | `t 04 lo hi` (u16 LE, ≤ 256). Response bytes go to `dosio_buf` | Count of bytes received. The success status is empty |
 | Write chunk | `t 05 00 00 payload…` (≤ 256 bytes; dos.cc ignores bytes 2-3) | `"00"`, else ERROR_DISK_FULL |
 | init | ABORT, wait for idle, clear ERROR, then `1 03` and `2 03` to close anything a previous run leaked | none |
-| DeleteFile | `1 09 name…` (`DOS_CMD_DELETE_FILE`, `dos.h` 19, `dos.cc` 208-221; always target 1 — it never touches the target's open file). Sent only after `dosio_delcheck` passed for the name's file id (`uci_pick_fid`) | `"00"`; any other status → ERROR_OBJECT_NOT_FOUND (205; the firmware answers `FILE DOESN'T EXIST`, `WRITE PROTECTED`, … — `file_system.cc` 28-60); no reply → ERROR_DEVICE_NOT_MOUNTED (218), the file may or may not be gone |
+| DeleteFile | `1 09 name…` (`DOS_CMD_DELETE_FILE`, `dos.h` 19, `dos.cc` 208-221; always target 1 — it never touches the target's open file). Sent only after `dosio_delcheck` passed for the name's file id (`uci_pick_fid`) | `"00"`; status `WRITE PROTECTED` (FatFS `FR_WRITE_PROTECTED`, `file_system.cc` 50-51; the only error string starting `WR`, checked on the first two status bytes) → ERROR_DISK_WRITE_PROTECTED (214); any other status → ERROR_OBJECT_NOT_FOUND (205; e.g. `FILE DOESN'T EXIST`, `ACCESS DENIED`, `file_system.cc` 28-60); no reply → ERROR_DEVICE_NOT_MOUNTED (218), the file may or may not be gone |
 
 - **Target limit**: there are two DOS targets, so at most **two files** can be open at once on ULTDOS. A third Open fails with ERROR_NO_FREE_STORE. The driver never sends OPEN to a busy target, because the firmware would leak the old handle (dos.cc:113).
 - **Error mapping**:
@@ -398,6 +409,8 @@ The guest is a hand-encoded "call script" interpreter. It walks a table of
 | `nullname` | Open(NULL) → 0 with 205 |
 | `delete` | DeleteFile: missing (205), open file (202, nothing changed), after Close (DOSTRUE, then Open fails 205), `RAM:`/`ram:` prefixes on DeleteFile and Open, `RAM:` alone (210), NULL (205), a 31-character name behind `Ram:`; re-created files take over the deleted entries' extents (addresses checked) |
 | `delreuse` | 32 files fill the directory; the 33rd create fails 221; DeleteFile of one; the create now succeeds in the freed entry *and extent* (address checked) and takes a full 64 KB; the next create fails 221 again |
+| `extscribble`, `exthi`, `extcarry`, `exthi64`, `extcarry64` | A forged "deleted, keeps extent" entry whose extent lies below `RD_DATA`, past `$FFFFFF`, or whose end overflows 32 bits is not reused: the create allocates from `free_ptr` (address checked). `exthi64`/`extcarry64` use a 64 KB capacity so the N2 capacity rule cannot hide a broken range check (`m2_extupper` goes red on `exthi64`) |
+| `smallext` | A deleted host-staged extent of capacity `$100`, and one of capacity 0, are not reused (fresh extents, a 512-byte write fits); a deleted 64 KB extent is |
 | `changemode` | ChangeMode(CHANGE_FH, fh, EXCLUSIVE_LOCK) on a sole handle → DOSTRUE and every Open then fails 202; repeated → DOSTRUE; released by Close; refused 202 while another handle shares the file; CHANGE_LOCK and SHARED_LOCK → 209; a closed handle → 211 |
 | `selection` | Backend selection, described above |
 
@@ -418,5 +431,6 @@ reprograms every register.
 - **Missing functions**: no Rename, Lock/Examine, and no NIL:/`*`/CONSOLE: names through Open; ChangeMode only for the vc.lib case. Add them only when a real program traps on them.
 - **RAMDISK**: 32 files, 31-character names (after `RAM:`), fixed extents (64 KB for guest-created files, 60 KB for the 32nd), reused only through a deleted file's directory entry.
 - **ULTDOS DeleteFile** is pinned against the firmware model only (`host/tests/test_hle_dos_uci.py`); like the rest of ULTDOS it is hardware-unvalidated.
+- **ULTDOS file identity is the name string** (inherited from Open's `uci_pick_fid`): `a` and `/a` (or any two spellings of one path) get different file ids, so the sharing rules and DeleteFile's open-file check can be bypassed by spelling the same file differently. Not changed; the firmware keeps its own lock state.
 - **ULTDOS**: opt-in only; two open files at most; names relative to the firmware's current path; about 65 B/s at 1 MHz; unvalidated on hardware.
 - **Checker coverage**: `host/rescheck.py` `FILE_OWNERS` (supervisor-frozen) does not list `hle_dos.s`/`dosio_*.s`, so their raw-literal scan does not run. The files use only rc equates and contain no raw addresses.
