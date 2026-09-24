@@ -32,6 +32,15 @@ EXEC_BASE = $000800     ; fake exec.library base (vector slots below it)
 .ifndef DOS_BASE
 DOS_BASE  = $000A00     ; fake dos.library base (vector slots below it)
 .endif
+; WS-B2 (docs/WAVE4_BRIEF.md C2/C4, docs/HLE_DOS.md): dos.library FileHandle
+; pool in $000C00-$000FFF.  Slot n = FH_POOL + FH_SIZE*n, BPTR = addr >> 2,
+; fh_Args (offset FH_ARGS_OFF) = FH_KIND_FILE0 + n while open.
+.ifndef FH_POOL
+FH_POOL   = $000C00     ; first FileHandle (longword aligned)
+.endif
+.ifndef FH_POOL_END
+FH_POOL_END = $000FFF   ; last byte the pool may grow into (inclusive)
+.endif
 
 ; @region run $001000-$00FFFF program stack - grows down from STACK_TOP; exit-address longword staged at $00F000-$00F003
 .ifndef STACK_TOP
@@ -51,7 +60,15 @@ HEAP_BASE = $100000     ; first byte of the AllocMem pool
 HEAP_END  = $7FFFFF     ; last byte of the AllocMem pool (inclusive)
 .endif
 
-; @region free $800000-$FFFFFF UNALLOCATED guest space - claim via this file + rescheck green
+; @region free $800000-$EFFFFF UNALLOCATED guest space - claim via this file + rescheck green
+
+; @region hle $F00000-$FFFFFF HLE DOS RAMDISK - dos.library file store (WS-B2, docs/HLE_DOS.md: header + 32-entry directory, data from +$1000)
+.ifndef dosio_rd_base
+dosio_rd_base = $F00000 ; RAMDISK header (magic "RDSK"); directory at +$20
+.endif
+.ifndef dosio_rd_end
+dosio_rd_end  = $FFFFFF ; last RAMDISK byte (inclusive)
+.endif
 
 ; --- Contract invariants (assemble-time; keep true under -D relocation) ----
 .assert EXIT_ADDR >= ENV_BASE,        error, "exit stub must sit inside the HLE env region"
@@ -59,3 +76,7 @@ HEAP_END  = $7FFFFF     ; last byte of the AllocMem pool (inclusive)
 .assert DOS_BASE - 60 >= ENV_BASE,    error, "deepest dos.library vector slot (LVO -60) must stay inside the env region"
 .assert STACK_TOP < PROG_BASE,        error, "guest stack must sit below the program load base"
 .assert HEAP_BASE > PROG_BASE,        error, "AllocMem pool must sit above the program load region"
+.assert DOS_BASE - 132 >= ENV_BASE,   error, "deepest WS-B2 dos.library vector slot (IoErr, LVO -132) must stay inside the env region"
+.assert FH_POOL >= $000C00 .and FH_POOL_END <= $000FFF, error, "FileHandle pool must stay inside the WS-B2 env sub-region $000C00-$000FFF"
+.assert (FH_POOL & 3) = 0,            error, "FileHandles must be longword aligned (BPTR)"
+.assert dosio_rd_base > HEAP_END,     error, "RAMDISK must sit above the AllocMem pool"
