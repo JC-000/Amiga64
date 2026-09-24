@@ -19,7 +19,9 @@
 ;   $04 dos  Input         -54   $0C exec DeletePool   -702
 ;   $05 dos  Read          -42   $0D exec AllocPooled  -708
 ;   $06 dos  IsInteractive -216  $0E exec FreePooled   -714
-;   $07 exec FindTask     -294
+;   $07 exec FindTask     -294   $0F exec AllocVec     -684
+;                                $10 exec FreeVec      -690
+;                                $11 exec StackSwap    -732
 ;
 ; HLE state lives in GUEST memory (ENV_STATE, staged fresh by hle_env.py
 ; before every run): heap bump pointer + console cursor.  That is the
@@ -42,7 +44,8 @@
 .import hle_dos_dispatch        ; runtime/ops/hle_dos.s (WS-B2), indices $30-$4F
 .import hle_dos_read, hle_dos_write     ; WS-B2 file-handle I/O (C2)
 
-HLE_FN_COUNT = 15               ; valid indices $A100-$A10E (hle_env.HLE_FN_COUNT)
+HLE_FN_COUNT = 18               ; valid indices $A100-$A111 (hle_env.HLE_FN_COUNT)
+LIB_VERSION  = 40               ; OpenLibrary: newer versions -> NULL
 HLE_DOS_FIRST = $30             ; $A130-$A14F: file DOS (hle_dos.s, WAVE4 C3)
 HLE_DOS_LAST  = $4F
 
@@ -52,6 +55,8 @@ HLE_DOS_LAST  = $4F
 ; AmigaOS structure offsets (dos/dosextens.h, exec/tasks.h)
 PR_CIS       = 156              ; struct Process pr_CIS (BPTR), $9C
 PR_COS       = 160              ; struct Process pr_COS (BPTR), $A0
+TC_SPLOWER   = 58               ; struct Task tc_SPLower, $3A
+TC_SPUPPER   = 62               ; struct Task tc_SPUpper, $3E
 FH_ARGS      = 36               ; struct FileHandle fh_Args = handle kind (C2)
 FH_KIND_NIL  = 2                ; 0 console out, 1 console in, 2 NIL:
 FH_KIND_FILE0 = $10             ; >= $10: WS-B2 file slots -> hle_dos_*
@@ -72,6 +77,9 @@ hle_idx:  .res 1                ; OpenLibrary name-compare index
 hle_sz:   .res 4                ; AllocMem/FreeMem size (rounded to 8)
 hle_flg:  .res 1                ; AllocMem flags bits 16-23 (MEMF_CLEAR = bit 0)
 hle_old:  .res 4                ; heap_next before the allocation = result
+hle_tmp:  .res 4                ; AllocVec size / StackSwap scratch
+hle_sa:   .res 3                ; hle_swap32 operand addresses (24-bit)
+hle_sb:   .res 3
 
 .segment "CODE"
 
@@ -130,9 +138,9 @@ hle_trap:                       ; non-HLE A-line / unimplemented LVO sentinel
         jmp emu_halt
 
 ; ===========================================================================
-; $A100 OpenLibrary — name pointer in A1, version in D0 (ignored).
-; Compares the guest string against "dos.library"; match -> D0 = DOSBase,
-; anything else -> D0 = 0.
+; $A100 OpenLibrary — name pointer in A1, version in D0.
+; Compares the guest string against "dos.library" (exact, NUL included);
+; match and D0 <= LIB_VERSION (40) -> D0 = DOSBase; anything else -> 0.
 ; ===========================================================================
 hle_openlibrary:
         ldx #3                  ; walking pointer := A1
@@ -166,8 +174,15 @@ hle_openlibrary:
         D0_ZERO
         jmp hle_ret
 
-@match:                         ; D0 = DOSBase
-        lda #<DOS_BASE
+@match:                         ; version asked (D0, unsigned) <= 40?
+        lda r_d0+3
+        ora r_d0+2
+        ora r_d0+1
+        bne @nomatch
+        lda #LIB_VERSION
+        cmp r_d0
+        bcc @nomatch            ; 40 < D0
+        lda #<DOS_BASE          ; D0 = DOSBase
         sta r_d0
         lda #>DOS_BASE
         sta r_d0+1
@@ -258,10 +273,11 @@ hle_kindfile:
 ;   kind >= $10          -> jmp hle_dos_write (WS-B2), call state untouched
 ;   kind 0/1 (console)   -> text to the C64 screen, D0 = D3
 ;   kind 2 (NIL:)        -> discarded, D0 = D3
-;   D1 = 0, kind 3-$0F, or D3 < 0 -> D0 = -1
+;   D1 = 0, kind 3-$0F, or D3 outside 0..$FFFFFF -> D0 = -1 (a length
+;   of 16 MB or more cannot describe a buffer in the 24-bit guest space)
 ; Console: ASCII -> screen codes ($20-$3F direct, $40-$5F minus $40,
 ; $60-$7F minus $60, >= $80 '?'), $0A newline, other controls ignored,
-; scrolls at line 25.  Length: low 24 bits (the guest address space).
+; scrolls at line 25.
 ; ===========================================================================
 hle_write:
         jsr hle_fhkind
@@ -269,8 +285,8 @@ hle_write:
         jsr hle_kindfile
         bcc @local
         jmp hle_dos_write       ; WS-B2 file slot (C2)
-@local: lda r_d3+3              ; negative length -> error
-        bmi @fail
+@local: lda r_d3+3              ; negative or >= 16 MB length -> error
+        bne @fail
         lda m_val
         cmp #FH_KIND_NIL
         beq @ok                 ; NIL: swallows everything
@@ -512,6 +528,229 @@ hle_allocpooled:
 ; ===========================================================================
 hle_freepooled:
         jmp hle_freemem
+
+; ===========================================================================
+; $A10F AllocVec — byteSize D0, requirements D1 (exec V36).  As exec does:
+; allocate byteSize+4 bytes, store that size in the first longword, return
+; the address after it (so results are 8n+4).  0 on failure.
+; ===========================================================================
+hle_allocvec:
+        lda r_d0+3              ; >= 16 MB can never fit (and D0+4 must
+        bne @fail               ; not wrap)
+        clc                     ; hle_sz = hle_tmp = D0 + 4 (24-bit + carry)
+        lda r_d0
+        adc #4
+        sta hle_sz
+        sta hle_tmp
+        lda r_d0+1
+        adc #0
+        sta hle_sz+1
+        sta hle_tmp+1
+        lda r_d0+2
+        adc #0
+        sta hle_sz+2
+        sta hle_tmp+2
+        lda #0
+        adc #0
+        sta hle_sz+3            ; 1 only for D0 >= $FFFFFC: alloc rejects
+        sta hle_tmp+3
+        lda r_d1+2
+        sta hle_flg
+        jsr hle_alloc
+        lda hle_old+2
+        ora hle_old+1
+        ora hle_old
+        beq @fail
+        ldx #3                  ; [block] := byteSize + 4
+@w:     lda hle_old,x
+        sta m_addr,x
+        lda hle_tmp,x
+        sta m_val,x
+        dex
+        bpl @w
+        jsr mem_write32
+        clc                     ; D0 = block + 4
+        lda hle_old
+        adc #4
+        sta r_d0
+        lda hle_old+1
+        adc #0
+        sta r_d0+1
+        lda hle_old+2
+        adc #0
+        sta r_d0+2
+        lda #0
+        sta r_d0+3
+        jmp hle_ret
+@fail:  D0_ZERO
+        jmp hle_ret
+
+; ===========================================================================
+; $A110 FreeVec — memoryBlock A1 (from AllocVec; NULL is a no-op).
+; FreeMem(A1 - 4, [A1 - 4]).
+; ===========================================================================
+hle_freevec:
+        lda r_a1
+        ora r_a1+1
+        ora r_a1+2
+        ora r_a1+3
+        beq @out
+        sec                     ; hle_ptr := A1 - 4
+        lda r_a1
+        sbc #4
+        sta hle_ptr
+        sta m_addr
+        lda r_a1+1
+        sbc #0
+        sta hle_ptr+1
+        sta m_addr+1
+        lda r_a1+2
+        sbc #0
+        sta hle_ptr+2
+        sta m_addr+2
+        lda r_a1+3
+        sbc #0
+        sta hle_ptr+3
+        sta m_addr+3
+        jsr mem_read32          ; stored size
+        ldx #3
+@c:     lda m_val,x
+        sta hle_sz,x
+        dex
+        bpl @c
+        jsr hle_free
+@out:   jmp hle_ret
+
+; ===========================================================================
+; $A111 StackSwap — newStack A0 -> struct StackSwapStruct {stk_Lower,
+; stk_Upper, stk_Pointer} (exec V37).  Exchanges the task's tc_SPLower/
+; tc_SPUpper with stk_Lower/stk_Upper and A7 with stk_Pointer, returning on
+; the NEW stack: the return address is popped from the old stack first and
+; the old A7 saved (as exec does), so a second StackSwap with the same
+; struct swaps back.  Retires without hle_ret (PC = popped address).
+; ===========================================================================
+hle_stackswap:
+        ldx #3                  ; hle_old := return address, A7 += 4
+@sp:    lda r_a7,x
+        sta m_addr,x
+        dex
+        bpl @sp
+        jsr mem_read32
+        ldx #3
+@ra:    lda m_val,x
+        sta hle_old,x
+        dex
+        bpl @ra
+        clc
+        lda r_a7
+        adc #4
+        sta r_a7
+        bcc @pop
+        inc r_a7+1
+        bne @pop
+        inc r_a7+2
+        bne @pop
+        inc r_a7+3
+@pop:   lda #<(ENV_PROCESS + TC_SPLOWER)       ; tc_SPLower <-> stk_Lower
+        sta hle_sb
+        lda #>(ENV_PROCESS + TC_SPLOWER)
+        sta hle_sb+1
+        lda #^(ENV_PROCESS + TC_SPLOWER)
+        sta hle_sb+2
+        lda #0
+        jsr hle_sa_a0
+        jsr hle_swap32
+        lda #<(ENV_PROCESS + TC_SPUPPER)       ; tc_SPUpper <-> stk_Upper
+        sta hle_sb
+        lda #>(ENV_PROCESS + TC_SPUPPER)
+        sta hle_sb+1
+        lda #^(ENV_PROCESS + TC_SPUPPER)
+        sta hle_sb+2
+        lda #4
+        jsr hle_sa_a0
+        jsr hle_swap32
+        lda #8                  ; A7 <-> stk_Pointer
+        jsr hle_sa_a0
+        jsr hle_setsa
+        jsr mem_read32
+        ldx #3
+@np:    lda m_val,x
+        sta hle_tmp,x
+        lda r_a7,x
+        sta m_val,x
+        dex
+        bpl @np
+        jsr mem_write32         ; stk_Pointer := old A7 (m_addr unchanged)
+        ldx #3
+@na:    lda hle_tmp,x
+        sta r_a7,x
+        dex
+        bpl @na
+        lda hle_old             ; PC = return address (24-bit)
+        sta r_pc
+        lda hle_old+1
+        sta r_pc+1
+        lda hle_old+2
+        sta r_pc+2
+        lda #0
+        sta r_pc+3
+        jmp dispatch_next
+
+; hle_sa := A0 + A (A = 0..8), 24-bit
+hle_sa_a0:
+        clc
+        adc r_a0
+        sta hle_sa
+        lda r_a0+1
+        adc #0
+        sta hle_sa+1
+        lda r_a0+2
+        adc #0
+        sta hle_sa+2
+        rts
+
+hle_setsa:                      ; m_addr := hle_sa
+        lda hle_sa
+        sta m_addr
+        lda hle_sa+1
+        sta m_addr+1
+        lda hle_sa+2
+        sta m_addr+2
+        lda #0
+        sta m_addr+3
+        rts
+
+hle_setsb:                      ; m_addr := hle_sb
+        lda hle_sb
+        sta m_addr
+        lda hle_sb+1
+        sta m_addr+1
+        lda hle_sb+2
+        sta m_addr+2
+        lda #0
+        sta m_addr+3
+        rts
+
+; hle_swap32 — exchange the guest longwords at hle_sa and hle_sb.
+hle_swap32:
+        jsr hle_setsa
+        jsr mem_read32
+        ldx #3
+@a:     lda m_val,x
+        sta hle_tmp,x
+        dex
+        bpl @a
+        jsr hle_setsb
+        jsr mem_read32          ; m_val = [sb]
+        jsr hle_setsa
+        jsr mem_write32         ; [sa] := old [sb]
+        ldx #3
+@b:     lda hle_tmp,x
+        sta m_val,x
+        dex
+        bpl @b
+        jsr hle_setsb
+        jmp mem_write32         ; [sb] := old [sa]
 
 ; ===========================================================================
 ; hle_alloc — hle_sz = requested size (u32 LE), hle_flg bit 0 = MEMF_CLEAR.
@@ -896,11 +1135,13 @@ hle_tab_lo:
         .byte <hle_input, <hle_read, <hle_isinteractive, <hle_findtask
         .byte <hle_allocmem, <hle_freemem, <hle_setsignal, <hle_createpool
         .byte <hle_deletepool, <hle_allocpooled, <hle_freepooled
+        .byte <hle_allocvec, <hle_freevec, <hle_stackswap
 hle_tab_hi:
         .byte >hle_openlibrary, >hle_closelibrary, >hle_output, >hle_write
         .byte >hle_input, >hle_read, >hle_isinteractive, >hle_findtask
         .byte >hle_allocmem, >hle_freemem, >hle_setsignal, >hle_createpool
         .byte >hle_deletepool, >hle_allocpooled, >hle_freepooled
+        .byte >hle_allocvec, >hle_freevec, >hle_stackswap
 .assert * - hle_tab_hi = HLE_FN_COUNT, error, "hle_tab_hi size != HLE_FN_COUNT"
 dos_name:
         .byte "dos.library", 0

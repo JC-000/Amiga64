@@ -27,8 +27,14 @@ exit"), and the C64 screen rows spell exactly the expected output.
 
 Adversarial leg (default on, ``--no-poison`` disables): before each run the
 first POISON_LEN bytes of the HLE heap are filled with $A5 so MEMF_CLEAR
-and "fresh memory is zero" assumptions cannot pass by accident (VICE's REU
-powers up zeroed; real hardware and earlier runs do not).
+and "fresh memory is zero" assumptions cannot pass by accident, whatever
+the REU happened to contain (its power-up contents are not specified, and
+earlier runs in the same session leave data behind).
+
+When the PRG exports ``hle_dos_init`` (WS-B2's file-handle pool), it is
+called before every program (``--no-dos-init`` disables, to demonstrate
+the leak test's teeth).  Programs marked ``needs_dos`` are skipped while
+``hle_dos.s`` is the supervisor stub.
 
 A HALT_ALINE inside the env's library vector tables is decoded to the
 library/LVO that the program called but the HLE does not implement.
@@ -83,6 +89,7 @@ LVO_NAMES = {
         -30: "Open", -36: "Close", -42: "Read", -48: "Write", -54: "Input",
         -60: "Output", -66: "Seek", -72: "DeleteFile", -84: "Lock",
         -90: "UnLock", -126: "CurrentDir", -132: "IoErr", -216: "IsInteractive",
+        -450: "ChangeMode", -462: "SetIoErr", -810: "ReadItem", -948: "PutStr",
     },
 }
 
@@ -110,17 +117,37 @@ def _alloc_sum() -> int:
 @dataclass
 class Program:
     name: str
-    exit_code: int
+    exit_code: int | None     # D0 at HALT_OK (None: halts elsewhere)
     lines: list[str]          # expected screen rows from row 0 (rest blank)
+    reason: int = HALT_OK
+    where: str | None = None  # decoded unimplemented-LVO slot (HALT_ALINE)
+    needs_dos: bool = False   # needs WS-B2's real hle_dos.s (skip on stub)
+
+
+def _scroll_line(n: int) -> str:
+    return f"line {n:02d}" + "*" * ((n * 3) % 7)
 
 
 def programs() -> dict[str, Program]:
     progs = [
         Program("hello", 0, ["Hello from vbcc!", "2 + 40 = 42"]),
         Program("exit", 7, ["exit(7) via stdio"]),
-        # 30 lines through a 25-row screen: rows show lines 6..30.
-        Program("scroll", 0, [f"line {n:02d}" for n in range(6, 31)]),
+        # 30 lines of varying length through 25 rows: rows show 6..30.
+        Program("scroll", 0, [_scroll_line(n) for n in range(6, 31)]),
         Program("alloc", 0, [f"alloc ok {_alloc_sum()}"]),
+        Program("sysbase", 0, [
+            f"ThisTask={hle_env.ENV_PROCESS:x}", "AttnFlags=0",
+            f"MaxLocMem={0x200000:x}", "exec ver=40", "dos ver=40",
+            "dos v40 ok", "dos v41 NULL", "dos v50 NULL", "dos.fake NULL",
+            "utility NULL"]),
+        Program("readitem", None, [], reason=0x01,
+                where="dos.library/ReadItem (LVO -810)"),
+        Program("putstr", None, ["before"], reason=0x01,
+                where="dos.library/PutStr (LVO -948)"),
+        Program("bigstack", 0, ["stack swapped"]),
+        # handle-state leak across programs (b1-review F2): run in order
+        Program("leak_open", 0, ["opened 8"], needs_dos=True),
+        Program("leak_check", 0, ["open ok"], needs_dos=True),
     ]
     return {p.name: p for p in progs}
 
@@ -160,7 +187,7 @@ def units() -> dict[str, Unit]:
                        "A3": hle_env.FH_CONIN >> 2, "D4": NEG1, "D5": 0,
                        "D6": 5, "D7": 13, "A4": 0, "A5": NEG1},
              ["unit ok", "line2"]),
-        Unit("u_dos2", {"D4": 15, "D5": NEG1, "D6": 3},
+        Unit("u_dos2", {"D4": 15, "D5": NEG1, "D6": 3, "D7": NEG1},
              ["no output call", "in!"]),
         Unit("u_file", {"D1": FILE_FH, "D2": 0x12345, "D3": 0x777,
                         "A7": (FILE_FH << 2) - 4}, [], reason=0x01,
@@ -168,6 +195,17 @@ def units() -> dict[str, Unit]:
         Unit("u_file2", {"D1": FILE_FH, "D2": 0x23456, "D3": 9,
                          "A7": (FILE_FH << 2) - 4}, [], reason=0x01,
              pc=dos - 42 + 2, seam=True),
+        Unit("u_file3", {"D1": FILE_FH, "D3": 3,
+                         "A7": (FILE_FH << 2) - 4}, [], reason=0x01,
+             pc=dos - 48 + 2, seam=True),
+        Unit("u_dos3", {"D4": 0, "D5": 0, "D6": NEG1}, []),
+        Unit("u_openlib", {"D2": dos, "D3": 0, "D4": 0, "D5": 0, "D6": 0,
+                           "D7": dos, "A2": 40, "A3": 40}, []),
+        Unit("u_vec", {"D2": H + 4, "D3": 0, "D4": 104, "D5": H + 108,
+                       "D6": H + 108, "D7": H + 124}, [], heap_next=H + 128),
+        Unit("u_swap", {"D2": H + 252, "D3": 0xCAFEBABE, "D4": 0x00F000,
+                        "D5": H + 20, "D6": H + 260,
+                        "A4": hle_env.ENV_STACK_LOWER, "D7": 0x00F000}, []),
         Unit("u_task", {"D2": hle_env.ENV_PROCESS, "D3": 0, "D4": 0, "D5": 0,
                         "D6": hle_env.EXEC_VERSION,
                         "D7": hle_env.ENV_CLI >> 2}, []),
@@ -229,32 +267,13 @@ def vbcc_home() -> str:
     return home
 
 
-def vbcc_config(home: str, out_dir: str) -> str:
-    """Derive build/vbcc/aos68k-amiga64 from vbcc's own aos68k config.
-
-    Only change: drop vlink's ``-Rshort`` (HUNK_RELOC32SHORT, $3F7) from the
-    no-debug link line — host/hunk.py parses the classic HUNK_RELOC32 only.
-    Generated at test time so no vbcc-derived file is committed.
-    """
-    src = os.path.join(home, "config", "aos68k")
-    with open(src) as f:
-        text = f.read()
-    if "-Rshort" not in text:
-        raise SystemExit(f"error: unexpected vbcc config {src} (no -Rshort)")
-    dst = os.path.join(out_dir, "aos68k-amiga64")
-    with open(dst, "w") as f:
-        f.write(text.replace(" -Rshort", ""))
-    return dst
-
-
 def compile_c(name: str, out_dir: str) -> bytes:
     home = vbcc_home()
-    cfg = vbcc_config(home, out_dir)
     src = os.path.join(FIXTURE_DIR, f"{name}.c")
     exe = os.path.join(out_dir, name)
     env = dict(os.environ, VBCC=home,
                PATH=os.path.join(home, "bin") + os.pathsep + os.environ["PATH"])
-    cmd = ["vc", f"+{cfg}", "-O2", "-o", exe, src]
+    cmd = ["vc", "+aos68k", "-O2", "-o", exe, src]   # vbcc's stock config
     res = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if res.returncode != 0:
         raise SystemExit(f"error: vc failed for {name}:\n{res.stdout}{res.stderr}")
@@ -267,10 +286,12 @@ def compile_c(name: str, out_dir: str) -> bytes:
 def decode_lvo_halt(pc: int) -> str | None:
     """PC after an A-line halt in a vector slot -> 'library/Function (LVO)'."""
     slot = pc - 2
+    depth = getattr(hle_env, "LVO_DEPTH", {})
     best = None
     for lib, (base, _funcs) in hle_env.LIBRARIES.items():
         lvo = slot - base
-        if -1024 < lvo < 0 and lvo % 6 == 0:
+        lo = -depth.get(lib, 1024)
+        if lo <= lvo < 0 and lvo % 6 == 0:
             if best is None or abs(lvo) < abs(best[1]):
                 best = (lib, lvo)
     if best is None:
@@ -285,11 +306,26 @@ def decode_lvo_halt(pc: int) -> str | None:
 def launch(manifest: dict) -> tuple[list[Chunk], int]:
     """Env chunks + the PC to start at (CLI launch stub when available)."""
     st = manifest["stack_top"]
-    env = hle_env.env_chunks(stack_top=st)
-    if hasattr(hle_env, "launch_chunks"):
+    if hasattr(hle_env, "check_program_fits"):
+        hle_env.check_program_fits(manifest)
+        return (hle_env.env_chunks(stack_top=st, entry=manifest["entry"]),
+                hle_env.ENV_LAUNCH)
+    if hasattr(hle_env, "launch_chunks"):           # 58f9755 env (red runs)
         stub, pc = hle_env.launch_chunks(manifest["entry"])
-        return env + stub, pc
-    return env, manifest["entry"]   # pre-M2-next env (red baseline)
+        return hle_env.env_chunks(stack_top=st) + stub, pc
+    return hle_env.env_chunks(stack_top=st), manifest["entry"]
+
+
+DOS_INIT = True       # main() clears it for --no-dos-init
+
+
+def has_label(sess: Session, name: str) -> bool:
+    from tests.harness_util import lookup_label
+    try:
+        lookup_label(sess.labels, name)
+        return True
+    except KeyError:
+        return False
 
 
 def stage_and_run(sess: Session, tag: str, blob: bytes, budget: int,
@@ -305,6 +341,8 @@ def stage_and_run(sess: Session, tag: str, blob: bytes, budget: int,
     if poison:
         staged.append(Chunk(HEAP_BASE, bytes([POISON_BYTE]) * POISON_LEN))
     sess.stage(staged)
+    if DOS_INIT and has_label(sess, "hle_dos_init"):
+        sess._call("hle_dos_init")    # fresh WS-B2 handle pool per program
     t0 = time.monotonic()
     res = sess.run_program(pc, manifest["stack_top"], budget)
     dt = time.monotonic() - t0
@@ -341,14 +379,23 @@ def check_screen(sess: Session, tag: str, lines: list[str]) -> None:
 def run_one(sess: Session, prog: Program, blob: bytes, budget: int,
             poison: bool) -> None:
     tag = prog.name
+    if prog.needs_dos and hle_dos_is_stub(sess):
+        print(f"[{tag}] SKIP: needs WS-B2's hle_dos.s (stub linked)")
+        return
     res, manifest, why = stage_and_run(sess, tag, blob, budget, poison)
-    sess.check(f"{tag}: halted HALT_OK",
-               res.halt != 0 and res.timeout == 0 and res.reason == HALT_OK, why)
-    sess.check(f"{tag}: exit code {prog.exit_code}",
-               res.regs["D0"] == prog.exit_code, f"D0={res.regs['D0']:08X}")
-    sess.check(f"{tag}: A7 back at stack_top+4",
-               res.regs["A7"] == manifest["stack_top"] + 4,
-               f"A7={res.regs['A7']:08X}")
+    halted = res.halt != 0 and res.timeout == 0
+    want = HALT_REASONS[prog.reason]
+    sess.check(f"{tag}: halted {want}", halted and res.reason == prog.reason,
+               why)
+    if prog.where is not None:
+        sess.check(f"{tag}: in the {prog.where} slot", prog.where in why, why)
+    if prog.exit_code is not None:
+        sess.check(f"{tag}: exit code {prog.exit_code}",
+                   res.regs["D0"] == prog.exit_code, f"D0={res.regs['D0']:08X}")
+    if prog.reason == HALT_OK:
+        sess.check(f"{tag}: A7 back at stack_top+4",
+                   res.regs["A7"] == manifest["stack_top"] + 4,
+                   f"A7={res.regs['A7']:08X}")
     check_screen(sess, tag, prog.lines)
 
 
@@ -369,12 +416,18 @@ def hle_dos_is_stub(sess: Session) -> bool:
 def run_unit(sess: Session, u: Unit, blob: bytes, budget: int) -> None:
     tag = u.name
     if u.seam and not hle_dos_is_stub(sess):
-        # The C2 pin below is exact only against the WS-B2 stub (a halt in
-        # the slot with the call state untouched).  With a real hle_dos.s
-        # the hand-off is WS-B2's to test; here we only require that the
-        # call was not printed on the console.
-        stage_and_run(sess, tag, blob, budget, poison=True)
-        print(f"  NOTE {tag}: real hle_dos_* linked — exact seam pin skipped")
+        # Real WS-B2 linked: the handle built on the stack is not an open
+        # pool slot, so hle_dos_* must fail it cleanly — HALT_OK, D0 = -1,
+        # stack restored, nothing on the console (b1-review F5).
+        res, manifest, why = stage_and_run(sess, tag, blob, budget, poison=True)
+        sess.check(f"{tag}: halted HALT_OK (serviced by hle_dos)",
+                   res.halt != 0 and res.timeout == 0 and res.reason == HALT_OK,
+                   why)
+        sess.check(f"{tag}: D0=-1 (slot not open)", res.regs["D0"] == NEG1,
+                   f"D0={res.regs['D0']:08X}")
+        sess.check(f"{tag}: A7 back at stack_top+4",
+                   res.regs["A7"] == manifest["stack_top"] + 4,
+                   f"A7={res.regs['A7']:08X}")
         check_screen(sess, tag, [])
         return
     res, manifest, why = stage_and_run(sess, tag, blob, budget, poison=True)
@@ -413,6 +466,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-poison", action="store_true",
                     help="do not pre-fill the heap with $A5 (C programs; "
                     "units always poison)")
+    ap.add_argument("--no-dos-init", action="store_true",
+                    help="do NOT call hle_dos_init before each program "
+                    "(demonstrates the leak test's teeth)")
     ap.add_argument("--no-units", action="store_true",
                     help="skip the HLE unit programs (fixtures/c/hle_unit)")
     ap.add_argument("--backend", default="auto", choices=["auto", "vice", "u64"])
@@ -420,6 +476,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="build dir for compiled programs (default build/vbcc)")
     args = ap.parse_args(argv)
 
+    global DOS_INIT
+    DOS_INIT = not args.no_dos_init
     prg = os.path.abspath(args.prg)
     labels_path = (os.path.abspath(args.labels) if args.labels
                    else os.path.splitext(prg)[0] + ".lbl")

@@ -6,10 +6,10 @@
         lea     name(pc),a1
         jsr     -294(a6)            ; FindTask("nobody")
         move.l  d0,d3               ; 0
-        moveq   #0,d0
-        move.l  #$1000,d1
-        jsr     -306(a6)            ; SetSignal(0, SIGBREAKF_CTRL_C)
-        move.l  d0,d4               ; 0
+        move.l  #$1000,d0           ; newSignals = CTRL_C, mask 0: changes
+        moveq   #0,d1               ; nothing, returns the old state
+        jsr     -306(a6)            ; SetSignal($1000, 0)
+        move.l  d0,d4               ; 0 (must be written: D0 was $1000)
         lea     libname(pc),a1
         moveq   #0,d0
         jsr     -552(a6)            ; OpenLibrary("intuition.library")

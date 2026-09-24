@@ -42,12 +42,6 @@ ENV_CLI_NAME = $000444  ; BSTR command-name buffer, 60 bytes
 .ifndef ENV_CLI
 ENV_CLI   = $000480     ; struct CommandLineInterface, 64 bytes
 .endif
-.ifndef EXEC_BASE
-EXEC_BASE = $000800     ; fake exec.library base (vector slots below it)
-.endif
-.ifndef DOS_BASE
-DOS_BASE  = $000A00     ; fake dos.library base (vector slots below it)
-.endif
 .ifndef ENV_PROCESS
 ENV_PROCESS = $000A40   ; struct Process, 228 bytes (FindTask(NULL) result)
 .endif
@@ -66,9 +60,20 @@ FH_NIL    = $000B90     ; struct FileHandle (44 bytes), fh_Args = 2 NIL:
 STACK_TOP = $00F000     ; initial A7 (host/image.py STACK_TOP); [A7] = EXIT_ADDR
 .endif
 
-; @region run $010000-$0FFFFF program load region - first Hunk segment at $010000 (host/image.py BASE_ADDR), 4-byte aligned segments follow
+; @region run $010000-$0EFFFF program load region - first Hunk segment at $010000 (host/image.py BASE_ADDR), 4-byte aligned segments follow
 .ifndef PROG_BASE
 PROG_BASE = $010000     ; guest load address of the first program segment
+.endif
+
+; @region hle $0F0000-$0FFFFF HLE library bases + their full vector tables (WS-B1, docs/WAVE4_BRIEF.md C4 amendment 2026-09-24)
+.ifndef ENV_LIBS
+ENV_LIBS  = $0F0000     ; start of the staged library area (padding from here)
+.endif
+.ifndef EXEC_BASE
+EXEC_BASE = $0F0400     ; ExecBase (632 bytes); slots LVO -6..-828 below it
+.endif
+.ifndef DOS_BASE
+DOS_BASE  = $0F0C00     ; DOSBase (70 bytes); slots LVO -6..-1158 below it
 .endif
 
 ; @region hle $100000-$7FFFFF HLE heap - exec AllocMem/FreeMem pool (WS-B1, docs/WAVE4_BRIEF.md C4)
@@ -83,8 +88,9 @@ HEAP_END  = $7FFFFF     ; last byte of the AllocMem pool (inclusive)
 
 ; --- Contract invariants (assemble-time; keep true under -D relocation) ----
 .assert EXIT_ADDR >= ENV_BASE,        error, "exit stub must sit inside the HLE env region"
-.assert EXEC_BASE - 552 >= ENV_BASE,  error, "deepest exec.library vector slot (LVO -552) must stay inside the env region"
-.assert DOS_BASE - 60 >= ENV_BASE,    error, "deepest dos.library vector slot (LVO -60) must stay inside the env region"
+.assert EXEC_BASE - 828 >= ENV_LIBS,  error, "deepest exec.library vector slot (LVO -828) must stay inside the library region"
+.assert DOS_BASE - 1158 >= EXEC_BASE + 632, error, "dos.library vector table must not overlap ExecBase"
+.assert DOS_BASE + 70 <= $100000,     error, "DOSBase must end inside the library region"
 .assert STACK_TOP < PROG_BASE,        error, "guest stack must sit below the program load base"
 .assert HEAP_BASE > PROG_BASE,        error, "AllocMem pool must sit above the program load region"
 .assert (HEAP_BASE & 7) = 0,          error, "AllocMem pool must be 8-byte aligned (MEM_BLOCKSIZE)"

@@ -50,7 +50,7 @@ EXPECTED_EXEC = {
     "OpenLibrary": -552, "CloseLibrary": -414, "FindTask": -294,
     "AllocMem": -198, "FreeMem": -210, "SetSignal": -306,
     "CreatePool": -696, "DeletePool": -702, "AllocPooled": -708,
-    "FreePooled": -714,
+    "FreePooled": -714, "AllocVec": -684, "FreeVec": -690, "StackSwap": -732,
 }
 EXPECTED_DOS_B1 = {
     "Output": -60, "Write": -48, "Input": -54, "Read": -42,
@@ -125,8 +125,8 @@ def test_unimplemented_slots_hold_sentinel():
     mem = _env()
     # a few LVOs vbcc's Workbench path would call but we do not implement
     for base, lvo in [(hle_env.EXEC_BASE, -384), (hle_env.EXEC_BASE, -132),
-                      (hle_env.EXEC_BASE, -684), (hle_env.EXEC_BASE, -732),
-                      (hle_env.DOS_BASE, -126)]:
+                      (hle_env.EXEC_BASE, -738), (hle_env.EXEC_BASE, -6),
+                      (hle_env.DOS_BASE, -126), (hle_env.DOS_BASE, -1158)]:
         assert _be16(mem, base + lvo) == hle_env.OP_LVO_UNIMPL
     assert hle_env.OP_LVO_UNIMPL & 0xFF00 not in (0xA100, 0xAF00)
 
@@ -152,12 +152,12 @@ def test_process_fields():
     assert p % 4 == 0
     assert mem[p + 8] == 13                                  # NT_PROCESS
     assert _be32(mem, p + 0x3A) == hle_env.ENV_STACK_LOWER       # tc_SPLower
-    assert _be32(mem, p + 0x3E) == STACK_TOP                 # tc_SPUpper
+    assert _be32(mem, p + 0x3E) == STACK_TOP + 4             # tc_SPUpper
     assert _be32(mem, p + 0x9C) == hle_env.FH_CONIN >> 2     # pr_CIS
     assert _be32(mem, p + 0xA0) == hle_env.FH_CONOUT >> 2    # pr_COS
     assert _be32(mem, p + 0xAC) == hle_env.ENV_CLI >> 2     # pr_CLI
     assert _be32(mem, p + 0xE0) == 0                         # pr_CES
-    assert STACK_TOP - hle_env.ENV_STACK_LOWER >= 4096           # vbcc __stack
+    assert STACK_TOP + 4 - hle_env.ENV_STACK_LOWER >= 4096       # vbcc __stack
 
 
 def test_cli_command_name_bstr():
@@ -201,9 +201,14 @@ def test_heap_region():
     assert hle_env.HEAP_BASE % 8 == 0
 
 
-def test_launch_stub_encoding():
-    chunks, pc = hle_env.launch_chunks(0x010000, args=b"a b\n")
-    mem = _mem(chunks)
+@pytest.mark.parametrize("via_env", [False, True])
+def test_launch_stub_encoding(via_env):
+    if via_env:
+        mem = _mem(hle_env.env_chunks(STACK_TOP, entry=0x010000, args=b"a b\n"))
+        pc = hle_env.ENV_LAUNCH
+    else:
+        chunks, pc = hle_env.launch_chunks(0x010000, args=b"a b\n")
+        mem = _mem(chunks)
     assert pc == hle_env.ENV_LAUNCH
     # lea ENV_ARGS.w,a0 / moveq #len,d0 / jmp entry.l
     assert _be16(mem, pc) == 0x41F8 and _be16(mem, pc + 2) == hle_env.ENV_ARGS
@@ -221,11 +226,12 @@ def test_launch_args_limits():
 # --- placement (C4): WS-B1 structures in $000400-$000BFF only -------------------
 
 def test_env_structs_inside_ws_b1_region_and_disjoint():
-    chunks = hle_env.env_chunks(STACK_TOP) + hle_env.launch_chunks(0x10000)[0]
+    chunks = hle_env.env_chunks(STACK_TOP, entry=0x10000)
     _mem(chunks)                                       # no overlap
     for c in chunks:
         end = c.guest_offset + len(c.data) - 1
-        if c.guest_offset in (hle_env.ABSEXECBASE_ADDR, STACK_TOP):
+        if c.guest_offset in (hle_env.ABSEXECBASE_ADDR, STACK_TOP,
+                              hle_env.ENV_LIBS):      # library region: C4 amd.
             continue
         assert 0x000400 <= c.guest_offset and end <= 0x000BFF, \
             f"${c.guest_offset:06X}-${end:06X}"

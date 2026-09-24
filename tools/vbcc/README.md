@@ -39,9 +39,9 @@ python3 -m tests.run_vbcc --prg build/<pkg>/runner.prg
 ```
 
 `tests/run_vbcc.py` finds the toolchain via `$VBCC` or the default
-prefix, and writes `build/vbcc/aos68k-amiga64`: vbcc's `aos68k` config
-with vlink's `-Rshort` removed (`host/hunk.py` reads classic
-`HUNK_RELOC32` only).
+prefix and compiles with vbcc's **stock** `vc +aos68k -O2` — exactly what
+users get. Its vlink line uses `-Rshort`, which emits
+`HUNK_RELOC32SHORT` (`$3F7` in a load file); `host/hunk.py` parses it.
 
 ## Licence note
 

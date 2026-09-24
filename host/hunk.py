@@ -7,6 +7,13 @@ Supported hunk blocks:
     HUNK_DATA    ($3EA)  initialized data hunk (payload follows)
     HUNK_BSS     ($3EB)  uninitialized data hunk (size only)
     HUNK_RELOC32 ($3EC)  32-bit relocations, attached to the preceding hunk
+    HUNK_RELOC32SHORT ($3FC, and $3F7 in executables)
+                         the same relocations with 16-bit count/target/offset
+                         words, padded to a longword at the end.  In a load
+                         file dos.library's LoadSeg treats $3F7 (the object-
+                         file id HUNK_DREL32) as RELOC32SHORT, and that is
+                         what vlink -Rshort (vbcc's default +aos68k link)
+                         emits.
     HUNK_END     ($3F2)  terminates the current hunk
     HUNK_SYMBOL  ($3F0)  skipped
     HUNK_DEBUG   ($3F1)  skipped
@@ -19,6 +26,12 @@ The flags are irrelevant on our target (all guest memory is REU) but are
 parsed and preserved.
 
 Malformed input raises :class:`HunkError` with a description of the fault.
+
+Not supported (raise :class:`HunkError` "unsupported hunk type"): base-
+relative / data-relative relocations HUNK_DREL16 ($3F8), HUNK_DREL8 ($3F9),
+HUNK_RELRELOC32 ($3FD), HUNK_ABSRELOC16 ($3FE), overlays, and any other
+block.  (vbcc's small-data model does not need them in executables: its
+A4-relative accesses are resolved by the linker.)
 """
 
 from __future__ import annotations
@@ -31,6 +44,8 @@ HUNK_CODE = 0x3E9
 HUNK_DATA = 0x3EA
 HUNK_BSS = 0x3EB
 HUNK_RELOC32 = 0x3EC
+HUNK_RELOC32SHORT = 0x3FC
+HUNK_DREL32 = 0x3F7  # == RELOC32SHORT inside a load file (LoadSeg V37+)
 HUNK_SYMBOL = 0x3F0
 HUNK_DEBUG = 0x3F1
 HUNK_END = 0x3F2
@@ -95,6 +110,16 @@ class _Reader:
             )
         val = int.from_bytes(self.blob[self.pos : self.pos + 4], "big")
         self.pos += 4
+        return val
+
+    def u16(self, what: str) -> int:
+        if self.pos + 2 > len(self.blob):
+            raise HunkError(
+                f"truncated file: expected {what} at offset {self.pos}, "
+                f"file is {len(self.blob)} bytes"
+            )
+        val = int.from_bytes(self.blob[self.pos : self.pos + 2], "big")
+        self.pos += 2
         return val
 
     def take(self, n: int, what: str) -> bytes:
@@ -193,34 +218,45 @@ def parse(blob: bytes) -> Executable:
             )
             open_hunk = True
 
-        elif hunk_type == HUNK_RELOC32:
+        elif hunk_type in (HUNK_RELOC32, HUNK_RELOC32SHORT, HUNK_DREL32):
+            short = hunk_type != HUNK_RELOC32
+            name = "reloc32short" if short else "reloc32"
             if not segments or not open_hunk:
                 raise HunkError(
-                    f"HUNK_RELOC32 at offset {r.pos - 4} is not attached to "
-                    f"a hunk"
+                    f"HUNK_{name.upper()} at offset {r.pos - 4} is not "
+                    f"attached to a hunk"
                 )
             seg = segments[-1]
             if seg.kind == "bss":
                 raise HunkError(
-                    f"HUNK_RELOC32 attached to BSS hunk {len(segments) - 1}"
+                    f"HUNK_{name.upper()} attached to BSS hunk "
+                    f"{len(segments) - 1}"
                 )
-            while (count := r.u32("reloc32 count")) != 0:
-                target = r.u32("reloc32 target hunk")
+            read = r.u16 if short else r.u32
+            nwords = 0
+            while (count := read(f"{name} count")) != 0:
+                target = read(f"{name} target hunk")
+                nwords += 2
                 if target >= table_size:
                     raise HunkError(
-                        f"reloc32 target hunk {target} out of range "
+                        f"{name} target hunk {target} out of range "
                         f"(table size {table_size})"
                     )
                 offsets = seg.relocs.setdefault(target, [])
                 for _ in range(count):
-                    off = r.u32("reloc32 offset")
+                    off = read(f"{name} offset")
+                    nwords += 1
                     if off + 4 > len(seg.data):
                         raise HunkError(
-                            f"reloc32 offset {off} out of range in hunk "
+                            f"{name} offset {off} out of range in hunk "
                             f"{len(segments) - 1} ({len(seg.data)} data bytes)"
                         )
                     offsets.append(off)
                 offsets.sort()
+            if short:
+                nwords += 1                    # the terminating 0 count
+                if nwords % 2:
+                    r.u16(f"{name} longword padding")
 
         elif hunk_type == HUNK_END:
             if not open_hunk:

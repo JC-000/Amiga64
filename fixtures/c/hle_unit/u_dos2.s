@@ -1,5 +1,5 @@
 ; Console without a prior Output() call (cursor state comes from the env),
-; plus negative-length Write.
+; plus negative / >= 16 MB length Write.
         movea.l 4.w,a6
         lea     dosname(pc),a1
         moveq   #0,d0
@@ -21,6 +21,12 @@
         moveq   #3,d3
         jsr     -48(a6)             ; Write to the console-in handle -> console
         move.l  d0,d6               ; 3
+        move.l  #FH_CONOUT>>2,d1
+        lea     msg2(pc),a0
+        move.l  a0,d2
+        move.l  #$01000003,d3       ; bits 24-30 set: >= 16 MB
+        jsr     -48(a6)
+        move.l  d0,d7               ; -1, nothing printed
         rts
 dosname: dc.b   "dos.library",0
 msg:    dc.b    "no output call",10
