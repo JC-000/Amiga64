@@ -22,6 +22,8 @@
 ;   $07 exec FindTask     -294   $0F exec AllocVec     -684
 ;                                $10 exec FreeVec      -690
 ;                                $11 exec StackSwap    -732
+;   $12 dos  GetVar       -906   $13 dos  DateStamp    -192
+;   $14 dos  SystemTagList -606
 ;
 ; HLE state lives in GUEST memory (ENV_STATE, staged fresh by hle_env.py
 ; before every run): heap bump pointer + console cursor.  That is the
@@ -44,7 +46,7 @@
 .import hle_dos_dispatch        ; runtime/ops/hle_dos.s (WS-B2), indices $30-$4F
 .import hle_dos_read, hle_dos_write     ; WS-B2 file-handle I/O (C2)
 
-HLE_FN_COUNT = 18               ; valid indices $A100-$A111 (hle_env.HLE_FN_COUNT)
+HLE_FN_COUNT = 21               ; valid indices $A100-$A114 (hle_env.HLE_FN_COUNT)
 LIB_VERSION  = 40               ; OpenLibrary: newer versions -> NULL
 HLE_DOS_FIRST = $30             ; $A130-$A14F: file DOS (hle_dos.s, WAVE4 C3)
 HLE_DOS_LAST  = $4F
@@ -686,6 +688,24 @@ hle_stackswap:
         sta r_a7,x
         dex
         bpl @na
+        sec                     ; [new A7 - 4] := return address, as exec
+        lda r_a7                ; does (it returns with RTS on the new stack)
+        sbc #4
+        sta m_addr
+        lda r_a7+1
+        sbc #0
+        sta m_addr+1
+        lda r_a7+2
+        sbc #0
+        sta m_addr+2
+        lda #0
+        sta m_addr+3
+        ldx #3
+@rw:    lda hle_old,x
+        sta m_val,x
+        dex
+        bpl @rw
+        jsr mem_write32
         lda hle_old             ; PC = return address (24-bit)
         sta r_pc
         lda hle_old+1
@@ -695,6 +715,53 @@ hle_stackswap:
         lda #0
         sta r_pc+3
         jmp dispatch_next
+
+; ===========================================================================
+; $A112 GetVar — name D1, buffer D2, size D3, flags D4 (dos V36).  There
+; are no environment/local variables: D0 = -1 ("not found"), the buffer is
+; not touched.  IoErr is NOT set: the file-DOS IoErr lives in WS-B2's
+; hle_dos_ioerr (docs/HLE.md).
+; $A114 SystemTagList — command D1, tags D2 (dos V36).  No shell: D0 = -1
+; (the command could not be run), so system("cmd") returns -1.
+; ===========================================================================
+hle_getvar:
+hle_systemtaglist:
+        D0_MINUS1
+        jmp hle_ret
+
+; ===========================================================================
+; $A113 DateStamp — struct DateStamp *ds in D1 (an address, not a BPTR).
+; The HLE clock is stopped at ds_Days = ds_Minute = ds_Tick = 0
+; (1978-01-01 00:00:00); D0 = D1.
+; ===========================================================================
+hle_datestamp:
+        ldx #3
+@c:     lda r_d1,x
+        sta hle_ptr,x
+        sta r_d0,x
+        dex
+        bpl @c
+        lda #3
+        sta hle_idx
+@w:     ldx #3
+@a:     lda hle_ptr,x
+        sta m_addr,x
+        lda #0
+        sta m_val,x
+        dex
+        bpl @a
+        jsr mem_write32
+        clc                     ; next longword
+        lda hle_ptr
+        adc #4
+        sta hle_ptr
+        bcc @n
+        inc hle_ptr+1
+        bne @n
+        inc hle_ptr+2
+@n:     dec hle_idx
+        bne @w
+        jmp hle_ret
 
 ; hle_sa := A0 + A (A = 0..8), 24-bit
 hle_sa_a0:
@@ -1136,12 +1203,14 @@ hle_tab_lo:
         .byte <hle_allocmem, <hle_freemem, <hle_setsignal, <hle_createpool
         .byte <hle_deletepool, <hle_allocpooled, <hle_freepooled
         .byte <hle_allocvec, <hle_freevec, <hle_stackswap
+        .byte <hle_getvar, <hle_datestamp, <hle_systemtaglist
 hle_tab_hi:
         .byte >hle_openlibrary, >hle_closelibrary, >hle_output, >hle_write
         .byte >hle_input, >hle_read, >hle_isinteractive, >hle_findtask
         .byte >hle_allocmem, >hle_freemem, >hle_setsignal, >hle_createpool
         .byte >hle_deletepool, >hle_allocpooled, >hle_freepooled
         .byte >hle_allocvec, >hle_freevec, >hle_stackswap
+        .byte >hle_getvar, >hle_datestamp, >hle_systemtaglist
 .assert * - hle_tab_hi = HLE_FN_COUNT, error, "hle_tab_hi size != HLE_FN_COUNT"
 dos_name:
         .byte "dos.library", 0

@@ -157,8 +157,11 @@ DOS_FUNCS = {
     "Input": (-54, 0x04),
     "Read": (-42, 0x05),
     "IsInteractive": (-216, 0x06),
+    "GetVar": (-906, 0x12),
+    "DateStamp": (-192, 0x13),
+    "SystemTagList": (-606, 0x14),
 }
-HLE_FN_COUNT = 0x12          # indices $00-$11 (mirrors hle.s HLE_FN_COUNT)
+HLE_FN_COUNT = 0x15          # indices $00-$14 (mirrors hle.s HLE_FN_COUNT)
 # File-DOS functions (HLE indices $30-$4F) are owned by WS-B2 in
 # host/hle_dos_env.py and merged here (docs/WAVE4_BRIEF.md C3).
 _clash = set(DOS_FUNCS) & set(DOS_FILE_FUNCS)
@@ -227,9 +230,30 @@ def _library(size: int, version: int, negsize: int, name_addr: int) -> bytes:
     return lib
 
 
+# struct ExecBase (V40) List headers: offset -> lh_Type.  MemList,
+# ResourceList, DeviceList, IntrList, LibList, PortList, TaskReady,
+# TaskWait, SemaphoreList, and the five SoftInts lists (16-byte
+# SoftIntList, List first).  ex_MemHandlers (616) is a MinList.
+EB_LISTS = {322: 10, 336: 8, 350: 3, 364: 2, 378: 9, 392: 4, 406: 1, 420: 1,
+            532: 15, **{434 + 16 * i: 2 for i in range(5)}}
+EB_MINLISTS = (616,)
+
+
+def _empty_list(buf: bytearray, off: int, addr: int, ntype: int | None) -> None:
+    """Empty (Min)List at buf[off] (guest address addr): lh_Head = &lh_Tail,
+    lh_Tail = 0, lh_TailPred = &lh_Head (+ lh_Type for a full List)."""
+    struct.pack_into(">III", buf, off, addr + 4, 0, addr)
+    if ntype is not None:
+        buf[off + 12] = ntype
+
+
 def _execbase() -> bytes:
     eb = _library(EXECBASE_SIZE, EXEC_VERSION, LVO_DEPTH["exec.library"],
                   LIB_NAMES_ADDR)
+    for off, ntype in EB_LISTS.items():
+        _empty_list(eb, off, EXEC_BASE + off, ntype)
+    for off in EB_MINLISTS:
+        _empty_list(eb, off, EXEC_BASE + off, None)
     eb[EB_MAXLOCMEM_OFF:EB_MAXLOCMEM_OFF + 4] = _be32(MAX_LOC_MEM)
     eb[EB_THISTASK_OFF:EB_THISTASK_OFF + 4] = _be32(ENV_PROCESS)
     struct.pack_into(">H", eb, EB_ATTNFLAGS_OFF, 0)
@@ -319,8 +343,12 @@ def env_chunks(stack_top: int = STACK_TOP,
                args: bytes = b"\n") -> list[Chunk]:
     """Image chunks for the complete HLE environment.
 
-    Stage these alongside the program's own chunks (order irrelevant —
-    nothing overlaps).  *stack_top* must match the A7 the driver passes to
+    The returned chunks do not overlap each other, nor a program image
+    that fits the load region (check it with :func:`check_program_fits`),
+    so their order relative to the program's chunks is irrelevant.  They
+    DO overlap :func:`launch_chunks` output and anything else staged into
+    the env/library areas (e.g. a test's own records): stage such chunks
+    AFTER these, or pass *entry* here.  *stack_top* must match the A7 the driver passes to
     ``test_run_program``.  Staging them re-initialises all HLE state
     (heap pointer, console cursor) for the next run.  The WS-B1 env part
     ($000400-$000BFF) and the library area are each one gap-free chunk.

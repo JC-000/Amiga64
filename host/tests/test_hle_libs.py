@@ -176,3 +176,34 @@ def test_program_reaching_library_region_rejected():
     b.add_bss(0x0F0000 - 0x010000 - 8)       # last byte $0EFFFF: fits
     _, manifest = image.build_image(hunk.parse(b.build()))
     hle_env.check_program_fits(manifest)
+
+
+# --- fix round 2 (b1-review R1/R2/R4) -----------------------------------------
+
+@pytest.mark.parametrize("name,lvo", [("GetVar", -906), ("DateStamp", -192),
+                                      ("SystemTagList", -606)])
+def test_r1_r2_dos_calls(name, lvo):
+    assert hle_env.DOS_FUNCS[name][0] == lvo
+    assert 0 <= hle_env.DOS_FUNCS[name][1] <= 0x2F
+
+
+# struct ExecBase (V40) List headers (14 bytes) + node type, and the
+# ex_MemHandlers MinList (12 bytes)
+EXEC_LISTS = [(322, 10), (336, 8), (350, 3), (364, 2), (378, 9), (392, 4),
+              (406, 1), (420, 1), (532, 15)] + [(434 + 16 * i, 2) for i in range(5)]
+
+
+@pytest.mark.parametrize("off,ntype", EXEC_LISTS)
+def test_execbase_lists_are_empty_lists(mem, off, ntype):
+    lh = hle_env.EXEC_BASE + off
+    assert be32(mem, lh) == lh + 4          # lh_Head -> &lh_Tail
+    assert be32(mem, lh + 4) == 0           # lh_Tail
+    assert be32(mem, lh + 8) == lh          # lh_TailPred -> &lh_Head
+    assert mem[lh + 12] == ntype            # lh_Type
+
+
+def test_execbase_memhandlers_minlist(mem):
+    lh = hle_env.EXEC_BASE + 616
+    assert be32(mem, lh) == lh + 4
+    assert be32(mem, lh + 4) == 0
+    assert be32(mem, lh + 8) == lh

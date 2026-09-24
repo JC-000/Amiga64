@@ -16,7 +16,11 @@
         movea.l a7,a3               ; SP before the swap
         movea.l a2,a0
         jsr     -732(a6)            ; StackSwap
-        move.l  a7,d2               ; = a2+248
+ret1:   move.l  a7,d2               ; = a2+248
+        move.l  -4(a7),d0           ; exec leaves the return address at
+        lea     ret1(pc),a0         ; stk_Pointer-4 (it returns via RTS on
+        sub.l   a0,d0               ; the new stack)
+        movea.l d0,a5               ; 0
         move.l  (a7),d3             ; $CAFEBABE
         move.l  8(a2),d4            ; old SP (= a3)
         suba.l  a1,a1

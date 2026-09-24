@@ -80,10 +80,10 @@ would reach past `$0EFFFF` (`host/image.py` does not bound the region).
 | `[stack_top]` | u32 BE `EXIT_ADDR` — pre-staged program-exit return address |
 | `$0F0000-$0F00C3` | padding (zero) |
 | `$0F00C4-$0F03FF` | exec vector slots, LVO -828 … -6 |
-| `$0F0400` | `EXEC_BASE`: full `struct ExecBase` (632 bytes, zero except): `ln_Type` NT_LIBRARY, `ln_Name` → "exec.library", `lib_NegSize` 828, `lib_PosSize` 632, `lib_Version` **40**, `MaxLocMem` (62) `$200000` (nominal 2 MB chip top — all guest RAM is alike), `ThisTask` (276) = `ENV_PROCESS`, `AttnFlags` (296) 0 (plain 68000, no FPU) |
+| `$0F0400` | `EXEC_BASE`: full `struct ExecBase` (632 bytes, zero except): every List header an empty list (`lh_Head` = &`lh_Tail`, `lh_TailPred` = &`lh_Head`, `lh_Type` set — MemList, ResourceList, DeviceList, IntrList, LibList, PortList, TaskReady, TaskWait, the 5 SoftInts, SemaphoreList; `ex_MemHandlers` MinList), `ln_Type` NT_LIBRARY, `ln_Name` → "exec.library", `lib_NegSize` 828, `lib_PosSize` 632, `lib_Version` **40**, `MaxLocMem` (62) `$200000` (nominal 2 MB chip top — all guest RAM is alike), `ThisTask` (276) = `ENV_PROCESS`, `AttnFlags` (296) 0 (plain 68000, no FPU) |
 | `$0F0678-$0F0779` | padding (zero) |
 | `$0F077A-$0F0BFF` | dos vector slots, LVO -1158 … -6 |
-| `$0F0C00` | `DOS_BASE`: `struct DosLibrary` (70 bytes): `ln_Name` → "dos.library", `lib_NegSize` 1158, `lib_Version` **40**; everything else 0 |
+| `$0F0C00` | `DOS_BASE`: `struct DosLibrary` (70 bytes): `ln_Name` → "dos.library", `lib_NegSize` 1158, `lib_Version` **40**; everything else 0 (it has no List headers) |
 | `$0F0C48` | library name strings (32 bytes) |
 | `$100000-$7FFFFF` | HLE heap (`HEAP_BASE`–`HEAP_END`, contract C4) |
 
@@ -134,10 +134,13 @@ exits 7).
 | exec | FreePooled | -714 | `$0E` | FreeMem(A1, D0) |
 | exec | AllocVec | -684 | `$0F` | as exec: AllocMem(D0+4, D1), size+4 stored in the first longword, D0 = block+4 (8n+4); D0 ≥ 16 MB or no room → 0 |
 | exec | FreeVec | -690 | `$10` | NULL → no-op; else FreeMem(A1-4, [A1-4]) |
-| exec | StackSwap | -732 | `$11` | A0 = StackSwapStruct: tc_SPLower/Upper ⇄ stk_Lower/Upper, A7 ⇄ stk_Pointer; the return address is popped from the old stack and the call returns on the new one (a second call swaps back) |
+| exec | StackSwap | -732 | `$11` | A0 = StackSwapStruct: tc_SPLower/Upper ⇄ stk_Lower/Upper, A7 ⇄ stk_Pointer; the return address is popped from the old stack, written at new-A7 − 4 (exec returns via RTS on the new stack) and the call returns on the new one (a second call swaps back) |
+| dos | GetVar | -906 | `$12` | no environment/local variables: D0 = -1 (not found), buffer untouched. **IoErr is not set** — the file-DOS IoErr lives in WS-B2's `hle_dos_ioerr` (`docs/HLE_DOS.md`); IoErr after GetVar reports whatever WS-B2 last stored. vc.lib's `getenv()` → NULL |
+| dos | DateStamp | -192 | `$13` | D1 = `struct DateStamp *` (address): all three longwords 0 (clock stopped at 1978-01-01 00:00), D0 = D1. `time()` → 252 460 800 |
+| dos | SystemTagList | -606 | `$14` | no shell: D0 = -1, so `system("cmd")` returns -1. `system(NULL)` does not call dos: vc.lib at V36+ reports a shell (returns 1) |
 
 Indices are mirrored verbatim in `runtime/ops/hle.s` (dispatch table,
-`HLE_FN_COUNT` = 18) and `host/hle_env.py` (`EXEC_FUNCS`/`DOS_FUNCS`,
+`HLE_FN_COUNT` = 21) and `host/hle_env.py` (`EXEC_FUNCS`/`DOS_FUNCS`,
 `HLE_FN_COUNT`); `host/tests/test_hle_m2next.py` checks density, range,
 uniqueness across packages and the table order in `hle.s`.
 
@@ -246,7 +249,8 @@ Bump allocator over `HEAP_BASE $100000`–`HEAP_END $7FFFFF` (7 MB), state =
     StackSwap there and back (`u_swap`), console/NIL:/NULL handles incl.
     Read(NIL:) (`u_dos3`), Write without Output, negative and ≥ 16 MB
     lengths, OpenLibrary exact name + version (`u_openlib`), FindTask,
-    SetSignal (D0 must be overwritten), the unimplemented-LVO sentinel,
+    SetSignal (D0 must be overwritten), GetVar/DateStamp/SystemTagList
+    (`u_dos4`), the unimplemented-LVO sentinel,
     and the C2 hand-off (`u_file`/`u_file2`/`u_file3`: kinds `$10`,
     `$FFFFFFFF`, `$00000100`). Against the WS-B2 stub the hand-off is
     pinned exactly (halt in the Write/Read slot, D1-D3 and the stack
@@ -260,7 +264,9 @@ Bump allocator over `HEAP_BASE $100000`–`HEAP_END $7FFFFF` (7 MB), state =
     `alloc` (malloc/free 16 B … 70 000 B, calloc), `sysbase` (ExecBase /
     DOSBase fields, OpenLibrary versions and names), `readitem` / `putstr`
     (deep dos LVOs -810 / -948 must halt in the DOS table's own slot),
-    `bigstack` (`__stack` → AllocVec + StackSwap), and `leak_open` +
+    `bigstack` (`__stack` → AllocVec + StackSwap), `getenv` (GetVar →
+    NULL), `time` (DateStamp → 252460800), `system` (NULL → 1, "cmd" →
+    -1), and `leak_open` +
     `leak_check` (handle state must not leak between programs; needs
     WS-B2's real `hle_dos.s`, skipped with a SKIP line while it is the
     stub). Checks: halt reason (+ decoded slot), exit code in D0,
@@ -273,6 +279,8 @@ Bump allocator over `HEAP_BASE $100000`–`HEAP_END $7FFFFF` (7 MB), state =
 ## Still missing (next)
 
 - **Keyboard input**: Read on the console returns EOF.
+- **Clock / environment / shell**: DateStamp is frozen at 0, GetVar finds
+  nothing, SystemTagList runs nothing.
 - **More libraries**: OpenLibrary knows only dos.library (math libraries
   for printf `%f` would be next for vbcc; not yet exercised).
 - **Workbench startup path**, Forbid/Permit, message ports, signals

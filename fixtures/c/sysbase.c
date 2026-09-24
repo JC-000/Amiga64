@@ -21,5 +21,9 @@ int main(void)
     printf("dos v50 %s\n", nz(__OpenLibrary(SysBase, "dos.library", 50)));
     printf("dos.fake %s\n", nz(__OpenLibrary(SysBase, "dos.fake", 0)));
     printf("utility %s\n", nz(__OpenLibrary(SysBase, "utility.library", 37)));
+    /* empty List headers: lh_Head = &lh_Tail, lh_TailPred = &lh_Head */
+    printf("LibList %s\n", *(unsigned long *)(s + 378) == (unsigned long)(s + 382)
+           && *(unsigned long *)(s + 386) == (unsigned long)(s + 378)
+           ? "empty" : "BAD");
     return 0;
 }
