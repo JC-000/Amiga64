@@ -5,9 +5,10 @@ dos.library file handles for guest programs: Open, Close, Read, Write, Seek,
 IoErr, DeleteFile and ChangeMode, with a backend seam.
 The **RAMDISK** backend is proven under VICE and is **always the default**.
 The **ULTDOS** backend, which talks to the Ultimate Command Interface, is
-written and pinned byte for byte against the firmware source, but it is
-**hardware-UNVALIDATED** and therefore **opt-in only** (see Backend
-selection).
+written and pinned byte for byte against the firmware source, and
+**hardware-VALIDATED** on the U64E (fw 3.15, 2026-09-24; see "Hardware
+validation" below). It remains **opt-in only** (see Backend selection);
+making it the default is a separate decision.
 
 Binding contracts are in `docs/WAVE4_BRIEF.md`:
 
@@ -218,8 +219,8 @@ the default.** ULTDOS (`dosio_backend = 1`) is used only when both hold:
 
 The opt-in is a 4-byte key rather than a flag byte because BSS holds
 power-on garbage (it is never cleared). A garbage nonzero byte must not
-switch a program onto an unvalidated backend. The backend stays opt-in until
-the hardware leg passes.
+switch a program onto the UCI backend. The backend passed its hardware leg
+(2026-09-24) but stays opt-in until a default change is decided.
 
 `tests/run_dos.py`'s `selection` leg builds a TEST-ONLY `DOSIO_FAKE_UCI`
 variant whose detection always reports a UCI. On that build it checks:
@@ -324,7 +325,7 @@ Hardware-tested 6502 is `~/Documents/c64-https` at `1b9b49e`.
   - If the OPEN transaction itself failed (timeout, refused push), the firmware may already have the file open.
   - In that case the driver sends `t 03` and fails with ERROR_DEVICE_NOT_MOUNTED (218). It never sends a second OPEN to that target.
 - **Timeouts**: every wait is bounded at 256 × `DOSIO_UCI_POLLS_HI` status polls (default 65536), each including a fence. On timeout the driver aborts and fails.
-- **Throughput (review nit 9)**: roughly **65 bytes/s at 1 MHz**.
+- **Throughput (review nit 9)**: roughly **65 bytes/s at 1 MHz** (measured on the U64E: read 61 B/s, write 114 B/s at 1 MHz; read ~2.7 KB/s, write ~4.8-5.1 KB/s at 48 MHz).
   - Every UCI register access is followed by the turbo fence from c64-https: 5 × 217 loop iterations, about 7.6k cycles, about 5.5 ms at 1 MHz.
   - Each payload byte costs about two register accesses (data plus status poll).
   - Speed scales with the CPU clock, to about 3 KB/s at 48 MHz. The fence is tuned for correctness at turbo speed, not for throughput.
@@ -364,8 +365,37 @@ listed in `build/evidence/ws-b2/fix1/mutants.txt`.
 - Path semantics. The target's current directory defaults to `/`, so guests need names like `SD/dir/file`.
 - Coexistence with the hardware test mailbox.
 
-Hardware status: **UNVALIDATED**. The supervisor will schedule a hardware
-leg (WS-A owns the device this wave).
+Hardware status: **VALIDATED** (2026-09-24). See "Hardware validation".
+
+## Hardware validation (U64E, fw 3.15, 2026-09-24)
+
+First run of the ULTDOS backend on silicon, opted in with the `"UCI!"` key,
+Command Interface enabled for the session only (runtime config, never saved;
+full-config re-read afterwards IDENTICAL). All writes were confined to a
+scratch folder `/USB1/amiga64-test` that did not exist beforehand; it was
+removed afterwards and the `/USB1` top-level listing was identical before
+and after (76 entries, nothing added or removed).
+
+| Scenario | Result |
+|---|---|
+| `u_main` (37 steps: missing-file 205, NEWFILE create, 300-byte write from an odd buffer, zero-length write, Seek BEGINNING/CURRENT/END incl. negative offsets and old-position returns, read-back into an unaligned buffer, EOF, read clamp, overwrite, reopen OLDFILE, READWRITE create on the second target, third Open refused 103, delete-while-open 202, NEWFILE vs open 202, OLDFILE sharing with independent positions, NEWFILE exclusivity vs OLD/RW 202, delete-missing 205) | 56/56 checks |
+| `u_delete` (delete, reopen gone 205, delete again 205) | 9/9 checks |
+| Throughput (`tp_*`, 2 reps each at 1 and 48 MHz) | all checks ok |
+| Independent FTP read-back of `a.bin` (300 B), `b.bin` (10 B), `t.bin` (1024 B at both speeds) | byte-identical |
+
+Guest paths use the medium name without a leading slash: `USB1/amiga64-test/x`
+(`/USB1`, `usb1` and `Usb1` resolve the same; an unknown root answers
+`PATH DOESN'T EXIST`).
+
+Model-vs-silicon notes (none affected results):
+- Firmware 3.15 answers some errors without the numeric `NN,` prefix:
+  `FILE DOESN'T EXIST`, `PATH DOESN'T EXIST`. The driver treats any
+  non-`00` status as failure, so the mapping held; the Python model's status
+  strings should be updated to these texts.
+- `FILE_STAT` on an existing file by its guest-relative name answered
+  `82,FILE NOT FOUND` in a raw probe. The driver does not use FILE_STAT
+  (it uses FILE_INFO on the open target), so this is informational.
+- `IDENTIFY` answers `ULTIMATE-II DOS V1.2`; `GET_PATH` answers `/`.
 
 ## Testing
 
@@ -430,7 +460,7 @@ reprograms every register.
 - **Init**: there is no runner HLE-init hook yet. Handles leak across programs run in one boot unless something calls `hle_dos_init`.
 - **Missing functions**: no Rename, Lock/Examine, and no NIL:/`*`/CONSOLE: names through Open; ChangeMode only for the vc.lib case. Add them only when a real program traps on them.
 - **RAMDISK**: 32 files, 31-character names (after `RAM:`), fixed extents (64 KB for guest-created files, 60 KB for the 32nd), reused only through a deleted file's directory entry.
-- **ULTDOS DeleteFile** is pinned against the firmware model only (`host/tests/test_hle_dos_uci.py`); like the rest of ULTDOS it is hardware-unvalidated.
+- **ULTDOS DeleteFile** is pinned against the firmware model and validated on the U64E (2026-09-24).
 - **ULTDOS file identity is the name string** (inherited from Open's `uci_pick_fid`): `a` and `/a` (or any two spellings of one path) get different file ids, so the sharing rules and DeleteFile's open-file check can be bypassed by spelling the same file differently. Not changed; the firmware keeps its own lock state.
-- **ULTDOS**: opt-in only; two open files at most; names relative to the firmware's current path; about 65 B/s at 1 MHz; unvalidated on hardware.
-- **Checker coverage**: `host/rescheck.py` `FILE_OWNERS` (supervisor-frozen) does not list `hle_dos.s`/`dosio_*.s`, so their raw-literal scan does not run. The files use only rc equates and contain no raw addresses.
+- **ULTDOS**: opt-in only; two open files at most; names relative to the firmware's current path (`USB1/...`); about 61-114 B/s at 1 MHz, ~2.7-5 KB/s at 48 MHz; validated on hardware 2026-09-24.
+- **Checker coverage**: `host/rescheck.py` scans `hle_dos.s` and `dosio_*.s` (owner `hle`, via `OWNER_GLOBS`); plain-value constants carry `; @value`.

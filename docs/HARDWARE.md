@@ -478,3 +478,12 @@ No hardware-vs-VICE divergence. `tests/run_dos.py` has no u64 backend yet
 54.7k → 68.3k IPS (+24.9%), RMW 40.6k → 58.2k (+43.4%) — within 0.2 pt of
 the WS-A fix-round session, so the HLE merges left core speed unchanged.
 The ULTDOS (UCI) file backend's first hardware leg is reported separately.
+
+### ULTDOS (UCI) file backend — first hardware leg (2026-09-24)
+
+Passed: `u_main` 56/56, `u_delete` 9/9, throughput legs all ok, FTP read-back
+byte-identical. Writes confined to `/USB1/amiga64-test` (absent before,
+removed after; `/USB1` top-level listing identical); Command Interface enabled
+for the session only; full-config re-read IDENTICAL. Measured: read 61 B/s /
+write 114 B/s at 1 MHz, read ~2.7 KB/s / write ~4.8-5.1 KB/s at 48 MHz.
+Details and model-vs-silicon notes: `docs/HLE_DOS.md` "Hardware validation".
