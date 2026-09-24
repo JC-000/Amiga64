@@ -42,10 +42,10 @@ RD_VERSION   = 1
 RD_HDR_SIZE  = $20
 RD_ENTRIES   = 32
 RD_ENT_SIZE  = 64
-RD_DATA_OFF  = $1000
+RD_DATA_OFF  = $1000  ; @value
 RD_NAME_OFF  = 32
 RD_NAME_MAX  = 31
-RD_NEW_CAP   = $10000
+RD_NEW_CAP   = $10000  ; @value
 RD_FLAG_USED = $01
 ; header fields
 RH_FREE      = 8

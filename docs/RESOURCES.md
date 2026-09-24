@@ -32,6 +32,11 @@ them does not even assemble).
 ; @region <owner> $<start>-$<end> <role...>  -- claims [start,end] inclusive
 ```
 
+A source-file equate that is a plain value (size, offset, flag bits) and
+never an address may carry `; @value` (`NAME = $1000  ; @value`). The
+checker then skips its address classification — but using a tagged name as
+a memory operand anywhere is a violation, so the tag cannot hide a claim.
+
 Equate lines below a `@region` belong to it and must lie inside its range.
 Regions never overlap, and together they must COVER the space — unclaimed
 space is declared explicitly with owner `free`, never left implicit.

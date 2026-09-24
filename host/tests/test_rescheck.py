@@ -216,3 +216,21 @@ def test_hle_family_globs_are_scanned():
     owners, unregistered = rescheck.source_owners(ROOT)
     assert owners["runtime/ops/hle_dos.s"] == "hle"
     assert unregistered == []
+
+
+def test_value_tag_exempts_plain_constants():
+    from host import rescheck
+    spaces, _ = rescheck.load_spaces(ROOT)
+    src = "SIZE = $1000  ; @value\n        lda #<SIZE\n"
+    assert rescheck.scan_source("x.s", src, "hle", spaces) == []
+    # untagged, the same literal is judged as an address in 'core' RAM
+    bad = rescheck.scan_source("x.s", "SIZE = $1000\n", "hle", spaces)
+    assert any(f.fatal for f in bad)
+
+
+def test_value_tag_cannot_hide_a_memory_operand():
+    from host import rescheck
+    spaces, _ = rescheck.load_spaces(ROOT)
+    src = "PTR = $1000  ; @value\n        lda PTR\n"
+    found = rescheck.scan_source("x.s", src, "hle", spaces)
+    assert any(f.fatal and "@value" in f.message for f in found)

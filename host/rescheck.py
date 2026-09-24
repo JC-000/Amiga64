@@ -282,6 +282,10 @@ def _judge(spaces: dict[str, Space], space_name: str, value: int, owner: str,
         f"owner is '{owner}'", True)
 
 
+_VALUE_TAG_RE = re.compile(
+    r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\$?[0-9A-Fa-f]+\s*;.*@value\b")
+
+
 def scan_source(path: str, text: str, owner: str,
                 spaces: dict[str, Space],
                 corpus: str | None = None) -> list[Finding]:
@@ -310,6 +314,20 @@ def scan_source(path: str, text: str, owner: str,
     for n, raw in enumerate(lines, 1):
         stripped = _strip_comment(raw)
         if not stripped:
+            continue
+
+        # `NAME = literal ; @value` declares a plain value (size, offset,
+        # flag bits), never an address.  Checked: using the name as a
+        # memory operand anywhere in the corpus is a violation.
+        tv = _VALUE_TAG_RE.match(raw)
+        if tv:
+            name = tv.group(1)
+            if re.search(r"(?:" + "|".join(_MNEMONICS) + r")\s+\(?"
+                         + re.escape(name) + r"\b", corpus, re.IGNORECASE):
+                findings.append(Finding(
+                    path, n, stripped,
+                    f"{name} is tagged @value but used as a memory operand",
+                    True))
             continue
 
         m = _ZP_INSN_RE.match(stripped.strip())
