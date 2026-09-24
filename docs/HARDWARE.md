@@ -455,3 +455,26 @@ Disabled). The re-read diff was empty.
   REC_NOINVAL`. The base PRG is `make runtime BUILD=build/base` on the
   158e684 sources. `tests/bench/u64bench.py` now takes `--prg` instead of the
   hardcoded `build/h1` path.
+
+## Wave 4 integrated build on hardware (2026-09-24)
+
+Regression of `wave4/integration` @fac0ce3 (WS-A REC shadow + WS-B1 exec/dos
+HLE + WS-B2 file DOS + post-merge round) on the U64E, firmware 3.15, one
+DeviceLock hold, 1 MHz for correctness; config snapshotted and restored
+exactly (re-read diff empty), C64 reset afterwards.
+
+| Suite | Result |
+|---|---|
+| Hand vectors (48 HAND + 15 WRAP) | 63/63 |
+| Full SingleStepTests suite | 5150/5150, 0 field failures (894.7 s) |
+| `run_program` | 48/48 |
+| `run_hello` | 13/13 |
+| `run_vbcc` (RAMDISK backend) | 299/299 |
+| `rec_wrap` | pass |
+| `rec_teeth` (refill, reset_case, load_chunk, mailbox, foreign) | 5/5 |
+
+No hardware-vs-VICE divergence. `tests/run_dos.py` has no u64 backend yet
+(VICE-only; follow-up). 48 MHz ABBA vs 158e684 in the same session: MEM
+54.7k → 68.3k IPS (+24.9%), RMW 40.6k → 58.2k (+43.4%) — within 0.2 pt of
+the WS-A fix-round session, so the HLE merges left core speed unchanged.
+The ULTDOS (UCI) file backend's first hardware leg is reported separately.
