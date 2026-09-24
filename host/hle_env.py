@@ -31,6 +31,7 @@ from __future__ import annotations
 import struct
 
 from .fixturegen import OP_HALT
+from .hle_dos_env import DOS_FILE_FUNCS
 from .image import STACK_TOP, Chunk
 
 # --- Env memory map (guest addresses) --------------------------------------
@@ -56,6 +57,9 @@ DOS_FUNCS = {
     "Output": (-60, 0x02),
     "Write": (-48, 0x03),
 }
+# File-DOS functions (HLE indices $30-$4F) are owned by WS-B2 in
+# host/hle_dos_env.py and merged here (docs/WAVE4_BRIEF.md C3).
+DOS_FUNCS.update(DOS_FILE_FUNCS)
 LIBRARIES = {
     "exec.library": (EXEC_BASE, EXEC_FUNCS),
     "dos.library": (DOS_BASE, DOS_FUNCS),

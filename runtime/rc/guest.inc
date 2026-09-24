@@ -38,13 +38,24 @@ DOS_BASE  = $000A00     ; fake dos.library base (vector slots below it)
 STACK_TOP = $00F000     ; initial A7 (host/image.py STACK_TOP); [A7] = EXIT_ADDR
 .endif
 
-; @region run $010000-$FFFFFF program load region - first Hunk segment at $010000 (host/image.py BASE_ADDR), 4-byte aligned segments follow
+; @region run $010000-$0FFFFF program load region - first Hunk segment at $010000 (host/image.py BASE_ADDR), 4-byte aligned segments follow
 .ifndef PROG_BASE
 PROG_BASE = $010000     ; guest load address of the first program segment
 .endif
+
+; @region hle $100000-$7FFFFF HLE heap - exec AllocMem/FreeMem pool (WS-B1, docs/WAVE4_BRIEF.md C4)
+.ifndef HEAP_BASE
+HEAP_BASE = $100000     ; first byte of the AllocMem pool
+.endif
+.ifndef HEAP_END
+HEAP_END  = $7FFFFF     ; last byte of the AllocMem pool (inclusive)
+.endif
+
+; @region free $800000-$FFFFFF UNALLOCATED guest space - claim via this file + rescheck green
 
 ; --- Contract invariants (assemble-time; keep true under -D relocation) ----
 .assert EXIT_ADDR >= ENV_BASE,        error, "exit stub must sit inside the HLE env region"
 .assert EXEC_BASE - 552 >= ENV_BASE,  error, "deepest exec.library vector slot (LVO -552) must stay inside the env region"
 .assert DOS_BASE - 60 >= ENV_BASE,    error, "deepest dos.library vector slot (LVO -60) must stay inside the env region"
 .assert STACK_TOP < PROG_BASE,        error, "guest stack must sit below the program load base"
+.assert HEAP_BASE > PROG_BASE,        error, "AllocMem pool must sit above the program load region"

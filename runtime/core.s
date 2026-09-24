@@ -29,6 +29,7 @@
 .export emu_reset, emu_step, emu_run, dispatch_next, fetch_word
 .export mem_read8, mem_read16, mem_read32
 .export mem_write8, mem_write16, mem_write32
+.export mem_rec_dirty           ; REC-ownership seam (docs/WAVE4_BRIEF.md C1)
 .export ea_calc, ea_load, ea_store
 .export alu_add, alu_sub, alu_cmp, alu_and, alu_or, alu_eor
 .export alu_not, alu_neg, alu_addx, alu_subx, alu_ext
@@ -1223,6 +1224,16 @@ op_fline:
 op_illegal:
         lda #HALT_ILLEGAL
         jmp emu_halt
+
+; ---------------------------------------------------------------------------
+; mem_rec_dirty — REC-ownership seam (docs/WAVE4_BRIEF.md contract C1).
+; Any code that programs the REC ($DF02-$DF0A) or issues a REC command
+; outside the memory API calls this before the next memory-API call.
+; Clobbers A only.  v0 memory API reprograms every register per call, so
+; this is a no-op until the REC-shadow work lands (WS-A owns the body).
+; ---------------------------------------------------------------------------
+mem_rec_dirty:
+        rts
 
 ; ===========================================================================
 

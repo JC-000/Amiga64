@@ -26,8 +26,11 @@
 
 .import mem_read8, mem_read32
 .import dispatch_next, emu_halt
+.import hle_dos_dispatch        ; runtime/ops/hle_dos.s (WS-B2), indices $30-$4F
 
 HLE_FN_COUNT = 4                ; valid indices $A100-$A103
+HLE_DOS_FIRST = $30             ; $A130-$A14F: file DOS (hle_dos.s, WAVE4 C3)
+HLE_DOS_LAST  = $4F
 
 ; DOS_BASE (guest DOSBase) and SCREEN (C64 text screen, VIC bank 0) come
 ; from the resource contract (runtime/rc/guest.inc / rc/ram.inc via
@@ -57,7 +60,12 @@ hle_aline:
         cmp #$A1
         bne hle_trap
         lda op_lo
-        cmp #HLE_FN_COUNT
+        cmp #HLE_DOS_FIRST      ; $30-$4F belong to hle_dos.s (WAVE4 C3)
+        bcc @local
+        cmp #HLE_DOS_LAST + 1
+        bcs hle_trap
+        jmp hle_dos_dispatch    ; op_lo = index, same entry state as here
+@local: cmp #HLE_FN_COUNT
         bcs hle_trap
         tax
         lda hle_tab_lo,x
