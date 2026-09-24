@@ -387,24 +387,86 @@ def fix1_scenarios() -> list[Scenario]:
         Step(O, name_addr(n, "a"), OLD, d0=bp(0), ioerr=0),               # 0 shared
         Step(S, d2=0, d3=END, ref=0, d0=0),                               # 1 pos 4
         Step(O, name_addr(n, "A"), NEW, d0=0, ioerr=E_USE),               # 2 in use
-        Step(W, d2=SRC, d3=2, ref=0, d0=2),                               # 3 untouched
-        Step(O, name_addr(n, "a"), RW, d0=bp(1), ioerr=E_USE),            # 4 shares
-        Step(O, name_addr(n, "a"), OLD, d0=bp(2), ioerr=E_USE),           # 5 shares
-        Step(C, ref=0, d0=TRUE), Step(C, ref=4, d0=TRUE),                 # 6 7
-        Step(O, name_addr(n, "A"), NEW, d0=0, ioerr=E_USE),               # 8 slot 2 open
-        Step(C, ref=5, d0=TRUE),                                          # 9
-        Step(O, name_addr(n, "A"), NEW, d0=bp(0), ioerr=E_USE),           # 10 exclusive
-        Step(O, name_addr(n, "a"), OLD, d0=0, ioerr=E_USE),               # 11
-        Step(O, name_addr(n, "a"), RW, d0=0, ioerr=E_USE),                # 12
-        Step(O, name_addr(n, "a"), NEW, d0=0, ioerr=E_USE),               # 13
-        Step(O, name_addr(n, "b"), NEW, d0=bp(1), ioerr=E_USE),           # 14 other file
-        Step(W, d2=SRC + 8, d3=1, ref=10, d0=1),                          # 15
-        Step(C, ref=10, d0=TRUE),                                         # 16
-        Step(O, name_addr(n, "a"), OLD, d0=bp(0), ioerr=E_USE),           # 17 released
-        Step(C, ref=17, d0=TRUE), Step(C, ref=14, d0=TRUE),               # 18 19
+        # fix2 item 2: the refused NEWFILE had ZERO side effects
+        Step(S, d2=0, d3=END, ref=0, d0=4),                               # 3 old pos
+        Step(S, d2=0, d3=BEG, ref=0, d0=4),                               # 4 size still 4
+        Step(R, d2=BUF + 0x100, d3=4, ref=0, d0=4, byte=ord("A")),        # 5 bytes intact
+        Step(W, d2=SRC, d3=2, ref=0, d0=2),                               # 6 untouched
+        Step(O, name_addr(n, "a"), RW, d0=bp(1), ioerr=E_USE),            # 7 shares
+        Step(O, name_addr(n, "a"), OLD, d0=bp(2), ioerr=E_USE),           # 8 shares
+        Step(C, ref=0, d0=TRUE), Step(C, ref=7, d0=TRUE),                 # 9 10
+        Step(O, name_addr(n, "A"), NEW, d0=0, ioerr=E_USE),               # 11 slot 2 open
+        Step(S, d2=0, d3=END, ref=8, d0=0),                               # 12 old pos 0
+        Step(S, d2=0, d3=BEG, ref=8, d0=6),                               # 13 size still 6
+        Step(C, ref=8, d0=TRUE),                                          # 14
+        Step(O, name_addr(n, "A"), NEW, d0=bp(0), ioerr=E_USE),           # 15 exclusive
+        Step(O, name_addr(n, "a"), OLD, d0=0, ioerr=E_USE),               # 16
+        Step(O, name_addr(n, "a"), RW, d0=0, ioerr=E_USE),                # 17
+        Step(O, name_addr(n, "a"), NEW, d0=0, ioerr=E_USE),               # 18
+        Step(O, name_addr(n, "b"), NEW, d0=bp(1), ioerr=E_USE),           # 19 other file
+        Step(W, d2=SRC + 8, d3=1, ref=15, d0=1),                          # 20
+        Step(C, ref=15, d0=TRUE),                                         # 21
+        Step(O, name_addr(n, "a"), OLD, d0=bp(0), ioerr=E_USE),           # 22 released
+        Step(C, ref=22, d0=TRUE), Step(C, ref=19, d0=TRUE),               # 23 24
     ]
     out.append(Scenario("lock", {"a": b"ABCD"}, n, st,
-                        expect_files={"a": SRC_DATA[8:9], "b": b""}))
+                        expect_files={"a": SRC_DATA[8:9], "b": b""},
+                        expect_buf={BUF + 0x100: b"ABCD\0"}))
+
+    # ---- fmtlock (fix2 item 1, reviewer adv_fmt): never auto-format while a
+    # handle is open.  The guest clobbers the RAMDISK magic through a Read
+    # while two handles are open; the next Open must fail 225 and leave the
+    # header alone (no entry written into file data); once all handles are
+    # closed the format happens and the new file really exists.
+    n = ["a", "hdr", "n"]
+    st = [
+        Step(O, name_addr(n, "a"), OLD, d0=bp(0), ioerr=0),               # 0 fid 0
+        Step(O, name_addr(n, "hdr"), OLD, d0=bp(1), ioerr=0),             # 1 fid 1
+        Step(R, d2=de.RD_BASE, d3=4, ref=1, d0=4),                        # 2 magic := XXXX
+        Step(O, name_addr(n, "n"), NEW, d0=0,
+             ioerr=de.ERROR_NOT_A_DOS_DISK),                               # 3 refused
+        Step(O, name_addr(n, "a"), OLD, d0=0,
+             ioerr=de.ERROR_NOT_A_DOS_DISK),                               # 4 any mode
+        Step(R, d2=BUF, d3=16, ref=0, d0=16, byte=ord("A")),              # 5 open fh ok
+        Step(C, ref=0, d0=TRUE), Step(C, ref=1, d0=TRUE),                 # 6 7
+        Step(O, name_addr(n, "n"), NEW, d0=bp(0),
+             ioerr=de.ERROR_NOT_A_DOS_DISK),                               # 8 formats
+        Step(W, d2=SRC, d3=5, ref=8, d0=5),                               # 9
+        Step(C, ref=8, d0=TRUE),                                          # 10
+        Step(O, name_addr(n, "n"), OLD, d0=bp(0),
+             ioerr=de.ERROR_NOT_A_DOS_DISK),                               # 11 n exists
+        Step(S, d2=0, d3=END, ref=11, d0=0),                              # 12
+        Step(S, d2=0, d3=BEG, ref=11, d0=5),                              # 13 size 5
+        Step(O, name_addr(n, "a"), OLD, d0=0,
+             ioerr=de.ERROR_OBJECT_NOT_FOUND),                             # 14 wiped
+        Step(C, ref=11, d0=TRUE),                                         # 15
+    ]
+    fmt_files = [de.RdFile("a", b"A" * 16), de.RdFile("hdr", b"XXXX")]
+    out.append(Scenario(
+        "fmtlock", fmt_files, n, st,
+        extra=[Chunk(de.RD_DIR + 202 * de.RD_ENT_SIZE, bytes(64))],
+        expect_files={"n": SRC_DATA[:5]},
+        expect_buf={BUF: b"A" * 16,
+                    # entry #202 would land in file data at +$32A0
+                    de.RD_DIR + 202 * de.RD_ENT_SIZE: bytes(64)}))
+
+    # ---- dirscribble (fix2 item 1b): the create path honours a refusal ----
+    # The guest zeroes the "used" flag of the directory entry of a file it
+    # holds EXCLUSIVELY (NEWFILE).  A second NEWFILE of that name no longer
+    # finds it, creates at the lowest free index -- the same index, i.e. the
+    # same file id -- and the lockcheck refuses: Open must fail 0/202 and
+    # write nothing (before fix2 the refusal carry was ignored).
+    n = ["d", "z"]
+    st = [
+        Step(O, name_addr(n, "d"), NEW, d0=bp(0), ioerr=0),               # 0 excl, idx 0
+        Step(O, name_addr(n, "z"), OLD, d0=bp(1), ioerr=0),               # 1 idx 1
+        Step(R, d2=de.RD_DIR, d3=1, ref=1, d0=1),                         # 2 flags[0]:=0
+        Step(O, name_addr(n, "d"), NEW, d0=0, ioerr=E_USE),               # 3 refused
+        Step(C, ref=1, d0=TRUE, ioerr=E_USE),                             # 4
+        Step(C, ref=0, d0=TRUE, ioerr=E_USE),                             # 5
+    ]
+    out.append(Scenario("dirscribble", {"d": b"", "z": b"\0"}, n, st,
+                        expect_buf={de.RD_DIR: b"\0\x01"}))
 
     # ---- fhargs: guest corrupts fh_Args; Close still releases the slot ----
     n = ["k"]

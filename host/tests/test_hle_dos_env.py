@@ -106,6 +106,7 @@ def test_asm_mirrors_ramdisk_format():
     assert eq["RD_NAME_MAX"] == de.RD_NAME_MAX
     assert eq["RD_NEW_CAP"] == de.RD_NEW_CAP
     assert eq["RD_VERSION"] == de.RD_VERSION
+    assert eq["ERROR_NOT_A_DOS_DISK"] == de.ERROR_NOT_A_DOS_DISK
 
 
 # --- RAMDISK format ---------------------------------------------------------------

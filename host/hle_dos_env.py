@@ -64,6 +64,7 @@ ERROR_INVALID_LOCK = 211
 ERROR_DEVICE_NOT_MOUNTED = 218
 ERROR_SEEK_ERROR = 219
 ERROR_DISK_FULL = 221
+ERROR_NOT_A_DOS_DISK = 225
 
 # --- Backend selection (review ruling 1) ---------------------------------------
 # ULTDOS is opt-in: the host writes this 4-byte key to the exported BSS

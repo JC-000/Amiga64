@@ -38,6 +38,7 @@
 .export hle_dos_init, hle_dos_ioerr, hle_dos_magic, dosio_backend
 .export dosio_want_uci
 .export dosio_lockcheck, dosio_curfid     ; sharing rules (backends call it)
+.export dosio_anyopen                     ; C=1 when any file handle is open
 ; backend parameter block + DMA helpers (docs/HLE_DOS.md "Backend seam")
 .export dosio_buf, dosio_name, dosio_nlen, dosio_mode, dosio_slot
 .export dosio_len, dosio_arg, dosio_err
@@ -566,6 +567,19 @@ dosio_lockcheck:
 @busy:  lda #ERROR_OBJECT_IN_USE
         sta dosio_err
         sec
+        rts
+
+; dosio_anyopen — C=1 when any slot is open (the Open in progress is not
+; yet marked).  Clobbers A/X.
+dosio_anyopen:
+        ldx #FH_SLOTS - 1
+@l:     lda dosio_sopen,x
+        bne @yes
+        dex
+        bpl @l
+        clc
+        rts
+@yes:   sec
         rts
 
 ; ===========================================================================

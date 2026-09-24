@@ -36,7 +36,7 @@
 .import dosio_buf, dosio_name, dosio_nlen, dosio_mode, dosio_slot
 .import dosio_len, dosio_arg, dosio_err
 .import dosio_dma, dosio_stash_guest, dosio_dc64, dosio_dreu, dosio_dlen
-.import dosio_lockcheck
+.import dosio_lockcheck, dosio_anyopen
 
 RD_VERSION   = 1
 RD_HDR_SIZE  = $20
@@ -60,6 +60,7 @@ RE_DATA      = 12
 ERROR_OBJECT_NOT_FOUND       = 205
 ERROR_INVALID_COMPONENT_NAME = 210
 ERROR_DISK_FULL              = 221
+ERROR_NOT_A_DOS_DISK         = 225
 
 FH_SLOTS = 8                    ; must match hle_dos.s
 
@@ -253,7 +254,12 @@ dosio_ram_open:
         lda dosio_rd_hdr+5
         cmp #RD_ENTRIES
         beq @scan
-@fmt:   jsr rd_format           ; leaves dosio_rd_hdr = fresh header
+@fmt:   jsr dosio_anyopen       ; never format under open handles (review
+        bcc :+                  ; fix2 item 1): their entries would be wiped
+        lda #ERROR_NOT_A_DOS_DISK ; and reused; leave the header untouched
+        sta dosio_err
+        jmp @fail
+:       jsr rd_format           ; leaves dosio_rd_hdr = fresh header
 
 @scan:  lda #$FF
         sta dosio_rd_free
@@ -367,7 +373,10 @@ dosio_ram_open:
         plp
         lda dosio_rd_free
         sta dosio_rd_i
-        jsr dosio_lockcheck     ; new entry: never refused; sets dosio_curfid
+        jsr dosio_lockcheck     ; sets dosio_curfid.  Refusal is possible only
+        bcc :+                  ; if the guest scribbled on the directory
+        jmp @fail               ; under an open handle: fail, change nothing
+:       lda dosio_rd_i          ; (lockcheck clobbers A)
         jsr rd_ent_store
         jsr rd_hdr_dma
         jsr dosio_stash_guest

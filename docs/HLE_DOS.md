@@ -168,7 +168,7 @@ The REC's REU address counter increments only the low 19 bits (VICE `reu.c`
 `hle_dos_init` picks the backend. **RAMDISK (`dosio_backend = 0`) is always
 the default.** ULTDOS (`dosio_backend = 1`) is used only when both hold:
 
-1. The host wrote the 4-byte key `"UCI!"` (`hle_dos_env.UCI_OPT_IN_KEY`) to the exported BSS symbol `dosio_want_uci`, before the run or before calling `hle_dos_init`.
+1. The host wrote the 4-byte key `"UCI!"` (`hle_dos_env.UCI_OPT_IN_KEY`) to the exported BSS symbol `dosio_want_uci`. The key is read **only when `hle_dos_init` runs**, which is either the first HLE DOS call after boot (lazy init) or an explicit host `jsr hle_dos_init`. So write it before the first dos call of the boot, or call `hle_dos_init` after writing it. Writing it mid-run has no effect until the next init. Nothing ever clears the key; to opt out again, overwrite it and re-run `hle_dos_init`.
 2. `dosio_uci_detect` sees the UCI: `$DF1D` reads `$C9` (`$49` while its IRQ is pending).
 
 The opt-in is a 4-byte key rather than a flag byte because BSS holds
@@ -222,7 +222,9 @@ Each directory entry (64 bytes) has this layout:
 
 - **Host staging**: `hle_dos_env.ramdisk_chunks({"name": bytes, ...})` lays files out from `+$1000`, each extent page aligned with a capacity of max(len, 64 KB). Stage the chunks with the program.
 - **Host read-back**: `hle_dos_env.parse_directory(read_fn)` reads files back after a run.
-- **Auto-format**: an invalid header (wrong magic, version or entry count) is formatted in place on the first Open. This writes a fresh header and zeroes the 2 KB directory.
+- **Auto-format**: an invalid header (wrong magic, version or entry count) is formatted in place on the next Open. This writes a fresh header and zeroes the 2 KB directory.
+  - **Never while a handle is open** (review fix2 item 1). A format would wipe and reuse the directory entries those handles still point at. While any handle is open, an Open that finds an invalid header fails with 0 and ERROR_NOT_A_DOS_DISK (225), and leaves the header untouched. The format happens on the first Open after every handle is closed. Tested by the `fmtlock` scenario.
+  - Every `dosio_lockcheck` call handles the refusal carry. A create can only be refused if the guest scribbled on the directory under an open handle, and then the Open fails and changes nothing.
 - **Guest-created files** get an extent of `RD_NEW_CAP` = 64 KB, or whatever space remains. 32 × 64 KB is exactly the 2 MB region, and the 4 KB header/directory page comes out of it. All 32 directory entries are allocatable, but the 32nd guest-created extent is 60 KB (tested by `dirfull`).
   - This is where ruling 6's "32 × 64 KB" comes up 4 KB short. Growing the region further would reach into `$DFxxxx`, which the ruling did not grant.
 - **Not supported**: delete, rename, or growing past the extent.
@@ -348,7 +350,9 @@ The guest is a hand-encoded "call script" interpreter. It walks a table of
 | `diskfull` | The 64 KB extent filled exactly; one more byte, and a length of -1, fail with 221 and write nothing; Seek to END+1 fails; a Read of length -1 is clamped to the file |
 | `dirfull` | All 32 directory entries allocatable in the 2 MB region; the 33rd create fails with 221; the last (60 KB) extent is usable |
 | `staledir` | A directory with a used entry but an invalid header. Auto-format must wipe the entry, so the stale name is not found and a new file of that name is empty |
-| `lock` | OLDFILE and READWRITE share; NEWFILE refused (202) while any handle is open, without truncating; every Open refused while a NEWFILE handle is open; released on Close; case-insensitive identity |
+| `lock` | OLDFILE and READWRITE share; NEWFILE refused (202) while any handle is open, with provably zero side effects (Seek END/BEG shows the unchanged size, and a Read shows the unchanged bytes; the `lockorder` mutant goes red); every Open refused while a NEWFILE handle is open; released on Close; case-insensitive identity |
+| `dirscribble` | The guest zeroes the directory flag of a file it holds exclusively. A second NEWFILE of that name creates at the same index (the same file id), the lockcheck refuses, and the Open fails with 202 and writes nothing (the `nocarry` mutant goes red) |
+| `fmtlock` | The guest clobbers the RAMDISK magic while two handles are open. Opens then fail with 225 and leave the header alone; the open handles keep working; after they are closed, the format happens and a new file persists (reviewer's `adv_fmt`) |
 | `fhargs` | The guest overwrites `fh_Args` through a Read into the handle pool. Read, Write and Seek refuse (211), Close still releases the slot, and the slot is reusable |
 | `nullname` | Open(NULL) → 0 with 205 |
 | `selection` | Backend selection, described above |
