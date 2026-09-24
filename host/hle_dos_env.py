@@ -32,6 +32,8 @@ DOS_FILE_FUNCS: dict[str, tuple[int, int]] = {
     "Close": (-36, 0x31),
     "Seek": (-66, 0x32),
     "IoErr": (-132, 0x33),
+    "DeleteFile": (-72, 0x34),       # remove() (m2-post)
+    "ChangeMode": (-450, 0x35),      # vc.lib fopen "a"/"r+": CHANGE_FH, EXCLUSIVE
 }
 
 # Direct file-handle Read/Write entries (hle_dos_read / hle_dos_write).  NOT
@@ -51,6 +53,12 @@ MODE_READWRITE = 1004
 OFFSET_BEGINNING = -1
 OFFSET_CURRENT = 0
 OFFSET_END = 1
+CHANGE_LOCK = 0              # ChangeMode type (dos/dos.h)
+CHANGE_FH = 1
+SHARED_LOCK = -2             # ACCESS_READ
+EXCLUSIVE_LOCK = -1          # ACCESS_WRITE
+RAM_PREFIX = "RAM:"          # leading device name the RAMDISK backend strips
+                             # (case-insensitively) from Open/DeleteFile names
 DOSTRUE = 0xFFFFFFFF
 DOSFALSE = 0
 
@@ -61,6 +69,7 @@ ERROR_OBJECT_TOO_LARGE = 207
 ERROR_ACTION_NOT_KNOWN = 209
 ERROR_INVALID_COMPONENT_NAME = 210
 ERROR_INVALID_LOCK = 211
+ERROR_DISK_WRITE_PROTECTED = 214
 ERROR_DEVICE_NOT_MOUNTED = 218
 ERROR_SEEK_ERROR = 219
 ERROR_DISK_FULL = 221

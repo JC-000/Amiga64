@@ -1,6 +1,7 @@
 ; ===========================================================================
 ; runtime/ops/hle_dos.s — M2: dos.library file I/O (Open/Close/Read/Write/
-; Seek/IoErr on FileHandles), generic layer + backend seam.
+; Seek/IoErr/DeleteFile/ChangeMode on FileHandles), generic layer + backend
+; seam.
 ; Owner: WS-B2 (m2-dos).  Contract: docs/WAVE4_BRIEF.md C1-C4,
 ; docs/HLE_DOS.md (function table, FileHandle pool, backend seam, formats).
 ;
@@ -14,6 +15,8 @@
 ;   hle_dos_init     — reset all slots + IoErr, pick the backend.  Also run
 ;                      lazily on the first HLE DOS call after boot (BSS is
 ;                      not cleared at boot; guarded by hle_dos_magic).
+;   hle_dos_ensure   — hle_dos_init unless it already ran (hle.s calls it
+;                      before storing into hle_dos_ioerr).
 ;
 ; Backends (selected at init, docs/HLE_DOS.md "Backend selection"):
 ;   0 = RAMDISK  (runtime/ops/dosio_ram.s) — guest/REU $E00000-$FFFFFF.
@@ -35,9 +38,10 @@
 .include "../macros.inc"
 
 .export hle_dos_dispatch, hle_dos_read, hle_dos_write
-.export hle_dos_init, hle_dos_ioerr, hle_dos_magic, dosio_backend
-.export dosio_want_uci
+.export hle_dos_init, hle_dos_ensure, hle_dos_ioerr, hle_dos_magic
+.export dosio_backend, dosio_want_uci
 .export dosio_lockcheck, dosio_curfid     ; sharing rules (backends call it)
+.export dosio_delcheck                    ; DeleteFile: file must not be open
 .export dosio_anyopen                     ; C=1 when any file handle is open
 ; backend parameter block + DMA helpers (docs/HLE_DOS.md "Backend seam")
 .export dosio_buf, dosio_name, dosio_nlen, dosio_mode, dosio_slot
@@ -48,16 +52,18 @@
 .import dispatch_next, emu_halt
 .import dosio_ram_init, dosio_ram_open, dosio_ram_close, dosio_ram_size
 .import dosio_ram_seek, dosio_ram_rdchunk, dosio_ram_wrchunk
-.import dosio_ram_wcheck, dosio_ram_setsize
+.import dosio_ram_wcheck, dosio_ram_setsize, dosio_ram_delete
 .import dosio_uci_detect, dosio_uci_init, dosio_uci_open, dosio_uci_close
 .import dosio_uci_size, dosio_uci_seek, dosio_uci_rdchunk, dosio_uci_wrchunk
-.import dosio_uci_wcheck, dosio_uci_setsize
+.import dosio_uci_wcheck, dosio_uci_setsize, dosio_uci_delete
 
 ; --- HLE indices (mirrored by host/hle_dos_env.py, C3 range $30-$4F) ------
 HLE_DOS_IDX_OPEN  = $30         ; dos.library/Open   LVO  -30
 HLE_DOS_IDX_CLOSE = $31         ; dos.library/Close  LVO  -36
 HLE_DOS_IDX_SEEK  = $32         ; dos.library/Seek   LVO  -66
 HLE_DOS_IDX_IOERR = $33         ; dos.library/IoErr  LVO -132
+HLE_DOS_IDX_DELETEFILE = $34    ; dos.library/DeleteFile LVO  -72
+HLE_DOS_IDX_CHANGEMODE = $35    ; dos.library/ChangeMode LVO -450
 HLE_DOS_IDX_READ  = $4E         ; direct hle_dos_read  (test seam, see HLE_DOS.md)
 HLE_DOS_IDX_WRITE = $4F         ; direct hle_dos_write (test seam)
 
@@ -66,6 +72,8 @@ FH_SIZE       = 44              ; sizeof(struct FileHandle), dos/dosextens.h
 FH_SLOTS      = 8
 FH_ARGS_OFF   = 36              ; fh_Args = handle kind
 FH_KIND_FILE0 = $10             ; slot n -> kind $10+n; Close writes $FFFFFFFF
+FH_KIND_CON_LAST = 2            ; kinds 0 console out, 1 console in, 2 NIL: (C2)
+.assert ^FH_CONOUT = ^FH_CONIN .and ^FH_CONOUT = ^FH_NIL, error, "console FileHandles must share a 64 KB bank"
 .assert FH_POOL + FH_SIZE * FH_SLOTS - 1 <= FH_POOL_END, error, "FileHandle pool overflows its region"
 .assert (FH_SIZE & 3) = 0, error, "FileHandles must stay longword aligned"
 
@@ -81,6 +89,8 @@ ERROR_INVALID_COMPONENT_NAME = 210
 ERROR_INVALID_LOCK           = 211
 ERROR_SEEK_ERROR             = 219
 ERROR_DISK_FULL              = 221
+CHANGE_FH      = 1              ; ChangeMode type: object is a FileHandle
+; ChangeMode newmode: EXCLUSIVE_LOCK (ACCESS_WRITE) = -1, all four bytes $FF
 
 NAME_MAX = 63                   ; dosio_name holds 63 chars + NUL
 
@@ -94,7 +104,8 @@ BE_RDCHUNK = 10
 BE_WRCHUNK = 12
 BE_WCHECK  = 14
 BE_SETSIZE = 16
-BE_NVEC    = 18
+BE_DELETE  = 18
+BE_NVEC    = 20
 
 ; --- BSS (C64 side; no ZP, C4) ----------------------------------------------
 .segment "BSS"
@@ -136,6 +147,7 @@ dosio_tot:     .res 4           ; bytes transferred
 dosio_req:     .res 2           ; current chunk request
 dosio_t32:     .res 4           ; 32-bit temp (size / old position)
 dosio_fh:      .res 2           ; guest address of the current FileHandle
+dosio_sd1:     .res 4           ; ChangeMode: the caller's D1 while D2 is checked
 
 .segment "CODE"
 
@@ -157,6 +169,12 @@ hle_dos_dispatch:
 :       cmp #HLE_DOS_IDX_IOERR
         bne :+
         jmp dosio_ioerr
+:       cmp #HLE_DOS_IDX_DELETEFILE
+        bne :+
+        jmp dosio_delete
+:       cmp #HLE_DOS_IDX_CHANGEMODE
+        bne :+
+        jmp dosio_changemode
 :       cmp #HLE_DOS_IDX_READ
         bne :+
         jmp hle_dos_read
@@ -216,6 +234,7 @@ hle_dos_init:
         sta hle_dos_magic+3
         rts
 
+hle_dos_ensure:
 dosio_ensure:
         lda hle_dos_magic
         cmp #'D'
@@ -422,38 +441,8 @@ dosio_open:
         beq @mode
 @fail:  jmp dosio_fail0
 @mode:  stx dosio_mode
-
-        ; copy the name (at most NAME_MAX chars + NUL) via the memory API
-        lda #ERROR_INVALID_COMPONENT_NAME
-        sta dosio_err
-        ldx #3
-@na:    lda r_d1,x
-        sta dosio_ga,x
-        dex
-        bpl @na
-        lda #0
-        sta dosio_nlen
-@nl:    ldx #3
-@nb:    lda dosio_ga,x
-        sta m_addr,x
-        dex
-        bpl @nb
-        jsr mem_read8
-        ldx dosio_nlen
-        lda m_val
-        sta dosio_name,x
-        beq @ndone
-        cpx #NAME_MAX
-        beq @fail               ; no NUL within NAME_MAX chars
-        inc dosio_nlen
-        inc dosio_ga
-        bne @nl
-        inc dosio_ga+1
-        bne @nl
-        inc dosio_ga+2
-        jmp @nl
-@ndone: cpx #0
-        beq @fail               ; empty name
+        jsr dosio_getname
+        bcs @fail
 
         ; free slot?
         lda #ERROR_NO_FREE_STORE
@@ -538,6 +527,155 @@ dosio_open:
         jmp dosio_ret
 
 ; ===========================================================================
+; dosio_getname — copy the C string at D1 (non-NULL) into dosio_name /
+; dosio_nlen through the memory API.  C=1 + ERROR_INVALID_COMPONENT_NAME
+; for an empty name or one with no NUL within NAME_MAX chars.
+; ===========================================================================
+dosio_getname:
+        lda #ERROR_INVALID_COMPONENT_NAME
+        sta dosio_err
+        ldx #3
+@na:    lda r_d1,x
+        sta dosio_ga,x
+        dex
+        bpl @na
+        lda #0
+        sta dosio_nlen
+@nl:    ldx #3
+@nb:    lda dosio_ga,x
+        sta m_addr,x
+        dex
+        bpl @nb
+        jsr mem_read8
+        ldx dosio_nlen
+        lda m_val
+        sta dosio_name,x
+        beq @ndone
+        cpx #NAME_MAX
+        beq @bad                ; no NUL within NAME_MAX chars
+        inc dosio_nlen
+        inc dosio_ga
+        bne @nl
+        inc dosio_ga+1
+        bne @nl
+        inc dosio_ga+2
+        jmp @nl
+@ndone: cpx #0
+        beq @bad                ; empty name
+        clc
+        rts
+@bad:   sec
+        rts
+
+; ===========================================================================
+; $A134 DeleteFile — name D1.  D0 = DOSTRUE, or DOSFALSE + IoErr:
+; ERROR_OBJECT_NOT_FOUND (205) for NULL or a missing file, ERROR_OBJECT_IN_USE
+; (202) while any handle has the file open (the backend asks
+; dosio_delcheck), name errors as Open.  The backend's delete sees
+; dosio_name/dosio_nlen only (dosio_slot is stale).
+; ===========================================================================
+dosio_delete:
+        lda #ERROR_OBJECT_NOT_FOUND
+        sta dosio_err
+        lda r_d1
+        ora r_d1+1
+        ora r_d1+2
+        ora r_d1+3
+        beq @fail
+        jsr dosio_getname
+        bcs @fail
+        ldy #BE_DELETE
+        jsr dosio_be
+        bcs @fail
+        jmp dosio_retm1
+@fail:  jmp dosio_fail0
+
+; dosio_delcheck — A = backend file id of the file about to be deleted.
+; C=1 + ERROR_OBJECT_IN_USE when any open handle has it (whatever its
+; mode), else C=0.  Clobbers A/X.
+dosio_delcheck:
+        sta dosio_lk
+        ldx #FH_SLOTS - 1
+@l:     lda dosio_sopen,x
+        beq @n
+        lda dosio_fid,x
+        cmp dosio_lk
+        beq @busy
+@n:     dex
+        bpl @l
+        clc
+        rts
+@busy:  lda #ERROR_OBJECT_IN_USE
+        sta dosio_err
+        sec
+        rts
+
+; ===========================================================================
+; $A135 ChangeMode — type D1, object D2, newmode D3 (dos V36).  Exactly
+; the call vc.lib's fopen makes for "a", "a+" and "r+" (and for "w+"
+; never): ChangeMode(CHANGE_FH, fh, EXCLUSIVE_LOCK = -1), i.e. make an
+; open file handle exclusive (docs/HLE_DOS.md).  Refused with DOSFALSE +
+; ERROR_OBJECT_IN_USE (202) while any OTHER handle has the same file open,
+; exactly as an exclusive (MODE_NEWFILE) Open would be; on success the
+; handle becomes exclusive (every later Open of the file fails 202 until
+; it is closed) and D0 = DOSTRUE.  Every other type/newmode -> DOSFALSE +
+; ERROR_ACTION_NOT_KNOWN (209); an invalid handle -> DOSFALSE +
+; ERROR_INVALID_LOCK (211).  D1-D3 are left as the caller set them.
+; ===========================================================================
+dosio_changemode:
+        lda #ERROR_ACTION_NOT_KNOWN
+        sta dosio_err
+        lda r_d1+3              ; type == CHANGE_FH
+        ora r_d1+2
+        ora r_d1+1
+        bne @fail
+        lda r_d1
+        cmp #CHANGE_FH
+        bne @fail
+        lda r_d3                ; newmode == EXCLUSIVE_LOCK (-1)
+        and r_d3+1
+        and r_d3+2
+        and r_d3+3
+        cmp #$FF
+        bne @fail
+        ldx #3                  ; validate the handle in D2 (dosio_getfh
+@sw:    lda r_d1,x              ; reads D1): swap it in, restore after
+        sta dosio_sd1,x
+        lda r_d2,x
+        sta r_d1,x
+        dex
+        bpl @sw
+        jsr dosio_getfh         ; C=1: ERROR_INVALID_LOCK
+        php
+        ldx #3
+@rs:    lda dosio_sd1,x
+        sta r_d1,x
+        dex
+        bpl @rs
+        plp
+        bcs @fail
+        ldx dosio_slot          ; any OTHER open handle on this file?
+        lda dosio_fid,x
+        sta dosio_lk
+        ldx #FH_SLOTS - 1
+@l:     cpx dosio_slot
+        beq @n
+        lda dosio_sopen,x
+        beq @n
+        lda dosio_fid,x
+        cmp dosio_lk
+        bne @n
+        lda #ERROR_OBJECT_IN_USE
+        sta dosio_err
+@fail:  jmp dosio_fail0
+@n:     dex
+        bpl @l
+        ldx dosio_slot
+        lda #1
+        sta dosio_excl,x
+        jmp dosio_retm1
+
+; ===========================================================================
 ; dosio_lockcheck — AmigaOS sharing rules (review ruling 7), called by a
 ; backend's open once it knows which file the name refers to and BEFORE any
 ; side effect (create/truncate).  A = backend file id.  Refused (C=1,
@@ -585,6 +723,10 @@ dosio_anyopen:
 ; ===========================================================================
 ; $A131 Close — fh D1.  D0 = DOSTRUE (-1), or DOSFALSE (0) + IoErr for an
 ; invalid handle.  Close(0) is a harmless DOSTRUE no-op (V36+ behaviour).
+; Close on one of the process's console handles (FH_CONOUT / FH_CONIN /
+; FH_NIL, staged by hle_env.py, while their fh_Args still holds a console
+; kind 0-2) is DOSTRUE and closes nothing, IoErr untouched — AmigaOS
+; programs Close(Output()) and must not break the console.
 ; ===========================================================================
 dosio_close:
         lda r_d1
@@ -595,7 +737,10 @@ dosio_close:
         jmp dosio_retm1
 :       jsr dosio_getslot       ; not fh_Args (review ruling 8)
         bcc :+
-        jmp dosio_fail0
+        jsr dosio_isconsole
+        bcs @fail
+        jmp dosio_retm1
+@fail:  jmp dosio_fail0
 :       ldy #BE_CLOSE
         jsr dosio_be            ; backend close cannot fail meaningfully
         ldx dosio_slot
@@ -609,6 +754,40 @@ dosio_close:
         sta m_val+3
         jsr mem_write32
         jmp dosio_retm1
+
+; dosio_isconsole — C=0 when D1 is the BPTR of FH_CONOUT, FH_CONIN or
+; FH_NIL and that handle's fh_Args is 0-2; else C=1.  Clobbers A/X, m_*.
+dosio_isconsole:
+        lda r_d1+3
+        ora r_d1+2
+        bne @no
+        ldx #2
+@f:     lda r_d1
+        cmp con_lo,x
+        bne @nx
+        lda r_d1+1
+        cmp con_hi,x
+        beq @kind
+@nx:    dex
+        bpl @f
+@no:    sec
+        rts
+@kind:  lda con_fh_lo,x         ; m_addr := handle + FH_ARGS_OFF
+        sta m_addr
+        lda con_fh_hi,x
+        sta m_addr+1
+        lda #^FH_CONOUT
+        sta m_addr+2
+        lda #0
+        sta m_addr+3
+        jsr mem_read32
+        lda m_val+3
+        ora m_val+2
+        ora m_val+1
+        bne @no
+        lda m_val
+        cmp #FH_KIND_CON_LAST + 1       ; C = kind > 2
+        rts
 
 ; ===========================================================================
 ; $A132 Seek — fh D1, position D2 (signed), mode D3 (OFFSET_BEGINNING -1,
@@ -1160,11 +1339,19 @@ fh_hi:
         .repeat FH_SLOTS, n
         .byte >(FH_POOL + FH_SIZE * n)
         .endrepeat
+con_lo:                         ; console handle BPTRs (low 16 bits)
+        .byte <(FH_CONOUT >> 2), <(FH_CONIN >> 2), <(FH_NIL >> 2)
+con_hi:
+        .byte >(FH_CONOUT >> 2), >(FH_CONIN >> 2), >(FH_NIL >> 2)
+con_fh_lo:                      ; their fh_Args addresses
+        .byte <(FH_CONOUT + FH_ARGS_OFF), <(FH_CONIN + FH_ARGS_OFF), <(FH_NIL + FH_ARGS_OFF)
+con_fh_hi:
+        .byte >(FH_CONOUT + FH_ARGS_OFF), >(FH_CONIN + FH_ARGS_OFF), >(FH_NIL + FH_ARGS_OFF)
 dosio_vectab:                   ; backend 0: RAMDISK
         .word dosio_ram_init, dosio_ram_open, dosio_ram_close, dosio_ram_size
         .word dosio_ram_seek, dosio_ram_rdchunk, dosio_ram_wrchunk
-        .word dosio_ram_wcheck, dosio_ram_setsize
+        .word dosio_ram_wcheck, dosio_ram_setsize, dosio_ram_delete
                                 ; backend 1: ULTDOS (UCI)
         .word dosio_uci_init, dosio_uci_open, dosio_uci_close, dosio_uci_size
         .word dosio_uci_seek, dosio_uci_rdchunk, dosio_uci_wrchunk
-        .word dosio_uci_wcheck, dosio_uci_setsize
+        .word dosio_uci_wcheck, dosio_uci_setsize, dosio_uci_delete

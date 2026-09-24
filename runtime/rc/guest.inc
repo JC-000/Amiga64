@@ -27,6 +27,9 @@ ENV_BASE  = $000400     ; env region base (region end $000FFF inclusive)
 .ifndef ENV_STATE
 ENV_STATE = $000400     ; HLE state block, 8 bytes BE: heap_next.l cursor.w column.b
 .endif
+.ifndef ENV_CLOCK
+ENV_CLOCK = $000408     ; HLE clock, 8 bytes BE: ds_Days.l ds_Minute.w ds_Tick.w (DateStamp)
+.endif
 .ifndef ENV_LAUNCH
 ENV_LAUNCH = $000410    ; CLI launch stub, 12 bytes (lea args,a0/moveq/jmp)
 .endif

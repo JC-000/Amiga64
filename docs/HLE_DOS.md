@@ -1,7 +1,8 @@
 # HLE DOS: dos.library file I/O (WS-B2)
 
-Owner: WS-B2 (`m2-dos`). This covers dos.library file handles for guest
-programs: Open, Close, Read, Write, Seek and IoErr, with a backend seam.
+Owner: WS-B2 (`m2-dos`; post-merge round: `m2-post`). This covers
+dos.library file handles for guest programs: Open, Close, Read, Write, Seek,
+IoErr, DeleteFile and ChangeMode, with a backend seam.
 The **RAMDISK** backend is proven under VICE and is **always the default**.
 The **ULTDOS** backend, which talks to the Ultimate Command Interface, is
 written and pinned byte for byte against the firmware source, but it is
@@ -34,6 +35,8 @@ and is owned by WS-B1.
 | Close | -36 | `$31` / `$A131` | D1 = fh → D0 = DOSTRUE (-1), or DOSFALSE (0) with IoErr set |
 | Seek | -66 | `$32` / `$A132` | D1 = fh, D2 = position (signed), D3 = mode → D0 = **old** position, or -1 with IoErr set |
 | IoErr | -132 | `$33` / `$A133` | → D0 = last error code |
+| DeleteFile | -72 | `$34` / `$A134` | D1 = name → D0 = DOSTRUE, or DOSFALSE with IoErr set |
+| ChangeMode | -450 | `$35` / `$A135` | D1 = type, D2 = object, D3 = newmode → D0 = DOSTRUE, or DOSFALSE with IoErr set. Only `(CHANGE_FH, open file, EXCLUSIVE_LOCK)` is implemented |
 | Read | -42 | WS-B1's index. It does `jmp hle_dos_read` when fh_Args ≥ `$10` | D1 = fh, D2 = buf, D3 = len → D0 = bytes read (0 at EOF), or -1 with IoErr set |
 | Write | -48 | WS-B1's index. It does `jmp hle_dos_write` when fh_Args ≥ `$10` | D1 = fh, D2 = buf, D3 = len → D0 = len, or -1 with IoErr set |
 | (test seam) | none | `$4E` / `$4F` | Direct entries into `hle_dos_read` / `hle_dos_write`. They are never mapped in the production env; see Testing |
@@ -44,9 +47,32 @@ Each function earns its place for a C runtime's `fopen`/`fread`/`fwrite`/`fclose
 - Read and Write are needed for fread/fwrite. The console kinds of both belong to WS-B1.
 - Seek is needed for fseek/ftell, for `"a"`-mode append (Seek to OFFSET_END), and for rewind.
 - IoErr is how an AmigaOS C runtime turns a failed Open/Read/Write into `errno`. It is also the only way to observe the error paths.
+- DeleteFile is `remove()` (vc.lib `stdio/remove.c` calls LVO -72 and returns 0 on DOSTRUE, else 1).
+- ChangeMode is what vc.lib's `fopen` calls for `"a"`, `"a+"` and `"r+"` (not for `"w"`/`"w+"`; see below).
 
-Nothing else was added. DeleteFile, Rename, Lock and IsInteractive are not
-implemented. If WS-B1's vbcc run traps on one of them, see Limitations.
+Nothing else was added. Rename, Lock/Examine and IsInteractive (WS-B1 owns
+that one) are not implemented here. If a vbcc run traps on one of them, see
+Limitations.
+
+### What vc.lib's fopen passes (disassembled, m2-post)
+
+`vc +aos68k` links `stdio/fopen.c` (`__open_file`) from vc.lib (0.9h P3,
+2022-05-22 target). Disassembled with capstone from a linked executable
+(vlink `-M` map for the symbol addresses):
+
+- Mode `'w'` → `Open(name, MODE_NEWFILE)`; `'a'` → `MODE_READWRITE` and an
+  append flag; anything else (`'r'`) → `MODE_OLDFILE`. Stream flags: `'r'` →
+  read, otherwise write; a `'+'` (after an optional `'b'`) adds both.
+- **If the stream is writable and the Open mode is not MODE_NEWFILE** —
+  that is `"a"`, `"a+"`, `"r+"`, not `"w"`/`"w+"` — it calls
+  **`ChangeMode(D1 = CHANGE_FH (1), D2 = the FileHandle BPTR from Open,
+  D3 = -1)`**. -1 is `EXCLUSIVE_LOCK` (= `ACCESS_WRITE`, `dos/dos.h`). On
+  DOSFALSE it `Close`s the handle and fopen returns NULL.
+- Then `IsInteractive(fh)`; for `'a'` finally `fseek(f, 0, SEEK_END)`
+  (vc.lib's `SEEK_END` is 1 = OFFSET_END → `Seek(fh, 0, OFFSET_END)`).
+
+That is the only ChangeMode call vc.lib makes, so it is the only one
+implemented (see Semantics).
 
 ### Semantics
 
@@ -60,7 +86,7 @@ implemented. If WS-B1's vbcc run traps on one of them, see Limitations.
 - **Names** are read through the memory API, at most 63 characters.
   - An empty name, or one with no NUL within 63 characters → ERROR_INVALID_COMPONENT_NAME (210).
   - RAMDISK names are at most 31 characters (longer → 210). They compare case-insensitively (ASCII) and are stored with case preserved.
-  - Names are taken verbatim. There are no paths and no device prefixes, so `RAM:x` is a file literally named `RAM:x`.
+  - Names are taken verbatim, except that the **RAMDISK backend strips one leading `RAM:`** (ASCII case-insensitive; the RAMDISK is the flat root of `RAM:`), so `RAM:x`, `ram:X` and `x` are the same file. The 31-character limit applies after the strip; `RAM:` alone is an empty name (210). No other device names or paths: `RAM:dir/x` is a file literally named `dir/x`, `DF0:x` one named `DF0:x`. ULTDOS sends names verbatim (firmware paths).
 - **Read** is clamped to `size - position`. At EOF it returns 0 and leaves IoErr unchanged. A length of 0 returns 0.
 - **Write** with a length of 0 returns 0.
   - For RAMDISK, a write whose end position would exceed the file's extent fails as a whole: D0 = -1, ERROR_DISK_FULL (221), nothing is written. **Per-file limit: 64 KB** for guest-created files; host-staged files are limited by their staged capacity. Tested by the `diskfull` scenario.
@@ -69,6 +95,18 @@ implemented. If WS-B1's vbcc run traps on one of them, see Limitations.
   - The target must lie in 0..size. Seeking past EOF is an error, as on AmigaOS.
   - A bad mode or an out-of-range target → -1 with ERROR_SEEK_ERROR (219), and the position is unchanged.
 - **Close(0)** is a harmless DOSTRUE (V36+ behaviour).
+- **Close on a console handle** — one of the process's three staged FileHandles `FH_CONOUT`/`FH_CONIN`/`FH_NIL` (`Output()`, `Input()`, NIL:) whose `fh_Args` still reads 0-2 — is DOSTRUE, closes nothing and leaves IoErr alone, as AmigaOS programs expect from `Close(Output())`; the console keeps working. Any other non-pool BPTR is still DOSFALSE + 211 (a stray BPTR whose memory happens to hold 0 at +36 is not a console).
+- **DeleteFile(name)**:
+  - NULL → DOSFALSE + ERROR_OBJECT_NOT_FOUND (205); name errors as Open (210).
+  - Missing file → DOSFALSE + 205. On RAMDISK an invalid header means "no files": 205, and nothing is formatted.
+  - **Any handle open on the file (any mode) → DOSFALSE + ERROR_OBJECT_IN_USE (202)**, nothing changed. The generic check is `dosio_delcheck` (file id as for the sharing rules).
+  - Otherwise DOSTRUE. RAMDISK: the directory entry is freed and keeps its extent for reuse (see RAMDISK format). ULTDOS: `DELETE_FILE`, see the UCI table.
+- **ChangeMode(type, object, newmode)** — only the call vc.lib makes:
+  - `type = CHANGE_FH (1)`, `newmode = EXCLUSIVE_LOCK (-1)`, `object` = BPTR of an open file handle (validated like Read/Write/Seek, `fh_Args` included): refused with DOSFALSE + **ERROR_OBJECT_IN_USE (202) while any *other* handle has the same file open** (the same test an exclusive MODE_NEWFILE Open applies); otherwise the handle becomes **exclusive** — every later Open of that file fails 202 until it is closed, exactly like a MODE_NEWFILE handle — and D0 = DOSTRUE. Repeating it on an already exclusive handle is DOSTRUE.
+  - An invalid or console handle → DOSFALSE + ERROR_INVALID_LOCK (211).
+  - Every other `type` (CHANGE_LOCK 0: there are no locks) or `newmode` (SHARED_LOCK -2, MODE_* values, …) → DOSFALSE + ERROR_ACTION_NOT_KNOWN (209). Not needed by vc.lib; add them when a program traps on it.
+  - D1-D3 are preserved.
+  - Effect on stdio: `fopen(f, "a"/"r+")` fails (NULL) while another stream has `f` open, and while such a stream is open every other `fopen(f, …)` fails — AmigaOS behaviour.
 - **Invalid handles** fail with ERROR_INVALID_LOCK (211). That is DOSFALSE for Close, and -1 for Read, Write and Seek. A handle is invalid when any of these holds:
   - D1 << 2 is not exactly a pool slot address.
   - The slot is closed.
@@ -85,7 +123,7 @@ implemented. If WS-B1's vbcc run traps on one of them, see Limitations.
 - **Handle exhaustion**: 8 slots. A 9th Open → 0 with ERROR_NO_FREE_STORE (103).
 - **IoErr** is set only by failing calls, so it is sticky like `pr_Result2`. `hle_dos_init` resets it to 0.
   - It lives in C64 BSS as `hle_dos_ioerr` (u32 LE, exported).
-  - WS-B1 handlers may store into it so that console errors show up in IoErr too.
+  - WS-B1 handlers may store into it so that console errors show up in IoErr too. `GetVar` does (205); it calls the exported `hle_dos_ensure` first, so a lazy first-call init cannot wipe the value afterwards.
 - **Multiple handles on one file** keep their own position. On RAMDISK they share the size, which is re-read from the directory on every use.
 
 ## FileHandle pool (C2)
@@ -99,7 +137,7 @@ implemented. If WS-B1's vbcc run traps on one of them, see Limitations.
 ## Backend seam
 
 `hle_dos.s` owns argument decoding, handle validation, positions, IoErr, and
-the transfer loop. A backend implements nine routines. They are reached through
+the transfer loop. A backend implements ten routines. They are reached through
 `dosio_vec`, which is copied from `dosio_vectab` at init. Each routine is
 entered by `jmp` with X = `dosio_slot` and returns with C=0 on success. On
 failure it returns C=1 with an AmigaOS code in `dosio_err`.
@@ -115,6 +153,7 @@ failure it returns C=1 with an AmigaOS code in `dosio_err`.
 | `rdchunk` | `dosio_buf` ← file[`dosio_arg`], `dosio_len` (1-256) bytes. On return `dosio_len` = bytes delivered; fewer means EOF |
 | `wrchunk` | file[`dosio_arg`] ← `dosio_buf`, `dosio_len` bytes |
 | `wcheck` | Can the file grow to end position `dosio_arg`? (disk-full pre-check) |
+| `delete` | Delete the file `dosio_name`/`dosio_nlen` (`dosio_slot` is stale: not a slot operation). Once it knows the file id, and before any side effect, it must call `dosio_delcheck` (A = file id), which refuses with ERROR_OBJECT_IN_USE while any handle has it open |
 
 ### Chunking and C1
 
@@ -161,7 +200,13 @@ The REC's REU address counter increments only the low 19 bits (VICE `reu.c`
     untouched;
   - that the RAMDISK header and every file survive.
 
-  The `nosplit` mutant (split disabled) turns it red.
+  The `nosplit` mutant (split disabled) turns it red **through the
+  RAMDISK-side legs only** (file data across `$E80000`). The guest-buffer
+  legs (steps 6 and 9) cannot exercise the split: guest chunks are
+  page-bounded, so no guest-side DMA ever straddles `$180000`, split or not
+  (m2-post fix1 F3). They stay as regression coverage of the page-bounded
+  chunking. `run_vbcc`'s `fio_big` exercises the split from C the same way:
+  big.bin's extent is staged across `$E80000` (see `docs/HLE.md`).
 
 ### Backend selection (review ruling 1)
 
@@ -211,7 +256,7 @@ Each directory entry (64 bytes) has this layout:
 
 | Offset | Field |
 |---|---|
-| +0 | u8 flags (bit 0 = used) |
+| +0 | u8 flags (bit 0 = used, bit 1 = owns an extent: set on every create, kept after a delete) |
 | +1 | u8 name_len |
 | +2 | u16 0 |
 | +4 | u32 size |
@@ -227,7 +272,13 @@ Each directory entry (64 bytes) has this layout:
   - Every `dosio_lockcheck` call handles the refusal carry. A create can only be refused if the guest scribbled on the directory under an open handle, and then the Open fails and changes nothing.
 - **Guest-created files** get an extent of `RD_NEW_CAP` = 64 KB, or whatever space remains. 32 × 64 KB is exactly the 2 MB region, and the 4 KB header/directory page comes out of it. All 32 directory entries are allocatable, but the 32nd guest-created extent is 60 KB (tested by `dirfull`).
   - This is where ruling 6's "32 × 64 KB" comes up 4 KB short. Growing the region further would reach into `$DFxxxx`, which the ruling did not grant.
-- **Not supported**: delete, rename, or growing past the extent.
+- **Delete and space reuse (m2-post)**: DeleteFile rewrites the entry's flags to `$02` (not used, extent kept); name, size, capacity and data address stay. A create picks the first unused entry as before. It takes over that entry's extent — capacity included, `free_ptr` left alone — only when all of these hold (`rd_ext_ok`):
+  - bit 1 is set;
+  - the extent lies inside the data area: `RD_DATA <= data` and `data + capacity <= $1000000` with no 32-bit carry, so a guest that scribbled on the directory cannot aim writes elsewhere (`extscribble`, `exthi`, `extcarry`, `exthi64`, `extcarry64`);
+  - **the capacity is nonzero and at least `min(64 KB, data_end - free_ptr)`** (fix1 N2): a create never gets less room than a fresh extent would give it (`smallext`).
+
+  Otherwise it allocates from `free_ptr` as before, and a too-small extent is abandoned (leaked until the next format). So a full RAMDISK (32 entries, or 2 MB) gets both an entry and 64 KB back from each delete (`delreuse`, `fio_reuse`); when fresh space is short, a deleted extent at least that large is still reused (the 60 KB last extent qualifies once `free_ptr` is exhausted).
+- **Not supported**: rename, growing past the extent, freeing an extent back to `free_ptr` (extents are only reused through their directory entry).
 
 ## ULTDOS backend: UCI mapping (HARDWARE-UNVALIDATED)
 
@@ -260,6 +311,7 @@ Hardware-tested 6502 is `~/Documents/c64-https` at `1b9b49e`.
 | Read chunk | `t 04 lo hi` (u16 LE, ≤ 256). Response bytes go to `dosio_buf` | Count of bytes received. The success status is empty |
 | Write chunk | `t 05 00 00 payload…` (≤ 256 bytes; dos.cc ignores bytes 2-3) | `"00"`, else ERROR_DISK_FULL |
 | init | ABORT, wait for idle, clear ERROR, then `1 03` and `2 03` to close anything a previous run leaked | none |
+| DeleteFile | `1 09 name…` (`DOS_CMD_DELETE_FILE`, `dos.h` 19, `dos.cc` 208-221; always target 1 — it never touches the target's open file). Sent only after `dosio_delcheck` passed for the name's file id (`uci_pick_fid`) | `"00"`; status `WRITE PROTECTED` (FatFS `FR_WRITE_PROTECTED`, `file_system.cc` 50-51; the only error string starting `WR`, checked on the first two status bytes) → ERROR_DISK_WRITE_PROTECTED (214); any other status → ERROR_OBJECT_NOT_FOUND (205; e.g. `FILE DOESN'T EXIST`, `ACCESS DENIED`, `file_system.cc` 28-60); no reply → ERROR_DEVICE_NOT_MOUNTED (218), the file may or may not be gone |
 
 - **Target limit**: there are two DOS targets, so at most **two files** can be open at once on ULTDOS. A third Open fails with ERROR_NO_FREE_STORE. The driver never sends OPEN to a busy target, because the firmware would leak the old handle (dos.cc:113).
 - **Error mapping**:
@@ -355,6 +407,11 @@ The guest is a hand-encoded "call script" interpreter. It walks a table of
 | `fmtlock` | The guest clobbers the RAMDISK magic while two handles are open. Opens then fail with 225 and leave the header alone; the open handles keep working; after they are closed, the format happens and a new file persists (reviewer's `adv_fmt`) |
 | `fhargs` | The guest overwrites `fh_Args` through a Read into the handle pool. Read, Write and Seek refuse (211), Close still releases the slot, and the slot is reusable |
 | `nullname` | Open(NULL) → 0 with 205 |
+| `delete` | DeleteFile: missing (205), open file (202, nothing changed), after Close (DOSTRUE, then Open fails 205), `RAM:`/`ram:` prefixes on DeleteFile and Open, `RAM:` alone (210), NULL (205), a 31-character name behind `Ram:`; re-created files take over the deleted entries' extents (addresses checked) |
+| `delreuse` | 32 files fill the directory; the 33rd create fails 221; DeleteFile of one; the create now succeeds in the freed entry *and extent* (address checked) and takes a full 64 KB; the next create fails 221 again |
+| `extscribble`, `exthi`, `extcarry`, `exthi64`, `extcarry64` | A forged "deleted, keeps extent" entry whose extent lies below `RD_DATA`, past `$FFFFFF`, or whose end overflows 32 bits is not reused: the create allocates from `free_ptr` (address checked). `exthi64`/`extcarry64` use a 64 KB capacity so the N2 capacity rule cannot hide a broken range check (`m2_extupper` goes red on `exthi64`) |
+| `smallext` | A deleted host-staged extent of capacity `$100`, and one of capacity 0, are not reused (fresh extents, a 512-byte write fits); a deleted 64 KB extent is |
+| `changemode` | ChangeMode(CHANGE_FH, fh, EXCLUSIVE_LOCK) on a sole handle → DOSTRUE and every Open then fails 202; repeated → DOSTRUE; released by Close; refused 202 while another handle shares the file; CHANGE_LOCK and SHARED_LOCK → 209; a closed handle → 211 |
 | `selection` | Backend selection, described above |
 
 ### REC-shadow leg
@@ -371,7 +428,9 @@ reprograms every register.
   - Kind `$FFFFFFFF` (a closed handle) must also route here.
   - The supervisor's end-to-end fopen test must stage a RAMDISK with `hle_dos_env.ramdisk_chunks` if the program opens existing files. It is not needed for NEWFILE, because of auto-format.
 - **Init**: there is no runner HLE-init hook yet. Handles leak across programs run in one boot unless something calls `hle_dos_init`.
-- **Missing functions**: no DeleteFile, Rename, Lock/Examine or IsInteractive, and no NIL:/`*`/CONSOLE: names through Open. Add them only when a real program traps on them.
-- **RAMDISK**: 32 files, 31-character names, fixed extents (64 KB for guest-created files, 60 KB for the 32nd), no deletion.
+- **Missing functions**: no Rename, Lock/Examine, and no NIL:/`*`/CONSOLE: names through Open; ChangeMode only for the vc.lib case. Add them only when a real program traps on them.
+- **RAMDISK**: 32 files, 31-character names (after `RAM:`), fixed extents (64 KB for guest-created files, 60 KB for the 32nd), reused only through a deleted file's directory entry.
+- **ULTDOS DeleteFile** is pinned against the firmware model only (`host/tests/test_hle_dos_uci.py`); like the rest of ULTDOS it is hardware-unvalidated.
+- **ULTDOS file identity is the name string** (inherited from Open's `uci_pick_fid`): `a` and `/a` (or any two spellings of one path) get different file ids, so the sharing rules and DeleteFile's open-file check can be bypassed by spelling the same file differently. Not changed; the firmware keeps its own lock state.
 - **ULTDOS**: opt-in only; two open files at most; names relative to the firmware's current path; about 65 B/s at 1 MHz; unvalidated on hardware.
 - **Checker coverage**: `host/rescheck.py` `FILE_OWNERS` (supervisor-frozen) does not list `hle_dos.s`/`dosio_*.s`, so their raw-literal scan does not run. The files use only rc equates and contain no raw addresses.

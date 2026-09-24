@@ -52,6 +52,7 @@ ENV_END = 0x001000           # reserved env region (exclusive)
 # WS-B1 owns $000400-$000BFF; $000C00-$000FFF is WS-B2's (docs/WAVE4_BRIEF.md C4)
 ENV_B1_END = 0x000C00        # exclusive
 ENV_STATE = 0x000400         # HLE state block (8 bytes, see below)
+ENV_CLOCK = 0x000408         # HLE clock: DateStamp state (8 bytes, see below)
 ENV_LAUNCH = 0x000410        # CLI launch stub (12 bytes)
 ENV_ARGS = 0x000420          # CLI argument string (32 bytes, NUL-terminated)
 EXIT_ADDR = 0x000440         # $AFFF HALT word — final-RTS landing site
@@ -80,6 +81,12 @@ HEAP_END = 0x7FFFFF          # last byte (inclusive)
 #   +6 u8  column      console cursor column 0-39
 #   +7 u8  reserved
 STATE_SIZE = 8
+# HLE clock at ENV_CLOCK (big-endian, staged fresh for every run): the
+# DateStamp the NEXT call starts from.  Every DateStamp call first advances
+# it by one tick (carrying into minutes and days), then returns it.
+#   +0 u32 ds_Days   +4 u16 ds_Minute (0-1439)   +6 u16 ds_Tick (0-2999)
+CLOCK_SIZE = 8
+TICKS_PER_SECOND = 50        # dos/dos.h TICKS_PER_SECOND
 
 # --- AmigaOS structure offsets used by the HLE / vbcc startup ----------------
 EXEC_VERSION = 40            # lib_Version (Kickstart 3.1): vc.lib >= 39 uses
@@ -339,6 +346,12 @@ def check_program_fits(manifest: dict) -> None:
                 f"exceeds the program load region (ends ${PROG_END:06X})")
 
 
+def clock_block(days: int = 0, minute: int = 0, tick: int = 0) -> bytes:
+    if not (0 <= minute < 1440 and 0 <= tick < 60 * TICKS_PER_SECOND):
+        raise ValueError(f"bad DateStamp minute={minute} tick={tick}")
+    return struct.pack(">IHH", days, minute, tick)
+
+
 def env_chunks(stack_top: int = STACK_TOP,
                command_name: bytes = b"prog", entry: int | None = None,
                args: bytes = b"\n") -> list[Chunk]:
@@ -358,6 +371,7 @@ def env_chunks(stack_top: int = STACK_TOP,
     """
     env = _Area(ENV_BASE, ENV_B1_END)
     env.put(ENV_STATE, state_block(), "HLE state")
+    env.put(ENV_CLOCK, clock_block(), "HLE clock")
     env.put(EXIT_ADDR, struct.pack(">H", OP_HALT), "exit stub")
     env.put(ENV_CLI_NAME, _bstr_name(command_name), "CLI name")
     env.put(ENV_CLI, _cli(), "CLI")

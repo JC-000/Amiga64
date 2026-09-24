@@ -196,6 +196,20 @@ def test_hle_state_block():
     assert mem[s + 6] == 0                             # column
 
 
+def test_hle_clock_block():
+    # m2-post: DateStamp state, staged as 0/0/0 (1978-01-01 00:00:00, tick 0)
+    mem = _env()
+    c = hle_env.ENV_CLOCK
+    assert hle_env.ENV_STATE + hle_env.STATE_SIZE <= c
+    assert c + hle_env.CLOCK_SIZE <= hle_env.ENV_LAUNCH
+    assert bytes(mem[c + i] for i in range(8)) == bytes(8)
+    assert hle_env.clock_block(7, 1439, 2999) == bytes.fromhex("00000007059F0BB7")
+    with pytest.raises(ValueError):
+        hle_env.clock_block(0, 1440, 0)
+    with pytest.raises(ValueError):
+        hle_env.clock_block(0, 0, 3000)
+
+
 def test_heap_region():
     assert hle_env.HEAP_BASE == 0x100000 and hle_env.HEAP_END == 0x7FFFFF
     assert hle_env.HEAP_BASE % 8 == 0
@@ -241,7 +255,7 @@ def test_guest_inc_mirrors_env_constants():
     src = (ROOT / "runtime/rc/guest.inc").read_text()
     eq = {m.group(1): int(m.group(2), 16)
           for m in re.finditer(r"^(\w+)\s*=\s*\$([0-9A-Fa-f]+)", src, re.M)}
-    for name in ("ENV_STATE", "ENV_LAUNCH", "ENV_ARGS", "ENV_CLI_NAME",
+    for name in ("ENV_STATE", "ENV_CLOCK", "ENV_LAUNCH", "ENV_ARGS", "ENV_CLI_NAME",
                  "ENV_CLI", "ENV_PROCESS", "FH_CONOUT", "FH_CONIN",
                  "FH_NIL", "HEAP_BASE", "HEAP_END"):
         assert eq[name] == getattr(hle_env, name), name

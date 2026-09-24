@@ -67,6 +67,7 @@ would reach past `$0EFFFF` (`host/image.py` does not bound the region).
 |---|---|
 | `$000004` | AbsExecBase: u32 BE pointer to ExecBase (`$0F0400`) |
 | `$000400` | `ENV_STATE`: HLE state block (8 bytes BE): `+0` u32 heap_next, `+4` u16 cursor (0-1000), `+6` u8 column, `+7` pad |
+| `$000408` | `ENV_CLOCK`: HLE clock (8 bytes BE): `+0` u32 ds_Days, `+4` u16 ds_Minute (0-1439), `+6` u16 ds_Tick (0-2999); staged 0/0/0 (`hle_env.clock_block`), see Clock |
 | `$000410` | `ENV_LAUNCH`: CLI launch stub `lea ENV_ARGS.w,a0 / moveq #len,d0 / jmp entry.l` |
 | `$000420` | `ENV_ARGS`: argument string (≤ 31 bytes + NUL, default `"\n"`) |
 | `$000440` | `EXIT_ADDR`: `$AFFF` HALT word (program-exit landing site) |
@@ -135,9 +136,37 @@ exits 7).
 | exec | AllocVec | -684 | `$0F` | as exec: AllocMem(D0+4, D1), size+4 stored in the first longword, D0 = block+4 (8n+4); D0 ≥ 16 MB or no room → 0 |
 | exec | FreeVec | -690 | `$10` | NULL → no-op; else FreeMem(A1-4, [A1-4]) |
 | exec | StackSwap | -732 | `$11` | A0 = StackSwapStruct: tc_SPLower/Upper ⇄ stk_Lower/Upper, A7 ⇄ stk_Pointer; the return address is popped from the old stack, written at new-A7 − 4 (exec returns via RTS on the new stack) and the call returns on the new one (a second call swaps back) |
-| dos | GetVar | -906 | `$12` | no environment/local variables: D0 = -1 (not found), buffer untouched. **IoErr is not set** — the file-DOS IoErr lives in WS-B2's `hle_dos_ioerr` (`docs/HLE_DOS.md`); IoErr after GetVar reports whatever WS-B2 last stored. vc.lib's `getenv()` → NULL |
-| dos | DateStamp | -192 | `$13` | D1 = `struct DateStamp *` (address): all three longwords 0 (clock stopped at 1978-01-01 00:00), D0 = D1. `time()` → 252 460 800 |
+| dos | GetVar | -906 | `$12` | no environment/local variables: D0 = -1 (not found), buffer untouched, **IoErr = ERROR_OBJECT_NOT_FOUND (205)** — stored into WS-B2's exported `hle_dos_ioerr` after `jsr hle_dos_ensure` (`docs/HLE_DOS.md`). vc.lib's `getenv()` → NULL |
+| dos | DateStamp | -192 | `$13` | D1 = `struct DateStamp *` (address): the HLE clock advances by **one tick per call** and the advanced ds_Days/ds_Minute/ds_Tick are stored there; D0 = D1. See Clock below |
 | dos | SystemTagList | -606 | `$14` | no shell: D0 = -1, so `system("cmd")` returns -1. `system(NULL)` does not call dos: vc.lib at V36+ reports a shell (returns 1) |
+
+### Clock (DateStamp)
+
+The HLE has no time source that is both cheap and available in every
+build: the only instruction counter lives in the test runner
+(`tests/runner/run_program.s` `icount`, zero page shared with the loader),
+not in the core, and the hardware mailbox path has none. So the clock is a
+**call counter**: each DateStamp call first advances `ENV_CLOCK` by one
+tick (1/50 s, `TICKS_PER_SECOND`), carrying at 3000 ticks into ds_Minute
+and at 1440 minutes into ds_Days, then returns it. The carries test `>=`
+(and the minute test runs on every call), so a guest-corrupted clock —
+tick ≥ 3000 or minute ≥ 1440 — is normalised by the next call
+(`u_clock2`). `ENV_CLOCK` is guest
+memory staged 0/0/0 (1978-01-01 00:00:00) with the env, so every run starts
+there; the first call of a run returns tick 1.
+
+- Monotonic: two calls never return the same stamp, and the stamp never
+  goes back within a run (days wrap only after 2^32 days).
+- `time()` (vc.lib: `((days + 2922) * 1440 + minute + gmtoffset) * 60 +
+  tick / 50`, gmtoffset 0 because OpenLibrary("locale.library") fails) is
+  252 460 800 for the first 49 calls and then counts one second per 50
+  calls. A `t = time(0); while (time(0) == t);` loop ends after 49 more
+  calls (`fixtures/c/tspin.c`, run under a 3 M instruction budget).
+- Guest code sees no relation to real or emulated time; programs that
+  measure elapsed time get "number of clock reads / 50" seconds.
+- **`clock()` stays -1**: vc.lib's `time/clock.c` is `moveq #-1,d0; rts`
+  (disassembled, 4 bytes) and never calls the OS, so there is nothing for
+  the HLE to service. `tspin` pins `clock=-1`.
 
 Indices are mirrored verbatim in `runtime/ops/hle.s` (dispatch table,
 `HLE_FN_COUNT` = 21) and `host/hle_env.py` (`EXEC_FUNCS`/`DOS_FUNCS`,
@@ -171,7 +200,7 @@ vbcc's `__stack` variable (default 4 KB), the startup takes its V36+ path:
 runs on a heap stack). Not called on the CLI path (and not implemented):
 the Workbench branch (WaitPort, GetMsg, ReplyMsg, Forbid, CurrentDir,
 Open("NIL:")), Close (the startup closes `4(argv block)`, which MEMF_CLEAR
-leaves 0). Programs that read ExecBase fields directly get a full-size
+leaves 0; Close on the console handles is DOSTRUE, `docs/HLE_DOS.md`). Programs that read ExecBase fields directly get a full-size
 ExecBase (ThisTask, AttnFlags, MaxLocMem, versions — `fixtures/c/sysbase.c`).
 
 ## FileHandles (contract C2)
@@ -250,7 +279,14 @@ Bump allocator over `HEAP_BASE $100000`–`HEAP_END $7FFFFF` (7 MB), state =
     Read(NIL:) (`u_dos3`), Write without Output, negative and ≥ 16 MB
     lengths, OpenLibrary exact name + version (`u_openlib`), FindTask,
     SetSignal (D0 must be overwritten), GetVar/DateStamp/SystemTagList
-    (`u_dos4`), the unimplemented-LVO sentinel,
+    (`u_dos4`), GetVar leaving a poisoned 32-byte buffer untouched + IoErr
+    205, and Close on Output()/Input()/NIL: → DOSTRUE with IoErr and the
+    console intact (`u_getvar`), DateStamp's tick → minute → day carries
+    (`u_clock`), recovery from an out-of-range clock (`u_clock2`),
+    GetVar as the first dos call after boot — `hle_dos_magic` zapped, no
+    host init — so its IoErr must survive the lazy init
+    (`u_getvar_lazy`), ChangeMode (`u_cmode`, `u_cmode2`, see
+    `docs/HLE_DOS.md`), the unimplemented-LVO sentinel,
     and the C2 hand-off (`u_file`/`u_file2`/`u_file3`: kinds `$10`,
     `$FFFFFFFF`, `$00000100`). Against the WS-B2 stub the hand-off is
     pinned exactly (halt in the Write/Read slot, D1-D3 and the stack
@@ -269,8 +305,29 @@ Bump allocator over `HEAP_BASE $100000`–`HEAP_END $7FFFFF` (7 MB), state =
     -1), and `leak_open` +
     `leak_check` (handle state must not leak between programs; needs
     WS-B2's real `hle_dos.s`, skipped with a SKIP line while it is the
-    stub). Checks: halt reason (+ decoded slot), exit code in D0,
-    `A7 = stack_top + 4`, and the full 25-row screen.
+    stub), `tspin` (the clock moves; `clock()` = -1). Checks: halt
+    reason (+ decoded slot), exit code in D0, `A7 = stack_top + 4`, and
+    the full 25-row screen.
+  - **stdio file I/O end to end** (m2-post; RAMDISK backend). A program
+    with `files=` gets a freshly formatted RAMDISK holding those files
+    (`hle_dos_env.ramdisk_chunks`) staged with it; `expect_files=` reads the
+    RAMDISK back after the run (`hle_dos_env.parse_directory` through
+    `tests.run_dos.Guest`, which splits REU reads at 512 KB lines) and
+    compares contents, `None` meaning "must not exist". `fio_rw` (fopen
+    "w"/fwrite/fclose, fopen "r"/fgetc/fread/EOF, missing file → NULL,
+    `RAM:` prefix), `fio_seek` (fseek/ftell/rewind on a staged file),
+    `fio_exit` (a stream left open is flushed by exit), `fio_fmt`
+    (fprintf/fscanf), `fio_big` (3000 bytes through a `setvbuf` buffer
+    that is not page aligned; a staged pad file puts big.bin's extent at
+    `$E7FE00`, so the chunk at file offset `$200` crosses the 512 KB REU
+    line `$E80000` on the RAMDISK side and needs `dosio_dma`'s split — the
+    nosplit mutant turns it red. The buffer also crosses guest `$180000`,
+    but that part is regression coverage only: guest chunks are
+    page-bounded, so no guest-side DMA can straddle it. The program prints
+    `straddle=1 odd=1`), `fio_append` (fopen "a" on an existing and a missing
+    file, "r+" in place, ChangeMode refusals), `fio_remove` (remove():
+    202 while open, 205 when missing, `RAM:` prefix), `fio_reuse` (fill
+    the RAMDISK, remove one, create again).
   - When the PRG exports `hle_dos_init` (WS-B2), it is called before every
     program (`--no-dos-init` turns that off: then `leak_check` goes red —
     evidence under `build/evidence/ws-b1/fix1/`). A runner-level HLE init
@@ -279,8 +336,8 @@ Bump allocator over `HEAP_BASE $100000`–`HEAP_END $7FFFFF` (7 MB), state =
 ## Still missing (next)
 
 - **Keyboard input**: Read on the console returns EOF.
-- **Clock / environment / shell**: DateStamp is frozen at 0, GetVar finds
-  nothing, SystemTagList runs nothing.
+- **Clock / environment / shell**: DateStamp is a call counter (one tick
+  per call, see Clock), GetVar finds nothing, SystemTagList runs nothing.
 - **More libraries**: OpenLibrary knows only dos.library (math libraries
   for printf `%f` would be next for vbcc; not yet exercised).
 - **Workbench startup path**, Forbid/Permit, message ports, signals

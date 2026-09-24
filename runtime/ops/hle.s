@@ -45,6 +45,7 @@
 .import dispatch_next, emu_halt
 .import hle_dos_dispatch        ; runtime/ops/hle_dos.s (WS-B2), indices $30-$4F
 .import hle_dos_read, hle_dos_write     ; WS-B2 file-handle I/O (C2)
+.import hle_dos_ioerr, hle_dos_ensure   ; IoErr() value (u32 LE) + lazy init
 
 HLE_FN_COUNT = 21               ; valid indices $A100-$A114 (hle_env.HLE_FN_COUNT)
 LIB_VERSION  = 40               ; OpenLibrary: newer versions -> NULL
@@ -64,6 +65,10 @@ FH_KIND_NIL  = 2                ; 0 console out, 1 console in, 2 NIL:
 FH_KIND_FILE0 = $10             ; >= $10: WS-B2 file slots -> hle_dos_*
 ST_HEAP      = 0                ; ENV_STATE +0: u32 heap_next
 ST_CON       = 4                ; ENV_STATE +4: u16 cursor, u8 column, u8 pad
+CLK_MINTICK  = 4                ; ENV_CLOCK +4: u16 ds_Minute, u16 ds_Tick (BE)
+TICKS_PER_MIN = 3000            ; 50 ticks/s (dos/dos.h TICKS_PER_SECOND)
+MINS_PER_DAY = 1440
+ERROR_OBJECT_NOT_FOUND = 205
 HEAP_TOP     = HEAP_END + 1     ; first byte past the pool ($800000)
 
 SCREEN_COLS  = 40
@@ -719,35 +724,82 @@ hle_stackswap:
 ; ===========================================================================
 ; $A112 GetVar — name D1, buffer D2, size D3, flags D4 (dos V36).  There
 ; are no environment/local variables: D0 = -1 ("not found"), the buffer is
-; not touched.  IoErr is NOT set: the file-DOS IoErr lives in WS-B2's
-; hle_dos_ioerr (docs/HLE.md).
+; not touched, IoErr = ERROR_OBJECT_NOT_FOUND (205, as dos.library sets it)
+; in hle_dos.s's hle_dos_ioerr (after its lazy init, so a first-call init
+; cannot wipe it).
 ; $A114 SystemTagList — command D1, tags D2 (dos V36).  No shell: D0 = -1
 ; (the command could not be run), so system("cmd") returns -1.
 ; ===========================================================================
 hle_getvar:
+        jsr hle_dos_ensure
+        lda #ERROR_OBJECT_NOT_FOUND
+        sta hle_dos_ioerr
+        lda #0
+        sta hle_dos_ioerr+1
+        sta hle_dos_ioerr+2
+        sta hle_dos_ioerr+3
 hle_systemtaglist:
         D0_MINUS1
         jmp hle_ret
 
 ; ===========================================================================
 ; $A113 DateStamp — struct DateStamp *ds in D1 (an address, not a BPTR).
-; The HLE clock is stopped at ds_Days = ds_Minute = ds_Tick = 0
-; (1978-01-01 00:00:00); D0 = D1.
+; The HLE clock (ENV_CLOCK, guest memory, staged 0/0/0 = 1978-01-01
+; 00:00:00 for every run) advances by ONE tick (1/50 s) per call, carrying
+; into ds_Minute (3000 ticks) and ds_Days (1440 minutes); the advanced
+; value is stored at [D1] (ds_Days, ds_Minute, ds_Tick) and D0 = D1.
+; The carries test >= (tick >= 3000, minute >= 1440 on every call), so a
+; guest-corrupted ENV_CLOCK is normalised by the next call.
+; A call counter, not a clock: time only moves when the program asks.
 ; ===========================================================================
 hle_datestamp:
+        SETADDR ENV_CLOCK, CLK_MINTICK
+        jsr mem_read32          ; m_val = minute:tick (LE: tick lo, tick hi,
+        inc m_val               ;                      minute lo, minute hi)
+        bne :+
+        inc m_val+1
+:       lda m_val               ; tick >= 3000? (>=, not ==: a corrupted
+        cmp #<TICKS_PER_MIN     ; clock recovers on the next call)
+        lda m_val+1
+        sbc #>TICKS_PER_MIN
+        bcc @min
+        lda #0
+        sta m_val
+        sta m_val+1
+        inc m_val+2             ; minute++
+        bne @min
+        inc m_val+3
+@min:   lda m_val+2             ; minute >= 1440? (checked on every call)
+        cmp #<MINS_PER_DAY
+        lda m_val+3
+        sbc #>MINS_PER_DAY
+        bcc @wr
+        lda #0
+        sta m_val+2
+        sta m_val+3
+        jsr mem_write32         ; ENV_CLOCK+4 := minute 0 (tick kept), then days++
+        SETADDR ENV_CLOCK, 0
+        jsr mem_read32
+        inc m_val
+        bne @wr
+        inc m_val+1
+        bne @wr
+        inc m_val+2
+        bne @wr
+        inc m_val+3
+@wr:    jsr mem_write32         ; m_addr: whichever field was changed last
         ldx #3
 @c:     lda r_d1,x
         sta hle_ptr,x
         sta r_d0,x
         dex
         bpl @c
-        lda #3
+        lda #0                  ; copy ds_Days, ds_Minute, ds_Tick to [D1]
         sta hle_idx
-@w:     ldx #3
+@w:     jsr hle_clock_field     ; m_val = field hle_idx (0..2)
+        ldx #3
 @a:     lda hle_ptr,x
         sta m_addr,x
-        lda #0
-        sta m_val,x
         dex
         bpl @a
         jsr mem_write32
@@ -759,9 +811,32 @@ hle_datestamp:
         inc hle_ptr+1
         bne @n
         inc hle_ptr+2
-@n:     dec hle_idx
+@n:     inc hle_idx
+        lda hle_idx
+        cmp #3
         bne @w
         jmp hle_ret
+
+; hle_clock_field — m_val := DateStamp field hle_idx (0 ds_Days, 1
+; ds_Minute, 2 ds_Tick) from ENV_CLOCK, as a u32.
+hle_clock_field:
+        lda hle_idx
+        bne @mt
+        SETADDR ENV_CLOCK, 0
+        jmp mem_read32
+@mt:    SETADDR ENV_CLOCK, CLK_MINTICK
+        jsr mem_read32          ; LE: tick lo, tick hi, minute lo, minute hi
+        lda hle_idx
+        cmp #2
+        beq @tk
+        lda m_val+2             ; minute -> low word
+        sta m_val
+        lda m_val+3
+        sta m_val+1
+@tk:    lda #0
+        sta m_val+2
+        sta m_val+3
+        rts
 
 ; hle_sa := A0 + A (A = 0..8), 24-bit
 hle_sa_a0:
