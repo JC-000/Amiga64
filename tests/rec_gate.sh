@@ -27,5 +27,6 @@ step rescheck    make rescheck
 step fetchdirect python3 -m tests.rec_build --out $B-fetchdirect FETCH_DIRECT
 step rec_budget  python3 -m tests.rec_budget --prg $B/runner.prg
 step rec_wrap    python3 -m tests.rec_wrap --prg $B/runner.prg
+step rec_apisweep python3 -m tests.rec_apisweep --prg $B/runner.prg
 [ -n "$SKIP_MATRIX" ] || step rec_matrix  python3 -m tests.rec_matrix
 exit $fails

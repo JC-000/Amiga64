@@ -165,11 +165,17 @@ def ph_teeth(hw: Hw, a) -> dict:
     rng = random.Random(seed)
     log(f"  teeth seed {seed}")
     out = {"seed": seed}
-    for tag, prg in (("normal", a.new), ("noinval", a.noinval)):
+    # label the second row by the build it really is (REC_NOINVAL or a
+    # mutant passed via --noinval), e.g. "ws-a-noinval", "ws-a-src-actrl"
+    mtag = os.path.basename(os.path.dirname(a.noinval))
+    out["mutant_build"] = os.path.relpath(a.noinval, ROOT)
+    for tag, prg in (("normal", a.new), (mtag, a.noinval)):
         rows = {}
         for name, fn in LEGS.items():
             if name == "mailbox" and hw.target.backend == "vice":
                 continue                        # no mailbox on VICE
+            if name == "boot" and hw.target.backend != "vice":
+                continue                        # mailbox dirties first
             labels = hw.load(prg)
             leg = Leg(hw.target, labels, "u64", rng)
             try:
@@ -177,12 +183,12 @@ def ph_teeth(hw: Hw, a) -> dict:
             except Exception as e:
                 leg.problems.append(f"exception: {e!r}")
             rows[name] = leg.problems
-            log(f"  teeth {tag:<8} {name:<11} "
+            log(f"  teeth {tag:<14} {name:<11} "
                 f"{'PASS' if not leg.problems else 'FAIL'} "
                 f"{leg.problems[:2] if leg.problems else ''}")
         out[tag] = rows
     out["normal_all_pass"] = not any(out["normal"].values())
-    out["mutant_failed_legs"] = sorted(k for k, v in out["noinval"].items()
+    out["mutant_failed_legs"] = sorted(k for k, v in out[mtag].items()
                                        if v)
     return out
 

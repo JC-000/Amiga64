@@ -53,6 +53,7 @@
 .exportzp r_a0, r_a1, r_a2, r_a3, r_a4, r_a5, r_a6, r_a7
 .exportzp r_pc, r_sr, op_lo, op_hi, m_addr, m_val
 .exportzp t_ea, t_op1, t_op2, t_res, t_tmp, st_halt, st_reason
+.exportzp m_rok                 ; label only: tests/rec_apisweep.py split-path check
 .export HALT_OK, HALT_ALINE, HALT_FLINE, HALT_ILLEGAL
 .export buf_case, buf_result
 

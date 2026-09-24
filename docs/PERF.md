@@ -161,21 +161,35 @@ of its own cycles/instruction; we spend ~400 host cycles/instruction.)
      of those invalidations and every `mio_full` store is load-bearing
      (`tests/rec_teeth.py`, `tests/rec_matrix.py`);
    - the boot stub also clears the flag (ZP comes up with garbage). That
-     clear is **redundant by design and NOT proven load-bearing**: every
-     host-reachable entry already invalidates before its first memory-API
-     call, so no test can observe the boot clear. The reviewer's
-     `bootrok` mutant survives, as it should.
+     clear **protects a direct memory-API call made before the first
+     runner entry**, for example a host `jsr` into `mem_read8` right after
+     boot on VICE. The runner entries invalidate on their own, but a
+     direct call has nothing else in front of it. At power-on the REC
+     length register is `$FFFF`, so a stale "valid" shadow issues a 64 KB
+     DMA over C64 RAM and VICE hangs. The `boot` teeth leg
+     (`tests/rec_teeth.py`, VICE only) catches the `bootrok` mutant this
+     way. On the U64 the mailbox dispatcher dirties the shadow before
+     every call, so the leg does not apply there.
 
    512 KB straddles (fix round, 2026-09-24). The REC's address counter
    carries only through bits 0–18, on VICE and on the U64E alike. A 16- or
    32-bit access straddling `$x7FFFF` → `$x80000` therefore needs splitting.
    This was a pre-existing bug, not something the shadow introduced. The
    API now tests for the straddle, which costs 7 cycles on the common path,
-   and moves straddling accesses byte by byte (`mio_split`). Measured cost
-   at "48 MHz", same session against the unfixed shadow core: MEM −2.0%,
-   RMW −1.6%, STREAM −0.2%. Against the windowed base, the fixed core is
-   still +25% MEM, +15% STREAM and +43% RMW. See `docs/HARDWARE.md`,
-   "Fix round".
+   and moves straddling accesses byte by byte (`mio_split`). The odd-address
+   straddle paths are reachable only from HLE and direct API calls, because
+   odd guest word/long accesses are address errors. They are pinned by
+   `tests/rec_apisweep.py`: 128 direct-API cases, with a split-path check
+   through `m_rok` and a check that X/Y are preserved.
+
+   **Measured** at "48 MHz", same session, fixed core against the unfixed
+   shadow core: MEM −2.0%, RMW −1.6%, STREAM −0.2%. The 7-cycle test alone
+   predicts only about 0.6–1% on these loops (1 or 2 calls per 2
+   instructions, against about 550–700 cycles per instruction). The rest is
+   **not** attributed to the test; code layout (page-crossing branches and
+   the moved entry points) is a likely contributor, but it was not isolated.
+   Against the windowed base, the fixed core is still +25% MEM, +15% STREAM
+   and +43% RMW. See `docs/HARDWARE.md`, "Fix round".
 
    Not done, and still open for the ALU/EA side of this lever:
    - trimming the ZP copies around `ea_load` / `ea_store` / `m_val`;

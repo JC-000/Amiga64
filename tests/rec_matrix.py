@@ -12,6 +12,9 @@ Rows (build flags -> legs that must FAIL):
     REC_MUT_RESET   emu_reset only  -> reset_case
     REC_MUT_DIRTY   mem_rec_dirty   -> load_chunk, foreign (+mailbox on u64)
     src-actrl/lenhi/c64hi  mio_full minus one cold-path store -> foreign
+    src-bootrok     boot stub leaves m_rok set -> boot
+  plus the direct-API sweep (tests/rec_apisweep.py): normal build passes,
+  the src-s-pred-odd / src-s-nostraddle2 / src-s-noy mutants must fail.
 Exit 0 iff every row behaves as required.
 """
 
@@ -36,6 +39,15 @@ ROWS = [
     ("src-actrl", "actrl", ["foreign"]),
     ("src-lenhi", "lenhi", ["foreign"]),
     ("src-c64hi", "c64hi", ["foreign"]),
+    ("src-bootrok", "bootrok", ["boot"]),
+]
+
+# Direct-API sweep rows (VICE only): (name, mutant or None, must fail?)
+SWEEP_ROWS = [
+    ("sweep-normal", None, False),
+    ("sweep-s-pred-odd", "s-pred-odd", True),
+    ("sweep-s-nostraddle2", "s-nostraddle2", True),
+    ("sweep-s-noy", "s-noy", True),
 ]
 
 
@@ -61,7 +73,8 @@ def main(argv=None) -> int:
                "--backend", args.backend]
         if must_fail:
             legs = [l for l in must_fail
-                    if args.backend == "u64" or l != "mailbox"]
+                    if (args.backend == "u64" or l != "mailbox")
+                    and (args.backend == "vice" or l != "boot")]
             cmd += ["--expect-fail", ",".join(legs)]
         r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
         log = os.path.join(ev, f"rec_teeth_{args.backend}_{name}.txt")
@@ -76,6 +89,26 @@ def main(argv=None) -> int:
         ok = r.returncode == 0
         ok_all &= ok
         summary.append((name, " ".join(flags) or "-", ok, tail))
+    if args.backend == "vice":
+        for name, mut, must_fail in SWEEP_ROWS:
+            if args.rows and name not in args.rows.split(","):
+                continue
+            out = "build/ws-a" if not mut else f"build/ws-a-src-{mut}"
+            prg = build(out, (), mutant=mut)
+            cmd = [sys.executable, "-m", "tests.rec_apisweep", "--prg", prg]
+            r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+            text = r.stdout + r.stderr
+            ok = (r.returncode != 0) if must_fail else (r.returncode == 0)
+            ok_all &= ok
+            with open(os.path.join(ev, f"rec_apisweep_{name}.txt"), "w") as f:
+                f.write("$ " + " ".join(os.path.relpath(c, ROOT)
+                                        if c.startswith(ROOT) else c
+                                        for c in cmd) + "\n")
+                f.write(text[-6000:] + f"\nexit={r.returncode} (must "
+                        f"{'FAIL' if must_fail else 'pass'})\n")
+            last = [l for l in text.splitlines() if " cases, " in l]
+            summary.append((name, f"mutant:{mut}" if mut else "-", ok,
+                            "\n" + (last[-1] if last else text[-300:])))
     print(f"\nC1 teeth matrix ({args.backend})")
     for name, flags, ok, tail in summary:
         print(f"== {name:<11} flags={flags:<15} {'OK' if ok else 'NOT OK'}")

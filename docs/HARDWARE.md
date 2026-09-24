@@ -383,6 +383,20 @@ stay on the fast path.
 | Teeth, `REC_NOINVAL` build | 5/5 fail |
 | Teeth, `actrl` source mutant | fails the new `foreign` leg only |
 
+The silicon `REC_NOINVAL` 5/5 failure shows only that the build is broken:
+its very first test case already fails, because with every invalidation
+removed the first window refill leaves the shadow stale for the rest of the
+run. It is **not** per-leg teeth evidence. The per-leg evidence is:
+
+- the VICE mutant matrix (`tests/rec_matrix.py`), where each
+  `REC_MUT_*` build and each source mutant kills exactly the legs that
+  cover it;
+- on silicon, the round-1 `REC_MUT_DIRTY` run (only load_chunk and
+  mailbox failed);
+- on silicon, the `actrl` run above (only `foreign` failed). Its JSON key
+  was mislabelled "noinval" and is now renamed `mutant_actrl`; see
+  `build/evidence/ws-a/fix1/hw-actrl-bench/NOTE.txt`.
+
 The `actrl` mutant is a cold path without the ACTRL store. The teeth
 scribbler now leaves ACTRL `$80` and LENHI `$01`. The runner-entry legs
 cannot catch it, because the window refill rewrites ACTRL itself. The
@@ -398,6 +412,15 @@ a direct `mem_write32`, with no refill in between.
 | STREAM | 61 480 → 61 343 (−0.2%) |
 | RMW | 58 219 → 57 302 (−1.6%) |
 | ALU | +0.6% (noise) |
+
+These deltas are **measured**. The 7-cycle straddle test predicts only
+about 0.6–1% on these loops, so part of the loss is something else. Code
+layout is a likely contributor, but it was not isolated.
+
+One `eff_mhz` sample in that file is an outlier: base rep 0 reads 43.15 MHz,
+while the other three samples read 38.1–38.8. The IPS values are
+wall-clock based and unaffected, but the c/instr derived from that sample is
+about 12% too high. Use the other rep, or IPS, for that row.
 
 Against the 158e684 windowed base in the main fix session
 (`fixtures/bench/sweep_reclean_fix1.json`), the fixed core is:

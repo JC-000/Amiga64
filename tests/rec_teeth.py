@@ -32,6 +32,12 @@ the leg (REC_NOINVAL removes all of them; REC_MUT_* remove one each).
              masks a cold path that forgets them in every runner-entry
              leg).  Kills REC_MUT_DIRTY and every mio_full store mutant
              (tests/rec_build.py MUTANTS: actrl, lenhi, c64hi).
+  boot       (VICE only) the very first thing after boot is a DIRECT
+             mem_read8 -- no runner entry, no emu_reset.  Only the boot
+             stub's m_rok clear protects it: the power-on REC length is
+             $FFFF, so a stale "valid" shadow would run a 64 KB DMA over
+             C64 RAM (hangs VICE).  Compared with the raw reader.
+                                                   (mutant src bootrok)
 
 Data values are random per run (--seed): the REU is NOT cleared between
 legs on hardware (run_prg reloads C64 RAM only), so fixed values could let
@@ -254,10 +260,24 @@ def leg_foreign(leg: Leg):
                             f"{b.hex()} got {val.hex()}")
 
 
+def leg_boot(leg: Leg):
+    from c64_test_harness import read_bytes, write_bytes
+    addr = DATA + 0x400 + leg.rng.randrange(0x100)
+    write_bytes(leg.t, rp.ZP_M_ADDR, struct.pack("<I", addr))
+    write_bytes(leg.t, rp.ZP_M_VAL, b"\x00")
+    leg.call("mem_read8", timeout=10.0)          # first call after boot
+    got = read_bytes(leg.t, rp.ZP_M_VAL, 1)[0]
+    ref = leg.ref_read(addr & ~0xF)[addr & 0xF]
+    if got != ref:
+        leg.problems.append(f"first direct mem_read8 after boot: expected "
+                            f"{ref:02X} got {got:02X}")
+
+
 LEGS = {"refill": leg_refill, "reset_case": leg_reset_case,
         "load_chunk": leg_load_chunk, "mailbox": leg_mailbox,
-        "foreign": leg_foreign}
+        "foreign": leg_foreign, "boot": leg_boot}
 U64_ONLY = {"mailbox"}
+VICE_ONLY = {"boot"}    # on u64 the mailbox dispatcher dirties first
 
 
 def main(argv=None) -> int:
@@ -277,7 +297,8 @@ def main(argv=None) -> int:
     prg = os.path.abspath(args.prg)
     labels = Labels.from_file(os.path.splitext(prg)[0] + ".lbl")
     names = [n for n in (args.legs.split(",") if args.legs else LEGS)
-             if args.backend == "u64" or n not in U64_ONLY]
+             if (args.backend == "u64" or n not in U64_ONLY)
+             and (args.backend == "vice" or n not in VICE_ONLY)]
     vice_config = ViceConfig(prg_path=prg, warp=True, sound=False,
                              extra_args=list(REU_VICE_ARGS))
     seed = args.seed if args.seed is not None else random.randrange(1 << 30)
