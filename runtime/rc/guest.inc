@@ -23,14 +23,42 @@ ABSEXECBASE_ADDR = $000004  ; 32-bit BE pointer to the fake ExecBase
 .ifndef ENV_BASE
 ENV_BASE  = $000400     ; env region base (region end $000FFF inclusive)
 .endif
+; --- WS-B1 part $000400-$000BFF (docs/WAVE4_BRIEF.md C4; layout docs/HLE.md)
+.ifndef ENV_STATE
+ENV_STATE = $000400     ; HLE state block, 8 bytes BE: heap_next.l cursor.w column.b
+.endif
+.ifndef ENV_LAUNCH
+ENV_LAUNCH = $000410    ; CLI launch stub, 12 bytes (lea args,a0/moveq/jmp)
+.endif
+.ifndef ENV_ARGS
+ENV_ARGS  = $000420     ; CLI argument string buffer, 32 bytes
+.endif
 .ifndef EXIT_ADDR
 EXIT_ADDR = $000440     ; $AFFF HALT word - final-RTS landing site
+.endif
+.ifndef ENV_CLI_NAME
+ENV_CLI_NAME = $000444  ; BSTR command-name buffer, 60 bytes
+.endif
+.ifndef ENV_CLI
+ENV_CLI   = $000480     ; struct CommandLineInterface, 64 bytes
 .endif
 .ifndef EXEC_BASE
 EXEC_BASE = $000800     ; fake exec.library base (vector slots below it)
 .endif
 .ifndef DOS_BASE
 DOS_BASE  = $000A00     ; fake dos.library base (vector slots below it)
+.endif
+.ifndef ENV_PROCESS
+ENV_PROCESS = $000A40   ; struct Process, 228 bytes (FindTask(NULL) result)
+.endif
+.ifndef FH_CONOUT
+FH_CONOUT = $000B30     ; struct FileHandle (44 bytes), fh_Args = 0 console out
+.endif
+.ifndef FH_CONIN
+FH_CONIN  = $000B60     ; struct FileHandle (44 bytes), fh_Args = 1 console in
+.endif
+.ifndef FH_NIL
+FH_NIL    = $000B90     ; struct FileHandle (44 bytes), fh_Args = 2 NIL:
 .endif
 
 ; @region run $001000-$00FFFF program stack - grows down from STACK_TOP; exit-address longword staged at $00F000-$00F003
@@ -59,3 +87,6 @@ HEAP_END  = $7FFFFF     ; last byte of the AllocMem pool (inclusive)
 .assert DOS_BASE - 60 >= ENV_BASE,    error, "deepest dos.library vector slot (LVO -60) must stay inside the env region"
 .assert STACK_TOP < PROG_BASE,        error, "guest stack must sit below the program load base"
 .assert HEAP_BASE > PROG_BASE,        error, "AllocMem pool must sit above the program load region"
+.assert (HEAP_BASE & 7) = 0,          error, "AllocMem pool must be 8-byte aligned (MEM_BLOCKSIZE)"
+.assert FH_NIL + 44 <= $000C00,       error, "WS-B1 env structures must stay below the WS-B2 part ($000C00)"
+.assert ((FH_CONOUT | FH_CONIN | FH_NIL | ENV_PROCESS | ENV_CLI | ENV_CLI_NAME) & 3) = 0, error, "BPTR targets must be longword aligned"
