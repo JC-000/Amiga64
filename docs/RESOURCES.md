@@ -32,6 +32,11 @@ them does not even assemble).
 ; @region <owner> $<start>-$<end> <role...>  -- claims [start,end] inclusive
 ```
 
+A source-file equate that is a plain value (size, offset, flag bits) and
+never an address may carry `; @value` (`NAME = $1000  ; @value`). The
+checker then skips its address classification — but using a tagged name as
+a memory operand anywhere is a violation, so the tag cannot hide a claim.
+
 Equate lines below a `@region` belong to it and must lie inside its range.
 Regions never overlap, and together they must COVER the space — unclaimed
 space is declared explicitly with owner `free`, never left implicit.
@@ -49,7 +54,7 @@ registered as-is (no renames: `build/runner.lbl` consumers exist).
 |---|---|---|
 | `r_` `m_` `t_` `op_` `st_` `ea_` `w_` `alu_` `mem_` `emu_` `fetch_` `dispatch_` `HALT_` `REU_CMD_` | core | `r_d0`, `t_tmp`, `st_halt`, `w_pg0` |
 | `fam_` + `g1_`..`g6_` file-locals | ops groups G1-G6 | `fam_move`, `g3_t` |
-| `hle_` `SCREEN*` `ENV_` `EXEC_`/`DOS_`/`EXIT_`/`ABSEXECBASE_` `FH_` | HLE (M2) | `hle_aline`, `SCREEN`, `DOS_BASE` |
+| `hle_` `SCREEN*` `ENV_` `EXEC_`/`DOS_`/`EXIT_`/`ABSEXECBASE_` `FH_` `HEAP_` | HLE (M2) | `hle_aline`, `SCREEN`, `DOS_BASE` |
 | `run_` `mb_` `test_` `RES_` `CASE_` `RUN_` `LOAD_` `READY_` + the legacy scratch names `cp cnt nexp expp rbidx srcp lcnt gaddr icount nobud` | runner/harness | `test_run_case`, `RES_DONE` |
 | `REC_` `ULT_` | sys (hardware regs, declared in `rc/ram.inc`) | `REC_COMMAND` |
 | `rc_` | the resource contract itself | reserved for future contract symbols |

@@ -5,7 +5,12 @@
 ; tests/runner/runner.s. Contract: docs/CONTRACTS.md "M0 loader".
 ;
 ; Exports:  test_load_chunk, test_run_program
-; Imports:  emu_reset, emu_step, mem_write8   (interpreter ABI)
+; Imports:  emu_reset, emu_step, mem_write8, mem_rec_dirty (interpreter ABI)
+;
+; REC ownership (docs/WAVE4_BRIEF.md C1): both entries are host-reachable
+; between runs, so both invalidate the memory API's REC shadow before their
+; first memory-API call -- test_run_program via emu_reset (which implies
+; mem_rec_dirty), test_load_chunk explicitly.
 ;
 ; test_load_chunk — stage one image record into guest (REU) memory:
 ;   host writes to buf_case a record framed exactly like image.bin
@@ -32,7 +37,7 @@
 ; ---------------------------------------------------------------------------
 
 .export test_load_chunk, test_run_program
-.import emu_reset, emu_step, mem_write8
+.import emu_reset, emu_step, mem_write8, mem_rec_dirty
 
 ; All fixed addresses come from the resource contract (docs/RESOURCES.md):
 ; contract ZP register file ($10-$7F), this file's loader/harness scratch
@@ -64,6 +69,7 @@ RUN_BUDGET  = buf_case + 8              ; u32 LE max instructions, 0 = no cap
         sei                             ; match test_run_case: no KERNAL IRQs
         lda     #$00
         sta     RES_DONE
+        jsr     mem_rec_dirty           ; C1: host may have left the REC dirty
 
         ldx     #3                      ; guest cursor := record offset
 @gcopy: lda     LOAD_OFFSET,x

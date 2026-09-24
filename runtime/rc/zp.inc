@@ -192,11 +192,12 @@ w_zacc    = $7E         ; ALU zero-accumulator scratch
 w_ptmp    = $7F         ; ALU/EA flag scratch
 .endif
 
-; @region core $80-$82 fetch-window state w_pg0/w_pg1/w_inv - linker-assigned (ZEROPAGE segment, core.s)
+; @region core $80-$87 fetch-window state w_pg0/w_pg1/w_inv + REC shadow m_rok/m_rlen/m_rlo/m_rhi/m_rbk - linker-assigned (ZEROPAGE segment, core.s)
 ; (no equates: allocated with .res in segment ZEROPAGE; c64.cfg ZP memory
-;  area starts at $0080, so these land at $80-$82 — see build/runner.map)
+;  area starts at $0080, so these land at $80-$87 in declaration order —
+;  see build/runner.map.  REC shadow: WS-A, docs/WAVE4_BRIEF.md C1/C4)
 
-; @region free $83-$FF UNALLOCATED - $83-$F8 is the remaining ld65 ZEROPAGE pool (c64.cfg: start $0080 size $0079); claim via this file + rescheck green
+; @region free $88-$FF UNALLOCATED - $88-$F8 is the remaining ld65 ZEROPAGE pool (c64.cfg: start $0080 size $0079); claim via this file + rescheck green
 
 ; --- Contract invariants (assemble-time; keep true under -D relocation) ----
 .assert r_a0 = r_d0 + $20, error, "getreg/setreg do reg*4 indexing from r_d0 - A regs must follow D regs contiguously"

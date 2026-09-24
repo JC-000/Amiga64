@@ -55,6 +55,7 @@ $000400–$000FFF, stack top $00F000, program load base $010000.
 - Memory API (guest BE ↔ ZP LE conversion at this boundary, v0 = direct per-call REU DMA; internals may later add windowing/TLB — **only these entry points are stable**):
   - `mem_read8` / `mem_read16` / `mem_read32`: `m_addr` → `m_val`
   - `mem_write8` / `mem_write16` / `mem_write32`: `m_addr`, `m_val` →
+  - `mem_rec_dirty`: REC-ownership seam — any code that programs the REC outside the memory API calls it before the next memory-API call (clobbers A). Binding rules: `docs/WAVE4_BRIEF.md` C1.
 - EA resolution: `ea_calc` — decodes mode/reg bits (X = 6-bit mode|reg field), leaves address in `t_ea`; `ea_load`/`ea_store` sized variants (size in A: 0=B,1=W,2=L). Covers all 68000 modes incl. d8(An,Xn) brief extension and abs.W/L, PC-relative, immediate.
 - Sized ALU primitives (all CCR logic lives HERE, not in group handlers): `alu_add`, `alu_sub`, `alu_cmp`, `alu_and`, `alu_or`, `alu_eor`, `alu_not`, `alu_neg`, `alu_addx`, `alu_subx`, `alu_ext`. Inputs `t_op1`,`t_op2`, size in A; result `t_res`, CCR updated per 68000 PRM semantics (X only where the 68k sets it).
 - `dispatch_next` — handlers `jmp` here when done (it is the top of the step loop).

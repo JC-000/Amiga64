@@ -253,6 +253,114 @@ def unlk_cases() -> list[dict[str, Any]]:
     ]
 
 
+# --- 512 KB REU-block straddles + bank carries (WS-A, wave 4 fix round) ------
+# The REC's REU address counter carries only through bits 0-18: a 16/32-bit
+# access straddling $x7FFFF -> $x80000 must still land on consecutive guest
+# (24-bit) addresses, and the 24-bit guest space wraps $FFFFFF -> $000000.
+# A bank carry INSIDE a 512 KB block ($01FFFF -> $020000) is done by the REC
+# itself; the following same-bank access must still hit the old bank (REC
+# shadow + autoload).  Sentinels (block base $x00000, the wrong-bank twin)
+# are init bytes the instruction must leave untouched.
+# Emitted as their own batch (WRAP.bin) so the historical HAND batch keeps
+# its 48 cases.
+
+WRAP_STEM = "WRAP"
+
+
+def be32w(addr: int, val: int) -> dict[int, int]:
+    """be32 with 24-bit guest address wrap."""
+    return {(addr + i) & 0xFFFFFF: (val >> (24 - 8 * i)) & 0xFF
+            for i in range(4)}
+
+
+def fill(addr: int, n: int, val: int) -> dict[int, int]:
+    return {(addr + i) & 0xFFFFFF: val for i in range(n)}
+
+
+def wrap_cases() -> list[dict[str, Any]]:
+    val = 0xA1B2C3D4                      # N set for MOVE (SR $08)
+
+    def around(a: int, block: int) -> dict[int, int]:
+        """$EE around the straddle + a sentinel at the REU-wrap target
+        (the 512K block base the 19-bit counter falls back to)."""
+        m = fill(a - 2, 8, 0xEE)
+        m.update({block + i: 0x5A + i for i in range(4)})
+        return m
+
+    cases = []
+    # (address, REU-wrap target).  For $FFFFFE the correct second half is
+    # guest $000000 (24-bit wrap); the REC would put it at $F80000.
+    for a, block in ((0x07FFFE, 0x000000), (0x17FFFE, 0x100000),
+                     (0xFFFFFE, 0xF80000)):
+        tag = f"{a:06x}"
+        cases.append(case(f"WRAP-movel-st-{tag}", [0x2081], sr=0x00,
+                          regs={"a0": a, "d1": val}, mem=around(a, block),
+                          wmem=be32w(a, val), exp_sr=0x08))
+        m = around(a, block)
+        m.update(be32w(a, 0x01020304))
+        cases.append(case(f"WRAP-movel-ld-{tag}", [0x2410], sr=0x00,
+                          regs={"a0": a}, mem=m, exp={"d2": 0x01020304}))
+    cases += [
+        # controls: word / byte accesses next to the boundary never straddle
+        case("WRAP-movew-st-07fffe", [0x3081], sr=0x00,
+             regs={"a0": 0x07FFFE, "d1": val}, mem=around(0x07FFFE, 0),
+             wmem={0x07FFFE: 0xC3, 0x07FFFF: 0xD4}, exp_sr=0x08),
+        case("WRAP-moveb-st-07ffff", [0x1081], sr=0x00,
+             regs={"a0": 0x07FFFF, "d1": val}, mem=around(0x07FFFE, 0),
+             wmem={0x07FFFF: 0xD4}, exp_sr=0x08),
+        case("WRAP-moveb-st-080000", [0x1081], sr=0x00,
+             regs={"a0": 0x080000, "d1": val}, mem=around(0x07FFFE, 0),
+             wmem={0x080000: 0xD4}, exp_sr=0x08),
+    ]
+    # straddling read feeding a straddling write, both post-increment
+    m = around(0x07FFFE, 0x000000)
+    m.update(around(0x17FFFE, 0x100000))
+    m.update(be32w(0x07FFFE, 0x11223344))
+    cases.append(case("WRAP-movel-copy-postinc", [0x22D8], sr=0x00,
+                      regs={"a0": 0x07FFFE, "a1": 0x17FFFE}, mem=m,
+                      wmem=be32w(0x17FFFE, 0x11223344),
+                      exp={"a0": 0x080002, "a1": 0x180002}))
+    # read-modify-write straddle: ADDQ.L #1,(A0), carry across the halves
+    m = around(0x07FFFE, 0x000000)
+    m.update(be32w(0x07FFFE, 0x0000FFFF))
+    cases.append(case("WRAP-addql-rmw-07fffe", [0x5290], sr=0x00,
+                      regs={"a0": 0x07FFFE}, mem=m,
+                      wmem=be32w(0x07FFFE, 0x00010000)))
+    # pre-decrement push onto a stack sitting on the boundary
+    cases.append(case("WRAP-movel-predec-a7", [0x2F01], sr=0x00,
+                      regs={"a7": 0x080002, "d1": val},
+                      mem=around(0x07FFFE, 0), wmem=be32w(0x07FFFE, val),
+                      exp={"a7": 0x07FFFE}, exp_sr=0x08))
+    # bank carry inside a 512K block, then a same-bank access
+    twin = fill(0x020100, 4, 0x77)              # wrong-bank landing site
+    m = dict(twin)
+    m.update(be32w(0x01FFFE, 0x11223344))
+    m.update(fill(0x010100, 4, 0xEE))
+    cases.append(case("BANK-movel-copy-01fffe", [0x2290], sr=0x00,
+                      regs={"a0": 0x01FFFE, "a1": 0x010100}, mem=m,
+                      wmem=be32w(0x010100, 0x11223344)))
+    m = dict(twin)
+    m.update(fill(0x01FFFC, 8, 0xEE))
+    m.update(fill(0x010000, 4, 0x66))           # read back after the write
+    cases.append(case("BANK-movel-st-01fffe", [0x2081], sr=0x00,
+                      regs={"a0": 0x01FFFE, "d1": val}, mem=m,
+                      wmem=be32w(0x01FFFE, val), exp_sr=0x08))
+    m = fill(0x020200, 4, 0x99)                 # wrong-bank twin of A1
+    m.update(be32w(0x01FFFE, 0x55667788))
+    m.update(be32w(0x010200, 0x55667788))
+    # CMPM.L (A0)+,(A1)+ : equal longs -> Z
+    cases.append(case("BANK-cmpml-01fffe", [0xB388], sr=0x00,
+                      regs={"a0": 0x01FFFE, "a1": 0x010200}, mem=m,
+                      exp={"a0": 0x020002, "a1": 0x010204}, exp_sr=0x04))
+    return cases
+
+
+def build_wrap_batch() -> bytes:
+    cases = wrap_cases()
+    return struct.pack("<H", len(cases)) + b"".join(
+        pack_case(c) for c in cases)
+
+
 def all_cases() -> list[dict[str, Any]]:
     return (ccr_immediate_cases() + move_from_sr_cases()
             + move_to_ccr_cases() + link_cases() + unlk_cases())
@@ -277,6 +385,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     path = args.out / f"{BATCH_STEM}.bin"
     path.write_bytes(blob)
     print(f"wrote {len(all_cases())} case(s) to {path}")
+    wpath = args.out / f"{WRAP_STEM}.bin"
+    wpath.write_bytes(build_wrap_batch())
+    print(f"wrote {len(wrap_cases())} case(s) to {wpath}")
     return 0
 
 

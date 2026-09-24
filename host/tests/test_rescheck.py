@@ -187,7 +187,7 @@ def test_host_mirror_mismatch_fails(tmp_path):
     for name, rel in rescheck.RC_FILES.items():
         src = (ROOT / rel).read_text()
         if name == "guest":
-            src = src.replace("DOS_BASE  = $000A00", "DOS_BASE  = $000A80")
+            src = src.replace("DOS_BASE  = $0F0C00", "DOS_BASE  = $0F0C80")
         (tmp_path / rel).write_text(src)
     (tmp_path / "host/hle_env.py").write_text(
         (ROOT / "host/hle_env.py").read_text())
@@ -198,3 +198,39 @@ def test_host_mirror_mismatch_fails(tmp_path):
 
 def test_missing_rc_file_fails(tmp_path):
     assert rescheck.run_checks(tmp_path) == 1
+
+
+def test_unregistered_source_fails(tmp_path):
+    """A runtime .s file with no registered owner is a violation."""
+    import shutil
+    from host import rescheck
+    root = tmp_path / "repo"
+    shutil.copytree(ROOT, root, ignore=shutil.ignore_patterns(
+        "build", ".git", ".claude", "__pycache__", "*.o"))
+    (root / "runtime/ops/zz_new.s").write_text("; empty\n")
+    assert rescheck.run_checks(root) == 1
+
+
+def test_hle_family_globs_are_scanned():
+    from host import rescheck
+    owners, unregistered = rescheck.source_owners(ROOT)
+    assert owners["runtime/ops/hle_dos.s"] == "hle"
+    assert unregistered == []
+
+
+def test_value_tag_exempts_plain_constants():
+    from host import rescheck
+    spaces, _ = rescheck.load_spaces(ROOT)
+    src = "SIZE = $1000  ; @value\n        lda #<SIZE\n"
+    assert rescheck.scan_source("x.s", src, "hle", spaces) == []
+    # untagged, the same literal is judged as an address in 'core' RAM
+    bad = rescheck.scan_source("x.s", "SIZE = $1000\n", "hle", spaces)
+    assert any(f.fatal for f in bad)
+
+
+def test_value_tag_cannot_hide_a_memory_operand():
+    from host import rescheck
+    spaces, _ = rescheck.load_spaces(ROOT)
+    src = "PTR = $1000  ; @value\n        lda PTR\n"
+    found = rescheck.scan_source("x.s", src, "hle", spaces)
+    assert any(f.fatal and "@value" in f.message for f in found)

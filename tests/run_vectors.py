@@ -126,7 +126,17 @@ def prepare_target(target, prg_path: str) -> None:
             client.run_prg(f.read())
         wait_ready(target.transport)
         labels = Labels.from_file(os.path.splitext(prg_path)[0] + ".lbl")
-        u64_install_dispatcher(target, lookup_label(labels, "main"))
+        # C1: the dispatcher invalidates the REC shadow before each call.
+        # No silent fallback: a PRG without mem_rec_dirty is refused.
+        try:
+            rec_dirty = lookup_label(labels, "mem_rec_dirty")
+        except KeyError as e:
+            raise RuntimeError(
+                f"{prg_path}: label mem_rec_dirty missing -- cannot install "
+                f"a C1-compliant U64 dispatcher (docs/WAVE4_BRIEF.md C1)"
+            ) from e
+        u64_install_dispatcher(target, lookup_label(labels, "main"),
+                               rec_dirty_addr=rec_dirty)
         return
     wait_ready(target.transport)
 

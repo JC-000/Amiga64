@@ -1,0 +1,6 @@
+HLE unit programs (vasm, Motorola syntax) — one register-level test per HLE
+call, driven by `python3 -m tests.run_vbcc --units` (expectations live in
+tests/run_vbcc.py UNITS).  Assembled at test time with vasmm68k_mot
+-Fhunkexe from the vbcc toolchain (tools/vbcc/); env addresses are passed
+in with -D from host/hle_env.py.  Each program leaves its results in
+D2-D7/A2-A5 (preserved across AmigaOS calls) and returns to the exit stub.

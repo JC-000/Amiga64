@@ -55,12 +55,13 @@ def test_vector_slots_hold_a1xx_words():
             assert addr + i in mem
 
 
-def test_slots_inside_env_region():
+def test_slots_inside_library_region():
+    """C4 amendment (2026-09-24): vector tables live in $0F0000-$0FFFFF."""
     for base, funcs in hle_env.LIBRARIES.values():
         for lvo, _ in funcs.values():
             addr = hle_env.slot_addr(base, lvo)
-            assert hle_env.ENV_BASE <= addr
-            assert addr + hle_env.SLOT_SIZE <= hle_env.ENV_END
+            assert hle_env.ENV_LIBS <= addr
+            assert addr + hle_env.SLOT_SIZE <= base
 
 
 def test_exit_stub_and_prestaged_return_address():
@@ -73,13 +74,17 @@ def test_exit_stub_and_prestaged_return_address():
 
 
 def test_env_avoids_program_and_stack_space():
-    """Nothing except the [stack_top] return address may leave the env
-    region + AbsExecBase; nothing may reach the first program segment."""
+    """Only AbsExecBase, the env region, the [stack_top] return address and
+    the library region ($0F0000-$0FFFFF, C4 amendment) are staged; nothing
+    lands in the program load region $010000-$0EFFFF."""
     for c in hle_env.env_chunks():
         end = c.guest_offset + len(c.data)
-        assert end <= BASE_ADDR
         if c.guest_offset == STACK_TOP:
             continue
+        if c.guest_offset >= hle_env.ENV_LIBS:
+            assert end - 1 <= hle_env.LIBS_REGION_END
+            continue
+        assert end <= BASE_ADDR
         assert (c.guest_offset == hle_env.ABSEXECBASE_ADDR
                 or hle_env.ENV_BASE <= c.guest_offset < hle_env.ENV_END)
 

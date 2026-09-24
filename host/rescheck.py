@@ -65,6 +65,35 @@ FILE_OWNERS = {
     "tests/runner/run_program.s": "run",
 }
 
+# Owners by glob, for module families that grow by file (checked after the
+# exact table above).  Every runtime/tests-runner source MUST resolve to an
+# owner — an unregistered .s file is a violation, so new sources can never
+# silently escape the scan.
+OWNER_GLOBS = [
+    ("runtime/ops/hle*.s", "hle"),      # hle.s, hle_dos.s (M2)
+    ("runtime/ops/dosio*.s", "hle"),    # dos I/O backends (WS-B2)
+]
+SCANNED_GLOBS = ["runtime/*.s", "runtime/ops/*.s", "tests/runner/*.s"]
+
+
+def source_owners(root: Path) -> tuple[dict[str, str], list[str]]:
+    """Map every scanned source to its owner; also list unregistered ones."""
+    owners = {rel: o for rel, o in FILE_OWNERS.items() if (root / rel).exists()}
+    unregistered = []
+    for pat in SCANNED_GLOBS:
+        for path in sorted(root.glob(pat)):
+            rel = path.relative_to(root).as_posix()
+            if rel in owners:
+                continue
+            owner = next((o for g, o in OWNER_GLOBS
+                          if Path(rel).match(g)), None)
+            if owner is None:
+                unregistered.append(rel)
+            else:
+                owners[rel] = owner
+    return owners, unregistered
+
+
 # Allowlist for scan findings: (path, regex matched against the stripped
 # source line, reason).  Document every entry — each one is a hole in the
 # checker.  Currently EMPTY: the migration left no raw foreign literals.
@@ -79,6 +108,7 @@ HOST_MIRRORS = {
     "DOS_BASE": ("host/hle_env.py", "DOS_BASE"),
     "STACK_TOP": ("host/image.py", "STACK_TOP"),
     "PROG_BASE": ("host/image.py", "BASE_ADDR"),
+    "PROG_END": ("host/image.py", "PROG_END"),
 }
 
 # --- rc-file model ----------------------------------------------------------
@@ -253,6 +283,10 @@ def _judge(spaces: dict[str, Space], space_name: str, value: int, owner: str,
         f"owner is '{owner}'", True)
 
 
+_VALUE_TAG_RE = re.compile(
+    r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\$?[0-9A-Fa-f]+\s*;.*@value\b")
+
+
 def scan_source(path: str, text: str, owner: str,
                 spaces: dict[str, Space],
                 corpus: str | None = None) -> list[Finding]:
@@ -281,6 +315,20 @@ def scan_source(path: str, text: str, owner: str,
     for n, raw in enumerate(lines, 1):
         stripped = _strip_comment(raw)
         if not stripped:
+            continue
+
+        # `NAME = literal ; @value` declares a plain value (size, offset,
+        # flag bits), never an address.  Checked: using the name as a
+        # memory operand anywhere in the corpus is a violation.
+        tv = _VALUE_TAG_RE.match(raw)
+        if tv:
+            name = tv.group(1)
+            if re.search(r"(?:" + "|".join(_MNEMONICS) + r")\s+\(?"
+                         + re.escape(name) + r"\b", corpus, re.IGNORECASE):
+                findings.append(Finding(
+                    path, n, stripped,
+                    f"{name} is tagged @value but used as a memory operand",
+                    True))
             continue
 
         m = _ZP_INSN_RE.match(stripped.strip())
@@ -404,15 +452,18 @@ def run_checks(root: Path, verbose: bool = False) -> int:
     for space in spaces.values():
         errors.extend(check_space(space))
 
-    sources = {rel: (root / rel).read_text()
-               for rel in FILE_OWNERS if (root / rel).exists()}
+    owners, unregistered = source_owners(root)
+    errors.extend(f"{rel}: source file has no registered owner "
+                  f"(add it to FILE_OWNERS/OWNER_GLOBS in host/rescheck.py)"
+                  for rel in unregistered)
+    sources = {rel: (root / rel).read_text() for rel in owners}
     corpus = "\n".join(
         _strip_comment(ln) for text in sources.values()
         for ln in text.splitlines())
     findings: list[Finding] = []
     for rel, text in sources.items():
         findings.extend(
-            scan_source(rel, text, FILE_OWNERS[rel], spaces, corpus))
+            scan_source(rel, text, owners[rel], spaces, corpus))
 
     if "guest" in spaces:
         errors.extend(check_host_mirrors(root, spaces["guest"]))
@@ -433,7 +484,7 @@ def run_checks(root: Path, verbose: bool = False) -> int:
               f"{len(warn)} unclassified")
         return 1
     print(f"rescheck: OK — {len(spaces)} spaces, {n_regions} regions, "
-          f"{n_equates} equates, {len(FILE_OWNERS)} sources scanned, "
+          f"{n_equates} equates, {len(sources)} sources scanned, "
           f"{len(warn)} unclassified")
     return 0
 
