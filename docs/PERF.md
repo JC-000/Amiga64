@@ -45,9 +45,10 @@ guest code page, refilled by ONE 256-byte REU DMA on a miss:
   +9 cycles per byte write, +16 per word/long write on the non-overlap path.
 - Data reads/writes: ~70 cycles of REC register setup + 1 cycle/byte + ZP
   copies per call in v0 and the windowed core. With the REC shadow (lever
-  d.2), a warm in-page call costs ~48 cycles of compare/setup with
-  2 REC accesses instead of 9. On hardware the access count, not the cycle
-  count, is what matters (see (d) 2).
+  d.2), a warm in-page call costs 47 cycles of compare/setup with
+  2 REC accesses instead of 9 (47 cycles + 7 for the 512 KB-straddle test
+  on 16/32-bit calls). On hardware the access count, not the cycle count,
+  is what matters (see (d) 2).
 
 ## (a) Representative instruction classes — estimated total 6502 cycles/instr
 
@@ -144,7 +145,7 @@ of its own cycles/instruction; we spend ~400 host cycles/instruction.)
    | ALU | 76.1k | 75.2k | within the ±1.3% rep spread |
 
    At 16 MHz the gains are +13% (MEM), +11% (STREAM) and +24% (RMW). At
-   1 MHz they are within ±2%, because the warm REC setup is ~48 cycles vs
+   1 MHz they are within ±2%, because the warm REC setup is 47 cycles vs
    v0's ~59 including jsr, and the accesses themselves are cheap at bus
    speed. The saved time per avoided access (0.8–1.1 µs at 48 MHz) matches
    the measured store cost, so the model is confirmed.
@@ -153,17 +154,34 @@ of its own cycles/instruction; we spend ~400 host cycles/instruction.)
    That was the reason this lever was deferred before, and contract C1
    handles it:
    - everything else that touches the REC calls `mem_rec_dirty`: the
-     fetch-window refill inline, `emu_reset`, the boot stub,
-     `test_load_chunk`, and the U64 mailbox dispatcher before every call;
-   - the `REC_NOINVAL` / `REC_MUT_*` builds prove, in VICE and on silicon,
-     that each of these invalidations is load-bearing (`tests/rec_teeth.py`,
-     `tests/rec_matrix.py`).
+     fetch-window refill inline, `emu_reset`, `test_load_chunk`, and the U64
+     mailbox dispatcher before every call;
+   - the `REC_NOINVAL` / `REC_MUT_*` builds and the cold-path source mutants
+     (`tests/rec_build.py` MUTANTS) prove, in VICE and on silicon, that each
+     of those invalidations and every `mio_full` store is load-bearing
+     (`tests/rec_teeth.py`, `tests/rec_matrix.py`);
+   - the boot stub also clears the flag (ZP comes up with garbage). That
+     clear is **redundant by design and NOT proven load-bearing**: every
+     host-reachable entry already invalidates before its first memory-API
+     call, so no test can observe the boot clear. The reviewer's
+     `bootrok` mutant survives, as it should.
+
+   512 KB straddles (fix round, 2026-09-24). The REC's address counter
+   carries only through bits 0–18, on VICE and on the U64E alike. A 16- or
+   32-bit access straddling `$x7FFFF` → `$x80000` therefore needs splitting.
+   This was a pre-existing bug, not something the shadow introduced. The
+   API now tests for the straddle, which costs 7 cycles on the common path,
+   and moves straddling accesses byte by byte (`mio_split`). Measured cost
+   at "48 MHz", same session against the unfixed shadow core: MEM −2.0%,
+   RMW −1.6%, STREAM −0.2%. Against the windowed base, the fixed core is
+   still +25% MEM, +15% STREAM and +43% RMW. See `docs/HARDWARE.md`,
+   "Fix round".
 
    Not done, and still open for the ALU/EA side of this lever:
    - trimming the ZP copies around `ea_load` / `ea_store` / `m_val`;
    - a dedicated fused RMW entry. The shadow already reduces the store half
      of an RMW to the command store (1 access); a fused entry would save
-     only the ~42-cycle compare path.
+     only the 41-cycle compare path.
    - DMA straight into `m_val` for byte ops. Rejected: a second C64 target
      address costs a C64-low store (~1 µs at turbo) on every byte↔word/long
      switch, to save a 6-cycle copy.

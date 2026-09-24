@@ -73,6 +73,77 @@ def probe(target, codes: dict) -> dict:
     return result
 
 
+def assemble_x(cmd: int, outdir: str) -> bytes:
+    out = os.path.join(outdir, f"rec_probe_x_{cmd:02x}.bin")
+    subprocess.run(["cl65", "-t", "none", "-C",
+                    os.path.join(HERE, "rec_probe_x.cfg"),
+                    "--asm-define", f"CMDF=0x{cmd:02x}", "-o", out,
+                    os.path.join(HERE, "rec_probe_x.s")], check=True)
+    obj = os.path.join(HERE, "rec_probe_x.o")
+    if os.path.exists(obj):
+        os.remove(obj)
+    with open(out, "rb") as f:
+        return f.read()
+
+
+XSTEPS = ["0 fetch 4 @ $01FFFE (bank 1->2)",
+          "1 same-bank fetch, BANK not rewritten",
+          "2 stash 4 @ $01FFFE (bank 1->2)",
+          "3 same-bank fetch, BANK not rewritten"]
+
+
+def probe_x(target, codes: dict) -> dict:
+    """Bank-carry-under-autoload + 512 KB wrap probe (rec_probe_x.s)."""
+    from c64_test_harness import read_bytes, write_bytes
+    from tests.harness_util import call_runner
+    result = {}
+    for cmd, code in codes.items():
+        write_bytes(target.transport, 0xC000, code)
+        write_bytes(target.transport, 0xC600, bytes(0x100))
+        call_runner(target, 0xC000, 30.0)
+        buf = read_bytes(target.transport, 0xC600, 0x100)
+        auto = bool(cmd & 0x20)
+        print(f"\n=== rec_probe_x, bank steps with ${cmd:02X} "
+              f"({'autoload' if auto else 'no autoload'}) ===")
+        steps = []
+        for i, name in enumerate(XSTEPS):
+            d = dict(zip(REGS, buf[0x40 + 16 * i + 2:0x40 + 16 * i + 11]))
+            reu = d["BANK"] << 16 | d["REUHI"] << 8 | d["REULO"]
+            steps.append({"step": name, "regs": d})
+            print(f"  after {name:<40} REU=${reu:06X} "
+                  f"BANK=${d['BANK']:02X} LEN=${d['LENHI'] << 8 | d['LENLO']:04X}")
+        data = buf[0:0x10]
+        wrap = buf[0x80:0x96]
+        v = {
+            "carry_fetch_ok": data[0:4] == bytes([0xA6, 0xA7, 0xA8, 0xA9]),
+            "step1_hit_bank1": data[4:8] == bytes([0xB0, 0xB1, 0xB2, 0xB3]),
+            "step3_hit_bank1": data[8:12] == bytes([0xB0, 0xB1, 0xB2, 0xB3]),
+            "carry_stash_ok": data[12:16] == bytes([0xB4, 0xB5, 0xB6, 0xB7]),
+            "bank_reg_after_step0": steps[0]["regs"]["BANK"],
+            "bank_reg_after_step2": steps[2]["regs"]["BANK"],
+        }
+        w = {
+            "07FFFE..080001_bytewise": wrap[0:6].hex(),
+            "fetch4_07FFFE": wrap[8:12].hex(),
+            "top_FFFFFE_bytewise": wrap[0x10:0x16].hex(),
+        }
+        # correct 24-bit carry would give: $07FFFE.. D0 D1, $080000.. D2 D3,
+        # $000000.. C2 C3 (untouched); a 19-bit counter wrap gives
+        # $080000.. C0 C1 (untouched), $000000.. D2 D3.
+        w["wraps_512k"] = (wrap[2:4] == bytes([0xC0, 0xC1])
+                           and wrap[4:6] == bytes([0xD2, 0xD3]))
+        w["carries_512k"] = (wrap[2:4] == bytes([0xD2, 0xD3])
+                             and wrap[4:6] == bytes([0xC2, 0xC3]))
+        w["top_wraps_to_F80000"] = (wrap[0x12:0x14] == bytes([0xD6, 0xD7])
+                                    and wrap[0x14:0x16] == bytes([0xCA, 0xCB]))
+        print(f"  data $C600-$C60F: {data.hex(' ')}")
+        print(f"  verdict: {v}")
+        print(f"  512K: {w}")
+        result[f"{cmd:02X}"] = {"steps": steps, "data": data.hex(),
+                                "bank": v, "wrap": w}
+    return result
+
+
 def assemble_all(prg: str) -> dict:
     outdir = os.path.join(os.path.dirname(os.path.abspath(prg)), "rec_probe")
     os.makedirs(outdir, exist_ok=True)
@@ -100,6 +171,9 @@ def main(argv=None) -> int:
         try:
             prepare_target(target, prg)
             result = probe(target, codes)
+            outdir = os.path.join(os.path.dirname(prg), "rec_probe")
+            result["x"] = probe_x(target, {c: assemble_x(c, outdir)
+                                           for c in (0x91, 0xB1)})
         finally:
             mgr.release(target)
     if args.json_out:

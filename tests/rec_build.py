@@ -27,8 +27,25 @@ def make_sources() -> list[str]:
     return [os.path.join(ROOT, p) for p in r.stdout.split()]
 
 
-def build(out_dir: str, defines: list[str] | tuple[str, ...] = ()) -> str:
-    """Build runner.prg (+ .lbl/.map) into *out_dir*; return the PRG path."""
+# Source mutants of runtime/core.s (reviewer-style: one store or branch
+# removed).  Each must be killed by a teeth leg (tests/rec_matrix.py).
+MUTANTS = {
+    # mio_full forgets the address-control store (scribbler leaves $80)
+    "actrl": ("        sta REC_ACTRL           ; both addresses increment\n"
+              "        lda #<t_tmp\n", "        lda #<t_tmp\n"),
+    # mio_full forgets the length-high store (scribbler leaves $01)
+    "lenhi": ("        sta REC_LENHI\n        sta REC_C64HI", "        sta REC_C64HI"),
+    # mio_full forgets the C64-address-high store (scribbler leaves $C5)
+    "c64hi": ("        sta REC_C64HI           ; C64 base = $0070 (t_tmp)\n",
+              ""),
+}
+
+
+def build(out_dir: str, defines: list[str] | tuple[str, ...] = (),
+          mutant: str | None = None) -> str:
+    """Build runner.prg (+ .lbl/.map) into *out_dir*; return the PRG path.
+    *mutant*: name in MUTANTS -- runtime/core.s is copied into *out_dir*
+    with that one edit and assembled in its place."""
     out_dir = os.path.join(ROOT, out_dir) if not os.path.isabs(out_dir) \
         else out_dir
     gen = os.path.join(out_dir, "gen", "dispatch.s")
@@ -42,6 +59,18 @@ def build(out_dir: str, defines: list[str] | tuple[str, ...] = ()) -> str:
            "-m", os.path.join(out_dir, "runner.map")]
     for d in defines:
         cmd += ["--asm-define", d]
+    if mutant:
+        a, b = MUTANTS[mutant]
+        core = os.path.join(ROOT, "runtime", "core.s")
+        text = open(core).read()
+        if text.count(a) != 1:
+            raise RuntimeError(f"mutant {mutant}: anchor found "
+                               f"{text.count(a)} times")
+        mpath = os.path.join(out_dir, f"core_mut_{mutant}.s")
+        with open(mpath, "w") as f:
+            f.write(text.replace(a, b))
+        srcs = [mpath if s == core else s for s in srcs]
+        cmd += ["--asm-include-dir", "runtime"]
     cmd += [os.path.relpath(s, ROOT) for s in srcs] + [gen]
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
     if r.returncode != 0:
@@ -53,9 +82,10 @@ def build(out_dir: str, defines: list[str] | tuple[str, ...] = ()) -> str:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
+    ap.add_argument("--mutant", choices=sorted(MUTANTS))
     ap.add_argument("defines", nargs="*")
     args = ap.parse_args(argv)
-    print(build(args.out, args.defines))
+    print(build(args.out, args.defines, args.mutant))
     return 0
 
 

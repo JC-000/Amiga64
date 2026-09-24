@@ -14,12 +14,16 @@ config re-read and compared.  CPU speed is set explicitly before every
 phase.  U64_BASELINE_ON_ENTRY=0 is required (no factory reset on entry).
 
 Phases (--phases, default all, in this order):
-  probe    tests/bench/rec_probe.s on silicon (REC autoload semantics)
-  hand     hand vectors at 1 MHz, new core
+  probe    tests/bench/rec_probe.s + rec_probe_x.s on silicon (autoload
+           semantics, bank carry under autoload, 512 KB counter wrap)
+  wrap     tests/rec_wrap.py on the new core (+ the base core as a red
+           control with --wrap-base)
+  hand     hand vectors at 1 MHz, new core (HAND + WRAP batches)
   full     full SingleStepTests suite at 1 MHz, new core
   program  run_program fixtures (minimal, reloc + budget demos), new core
   teeth    C1 teeth legs (tests/rec_teeth.py) on the new core (all must
-           pass) and on the REC_NOINVAL core (all must fail)
+           pass) and on the --noinval core (REC_NOINVAL: all must fail;
+           a mutant build: the legs that cover it must fail)
   bench    68k IPS, base vs new, ABBA order per speed (--speeds), plus a
            calibrated $DF0A store-cost measurement per speed
 Output: --out-dir (logs + JSON per phase) and --bench-json.
@@ -77,9 +81,29 @@ class Hw:
 # ------------------------------------------------------------------ phases
 
 def ph_probe(hw: Hw, a) -> dict:
-    from tests.bench.rec_probe import assemble_all, probe
+    from tests.bench.rec_probe import assemble_all, assemble_x, probe, probe_x
     hw.load(a.new)
-    return probe(hw.target, assemble_all(a.new))
+    out = probe(hw.target, assemble_all(a.new))
+    xdir = os.path.join(os.path.dirname(a.new), "rec_probe")
+    out["x"] = probe_x(hw.target, {c: assemble_x(c, xdir)
+                                   for c in (0x91, 0xB1)})
+    return out
+
+
+def ph_wrap(hw: Hw, a) -> dict:
+    """tests/rec_wrap.py on silicon: 512K straddles, bank carry, the B2
+    reviewer's repro and a chunk staged across $080000."""
+    from tests.rec_wrap import run, run_b2
+    out = {}
+    for tag, prg in (("new", a.new),) + ((("base", a.base),)
+                                           if a.wrap_base else ()):
+        labels = hw.load(prg)
+        probs = run(hw.target, labels, "u64")
+        labels = hw.load(prg)
+        probs += run_b2(hw.target, labels, "u64")
+        out[tag] = probs
+        log(f"  rec_wrap {tag}: {'all checks passed' if not probs else probs}")
+    return out
 
 
 def _vectors(hw: Hw, prg: str, vec_dir: str) -> dict:
@@ -234,7 +258,8 @@ def vice_dry_run(a) -> int:
     return rc
 
 
-PHASES = {"probe": ph_probe, "hand": ph_hand, "full": ph_full,
+PHASES = {"probe": ph_probe, "wrap": ph_wrap, "hand": ph_hand,
+          "full": ph_full,
           "program": ph_program, "teeth": ph_teeth, "bench": ph_bench}
 
 
@@ -247,6 +272,8 @@ def main(argv=None) -> int:
     ap.add_argument("--hand", default="build/vectors-hand")
     ap.add_argument("--phases", default=",".join(PHASES))
     ap.add_argument("--speeds", default="1,16,48")
+    ap.add_argument("--wrap-base", action="store_true",
+                    help="wrap phase: also run the base core (red control)")
     ap.add_argument("--backend", default="u64", choices=["u64", "vice"],
                     help="vice = dry run of the session logic (no config, "
                          "1 MHz only, warp; no performance meaning)")

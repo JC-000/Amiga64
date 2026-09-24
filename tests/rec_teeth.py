@@ -26,6 +26,12 @@ the leg (REC_NOINVAL removes all of them; REC_MUT_* remove one each).
   mailbox    (u64 only) scribbler, then a DIRECT host call of mem_read8
              through the mailbox dispatcher (run_program.peek_guest path).
              Needs the dispatcher's jsr mem_rec_dirty. (REC_MUT_DIRTY)
+  foreign    a C1-compliant foreign REC user: scribbler, jsr mem_rec_dirty,
+             then direct mem_write32 / mem_read32 with NO window refill in
+             between (the refill rewrites ACTRL/LENHI/C64HI itself, which
+             masks a cold path that forgets them in every runner-entry
+             leg).  Kills REC_MUT_DIRTY and every mio_full store mutant
+             (tests/rec_build.py MUTANTS: actrl, lenhi, c64hi).
 
 Data values are random per run (--seed): the REU is NOT cleared between
 legs on hardware (run_prg reloads C64 RAM only), so fixed values could let
@@ -66,13 +72,22 @@ def _sta(addr):
 
 
 def scribbler() -> bytes:
-    """Reprogram every REC register the data path shadows, then run a
-    3-byte fetch without autoload (registers advance, LEN ends at 1)."""
+    """Stand-in for a foreign REC user: run a 3-byte fetch without autoload
+    (registers advance, LEN ends at 1), then leave EVERY register the data
+    path relies on in a hostile state, including the ones only the cold
+    path (mio_full) writes: C64 address $C5F0, REU $FE0000, LEN $0103
+    (LENHI nonzero) and ACTRL $80 (C64 address fixed).  A core that skips
+    any of those stores after a C1 invalidation transfers to/from the
+    wrong place or length."""
     code = []
     for reg, val in ((0xDF02, SCRATCH & 0xFF), (0xDF03, SCRATCH >> 8),
                      (0xDF04, 0x00), (0xDF05, 0x00), (0xDF06, 0xFE),
                      (0xDF07, 0x03), (0xDF08, 0x00), (0xDF0A, 0x00),
-                     (0xDF01, 0x91)):
+                     (0xDF01, 0x91),
+                     # hostile leftovers, no command
+                     (0xDF02, SCRATCH & 0xFF), (0xDF03, SCRATCH >> 8),
+                     (0xDF04, 0x00), (0xDF05, 0x00), (0xDF06, 0xFE),
+                     (0xDF07, 0x03), (0xDF08, 0x01), (0xDF0A, 0x80)):
         code += [0xA9, val] + _sta(reg)
     return bytes(code + [0x60])
 
@@ -213,8 +228,35 @@ def leg_mailbox(leg: Leg):
                             f"{data[1]:02X} got {got:02X}")
 
 
+def leg_foreign(leg: Leg):
+    from c64_test_harness import read_bytes, write_bytes
+    a, b = rand_long(leg.rng), rand_long(leg.rng)
+    addr = DATA + 0x300 + 4 * leg.rng.randrange(16)
+    leg.run_case("case1", a)                    # shadow warm
+    # mem_write32 of b at addr, the C1 way: foreign DMA, mem_rec_dirty
+    leg.scribble()
+    leg.call("mem_rec_dirty")
+    write_bytes(leg.t, rp.ZP_M_ADDR, struct.pack("<I", addr))
+    write_bytes(leg.t, rp.ZP_M_VAL, b[::-1])           # m_val is LE
+    leg.call("mem_write32")
+    got = leg.ref_read(addr & ~0xF)[addr & 0xF:(addr & 0xF) + 4]
+    if got != b:
+        leg.problems.append(f"mem_write32 after foreign DMA: REU expected "
+                            f"{b.hex()} got {got.hex()}")
+    # and mem_read32 of it back, again after a foreign DMA
+    leg.scribble()
+    leg.call("mem_rec_dirty")
+    write_bytes(leg.t, rp.ZP_M_VAL, bytes(4))
+    leg.call("mem_read32")
+    val = read_bytes(leg.t, rp.ZP_M_VAL, 4)[::-1]
+    if val != b:
+        leg.problems.append(f"mem_read32 after foreign DMA: expected "
+                            f"{b.hex()} got {val.hex()}")
+
+
 LEGS = {"refill": leg_refill, "reset_case": leg_reset_case,
-        "load_chunk": leg_load_chunk, "mailbox": leg_mailbox}
+        "load_chunk": leg_load_chunk, "mailbox": leg_mailbox,
+        "foreign": leg_foreign}
 U64_ONLY = {"mailbox"}
 
 

@@ -279,17 +279,18 @@ wrap:   inc r_pc+1
 wdone:  rts
 
 miss:                           ; refill the window with PC's guest page:
-        lda r_pc+1              ; one 256-byte REU DMA into code_win
+        lda #0                  ; one 256-byte REU DMA into code_win (a
+.if .not (.defined(REC_NOINVAL) .or .defined(REC_MUT_REFILL))
+        sta m_rok               ; page never straddles a 512 KB REU block)
+.endif                          ; C1: shadow stale BEFORE the REC changes
+        sta w_inv
+        lda r_pc+1
         sta w_pg0
         sta REC_REUHI           ; REU offset = page << 8
         lda r_pc+2
         sta w_pg1
         sta REC_REUBANK
         lda #0
-        sta w_inv
-.if .not (.defined(REC_NOINVAL) .or .defined(REC_MUT_REFILL))
-        sta m_rok               ; C1: data-path REC shadow is now stale
-.endif
         sta REC_REULO
         sta REC_C64LO           ; code_win is page-aligned
         sta REC_LENLO           ; length $0100
@@ -328,9 +329,22 @@ miss:                           ; refill the window with PC's guest page:
 ; size, e.g. the store half of a read-modify-write) to 5 (everything
 ; differs); typical warm in-page call 2.  Anything else that programs the
 ; REC must call mem_rec_dirty before the next call here (C1).
-; Cost per warm in-page call ~48 cycles of REC setup (v0 ~59 incl. jsr),
-; +1 cycle/byte DMA + copies; writes add the WINCHK_* window-overlap test
-; (9-16 cycles, non-overlap).
+; Cost per warm in-page call 47 cycles of REC setup (v0 ~59 incl. jsr),
+; +7 for the 512K-straddle test on 16/32-bit calls, +1 cycle/byte DMA +
+; copies; writes add the WINCHK_* window-overlap test (9-16 cycles).
+;
+; 512 KB straddles.  The REC's REU address counter carries only through
+; bits 0-18 (a 512 KB 1750-style counter; VICE reu.c and the U64E alike,
+; tests/bench/rec_probe.py): a DMA that runs past $x7FFFF continues at
+; $x00000, not $(x+8)0000.  A 16/32-bit access whose bytes straddle such
+; a line (guest address bits 18-0 >= $80000 - (len-1)) therefore goes to
+; mio_split, which moves it one byte per DMA with the CPU doing the
+; 24-bit address increment (so $FFFFFF wraps to $000000, as the 68000's
+; 24-bit bus does).  Bank carries INSIDE a 512 KB block ($01FFFF ->
+; $020000) are done correctly by the REC and autoload restores the bank
+; register (probed), so those stay on the fast path.  Every other DMA in
+; the tree is either 1 byte (test_load_chunk staging, mem_write8/read8)
+; or a page-aligned 256-byte window refill -- neither can straddle.
 ; ===========================================================================
 
 ; ---------------------------------------------------------------------------
@@ -402,8 +416,8 @@ REU_CMD_STASH_AL = REU_CMD_STASH | $20
 ; ---------------------------------------------------------------------------
 ; MIO_PROG len — program the REC for t_tmp <-> REU[m_addr], len bytes,
 ; touching only registers whose shadow differs.  Clobbers A.  Inlined in
-; each entry (saves the jsr/rts of the v0 mio_setup).  Warm cycles: 42
-; (nothing changes) .. 48 (low byte changes, the common case) .. ~70.
+; each entry (saves the jsr/rts of the v0 mio_setup).  Warm cycles: 41
+; (nothing changes) .. 47 (low byte changes, the common case) .. ~68.
 ; ---------------------------------------------------------------------------
 .macro MIO_PROG len
         .local warm, lenok, look, hiok, done
@@ -461,6 +475,82 @@ done:
 .endproc
 
 ; ---------------------------------------------------------------------------
+; STRADDLE len, slow — branch to slow when a len-byte access at m_addr
+; crosses a 512 KB REU block line ($x7FFFF -> $x80000).  Common path
+; (address low byte < $100-(len-1)): 7 cycles, falls through.  Clobbers A.
+; ---------------------------------------------------------------------------
+.macro STRADDLE len, slow
+        .local no
+        lda m_addr              ; 3
+        cmp #$100-(len-1)       ; 2
+        bcc no                  ; 3 taken = common path
+        lda m_addr+1
+        cmp #$FF
+        bne no
+        lda m_addr+2
+        ora #$F8                ; bits 18-16 all set?
+        cmp #$FF
+        beq slow
+no:
+.endmacro
+
+.segment "BSS"
+m_scmd: .res 1                  ; mio_split: REC command
+m_slen: .res 1                  ; mio_split: byte count
+.segment "CODE"
+
+; ---------------------------------------------------------------------------
+; mio_split — slow path for a straddling access: A = byte count, m_scmd =
+; REC command (no autoload needed).  Moves t_tmp[i] <-> REU[m_addr + i]
+; one byte per DMA, every register programmed each time, the 24-bit
+; address sum done by the CPU.  Leaves the shadow invalid (cleared before
+; the first REC store), so the next call re-programs from scratch.
+; Clobbers A only (X and Y preserved, like the fast path).  ~9 REC
+; accesses per byte -- rare by construction (one address in 2^19 per
+; long, and only misaligned-for-the-block data).
+; ---------------------------------------------------------------------------
+.proc mio_split
+        sta m_slen
+        txa
+        pha
+        tya
+        pha
+        lda #0
+        sta m_rok               ; shadow stale BEFORE the REC changes
+        tay
+loop:   lda #0
+        sta REC_C64HI
+        sta REC_LENHI
+        sta REC_ACTRL
+        lda #1
+        sta REC_LENLO
+        tya
+        clc
+        adc #<t_tmp
+        sta REC_C64LO           ; t_tmp+i (never crosses page 0)
+        tya
+        clc
+        adc m_addr
+        sta REC_REULO
+        lda m_addr+1
+        adc #0
+        sta REC_REUHI
+        lda m_addr+2
+        adc #0                  ; carry out of bit 23 dropped: 24-bit wrap
+        sta REC_REUBANK
+        lda m_scmd
+        sta REC_COMMAND
+        iny
+        cpy m_slen
+        bne loop
+        pla
+        tay
+        pla
+        tax
+        rts
+.endproc
+
+; ---------------------------------------------------------------------------
 ; mem_rec_dirty — REC-ownership seam (docs/WAVE4_BRIEF.md contract C1).
 ; Any code that programs the REC ($DF02-$DF0A) or issues a REC command
 ; outside the memory API calls this before the next memory-API call:
@@ -485,21 +575,28 @@ done:
 .endproc
 
 .proc mem_read16
+        STRADDLE 2, split
         MIO_PROG 2
         lda #REU_CMD_FETCH_AL
         sta REC_COMMAND
-        lda t_tmp               ; guest [addr] = high byte
+copy:   lda t_tmp               ; guest [addr] = high byte
         sta m_val+1
         lda t_tmp+1             ; guest [addr+1] = low byte
         sta m_val
         rts
+split:  lda #REU_CMD_FETCH
+        sta m_scmd
+        lda #2
+        jsr mio_split
+        jmp copy
 .endproc
 
 .proc mem_read32
+        STRADDLE 4, split
         MIO_PROG 4
         lda #REU_CMD_FETCH_AL
         sta REC_COMMAND
-        lda t_tmp
+copy:   lda t_tmp
         sta m_val+3
         lda t_tmp+1
         sta m_val+2
@@ -508,6 +605,11 @@ done:
         lda t_tmp+3
         sta m_val
         rts
+split:  lda #REU_CMD_FETCH
+        sta m_scmd
+        lda #4
+        jsr mio_split
+        jmp copy
 .endproc
 
 .proc mem_write8
@@ -526,10 +628,15 @@ done:
         sta t_tmp               ; high byte first (guest BE)
         lda m_val
         sta t_tmp+1
+        STRADDLE 2, split
         MIO_PROG 2
         lda #REU_CMD_STASH_AL
         sta REC_COMMAND
         rts
+split:  lda #REU_CMD_STASH
+        sta m_scmd
+        lda #2
+        jmp mio_split
 .endproc
 
 .proc mem_write32
@@ -542,10 +649,15 @@ done:
         sta t_tmp+2
         lda m_val
         sta t_tmp+3
+        STRADDLE 4, split
         MIO_PROG 4
         lda #REU_CMD_STASH_AL
         sta REC_COMMAND
         rts
+split:  lda #REU_CMD_STASH
+        sta m_scmd
+        lda #4
+        jmp mio_split
 .endproc
 
 ; ===========================================================================

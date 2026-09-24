@@ -2,6 +2,7 @@
 # WS-A full VICE gate (docs/WAVE4_BRIEF.md C5.3), logged per step.
 #   sh tests/rec_gate.sh [BUILD_DIR] [EVIDENCE_DIR]
 # Assumes `make vectors` and `python3 -m host.handvec --out build/vectors-hand`
+# (HAND.bin 48 cases + WRAP.bin 512K-straddle/bank-carry cases)
 # have been run.  Exit status = number of failed steps.
 B=${1:-build/ws-a}
 E=${2:-build/evidence/ws-a/green/gate}
@@ -25,5 +26,6 @@ step run_hello   python3 -m tests.run_hello --prg $B/runner.prg
 step rescheck    make rescheck
 step fetchdirect python3 -m tests.rec_build --out $B-fetchdirect FETCH_DIRECT
 step rec_budget  python3 -m tests.rec_budget --prg $B/runner.prg
+step rec_wrap    python3 -m tests.rec_wrap --prg $B/runner.prg
 [ -n "$SKIP_MATRIX" ] || step rec_matrix  python3 -m tests.rec_matrix
 exit $fails

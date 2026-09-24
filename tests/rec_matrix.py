@@ -7,10 +7,11 @@ Writes one log per row under --evidence and prints a summary table.
 
 Rows (build flags -> legs that must FAIL):
     normal          (none)          -> none; every leg must pass
-    REC_NOINVAL     all invalidation -> refill, reset_case, load_chunk (+mailbox on u64)
+    REC_NOINVAL     all invalidation -> refill, reset_case, load_chunk, foreign (+mailbox on u64)
     REC_MUT_REFILL  refill only     -> refill
     REC_MUT_RESET   emu_reset only  -> reset_case
-    REC_MUT_DIRTY   mem_rec_dirty   -> load_chunk (+mailbox on u64)
+    REC_MUT_DIRTY   mem_rec_dirty   -> load_chunk, foreign (+mailbox on u64)
+    src-actrl/lenhi/c64hi  mio_full minus one cold-path store -> foreign
 Exit 0 iff every row behaves as required.
 """
 
@@ -26,10 +27,15 @@ from tests.rec_build import ROOT, build
 ROWS = [
     ("normal", [], None),
     ("noinval", ["REC_NOINVAL"], ["refill", "reset_case", "load_chunk",
-                                  "mailbox"]),
+                                  "mailbox", "foreign"]),
     ("mut-refill", ["REC_MUT_REFILL"], ["refill"]),
     ("mut-reset", ["REC_MUT_RESET"], ["reset_case"]),
-    ("mut-dirty", ["REC_MUT_DIRTY"], ["load_chunk", "mailbox"]),
+    ("mut-dirty", ["REC_MUT_DIRTY"], ["load_chunk", "mailbox", "foreign"]),
+    # source mutants of the cold path (tests/rec_build.py MUTANTS): the
+    # scribbler leaves ACTRL/LENHI/C64HI hostile, so mio_full must write them
+    ("src-actrl", "actrl", ["foreign"]),
+    ("src-lenhi", "lenhi", ["foreign"]),
+    ("src-c64hi", "c64hi", ["foreign"]),
 ]
 
 
@@ -46,7 +52,11 @@ def main(argv=None) -> int:
     ok_all = True
     for name, flags, must_fail in rows:
         out = "build/ws-a" if not flags else f"build/ws-a-{name}"
-        prg = build(out, flags)
+        if isinstance(flags, str):                  # source mutant
+            prg = build(out, (), mutant=flags)
+            flags = [f"mutant:{flags}"]
+        else:
+            prg = build(out, flags)
         cmd = [sys.executable, "-m", "tests.rec_teeth", "--prg", prg,
                "--backend", args.backend]
         if must_fail:

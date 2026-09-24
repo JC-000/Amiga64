@@ -205,7 +205,11 @@ or persistent-storage changes were made. The harness baseline reset on
 entry was disabled with `U64_BASELINE_ON_ENTRY=0`. **Do not compare the
 numbers below with the 3.14d tables above.** For example, the calibrated
 clock at the "48" step is now 38.4–39.4 MHz, where 3.14d measured 46.2.
-Only the same-session base-vs-new deltas below are claims.
+That drop is **not** attributed to the firmware alone: this session ran
+with the other lane's Badline Timing `Enabled` / Bus Operation Mode
+`Quiet` config, and those settings may cost effective clock too. No
+isolating measurement was made. Only the same-session base-vs-new deltas
+below are claims.
 
 ### REC semantics on silicon (`tests/bench/rec_probe.py`)
 
@@ -290,13 +294,126 @@ the clock is exact, ALU c/instr is identical (596 vs 594).
 **Finding 8. The saved time matches the access count.** Dividing the time
 saved per instruction by the REC accesses saved per instruction gives
 **0.76–1.13 µs per avoided access at 48 MHz**, and 1.28–1.33 µs at
-16 MHz. This agrees with the measured `$DF0A` store cost above, so the
-gain is exactly lever 2's mechanism. At 1 MHz the accesses cost only
+16 MHz. That band is roughly **±25%** around the measured `$DF0A`
+store cost (0.91 µs at 48, 1.72 µs at 16). The saved per-instruction time
+also includes the shadow compare cycles and two-point timing jitter, and
+loads/stores/command stores may not all cost exactly one `$DF0A` store.
+So this is **consistent with** lever 2's mechanism being the whole gain,
+not a precise per-access measurement. At 1 MHz the accesses cost only
 4 cycles each, so the effect is within ±2%. The warm path is cycle-neutral
-(~48 cycles of REC setup vs v0's ~59 incl. jsr, plus shadow compares).
+(47 cycles of REC setup vs v0's ~59 incl. jsr, plus shadow compares).
 At 48 MHz the memory-bound loops are now 544–674 c/instr against 512 for
 the pure-ALU loop. What remains is mostly CPU work, plus one command
 store and the DMA itself per call.
+
+### Fix round, 2026-09-24: 512 KB REU-block wrap and bank carry
+
+The adversarial review found a **pre-existing** bug. It was present in
+158e684 and in every earlier core. The REC's REU address counter carries
+only through **bits 0–18**, so one DMA that runs past `$x7FFFF` continues
+at `$x00000` instead of `$(x+8)0000`. A 16- or 32-bit guest access that
+straddles a 512 KB line therefore split its bytes across the wrong
+addresses, and reads wrapped the same way. That is why a read-back
+"verified" the damage.
+
+**Silicon matches VICE.** `tests/bench/rec_probe.py`, part 2
+(`rec_probe_x.s`), gave byte-identical results on the U64E (fw 3.15,
+REU at 16 MB) and on VICE:
+
+- A raw 4-byte stash to `$07FFFE` lands at `$07FFFE/F` and `$000000/1`.
+  `$080000/1` is left untouched. `wraps_512k: True`.
+- A 4-byte stash to `$FFFFFE` lands its second half at `$F80000`, not
+  `$000000`.
+- A 4-byte fetch or stash at `$01FFFE` carries correctly into bank 2
+  (inside a 512 KB block).
+- With **autoload**, the BANK register reads back as bank 1 afterwards
+  (`$F9`, the upper bits read as 1). A following access that rewrites only
+  REU-low/high and leaves BANK alone hits bank 1, for both fetch and stash.
+- Without autoload, BANK is left at 2.
+
+So the REC shadow's bank handling is sound, and bank-crossing transfers
+stay on the fast path.
+
+**Fix** (`runtime/core.s`):
+
+- `mem_read16/32` and `mem_write16/32` first test whether the access
+  straddles a 512 KB line (`STRADDLE`, 7 cycles on the common path).
+- If it does, `mio_split` moves the bytes one DMA per byte, with the CPU
+  doing the 24-bit address increment, so `$FFFFFF` wraps to `$000000` as
+  on the 68000.
+- `mio_split` invalidates the shadow *before* it touches the REC.
+- Every other DMA in the tree cannot straddle:
+  - byte API calls;
+  - `test_load_chunk` staging, which is per-byte `mem_write8`;
+  - the 256-byte page-aligned window refill.
+- No host tool writes the REU directly.
+- WS-B2's future bulk DOS DMA must split at 512 KB lines itself.
+
+**Red → green** (evidence: `build/evidence/ws-a/fix1/`):
+
+- **Hand vectors:** the new `WRAP.bin` batch has 15 cases, written by
+  `host/handvec.py`:
+  - 32-bit loads and stores at `$07FFFE`, `$17FFFE` and `$FFFFFE`;
+  - copy, read-modify-write and predecrement straddles;
+  - word and byte controls;
+  - three bank-carry cases, each with a wrong-bank twin.
+
+  9 of the 15 fail on 158e684 and on 5ca5a20 (25 field failures); all 15
+  pass after the fix.
+- **`tests/rec_wrap.py` (runner level, VICE):**
+  - a 17-instruction program checked against an independent raw reader;
+  - the WS-B2 reviewer's repro (`move.l #$11223344,$07FFFE`), re-hosted;
+  - a 32-byte chunk staged across `$080000`.
+
+  It reports 9 failed checks on 5ca5a20 and 0 after the fix. The staging
+  leg passes even on the old core, which confirms that per-byte staging
+  cannot straddle.
+
+**On silicon, with the fixed core at 1 MHz:**
+
+| Check | Result |
+|---|---|
+| Probe (above) | matches VICE |
+| `rec_wrap`, new core | **all checks passed** |
+| `rec_wrap`, 158e684 core (control) | **fails**, same REU damage as VICE |
+| Hand vectors (48 HAND + 15 WRAP) | **63/63** |
+| run_program | **48/48 checks** |
+| Full golden suite | **5150/5150**, 0 field failures (894.7 s) |
+| Teeth, normal build (refill, reset_case, load_chunk, mailbox, foreign) | **5/5 pass** |
+| Teeth, `REC_NOINVAL` build | 5/5 fail |
+| Teeth, `actrl` source mutant | fails the new `foreign` leg only |
+
+The `actrl` mutant is a cold path without the ACTRL store. The teeth
+scribbler now leaves ACTRL `$80` and LENHI `$01`. The runner-entry legs
+cannot catch it, because the window refill rewrites ACTRL itself. The
+`foreign` leg can: it follows a foreign DMA with `mem_rec_dirty` and then
+a direct `mem_write32`, with no refill in between.
+
+**Cost of the straddle test, same session at "48 MHz"** (ABBA,
+5ca5a20 → fixed core, `fixtures/bench/sweep_reclean_fix1_vs_5ca5a20.json`):
+
+| Loop | Change |
+|---|---|
+| MEM | 70 714 → 69 282 (−2.0%) |
+| STREAM | 61 480 → 61 343 (−0.2%) |
+| RMW | 58 219 → 57 302 (−1.6%) |
+| ALU | +0.6% (noise) |
+
+Against the 158e684 windowed base in the main fix session
+(`fixtures/bench/sweep_reclean_fix1.json`), the fixed core is:
+
+| Loop | Change |
+|---|---|
+| MEM | 54 646 → 68 172 (**+24.8%**) |
+| STREAM | +14.9% |
+| RMW | 40 607 → 58 149 (**+43.2%**) |
+| ALU | ±0% |
+
+MEM swings 3–4% between sessions (71.6k in the first session, 68.2k and
+69.3k here), so compare only within a session. The main fix session waited
+173 s for the lock; the teeth+bench session waited 188 s. The session
+config found and restored was again the other lane's (CPU Speed 48, REU
+Disabled). The re-read diff was empty.
 
 ## Reproduction
 
