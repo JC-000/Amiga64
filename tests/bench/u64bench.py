@@ -8,9 +8,12 @@ Per CPU-speed step (default sweep 1..48 MHz):
                              -> DMA bytes/sec + per-transfer engine overhead
   4. 68k ALU/DBcc loop     — interpreter IPS + 6502-cycles/instr
   5. 68k memory loop       — same, REU-data-bound (MOVE.L (A0),D1)
+  (+ WS-A extras, used by tests/bench/u64_session.py: streaming
+   MOVE.L (A0)+,D1 and read-modify-write ADDQ.L #1,(A0) loops)
 
 All wall-clock numbers are two-point deltas so fixed REST/dispatch overhead
-cancels. Run: U64_HOST=... python3 bench.py [--backend vice] [--speeds ...]
+cancels. Run: U64_HOST=... python3 -m tests.bench.u64bench --prg PRG
+[--backend vice] [--speeds ...]
 """
 
 import argparse
@@ -20,7 +23,9 @@ import struct
 import sys
 import time
 
-sys.path.insert(0, "/Users/someone/Documents/Amiga64")
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))))
+sys.path.insert(0, ROOT)
 
 from c64_test_harness import Labels, UnifiedManager, ViceConfig, read_bytes, write_bytes
 from tests.harness_util import REU_VICE_ARGS, call_runner, lookup_label
@@ -28,8 +33,7 @@ from tests.run_program import Session, RESULT_LEN, RunResult, BUF_CASE
 from tests.run_vectors import prepare_target
 from host import fixturegen, hunk, image
 
-PRG = "/Users/someone/Documents/Amiga64/build/h1/runner.prg"
-LBL = "/Users/someone/Documents/Amiga64/build/h1/runner.lbl"
+PRG = os.path.join(ROOT, "build", "h1", "runner.prg")    # --prg overrides
 
 ALU_ADDR = 0xC000   # buf_case is free while no case is staged
 IO_ADDR = 0xC040
@@ -149,6 +153,31 @@ def hunk_mem68k(n: int) -> bytes:
 def mem68k_icount(n: int) -> int:
     return 3 + 2 * n
 
+def hunk_stream68k(n: int) -> bytes:
+    """MOVE.L (A0)+,D1 over n longwords from $8000: a new address (same
+    page, new low byte) on every read -- the common warm-shadow case."""
+    b = fixturegen.HunkBuilder()
+    b.add_code([
+        0x303C, n - 1,              # MOVE.W #n-1,D0
+        0x41F9, 0x0000, 0x8000,     # LEA $8000.L,A0
+        0x2218,                     # loop: MOVE.L (A0)+,D1
+        0x51C8, 0xFFFC,             #       DBRA D0,loop
+        0xAFFF,                     # HALT
+    ])
+    return b.build()
+
+def hunk_rmw68k(n: int) -> bytes:
+    """ADDQ.L #1,(A0): a read then a write of the same longword."""
+    b = fixturegen.HunkBuilder()
+    b.add_code([
+        0x303C, n - 1,              # MOVE.W #n-1,D0
+        0x41F9, 0x0000, 0x8000,     # LEA $8000.L,A0
+        0x5290,                     # loop: ADDQ.L #1,(A0)
+        0x51C8, 0xFFFC,             #       DBRA D0,loop
+        0xAFFF,                     # HALT
+    ])
+    return b.build()
+
 # ------------------------------------------------------------------ driver
 
 def timed_call(target, addr: int, timeout: float) -> float:
@@ -194,6 +223,7 @@ def two_point(target, addr: int, codegen, c1: int, c2: int,
 
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--prg", default=PRG)
     ap.add_argument("--backend", default="u64", choices=["vice", "u64"])
     ap.add_argument("--speeds", default="1,2,4,8,12,16,20,24,32,40,48")
     ap.add_argument("--json-out", default="")
@@ -201,15 +231,16 @@ def main() -> int:
                     help="skip 6502 IO/DMA benches (keep ALU clock calibration)")
     args = ap.parse_args()
 
-    labels = Labels.from_file(LBL)
-    vice_config = ViceConfig(prg_path=PRG, warp=True, sound=False,
+    PRG_ = os.path.abspath(args.prg)
+    labels = Labels.from_file(os.path.splitext(PRG_)[0] + ".lbl")
+    vice_config = ViceConfig(prg_path=PRG_, warp=True, sound=False,
                              extra_args=list(REU_VICE_ARGS))
     results = []
     with UnifiedManager(backend=args.backend, vice_config=vice_config,
                         lock_timeout=1800.0) as mgr:
         target = mgr.acquire()
         try:
-            prepare_target(target, PRG)
+            prepare_target(target, PRG_)
             if args.backend == "vice":
                 sess = Session(target=target, labels=labels, timeout=120.0)
                 r = bench_68k(sess, hunk_alu68k, alu68k_icount, 200, 2200)

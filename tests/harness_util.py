@@ -68,9 +68,18 @@ def wait_ready(transport, timeout: float = 60.0) -> None:
 #
 #   dispatcher:  lda MBOX / beq dispatcher   ; spin
 #                lda #0  / sta MBOX
+#                jsr mem_rec_dirty           ; C1 (when the label exists)
 #                jsr $xxxx                   ; operand patched per call
 #                lda #$FF / sta DONE
 #                jmp dispatcher
+#
+# The mem_rec_dirty call is contract C1 (docs/WAVE4_BRIEF.md): between two
+# mailbox calls the host's REST DMA and the Ultimate firmware may leave the
+# REC in any state, so every host-dispatched call -- including direct
+# memory-API calls such as run_program's peek_guest -> mem_read8 --
+# invalidates the memory API's REC shadow first.  On VICE, jsr() enters
+# the target directly; nothing on the VICE host side touches the REC, and
+# the runner entries invalidate on their own.
 #
 # Per call the host writes the JSR operand, then MBOX=1/DONE=0 in one DMA
 # write, and polls DONE for $FF. IRQs stay enabled until the first
@@ -84,8 +93,12 @@ U64_SELFTEST_RTS = U64_DISPATCH_PAGE | 0xFA
 IDLE_JMP_OFFSET = 5                  # runner.s: main = lda #$A5 / sta abs / @idle
 
 
-def u64_install_dispatcher(target, main_addr: int) -> dict:
+def u64_install_dispatcher(target, main_addr: int,
+                           rec_dirty_addr: int | None = None) -> dict:
     """Install the mailbox dispatcher and retarget the runner's idle loop.
+
+    *rec_dirty_addr*: address of the core's ``mem_rec_dirty`` (C1); when
+    given, the dispatcher calls it before every dispatched call.
 
     Returns the dispatch map {mbox, done, jsr_operand} and stashes it on
     the target for call_runner(). Verifies the idle-loop bytes before
@@ -105,25 +118,32 @@ def u64_install_dispatcher(target, main_addr: int) -> dict:
 
     entry = U64_DISPATCH_PAGE | (idle & 0xFF)
     body = entry + 3
-    if (body + 21) > (U64_MBOX & 0xFFFF):
+    size = 21 + (3 if rec_dirty_addr is not None else 0)
+    if (body + size) > (U64_MBOX & 0xFFFF):
         # entry sits high in the page; put the body at the page start
         body = U64_DISPATCH_PAGE
-        if body + 21 >= entry:
+        if body + size >= entry:
             raise RuntimeError(f"no room for dispatcher body around ${entry:04X}")
     blo, bhi = body & 0xFF, body >> 8
     mlo, mhi = U64_MBOX & 0xFF, U64_MBOX >> 8
     dlo, dhi = U64_DONE & 0xFF, U64_DONE >> 8
+    dirty = b""
+    if rec_dirty_addr is not None:
+        dirty = bytes([0x20, rec_dirty_addr & 0xFF,
+                       (rec_dirty_addr >> 8) & 0xFF])   # jsr mem_rec_dirty
     code = bytes([
         0xAD, mlo, mhi,          # body:  lda MBOX
         0xF0, 0xFB,              #        beq body
         0xA9, 0x00,              #        lda #0
         0x8D, mlo, mhi,          #        sta MBOX
-        0x20, 0x00, 0x00,        #        jsr $0000   (operand = body+11)
+    ]) + dirty + bytes([
+        0x20, 0x00, 0x00,        #        jsr $0000   (operand patched)
         0xA9, 0xFF,              #        lda #$FF
         0x8D, dlo, dhi,          #        sta DONE
         0x4C, blo, bhi,          #        jmp body
     ])
-    jsr_operand = body + 11
+    assert len(code) == size
+    jsr_operand = body + 11 + len(dirty)
 
     write_bytes(transport, body, code)
     write_bytes(transport, U64_MBOX, bytes([0x00, 0x00, 0x60]))  # flags + RTS
