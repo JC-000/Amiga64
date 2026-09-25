@@ -138,6 +138,8 @@ class Program:
     budget: int | None = None  # per-program instruction cap (overrides --budget)
     expect_addr: dict[str, int] | None = None   # RAMDISK extent address
     pools: bool = False       # needs the W5-H hle.s pool wiring (skip without)
+    src: str | None = None    # fixture file (default: name)
+    defines: tuple[str, ...] = ()   # extra vc -D NAME=VALUE
 
 
 def _scroll_line(n: int) -> str:
@@ -215,6 +217,20 @@ def programs() -> dict[str, Program]:
                                      "merged 3MB=fit", "all freed 7MB=fit"]),
         Program("heap_pool", 0, ["pools ok 40 rounds"], pools=True),
         Program("heap_realloc", 0, ["realloc ok 30 rounds"]),
+        # fix1: the reviewer's randomized stress + structural heap check;
+        # lines after "stress ok" pin the run (rejected frees, OOMs, pool
+        # deletions, largest free / used block seen)
+        Program("heap_stress1", 0, ["stress ok", "top0=1000d0 hd0=0",
+                                    "rej=3 oom=0 del=4",
+                                    "maxfree=24a0 maxblk=1548"], pools=True,
+                src="heap_stress", defines=("SEED=6", "NOPS=120", "NSLOT=16",
+                                            "BIGPCT=0")),
+        Program("heap_stress2", 0, ["stress ok", "top0=1000d0 hd0=0",
+                                    "rej=1 oom=4 del=3",
+                                    "maxfree=311518 maxblk=2d4af0"], pools=True,
+                src="heap_stress", defines=("SEED=7", "NOPS=90", "NSLOT=16",
+                                            "BIGMAX=3000000UL", "BIGPCT=40",
+                                            "CLEARMAX=65536UL", "COPYMAX=4096UL")),
     ]
     return {p.name: p for p in progs}
 
@@ -351,6 +367,22 @@ def units() -> dict[str, Unit]:
         Unit("u_heap5", {"D2": P, "D3": 0, "D4": 0, "D5": P,
                          "D6": 0x7FFFF8, "A2": 0x7FFFF8, "D7": 0, "A3": 0,
                          "A4": 0}, [], heap_next=0x800000),
+        # fix1 (adversarial review): merge-down footer, DeletePool walking
+        # past a free block, stale free after the wilderness, forged header
+        Unit("u_heap6", {"D2": P, "D3": P + 0x48, "D4": P + 0x90,
+                         "A2": P + 0xD8, "D5": P, "D6": 0, "D7": 0}, [],
+             heap_next=H + 0x128),
+        Unit("u_heap7", {"A2": P, "D2": P + 0x10, "D3": P + 0x58,
+                         "D4": P + 0xA0, "A3": P + 0xE8, "D5": P, "D6": 0,
+                         "D7": 0, "A4": 0x6000D00D}, [], heap_next=H + 0x108,
+             pools=True),
+        Unit("u_heap8", {"A2": P, "A3": P + 0x18, "A4": P, "D2": 1,
+                         "D3": P + 0x48, "D4": 0, "A5": P + 0x60, "D5": 2,
+                         "D6": P + 0xA8, "D7": 0}, [], heap_next=H + 0xC8),
+        # fix1: a cyclic (guest-corrupted) free list ends the walk at the
+        # guard (~134 M C64 cycles, docs/HLE.md "Heap")
+        Unit("u_heap9", {"A2": P, "A3": P + 0x30, "D2": P + 0x60,
+                         "D3": H + 0x38}, [], heap_next=H + 0xB0),
     ]
     return {u.name: u for u in us}
 
@@ -407,13 +439,15 @@ def vbcc_home() -> str:
     return home
 
 
-def compile_c(name: str, out_dir: str) -> bytes:
+def compile_c(name: str, out_dir: str, src_name: str | None = None,
+              defines: tuple[str, ...] = ()) -> bytes:
     home = vbcc_home()
-    src = os.path.join(FIXTURE_DIR, f"{name}.c")
+    src = os.path.join(FIXTURE_DIR, f"{src_name or name}.c")
     exe = os.path.join(out_dir, name)
     env = dict(os.environ, VBCC=home,
                PATH=os.path.join(home, "bin") + os.pathsep + os.environ["PATH"])
-    cmd = ["vc", "+aos68k", "-O2", "-o", exe, src]   # vbcc's stock config
+    cmd = ["vc", "+aos68k", "-O2", *[f"-D{d}" for d in defines],
+           "-o", exe, src]                         # vbcc's stock config
     res = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if res.returncode != 0:
         raise SystemExit(f"error: vc failed for {name}:\n{res.stdout}{res.stderr}")
@@ -715,7 +749,8 @@ def main(argv: list[str] | None = None) -> int:
 
     os.makedirs(args.out, exist_ok=True)
     blobs = {n: (assemble(utable[n].src or n, args.out) if n in utable
-                 else compile_c(n, args.out)) for n in names}
+                 else compile_c(n, args.out, table[n].src, table[n].defines))
+             for n in names}
     print(f"built {len(blobs)} program(s) (vasm units / vbcc C) into {args.out}")
 
     from c64_test_harness import Labels, UnifiedManager, ViceConfig

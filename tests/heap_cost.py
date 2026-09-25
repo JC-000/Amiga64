@@ -190,6 +190,17 @@ def measure(sess, b: Bench) -> dict:
     pool = b.alloc(8)["addr"]
     d0 = b.pool_delete(pool)
     rec("DeletePool: empty pool", d0)
+    # walk only: an empty pool below 20 unrelated live blocks
+    fresh(sess)
+    pool = b.alloc(8)["addr"]
+    for _ in range(20):
+        b.alloc(40)
+    dw = b.pool_delete(pool)
+    per = {key: (dw[key] - d0[key]) / 20
+           for key in ("cycles", "instr", "reads", "writes")}
+    out["DeletePool: per block walked, not owned"] = per
+    print(f"  {'DeletePool: per block walked only':34s} {per['cycles']:6.0f} cyc "
+          f"{per['instr']:5.0f} ins  {per['reads']:.1f} R + {per['writes']:.1f} W")
     per = {key: (d10[key] - d0[key]) / 20
            for key in ("cycles", "instr", "reads", "writes")}
     out["DeletePool: per walked block"] = per

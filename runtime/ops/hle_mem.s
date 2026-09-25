@@ -7,11 +7,15 @@
 ;   hle_alloc: in  hle_sz (u32 LE size), hle_flg (bit 0 = MEMF_CLEAR)
 ;              out hle_old (u32 LE block, 0 = failed)
 ;   hle_free:  in  hle_ptr (u32 LE block), hle_sz (u32 LE size)
-;   Both clobber A, X, Y, m_*, hle_sz, hle_cnt, hle_ptr (alloc), hle_old (free).
+;   hle_alloc clobbers A, X, Y, m_*, hle_sz (rounded), hle_cnt (MEMF_CLEAR);
+;   hle_free clobbers A, X, Y, m_*, hle_sz — neither touches hle_ptr, and
+;   hle_free leaves hle_old alone (C1 allows more; callers rely on nothing
+;   else).  Both also use this file's own hle_h* BSS.
 ; Pool entries (wired from hle.s AllocPooled / DeletePool):
 ;   hle_pool_alloc:  as hle_alloc, the block is tagged with the pool in A0
 ;   hle_pool_delete: A0 = pool header; frees every block tagged with it,
-;                    then the header itself.  Clobbers as hle_free.
+;                    then the header itself.  Clobbers as hle_free plus
+;                    hle_ptr (:= A0).
 ;
 ; First-fit allocator with boundary tags, all metadata in guest memory:
 ;   ENV_STATE+0  u32 top: start of the untouched "wilderness" above the last
@@ -53,7 +57,9 @@ HB_TAG       = $5A              ; header word 1 high byte of a live block
 HB_MIN       = 16               ; smallest block (a free one needs 16)
 HB_NEXT      = 4                ; free-list links
 HB_PREV      = 8
-WALK_MAX     = $08              ; free-list walk guard: $080000 nodes
+WALK_MAX     = $038000          ; @value free-list walk guard (nodes): the most free
+                                ; blocks a 7 MB heap can hold is 7 MB / 32 =
+                                ; 229 376 (a free block needs a used neighbour)
 
 .assert (HEAP_TOP - HEAP_BASE) = $700000, error, "size checks assume a 7 MB heap"
 
@@ -251,10 +257,11 @@ hm_alloc:
 ; --- first fit over the free list ------------------------------------------
         MOV3 hle_hb, hle_hhd
         CLR3 hle_hp
-        lda #0
+        lda #<WALK_MAX
         sta hle_hcnt
+        lda #>WALK_MAX
         sta hle_hcnt+1
-        lda #WALK_MAX
+        lda #^WALK_MAX
         sta hle_hcnt+2
 @walk:  IS0_3 hle_hb
         jeq @wild

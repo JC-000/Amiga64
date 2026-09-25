@@ -282,26 +282,32 @@ always used.
 - **Pools**: CreatePool allocates an 8-byte header (a 16-byte block,
   holding memFlags so MEMF_CLEAR pools clear); AllocPooled allocates a
   normal block whose header records the pool as owner (`hle_pool_alloc`);
-  FreePooled = FreeMem. **DeletePool** (`hle_pool_delete`) walks every
-  block from `HEAP_FIRST` to top (the blocks tile the heap, so size words
-  are enough), releases each used block owned by the pool, then frees
-  the header. A0 = NULL is a no-op; an A0 that is not a live 16-byte
-  block is rejected like an invalid free and frees nothing (`u_heap4`;
-  `heap_pool`: 40 × create / 5 × 52 000-byte AllocPooled / delete, 1.4×
-  the heap). Puddles are not modelled.
+  FreePooled = FreeMem: neither checks the owner, so FreeMem of a pooled
+  block and FreePooled with the wrong pool both free it. **DeletePool**
+  (`hle_pool_delete`) walks every block from `HEAP_FIRST` to top (the
+  blocks tile the heap, so size words are enough; free blocks are walked
+  past, `u_heap7`), releases each used block owned by the pool, then
+  frees the header. That is O(all blocks in the heap, live and free), not
+  O(the pool): ~580 C64 cycles per block walked (2 DMA), plus the release
+  cost of each owned block, paid on **every** DeletePool — ~1.2 s at
+  1 MHz with 2000 blocks in the heap (vbcc calls it once, at exit). A0 =
+  NULL is a no-op; an A0 that is not a live block allocated with 8 bytes
+  or less (a 16-byte block, or 24 with SLACK) is rejected like an invalid
+  free and frees nothing. The header check cannot tell CreatePool's header from any
+  AllocMem(1 … 8) block: DeletePool on such a block frees it (and every
+  block "owned" by its address — none, unless it was used as a pool)
+  (`u_heap4`; `heap_pool`: 40 × create / 5 × 52 000-byte AllocPooled /
+  delete, 1.4× the heap). Puddles are not modelled.
 - **AllocVec/FreeVec** (hle.s): AllocMem(size + 4) with the size stored in
   the first longword, result 8n+4; FreeVec = FreeMem(A1 − 4, [A1 − 4]).
 - **AvailMem** is not implemented (no vbcc program calls it).
 
-**Pool wiring (supervisor merge step).** `hle.s` is frozen, so the two
-pool entries are exported by `hle_mem.s` and called from `hle.s` by:
-`.import hle_pool_alloc, hle_pool_delete`; in `hle_allocpooled`
-`jsr hle_alloc` → `jsr hle_pool_alloc`; in `hle_deletepool` a
-`jsr hle_pool_delete` before its `jmp hle_ret`. Until then pooled blocks
-are owned by nobody and DeletePool frees nothing; `tests/run_vbcc.py`
-detects the missing calls in the PRG and SKIPs `u_heap4` / `heap_pool`
-with a message (`build/evidence/w5-heap/build_wired.sh` builds the wired
-variant from a scratch copy of `hle.s`).
+**Pool wiring.** The two pool entries are exported by `hle_mem.s` and
+called from `hle.s` (wired by the supervisor in 0edc577):
+`hle_allocpooled` calls `hle_pool_alloc`, `hle_deletepool` calls
+`hle_pool_delete`. `tests/run_vbcc.py` still checks the PRG for both
+calls and SKIPs the pool tests (`u_heap4`, `u_heap7`, `heap_pool`,
+`heap_stress*`) with a message if a build lacks them.
 
 ### Invalid frees (C1: survivable, detected, counted)
 
@@ -318,15 +324,32 @@ interior pointers, a size of 0 / too small / too large, and **double
 frees** — also after the block was merged: a block merged into its lower
 neighbour or into the wilderness gets its tag word zeroed, a block that
 became a free block has USED clear, and a stale free header left inside a
-larger free block keeps USED clear (`u_heap1`, `u_heap2`). **NULL** is a
-silent no-op and is not counted. Not detectable: a forged header (guest
-data at A1 − 8 that happens to look like a live block of that size) or a
-pointer into memory that has since been reallocated as a larger block —
-the same class of bug corrupts a real exec MemHeader. Corrupt heap state
-(top out of range or misaligned, a free-list head outside the heap) makes
-AllocMem return 0 and FreeMem do nothing; a corrupt link ends the
-first-fit walk (the wilderness is used instead), and the walk gives up
-after `$80000` nodes, so a guest-corrupted list cannot hang the C64.
+larger free block keeps USED clear (`u_heap1`, `u_heap2`); a stale free of
+a block that dropped into the wilderness and was re-carved inside a larger
+block is rejected by its zeroed tag, and a forged header with USED clear
+by the USED bit (`u_heap8`, the review's poc T1/T2). **NULL** is a silent
+no-op and is not counted — but like every FreeMem it first loads the heap
+state, so FreeMem(NULL) on a pristine heap formats `HEAP_CTL`. Not
+detectable: a forged header that looks exactly like a live block (USED,
+tag `$5A`, the right size), or a stale pointer whose old header now lies
+in live data that happens to look like one — the same class of bug
+corrupts a real exec MemHeader.
+
+**Guest-corrupted metadata.** The checks above validate the block being
+freed, not the rest of the heap: a free trusts its neighbours' headers,
+the lower neighbour's footer (only its range and alignment are checked)
+and the free-list links it unlinks through, as real exec trusts its
+MemChunks. A guest that overwrites heap metadata outside its own blocks
+can therefore make a later free corrupt the heap. What is guarded: a
+corrupt `top` or list head (out of range, misaligned) makes AllocMem
+return 0 and FreeMem do nothing; a corrupt link, or a used block, met by
+the first-fit walk ends the walk (the block comes from the wilderness);
+and the walk stops after **`WALK_MAX` = `$38000` nodes** — the most free
+blocks a 7 MB heap can hold (each needs 16 bytes plus a used 16-byte
+neighbour: 7 MB / 32 = 229 376). A cyclic list is therefore walked
+229 376 times before AllocMem gives up on it: ~134 M C64 cycles
+(229 376 × 585), ~2.2 minutes at 1 MHz, ~3 s at 48 MHz, 12 s in VICE warp
+(`u_heap9`), per AllocMem call — slow, but it cannot hang the C64.
 
 ### Cost (measured in VICE, `python3 -m tests.heap_cost`)
 
@@ -337,19 +360,20 @@ timer and a VICE exec checkpoint, stub subtracted), and memory-API calls
 
 | Case | cycles | 6502 instr | DMA (R + W) |
 |---|---:|---:|---|
-| AllocMem, first of a run (formats `HEAP_CTL`) | 1676 | 515 | 1 + 6 |
-| AllocMem from the wilderness | 1459 | 415 | 2 + 3 |
-| AllocMem reusing a free block whole | 2477 | 694 | 5 + 4 |
-| AllocMem reusing a free block, split | 2764 | 855 | 4 + 7 |
-| + per free block skipped by first fit | 586 | 165 | 2 + 0 |
+| AllocMem, first of a run (formats `HEAP_CTL`) | 1678 | 516 | 1 + 6 |
+| AllocMem from the wilderness | 1461 | 416 | 2 + 3 |
+| AllocMem reusing a free block whole | 2424 | 692 | 5 + 4 |
+| AllocMem reusing a free block, split | 2754 | 853 | 4 + 7 |
+| + per free block skipped by first fit | 585 | 164 | 2 + 0 |
 | FreeMem, neighbours used (push on the list) | 2880 | 833 | 5 + 6 |
 | FreeMem, upper neighbour free (merge) | 3447 | 984 | 7 + 6 |
 | FreeMem, lower neighbour free (merge) | 2839 | 820 | 6 + 4 |
-| FreeMem, lower free + wilderness | 2783 | 793 | 7 + 3 |
-| FreeMem of the top block | 1742 | 490 | 4 + 2 |
-| FreeMem rejected (double free) | 898 | 267 | 3 + 1 |
+| FreeMem, lower free + wilderness | 2826 | 793 | 7 + 3 |
+| FreeMem of the top block | 1700 | 490 | 4 + 2 |
+| FreeMem rejected (double free) | 941 | 267 | 3 + 1 |
 | DeletePool of an empty pool | 3017 | 916 | 8 + 2 |
-| DeletePool, per block walked (avg., half released) | 1545 | 448 | 2.6 + 3.7 |
+| DeletePool, per block walked (not owned) | 580 | 163 | 2 + 0 |
+| DeletePool, per block walked (avg., half released) | 1547 | 448 | 2.6 + 3.7 |
 | MEMF_CLEAR, per byte | 42.3 | 12.3 | 0.25 W |
 
 Every call first reads top and the list head (2 DMA). For comparison the
@@ -389,7 +413,9 @@ but leaked every out-of-order free. At 1 MHz an AllocMem/FreeMem pair is
     merge, the SLACK case, `u_heap3` MEMF_CLEAR on reused dirty blocks
     whole and split + alignment of odd sizes, `u_heap4` DeletePool frees
     exactly its pool, `u_heap5` the largest block and the heap's last
-    8 bytes),
+    8 bytes; fix1: `u_heap6` merge-down footer, `u_heap7` DeletePool past
+    a free block, `u_heap8` stale free after the wilderness + forged
+    header, `u_heap9` cyclic free list vs the walk guard),
     StackSwap there and back (`u_swap`), console/NIL:/NULL handles incl.
     Read(NIL:) (`u_dos3`), Write without Output, negative and ≥ 16 MB
     lengths, OpenLibrary exact name + version (`u_openlib`), FindTask,
@@ -414,7 +440,11 @@ but leaked every out-of-order free. At 1 MHz an AllocMem/FreeMem pair is
     length through 25 rows — also proves the scrolled-in row is blank),
     `alloc` (malloc/free 16 B … 70 000 B, calloc), `heap_churn` /
     `heap_coalesce` / `heap_pool` / `heap_realloc` (W5-H reuse: see Heap;
-    `heap_pool` needs the pool wiring), `sysbase` (ExecBase /
+    `heap_pool` needs the pool wiring), `heap_stress1` / `heap_stress2`
+    (`fixtures/c/heap_stress.c`, the adversarial review's randomized
+    AllocMem/AllocVec/pool stress with a full structural heap check after
+    every op; two fixed seeds, a small mix and a big mix that runs out of
+    memory; ~65 s together in VICE warp), `sysbase` (ExecBase /
     DOSBase fields, OpenLibrary versions and names), `readitem` / `putstr`
     (deep dos LVOs -810 / -948 must halt in the DOS table's own slot),
     `bigstack` (`__stack` → AllocVec + StackSwap), `getenv` (GetVar →

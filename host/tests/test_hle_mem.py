@@ -57,3 +57,13 @@ def test_pool_wiring_detection(tmp_path, monkeypatch):
     jmp_delete = b"\x20\x37\x3E\x4C\xF8\x4A"
     assert run_vbcc.pool_wiring(_prg(tmp_path, jmp_delete), labels) is True
     assert run_vbcc.pool_wiring(_prg(tmp_path, wired), {}) is None
+
+
+def test_walk_guard_covers_the_largest_free_list():
+    # a free block needs 16 bytes and a used neighbour of >= 16 bytes, so a
+    # 7 MB heap holds at most 7 MB / 32 free blocks; the first-fit walk
+    # guard must allow exactly that many nodes (docs/HLE.md "Heap")
+    src = (ROOT / "runtime/ops/hle_mem.s").read_text()
+    m = re.search(r"^WALK_MAX\s*=\s*\$([0-9A-Fa-f]+)", src, re.M)
+    heap = hle_env.HEAP_END + 1 - hle_env.HEAP_BASE
+    assert int(m.group(1), 16) == heap // 32 == 229_376
