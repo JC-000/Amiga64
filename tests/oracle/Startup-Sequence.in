@@ -1,0 +1,9 @@
+FailAt 2147483647
+Assign ENV: DH0:env
+Assign T: DH0:t
+{stage}CD RAM:
+DH0:bin/{name} <NIL: >DH0:o/stdout.txt
+Echo "$RC" >DH0:o/rc.txt
+CD DH0:
+Copy RAM:~(NVRAM|ENV|T|Clipboards|Disk.info) DH0:ram ALL QUIET
+Echo "done" >DH0:o/done.txt
