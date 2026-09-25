@@ -56,7 +56,7 @@ registered as-is (no renames: `build/runner.lbl` consumers exist).
 | `fam_` + `g1_`..`g6_` file-locals | ops groups G1-G6 | `fam_move`, `g3_t` |
 | `hle_` `SCREEN*` `ENV_` `EXEC_`/`DOS_`/`EXIT_`/`ABSEXECBASE_` `FH_` `HEAP_` | HLE (M2) | `hle_aline`, `SCREEN`, `DOS_BASE` |
 | `run_` `mb_` `test_` `RES_` `CASE_` `RUN_` `LOAD_` `READY_` + the legacy scratch names `cp cnt nexp expp rbidx srcp lcnt gaddr icount nobud` | runner/harness | `test_run_case`, `RES_DONE` |
-| `REC_` `ULT_` | sys (hardware regs, declared in `rc/ram.inc`) | `REC_COMMAND` |
+| `REC_` `ULT_` `CIA1_` `VIC_` | sys (hardware regs, declared in `rc/ram.inc`) | `REC_COMMAND` |
 | `rc_` | the resource contract itself | reserved for future contract symbols |
 
 New symbols MUST take a registered prefix of their owning module (new

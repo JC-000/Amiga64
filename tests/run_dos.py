@@ -3,6 +3,19 @@
 Usage:
     python3 -m tests.run_dos --prg build/ws-b2/runner.prg
         [--only NAME[,NAME]] [--budget N] [--timeout SECS]
+        [--backend vice|u64] [--out-dir DIR]
+
+``--backend u64`` (U64_HOST=...) runs the scenarios on the Ultimate 64 at
+1 MHz inside ONE DeviceLock hold with an exact full-config snapshot/restore
+(tests/bench/u64_session.u64_hold; config JSON in --out-dir).  RAMDISK only:
+it refuses to run unless the Command Interface is Disabled; after boot it
+zeroes ``dosio_want_uci`` and ``hle_dos_magic`` (defence in depth: before
+the wave-5 boot-stub fix, C64 BSS was not cleared), proves that
+``hle_dos_init`` selects RAMDISK, and checks ``dosio_backend`` = RAMDISK
+after every scenario; any preflight failure aborts.  The ``selection`` leg
+is VICE-only by construction (it boots its own fake-UCI build in a local
+VICE instance); with ``--backend u64`` it runs there after the hardware
+leg, and its checks are labelled "[local VICE]".
 
 Why a separate driver (docs/HLE_DOS.md "Testing"): until WS-B1's hle.s
 routes Read/Write on file kinds (fh_Args >= $10) to ``hle_dos_read`` /
@@ -959,6 +972,102 @@ def selection_checks(prg: str, timeout: float,
     return sess.checks, sess.failures
 
 
+def u64_preflight(before: dict) -> None:
+    """u64 only, before anything touches the machine: the Command
+    Interface must be Disabled in the session's config snapshot, so no
+    code path can reach the UCI (WAVE5_BRIEF C3: no storage writes).  A
+    missing item counts as not Disabled."""
+    ci = (before.get("C64 and Cartridge Settings") or {}).get(
+        "Command Interface")
+    if ci != "Disabled":
+        raise RuntimeError(f"refusing to run: Command Interface is {ci!r} "
+                           f"in the device config (must be 'Disabled')")
+
+
+def zero_dos_bss(sess, labels) -> None:
+    """u64 only, fail-closed: before the wave-5 boot-stub BSS clear (and
+    on any older core), a previous session can leave the opt-in key "UCI!"
+    in dosio_want_uci and "DOS!" in hle_dos_magic (which skips the lazy
+    init, keeping stale backend vectors).  Record the residue, zero both
+    and prove it by readback; run hle_dos_init once and prove it selected
+    RAMDISK; zero hle_dos_magic again so the first scenario still starts
+    with a lazy init.  Any failure raises: this suite must never select
+    ULTDOS (no storage writes, WAVE5_BRIEF C3)."""
+    from c64_test_harness import read_bytes, write_bytes
+    from tests.harness_util import lookup_label
+    t = sess.target.transport
+
+    def zero(name: str, what: str) -> None:
+        addr = lookup_label(labels, name)
+        print(f"  u64: {name} {what}: {read_bytes(t, addr, 4).hex()}")
+        write_bytes(t, addr, bytes(4))
+        got = read_bytes(t, addr, 4)
+        ok = got == bytes(4)
+        sess.check(f"u64: {name} zeroed ({what})", ok,
+                   f"readback {got.hex()}")
+        if not ok:
+            raise RuntimeError(f"{name} readback {got.hex()} after zeroing")
+
+    zero("dosio_want_uci", "residue at boot")
+    zero("hle_dos_magic", "residue at boot")
+    sess._call("hle_dos_init")
+    be = read_bytes(t, lookup_label(labels, "dosio_backend"), 1)[0]
+    sess.check("u64: hle_dos_init selects RAMDISK", be == 0, f"got {be}")
+    if be != 0:
+        raise RuntimeError(f"hle_dos_init selected backend {be}, not RAMDISK")
+    zero("hle_dos_magic", "after the probe init")
+
+
+def hold_checks(sess, hold: dict) -> None:
+    """u64: the hold's own outcome counts -- a config that did not come back
+    exactly, or a C64 reset that failed, is a failure of the run."""
+    sess.check("u64: device config restored exactly", bool(hold["restored"]),
+               "see config_after.json")
+    sess.check("u64: C64 reset after the restore", bool(hold["reset_ok"]),
+               "the reset failed; see the session log")
+
+
+def run_suite(target, labels, scs, args):
+    """Every scenario on one prepared target (RAMDISK backend)."""
+    from c64_test_harness import read_bytes
+    from tests.harness_util import lookup_label
+    from tests.run_program import Session
+    u64 = target.backend != "vice"
+    sess = Session(target=target, labels=labels, timeout=args.timeout)
+    if u64:
+        zero_dos_bss(sess, labels)
+    g = Guest(sess, labels)
+    be = lookup_label(labels, "dosio_backend")
+    for sc in scs:
+        chunks, manifest = scenario_chunks(sc)
+        print(f"[{sc.name}] {len(sc.steps)} step(s)", flush=True)
+        try:
+            sess.stage(chunks)
+            if sc.init:
+                try:
+                    sess._call("hle_dos_init")
+                except KeyError as e:
+                    sess.check(f"{sc.name}: hle_dos_init exported", False,
+                               str(e))
+            res = sess.run_program(manifest["entry"], manifest["stack_top"],
+                                   args.budget)
+            res.print_state()
+            check_scenario(sess, g, sc, res)
+        except Exception as e:  # noqa: BLE001 - a wedged target: stop, keep
+            sess.check(f"{sc.name}: ran", False,     # the counts so far
+                       f"{type(e).__name__}: {e}")
+            return sess
+        if u64:
+            got = read_bytes(target.transport, be, 1)[0]
+            sess.check(f"u64: {sc.name}: dosio_backend = RAMDISK", got == 0,
+                       f"got {got}")
+    got = read_bytes(target.transport, be, 1)[0]
+    sess.check("backend = RAMDISK (0) " +
+               ("(opt-in key zeroed)" if u64 else "under VICE (no UCI)"),
+               got == 0, f"got {got}")
+    return sess
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python3 -m tests.run_dos",
                                  description=__doc__.split("\n")[0])
@@ -966,8 +1075,27 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--labels")
     ap.add_argument("--only", help="comma-separated scenario names")
     ap.add_argument("--budget", type=int, default=200_000)
-    ap.add_argument("--timeout", type=float, default=60.0)
+    ap.add_argument("--timeout", type=float,
+                    help="per runner call (default 60 s VICE, 600 s u64)")
+    ap.add_argument("--backend", choices=["vice", "u64"], default="vice",
+                    help="u64: the Ultimate 64 at U64_HOST, 1 MHz, one "
+                         "DeviceLock hold with exact config snapshot/restore; "
+                         "RAMDISK only; the selection leg then runs on a "
+                         "local VICE")
+    ap.add_argument("--out-dir", default="build/evidence/run_dos-u64",
+                    help="u64: config_before/after.json")
     args = ap.parse_args(argv)
+    if args.timeout is None:
+        args.timeout = 600.0 if args.backend == "u64" else 60.0
+
+    scs = scenarios()
+    if args.only:
+        valid = [s.name for s in scs] + ["selection"]
+        unknown = sorted(set(args.only.split(",")) - set(valid))
+        if unknown:
+            print(f"error: unknown --only name(s): {', '.join(unknown)}; "
+                  f"valid: {', '.join(valid)}", file=sys.stderr)
+            return 2
 
     prg = os.path.abspath(args.prg)
     labels_path = (os.path.abspath(args.labels) if args.labels
@@ -976,59 +1104,54 @@ def main(argv: list[str] | None = None) -> int:
         if not os.path.exists(p):
             print(f"error: not found: {p}", file=sys.stderr)
             return 2
-    scs = scenarios()
     run_selection = True
     if args.only:
         want = set(args.only.split(","))
         scs = [s for s in scs if s.name in want]
         run_selection = "selection" in want
 
-    from c64_test_harness import Labels, UnifiedManager, ViceConfig, read_bytes
-    from tests.harness_util import REU_VICE_ARGS, lookup_label
-    from tests.run_program import Session
+    from c64_test_harness import Labels, UnifiedManager, ViceConfig
+    from tests.harness_util import REU_VICE_ARGS
     from tests.run_vectors import prepare_target
 
     labels = Labels.from_file(labels_path)
-    vice_config = ViceConfig(prg_path=prg, warp=True, sound=False,
-                             extra_args=list(REU_VICE_ARGS))
-    with UnifiedManager(backend="vice", vice_config=vice_config) as mgr:
-        target = mgr.acquire()
-        try:
+    if args.backend == "u64" and not scs:
+        from tests.run_program import Session
+        sess = Session(target=None, labels=labels, timeout=args.timeout)
+        print("[u64] no scenario selected: the device is not used")
+    elif args.backend == "u64":
+        from tests.bench.u64_session import log, u64_hold
+        with u64_hold(os.path.abspath(args.out_dir)) as hold:
+            u64_preflight(hold["before"])
+            target = hold["target"]
+            target.transport.set_speed(1)
+            log("CPU speed set to 1 MHz")
             prepare_target(target, prg)
-            sess = Session(target=target, labels=labels, timeout=args.timeout)
-            g = Guest(sess, labels)
-            for sc in scs:
-                chunks, manifest = scenario_chunks(sc)
-                print(f"[{sc.name}] {len(sc.steps)} step(s)")
-                sess.stage(chunks)
-                if sc.init:
-                    try:
-                        sess._call("hle_dos_init")
-                    except KeyError as e:
-                        sess.check(f"{sc.name}: hle_dos_init exported", False,
-                                   str(e))
-                res = sess.run_program(manifest["entry"], manifest["stack_top"],
-                                       args.budget)
-                res.print_state()
-                check_scenario(sess, g, sc, res)
+            sess = run_suite(target, labels, scs, args)
+        hold_checks(sess, hold)
+    else:
+        vice_config = ViceConfig(prg_path=prg, warp=True, sound=False,
+                                 extra_args=list(REU_VICE_ARGS))
+        with UnifiedManager(backend="vice", vice_config=vice_config) as mgr:
+            target = mgr.acquire()
             try:
-                be = read_bytes(target.transport,
-                                lookup_label(labels, "dosio_backend"), 1)[0]
-                sess.check("backend = RAMDISK (0) under VICE (no UCI)", be == 0,
-                           f"got {be}")
-            except KeyError as e:
-                sess.check("dosio_backend exported", False, str(e))
-        finally:
-            mgr.release(target)
+                prepare_target(target, prg)
+                sess = run_suite(target, labels, scs, args)
+            finally:
+                mgr.release(target)
 
     if run_selection:
-        print("[selection] DOSIO_FAKE_UCI build (second VICE instance)")
+        # VICE-only by construction: selection_checks boots its own
+        # DOSIO_FAKE_UCI build in a local VICE instance, whatever --backend
+        tag = "[local VICE] " if args.backend == "u64" else ""
+        print(f"[selection] {tag}DOSIO_FAKE_UCI build (second VICE instance)")
         try:
             ok, bad = selection_checks(prg, args.timeout, args.budget)
-            sess.checks += ok
-            sess.failures += bad
+            sess.checks += [tag + c for c in ok]
+            sess.failures += [tag + f for f in bad]
         except Exception as e:  # noqa: BLE001 - report, don't mask
-            sess.check("selection: ran", False, f"{type(e).__name__}: {e}")
+            sess.check(f"{tag}selection: ran", False,
+                       f"{type(e).__name__}: {e}")
 
     n_ok, n_bad = len(sess.checks), len(sess.failures)
     print(f"{n_ok}/{n_ok + n_bad} checks passed")

@@ -41,6 +41,7 @@
 .export mem_read8, mem_read16, mem_read32
 .export mem_write8, mem_write16, mem_write32
 .export mem_rec_dirty           ; REC-ownership seam (docs/WAVE4_BRIEF.md C1)
+.import __BSS_RUN__, __BSS_SIZE__   ; ld65 (c64.cfg BSS define = yes): boot clear
 .export ea_calc, ea_load, ea_store
 .export alu_add, alu_sub, alu_cmp, alu_and, alu_or, alu_eor
 .export alu_not, alu_neg, alu_addx, alu_subx, alu_ext
@@ -102,7 +103,26 @@ basic_stub:                             ; 10 SYS 2061
 @next:  .word $0000                     ; end of program
         lda #0                          ; $080D: ZP comes up with garbage --
         sta m_rok                       ; REC shadow invalid at boot (always,
-        jmp main                        ; even in REC_NOINVAL builds)
+                                        ; even in REC_NOINVAL builds)
+        ; Clear BSS.  C64 RAM survives a PRG reload on hardware, and HLE
+        ; state in BSS trusts it (hle_dos_magic "DOS!", dosio_want_uci
+        ; "UCI!"), so stale bytes must never reach a run.  BSS is
+        ; page-aligned (c64.cfg); whole pages are cleared, the tail of the
+        ; last page is unused MAIN space.  The self-modified page operand is
+        ; reset first so a restart at $080D works too.  tests/bss_boot.py.
+        tay                             ; A = 0, Y = 0
+        lda #>__BSS_RUN__
+        sta @pg+2
+        tya
+        ldx #>(__BSS_SIZE__ + $FF)      ; page count (rounded up)
+        beq @done
+@pg:    sta __BSS_RUN__,y               ; high byte self-modified
+        iny
+        bne @pg
+        inc @pg+2
+        dex
+        bne @pg
+@done:  jmp main
 
 .segment "CODE"
 
@@ -1454,3 +1474,5 @@ ea_modetab_lo:
 ea_modetab_hi:
         .byte >ea_m0, >ea_m1, >ea_m2, >ea_m3
         .byte >ea_m4, >ea_m5, >ea_m6, >ea_m7
+
+.assert (__BSS_RUN__ & $FF) = 0, lderror, "boot BSS clear assumes page-aligned BSS (c64.cfg align = $100)"

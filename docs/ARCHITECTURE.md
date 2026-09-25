@@ -43,7 +43,7 @@ Milestone-driven combination: **S1 + S4 first** (interpret a Hunk-format CLI pro
 
 1. **M0 — Loader** ✅ (tag `m0-loader-green`): Hunk parser + REU image/manifest on host; chunks staged through the contract memory API; end-to-end demo with runtime relocation verified in VICE.
 2. **M1 — Core interpreter** ✅ (tags `m1-vectors-green`, `hw-validated`): full 68000 user-mode integer set in 6502/ca65, validated against 5150 sampled SingleStepTests golden vectors + 48 hand vectors for uncovered ops — green in VICE **and on a real Ultimate 64 Elite with zero divergence**. Measured speed: `docs/HARDWARE.md` (analytic model: `docs/PERF.md`).
-3. **M2 — HLE exec/dos** 🔶 in progress: v0 done — exec/dos library calls (OpenLibrary/CloseLibrary/Output/Write) serviced natively via A-line vector slots; a hand-encoded hello-world Hunk program prints on the C64 screen (`docs/HLE.md`). Exit criterion still open: a freshly compiled (vbcc/gcc-m68k) binary to completion — needs AllocMem/FreeMem for CRT0 first.
+3. **M2 — HLE exec/dos** ✅ done (Waves 4–5): vbcc-compiled C programs run to completion — stdio with file I/O (RAM disk; Ultimate storage opt-in, hardware-validated), keyboard input, a real heap, pools, custom stacks (`docs/HLE.md`, `docs/HLE_DOS.md`, `docs/HLE_CON.md`).
 4. **M3 — Chipset shim v0**: single static playfield → VIC-II bitmap; framebuffer conversion on vblank.
 5. **M4 — AOT translator v0**: translate straight-line 68k basic blocks, falling back to the interpreter at block boundaries.
 
@@ -51,7 +51,7 @@ Milestone-driven combination: **S1 + S4 first** (interpret a Hunk-format CLI pro
 
 - REU: 16 MB on U64 Elite; transfers via $DF00 REC registers. Guest memory maps 1:1 onto REU space; instruction fetch runs through a 256-byte window (one DMA per page), data access per-call.
 - Measured on real U64E (fw 3.14d): bulk REU DMA scales with CPU clock only to ~2 MHz, capping at ~3.3 MB/s; REC *register* stores are throttled to ~1 µs each at turbo — register-access count, not byte bandwidth, is the memory-API ceiling. Windowed interpreter reaches ~80k/57k 68k-IPS (ALU/mem mix) at 48 MHz with flat cycles-per-instruction across the speed sweep.
-- Ultimate command interface ($DF1C area): file I/O against SD/USB storage — backs dos.library HLE (not yet used; M2-next).
+- Ultimate command interface ($DF1C area): file I/O against SD/USB storage — backs the opt-in ULTDOS dos.library backend (hardware-validated 2026-09-24; `docs/HLE_DOS.md`).
 - U64 turbo mode: CPU speed enum 1–48 MHz. Stock-C64 + cartridge stays 1 MHz: interpreter stays portable, speed is config.
 - Resource ownership (ZP / RAM / guest space) is contract-managed: `runtime/rc/*.inc` + `make rescheck` (`RESOURCES.md`).
 
