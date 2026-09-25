@@ -32,6 +32,7 @@ Output: --out-dir (logs + JSON per phase) and --bench-json.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import glob
 import json
@@ -55,27 +56,137 @@ def dump(path: str, obj) -> None:
         json.dump(obj, f, indent=1)
 
 
+def full_config(client) -> dict:
+    """{category: {item: value}} for every category (bodyless GETs only).
+    The REST answer nests the items under the category name."""
+    out = {}
+    for cat in client.list_configs():
+        raw = {k: v for k, v in client.get_config_category(cat).items()
+               if k != "errors"}
+        out[cat] = raw[cat] if list(raw) == [cat] else raw
+    return out
+
+
+def config_diff(a: dict, b: dict) -> dict:
+    """{category: {item: (a, b)}} for every item that differs."""
+    diff = {}
+    for cat in sorted(set(a) | set(b)):
+        ca, cb = a.get(cat) or {}, b.get(cat) or {}
+        d = {k: (ca.get(k), cb.get(k)) for k in sorted(set(ca) | set(cb))
+             if ca.get(k) != cb.get(k)}
+        if d:
+            diff[cat] = d
+    return diff
+
+
+@contextlib.contextmanager
+def u64_hold(out_dir: str, lock_timeout: float = 6 * 3600.0):
+    """ONE DeviceLock hold with exact config snapshot/restore.
+
+    Right after the lock is acquired: device info, the harness
+    snapshot_state and the FULL config (every category) are recorded in
+    out_dir/config_before.json.  On exit (also on error): restore_state,
+    then every item still differing from the full snapshot is put back
+    one by one, the C64 is reset, the full config re-read and diffed
+    (out_dir/config_after.json).  No factory baseline on entry, no flash
+    save.  Yields a dict: target, info, lock_wait_s; after the block,
+    "restored" is True only for an empty re-read diff."""
+    from c64_test_harness import UnifiedManager
+    from c64_test_harness.backends.ultimate64_helpers import (
+        U64StateSnapshot, restore_state, snapshot_state)
+    hold = {"restored": False}
+    t_req = time.monotonic()
+    log("requesting the device (DeviceLock) ...")
+    with UnifiedManager(backend="u64", lock_timeout=lock_timeout,
+                        baseline_on_entry=False) as mgr:
+        target = mgr.acquire()
+        snap = None
+        try:
+            hold["lock_wait_s"] = waited = time.monotonic() - t_req
+            client = target.transport.client
+            before = full_config(client)
+            snap = dataclasses.asdict(snapshot_state(client))
+            info = client.get_info()
+            hold.update(target=target, info=info)
+            log(f"acquired after {waited:.0f}s wait; {info.get('product')} "
+                f"fw {info.get('firmware_version')} fpga "
+                f"{info.get('fpga_version')} core {info.get('core_version')}")
+            log(f"config before: {snap}")
+            dump(os.path.join(out_dir, "config_before.json"),
+                 {"info": info, "snapshot_state": snap, "full": before,
+                  "lock_wait_s": waited,
+                  "time": time.strftime("%Y-%m-%dT%H:%M:%S")})
+            yield hold
+        finally:
+            log("restoring config ...")
+            try:
+                if snap is None:
+                    raise RuntimeError("no snapshot was taken; config "
+                                       "untouched by this session")
+                restore_state(client, U64StateSnapshot(**snap))
+                for cat, items in config_diff(before,
+                                              full_config(client)).items():
+                    for item, (was, now) in items.items():
+                        try:
+                            client.set_config_item(cat, item, was)
+                            log(f"  restored {cat} / {item} = {was!r} "
+                                f"(was {now!r})")
+                        except Exception as e:
+                            log(f"  could not restore {cat} / {item} = "
+                                f"{was!r}: {e!r}")
+                client.reset()
+                time.sleep(3.0)
+                after = full_config(client)
+                diff = config_diff(before, after)
+                dump(os.path.join(out_dir, "config_after.json"),
+                     {"full": after, "diff_vs_before": diff,
+                      "time": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                log("config after (full, all categories): "
+                    f"{'IDENTICAL' if not diff else diff}")
+                hold["restored"] = not diff
+            except Exception as e:
+                log(f"RESTORE FAILED: {e!r}\n{traceback.format_exc()}")
+            mgr.release(target)
+
+
 class Hw:
-    def __init__(self, target, out_dir):
+    def __init__(self, target, out_dir, vice=None):
+        """*vice*: a u64bench.ViceBoot for the dry run (target unused)."""
         self.target = target
-        self.t = target.transport
+        self.vice = vice
         self.out = out_dir
         self.cur_prg = None
 
+    @property
+    def t(self):
+        return self.target.transport
+
+    @property
+    def backend(self) -> str:
+        return "vice" if self.vice is not None else self.target.backend
+
     def speed(self, mhz: int) -> None:
-        if self.target.backend == "vice":      # dry-run backend: 1 MHz only
+        if self.vice is not None:              # dry-run backend: 1 MHz only
             return
         self.t.set_speed(mhz)
         time.sleep(0.5)
 
     def load(self, prg: str):
-        """Boot *prg* at 1 MHz (run_prg + dispatcher), return its labels."""
+        """Boot *prg* at 1 MHz (run_prg + dispatcher), return its labels.
+        On VICE every load is a fresh instance of *prg*, so a base or
+        mutant build really runs (and its own labels match it)."""
         from c64_test_harness import Labels
+        from tests.bench.u64bench import check_loaded
         from tests.run_vectors import prepare_target
-        self.speed(1)
-        prepare_target(self.target, prg)
+        labels = Labels.from_file(os.path.splitext(prg)[0] + ".lbl")
+        if self.vice is not None:
+            self.target = self.vice.load(prg)
+        else:
+            self.speed(1)
+            prepare_target(self.target, prg)
+        check_loaded(self.target, prg, labels)
         self.cur_prg = prg
-        return Labels.from_file(os.path.splitext(prg)[0] + ".lbl")
+        return labels
 
 
 # ------------------------------------------------------------------ phases
@@ -172,9 +283,9 @@ def ph_teeth(hw: Hw, a) -> dict:
     for tag, prg in (("normal", a.new), (mtag, a.noinval)):
         rows = {}
         for name, fn in LEGS.items():
-            if name == "mailbox" and hw.target.backend == "vice":
+            if name == "mailbox" and hw.backend == "vice":
                 continue                        # no mailbox on VICE
-            if name == "boot" and hw.target.backend != "vice":
+            if name == "boot" and hw.backend != "vice":
                 continue                        # mailbox dirties first
             labels = hw.load(prg)
             leg = Leg(hw.target, labels, "u64", rng)
@@ -239,28 +350,23 @@ def ph_bench(hw: Hw, a) -> dict:
 
 def vice_dry_run(a) -> int:
     """Exercise the phase code on VICE (logic check before device time).
-    VICE cannot swap PRGs inside one instance, so every phase uses --new
-    (the teeth 'noinval' row then runs the normal build and passes)."""
-    a.base = a.noinval = a.new
-    from c64_test_harness import UnifiedManager, ViceConfig
-    from tests.harness_util import REU_VICE_ARGS
-    cfg = ViceConfig(prg_path=a.new, warp=True, sound=False,
-                     extra_args=list(REU_VICE_ARGS))
+    VICE cannot swap PRGs inside one instance, so every Hw.load boots a
+    fresh instance of that PRG: --base and --noinval really run."""
+    from tests.bench.u64bench import ViceBoot
     rc = 0
-    with UnifiedManager(backend="vice", vice_config=cfg) as mgr:
-        target = mgr.acquire()
-        try:
-            hw = Hw(target, a.out_dir)
-            for ph in a.phases.split(","):
-                log(f"=== (vice dry run) phase {ph} ===")
-                try:
-                    r = PHASES[ph](hw, a)
-                    dump(os.path.join(a.out_dir, f"phase_{ph}.json"), r)
-                except Exception as e:
-                    rc = 1
-                    log(f"phase {ph} ERROR: {e!r}\n{traceback.format_exc()}")
-        finally:
-            mgr.release(target)
+    vice = ViceBoot()
+    try:
+        hw = Hw(None, a.out_dir, vice=vice)
+        for ph in a.phases.split(","):
+            log(f"=== (vice dry run) phase {ph} ===")
+            try:
+                r = PHASES[ph](hw, a)
+                dump(os.path.join(a.out_dir, f"phase_{ph}.json"), r)
+            except Exception as e:
+                rc = 1
+                log(f"phase {ph} ERROR: {e!r}\n{traceback.format_exc()}")
+    finally:
+        vice.close()
     return rc
 
 

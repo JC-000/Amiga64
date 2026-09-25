@@ -487,3 +487,72 @@ removed after; `/USB1` top-level listing identical); Command Interface enabled
 for the session only; full-config re-read IDENTICAL. Measured: read 61 B/s /
 write 114 B/s at 1 MHz, read ~2.7 KB/s / write ~4.8-5.1 KB/s at 48 MHz.
 Details and model-vs-silicon notes: `docs/HLE_DOS.md` "Hardware validation".
+
+## Wave 5: run_dos on hardware (W5-T, 2026-09-24)
+
+`tests/run_dos.py --backend u64` ran the HLE DOS file-I/O scenarios on the
+U64E, **RAMDISK backend only**, at 1 MHz, in one DeviceLock hold. The build
+was `wave5/tools` on base 4ce6031; the `.s` sources are unchanged from the
+base.
+
+**Device state has changed since the Wave 4 sections above.** The device
+reported fw 3.15, but git **c47155b7**, FPGA 125, core **1.50**. Wave 4
+recorded git bce4535e and core 1.4F. So compare with earlier sections only
+with that in mind.
+
+**Lock and config:**
+- The session waited 1751 s for the lock, behind another project's live
+  lane.
+- Config as found: Turbo Control `Off`, CPU Speed `" 1"`, REU `Disabled` /
+  `2 MB`, Cartridge `""`, Cartridge Preference `Auto`, Badline Timing
+  `Enabled`, Bus Operation Mode `Quiet`.
+- The session took the full config (every category) and the harness
+  `snapshot_state` right after acquiring the lock, and set the CPU speed to
+  1 MHz explicitly. No factory baseline was applied on entry.
+- At the end it ran `restore_state`, reset the C64 and re-read the full
+  config. The diff was **empty (IDENTICAL)**. Nothing was saved to flash.
+- There were no storage writes and no UCI traffic.
+
+**Boot residue:** after `run_prg`, `dosio_want_uci` read `000000ff` and
+`hle_dos_magic` read `ffffffff`. The driver zeroes both and proves it by
+readback. The residue was harmless in this session, but a key or a magic
+left over from an earlier session would not be (`docs/HLE_DOS.md`
+"Testing"). Upstream, the boot stub now clears BSS (supervisor fix,
+`tests/bss_boot.py`), so the zeroing stays only as defence in depth.
+
+| | Checks |
+|---|---|
+| Hardware, 23 scenarios | **736/736** (about 6 min inside the hold) |
+| VICE, same 23 scenarios | 711/711 |
+| VICE, full (plus the `selection` leg) | 762/762 |
+
+**How the counts relate:**
+- **Hardware:** 711 + 25 = 736. The 25 u64-only checks are 2 zeroing
+  readbacks and one "`dosio_backend` = RAMDISK" check after each of the 23
+  scenarios.
+- **VICE:** 711 + 51 = 762. The 51 are the VICE-only `selection` leg, which
+  is skipped on hardware: its fake-UCI build with the opt-in key would
+  drive the real UCI.
+- The final backend check is in both counts. Only its label differs.
+
+**No hardware-vs-VICE divergence.** Every scenario passed on both targets.
+
+Log: `build/evidence/w5-tools/hw/run_dos_u64.log`; config JSON in
+`build/evidence/w5-tools/hw/run_dos/`.
+
+Reproduce: `U64_HOST=<ip> python3 -m tests.run_dos --prg
+build/<pkg>/runner.prg --backend u64 --out-dir <dir>`.
+
+**Bench tooling fix (VICE only).** `tests/bench/u64_session.py` now boots a
+fresh VICE instance for every `Hw.load`. Before, it returned the other
+build's labels while VICE kept running the first PRG. That gave false
+results on VICE:
+- a JAM, with the `REC_NOINVAL` build as base;
+- a bogus icount `4294901760`, with the 158e684 build as base.
+
+The old dry run hid this by forcing base = new. `u64bench.check_loaded`
+now refuses any label/PRG mismatch, on both backends. With the fix, a VICE
+dry run really runs the base and mutant builds:
+- `rec_wrap` fails on 158e684, as it did on silicon;
+- the `REC_NOINVAL` teeth legs fail: refill, reset_case, load_chunk and
+  foreign. The `boot` leg passes.

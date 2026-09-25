@@ -178,6 +178,60 @@ def hunk_rmw68k(n: int) -> bytes:
     ])
     return b.build()
 
+# ------------------------------------------------------------------ loading
+
+# Code labels whose bytes in C64 RAM must match the PRG file: none of them is
+# self-modified, and the U64 dispatcher patches only main+7.
+LOAD_CHECK_LABELS = ("test_run_program", "test_load_chunk", "mem_rec_dirty")
+LOAD_CHECK_LEN = 8
+
+
+def check_loaded(target, prg: str, labels) -> None:
+    """Raise unless the machine is running *prg*, the build *labels* is from.
+
+    Every call a bench makes goes to a label address; if the loaded PRG is
+    another build, those addresses land in foreign code and the bench
+    reports a false failure (JAM, bad halt, bogus icount)."""
+    with open(prg, "rb") as f:
+        raw = f.read()
+    load = raw[0] | raw[1] << 8
+    for name in LOAD_CHECK_LABELS:
+        addr = lookup_label(labels, name)
+        want = raw[2 + addr - load:2 + addr - load + LOAD_CHECK_LEN]
+        got = read_bytes(target.transport, addr, LOAD_CHECK_LEN)
+        if got != want:
+            raise RuntimeError(
+                f"{os.path.relpath(prg, ROOT)} is not the loaded PRG: "
+                f"{name} ${addr:04X} holds {got.hex()}, the file has "
+                f"{want.hex()}")
+
+
+class ViceBoot:
+    """One VICE instance per PRG: the VICE backend cannot swap the PRG of a
+    running instance, so load() boots a fresh instance of *prg*."""
+
+    def __init__(self):
+        self.mgr = None
+        self.target = None
+
+    def load(self, prg: str):
+        self.close()
+        cfg = ViceConfig(prg_path=prg, warp=True, sound=False,
+                         extra_args=list(REU_VICE_ARGS))
+        self.mgr = UnifiedManager(backend="vice", vice_config=cfg)
+        self.target = self.mgr.acquire()
+        prepare_target(self.target, prg)
+        return self.target
+
+    def close(self) -> None:
+        if self.mgr is not None:
+            try:
+                self.mgr.release(self.target)
+            finally:
+                self.mgr.shutdown()
+        self.mgr = self.target = None
+
+
 # ------------------------------------------------------------------ driver
 
 def timed_call(target, addr: int, timeout: float) -> float:
@@ -241,6 +295,7 @@ def main() -> int:
         target = mgr.acquire()
         try:
             prepare_target(target, PRG_)
+            check_loaded(target, PRG_, labels)
             if args.backend == "vice":
                 sess = Session(target=target, labels=labels, timeout=120.0)
                 r = bench_68k(sess, hunk_alu68k, alu68k_icount, 200, 2200)

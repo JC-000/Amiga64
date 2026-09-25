@@ -1,8 +1,10 @@
 """Byte-level protocol test for the ULTDOS backend (runtime/ops/dosio_uci.s).
 
-HARDWARE STATUS: UNVALIDATED — nothing here touches a device.  This pins the
-exact UCI traffic the driver produces so the later hardware leg has a
-fixed expectation.
+HARDWARE STATUS: the driver is validated on the U64E (fw 3.15, 2026-09-24,
+docs/HLE_DOS.md "Hardware validation").  Nothing here touches a device: this
+pins the exact UCI traffic the driver produces, against a model whose status
+strings match what fw 3.15 answered in the hardware probes
+(build/hw-final-evidence/ultdos/ultdos_run2.log; W5-T section at the end).
 
 How: ``dosio_uci.s`` is assembled standalone (cl65) together with a
 generated shim that provides the ``dosio_*`` parameter block it imports,
@@ -14,14 +16,25 @@ Reads/writes of ``$DF1C-$DF1F`` go to :class:`UciDevice`, a model of
   lines 54-61, register mux 97-106, control writes 148-170, queue pointers
   176-185), including the documented hazard that the "new command" bit 0
   clears BEFORE the reply queues are valid
-  (``software/io/command_interface/command_intf.cc`` 155-160 then
-  ``copy_result`` 173-191), and
+  (``software/io/command_interface/command_intf.cc`` 169-173 then
+  ``copy_result`` 188-206), and
 - the DOS command target, ``software/filemanager/dos.cc`` (parse_command
-  lines 86-153 / 467-492, get_more_data 784-802) plus the open-mode rules of
-  ``software/filemanager/filemanager.cc`` ``fopen_impl`` 668-689 and the flag
-  values of ``software/filesystem/fs_errors_flags.h`` 44-53.
+  lines 85-153 / 467-492, get_more_data 772-803) plus the open-mode rules of
+  ``software/filemanager/filemanager.cc`` ``fopen_impl`` 713-752 and the flag
+  values of ``software/filesystem/fs_errors_flags.h`` 44-53; status strings
+  from ``software/filesystem/file_system.cc`` ``get_error_string`` 28-77
+  (no "NN," prefix) and the fixed ``dos.cc`` Messages 16-30 ("NN,TEXT").
 
-Firmware tree: ~/Documents/1541ultimate @ 880de4dd.
+Firmware tree: ~/Documents/1541ultimate @ bce4535e, the U64E's fw 3.15 build
+(docs/HARDWARE.md).  Written against 880de4dd; W5-T re-checked every cited
+line at bce4535e: dos.cc, file_system.cc's strings, fs_errors_flags.h and
+command_protocol.vhd are unchanged, filemanager.cc and command_intf.cc moved
+(line numbers above are bce4535e's).  ~/Documents/1541u-315preview
+(v3.15-84) has the same strings.  On 2026-09-24 21:52 the device reported
+git c47155b7 (core 1.50): against bce4535e only filemanager.cc changed in
+these paths, and its fopen_impl / delete_file_impl logic is unchanged
+(moved to lines 738 / 1193).  No DOS-target error exists in both a
+numbered and an unnumbered form in either tree, so the model has one variant.
 
 Every pushed command is logged; the tests assert the exact bytes, the
 handshake discipline (PUSH written as exactly $01, never while busy, a
@@ -333,7 +346,7 @@ OPS = _build_ops()
 
 
 # =============================================================================
-# UCI device model: FPGA handshake + DOS targets 1/2 (firmware 880de4dd)
+# UCI device model: FPGA handshake + DOS targets 1/2 (firmware bce4535e)
 # =============================================================================
 
 @dataclass
@@ -354,9 +367,11 @@ class DosTarget:
             if self.file is not None:
                 dev.violations.append(f"OPEN on busy target (leaks {self.file})")
             self.file = None
+            if not self.parent_exists(name, dev):     # filemanager.cc:718-721
+                return [b""], b"PATH DOESN'T EXIST"   # before any create
             if dev.readonly and flags & FA_WRITE:
                 return [b""], b"WRITE PROTECTED"
-            exists = name in self.fs                  # filemanager.cc:668-689
+            exists = name in self.fs                  # filemanager.cc:723-734
             if exists and flags & FA_CREATE_NEW:
                 return [b""], b"FILE EXISTS"
             create = ((flags & FA_CREATE_NEW and not exists)
@@ -415,6 +430,8 @@ class DosTarget:
         if cmd == DOS_INFO:                           # dos.cc:154-182
             if self.file is None:
                 return [b""], b"85,NO FILE OPEN"
+            if dev.info_fails:                        # fstat failed, 161-165
+                return [b""], b"82,FILE NOT FOUND"
             name = self.file.encode()
             info = struct.pack("<IHH3sB", len(self.fs[self.file]), 0, 0,
                                b"   ", 0) + name
@@ -422,9 +439,12 @@ class DosTarget:
         if cmd == DOS_DELETE:                         # dos.cc:208-221
             name = msg[2:].split(b"\0")[0].decode("latin-1")
             name = next((k for k in self.fs if k.lower() == name.lower()), name)
+            if not self.parent_exists(name, dev):     # filemanager.cc:1086-1088
+                return [b""], b"PATH DOESN'T EXIST"
             if any(t.file == name for t in dev.targets.values()):
+                # FF_FS_LOCK is 0 (chan_fat/full/ffconf.h:265): FatFS
+                # unlinks an open file without complaint -> "00,OK" below
                 dev.violations.append(f"DELETE of open file {name}")
-                return [b""], b"ACCESS DENIED"         # FatFS FR_LOCKED/DENIED
             if dev.readonly:
                 return [b""], b"WRITE PROTECTED"
             if name not in self.fs:                   # file_system.cc:39-40
@@ -433,12 +453,23 @@ class DosTarget:
             return [b""], b"00,OK"
         return [b""], b"21,UNKNOWN COMMAND"
 
+    def parent_exists(self, name: str, dev: "UciDevice") -> bool:
+        """A directory exists if listed in dev.dirs or holding a file; a
+        bare name is relative to the (existing) current path."""
+        if "/" not in name:
+            return True
+        parent = name.rsplit("/", 1)[0].lower()
+        return (parent in {d.lower() for d in dev.dirs}
+                or any(k.lower().startswith(parent + "/") for k in self.fs))
+
 
 @dataclass
 class UciDevice:
     fs: dict = field(default_factory=dict)
     latency: int = 3                  # status polls before a reply is valid
     readonly: bool = False            # FA_WRITE opens fail "WRITE PROTECTED"
+    info_fails: bool = False          # FILE_INFO's fstat fails ("82,...")
+    dirs: set = field(default_factory=set)       # empty directories
     hang_cmds: set = field(default_factory=set)  # processed, reply never posted
     state: int = 0                    # 2-bit protocol state (vhd:48-52)
     newcmd: int = 0
@@ -468,13 +499,13 @@ class UciDevice:
         self.pending -= 1
         if self.pending > 0:
             return
-        if self.phase == "accept":            # command_intf.cc:155-158
+        if self.phase == "accept":            # command_intf.cc:164-169
             self.newcmd = 0                   # bit 0 clears, queues not ready
             self.phase, self.pending = "reply", self.latency
-        elif self.phase == "reply":           # copy_result, cc:173-191
+        elif self.phase == "reply":           # copy_result, cc:188-206
             self._post_block()
             self.phase = ""
-        elif self.phase == "abort":           # cc:121-128 HANDSHAKE_RESET
+        elif self.phase == "abort":           # cc:136-144 HANDSHAKE_RESET
             self.abort, self.state, self.newcmd = 0, 0, 0
             self.cmd.clear()
             self.phase = ""
@@ -1025,19 +1056,13 @@ def test_file_info_failure_fails_the_open(build):
     # ruling 4: no unknown-size handles.
     h = Harness(build, fs={"f": bytearray(b"12345")})
     h.call("dosio_uci_init")
-    real = h.dev.targets[1].parse
-
-    def no_info(msg, dev):
-        if msg[1] == DOS_INFO:
-            return [b""], b"88,NO INFORMATION AVAILABLE"
-        return real(msg, dev)
-    h.dev.targets[1].parse = no_info
+    h.dev.info_fails = True                    # "82,FILE NOT FOUND"
     h.dev.log.clear()
     assert h.open(0, "f", MODE_OLD) == 1
     assert h.err() == de.ERROR_OBJECT_NOT_FOUND
     assert cmds(h)[-1] == bytes([1, DOS_CLOSE])
     assert h.dev.targets[1].file is None
-    h.dev.targets[1].parse = real
+    h.dev.info_fails = False
     assert h.open(0, "f", MODE_OLD) == 0      # target released
     assert h.dev.targets[1].file == "f"
     assert_clean(h)
@@ -1120,7 +1145,8 @@ def test_delete_write_protected_maps_to_214(build):
 
 
 def test_delete_other_refusals_stay_205(build):
-    # "ACCESS DENIED" / "FILE DOESN'T EXIST" etc. are not write protection
+    # "ACCESS DENIED" (FR_DENIED, file_system.cc:45-46, e.g. a read-only
+    # attribute) / "FILE DOESN'T EXIST" etc. are not write protection
     h = Harness(build, fs={"d": bytearray(b"1")})
     h.call("dosio_uci_init")
     real = h.dev.targets[1].parse
@@ -1184,4 +1210,92 @@ def test_delete_lost_reply_reports_device_error(build):
     assert h.delete("f") == 1
     assert h.err() == de.ERROR_DEVICE_NOT_MOUNTED
     h.dev.hang_cmds = set()
+    assert_clean(h)
+
+
+# =============================================================================
+# W5-T: status strings as firmware 3.15 answers them on the U64E
+# (build/hw-final-evidence/ultdos/ultdos_run2.log, 2026-09-24; firmware
+# ~/Documents/1541ultimate @ bce4535e = the device's 3.15 build)
+# =============================================================================
+
+def _status(dev, msg):
+    """Status line the DOS target posts for one command (model level)."""
+    tgt = dev.targets[msg[0]]
+    return tgt.parse(msg, dev)[1]
+
+
+@pytest.mark.parametrize("msg,want", [
+    # probe "open OLD missing" / "open RO missing [relative]": FR_NO_FILE via
+    # get_error_string (file_system.cc:39-40), no "NN," prefix
+    (b"\x01\x02\x03USB1/amiga64-test/nosuch", b"FILE DOESN'T EXIST"),
+    (b"\x01\x02\x01USB1/amiga64-test/nosuch", b"FILE DOESN'T EXIST"),
+    # probe "open RO missing [bogus root]": FR_NO_PATH (file_system.cc:41-42)
+    (b"\x01\x02\x01NOSUCHROOT/amiga64-test/x", b"PATH DOESN'T EXIST"),
+    # probe "delete missing" (dos.cc:208-221)
+    (b"\x01\x09USB1/amiga64-test/nosuch", b"FILE DOESN'T EXIST"),
+    # probes "close t1 (none open)" / "file_info t1 (none)": fixed Messages
+    # (dos.cc:22-23)
+    (b"\x01\x03", b"84,NO FILE TO CLOSE"),
+    (b"\x01\x07", b"85,NO FILE OPEN"),
+])
+def test_model_status_matches_fw315_probe(msg, want):
+    dev = UciDevice(fs={"USB1/amiga64-test/other": bytearray(b"o")})
+    assert _status(dev, msg) == want
+
+
+def test_model_missing_directory_creates_nothing():
+    # fopen_impl (filemanager.cc:718-721) returns FR_NO_PATH BEFORE any
+    # create flag is honoured: CREATE_ALWAYS / OPEN_ALWAYS create nothing
+    dev = UciDevice(fs={"USB1/d/f": bytearray(b"1")})
+    for flags in (0x0B, 0x13, 0x07):
+        st = _status(dev, bytes([1, DOS_OPEN, flags]) + b"USB1/nodir/n")
+        assert st == b"PATH DOESN'T EXIST"
+    assert set(dev.fs) == {"USB1/d/f"}
+    # an existing directory still creates
+    assert _status(dev, b"\x01\x02\x0BUSB1/d/n") == b"00,OK"
+    assert "USB1/d/n" in dev.fs
+
+
+def test_model_file_info_failure_is_82():
+    # dos.cc:154-165: fstat failure on the open file -> c_status_file_not_found
+    dev = UciDevice(fs={"f": bytearray(b"1")})
+    assert _status(dev, b"\x01\x02\x03f") == b"00,OK"
+    dev.info_fails = True
+    assert _status(dev, b"\x01\x07") == b"82,FILE NOT FOUND"
+
+
+def test_model_delete_of_open_file_succeeds_in_firmware():
+    # FF_FS_LOCK is 0 (chan_fat/full/ffconf.h:265): FatFS does not refuse
+    # f_unlink on an open file, so the firmware deletes it and answers OK.
+    # The driver must never send it (dosio_delcheck); the model flags it.
+    dev = UciDevice(fs={"f": bytearray(b"1")})
+    _status(dev, b"\x01\x02\x03f")
+    assert _status(dev, b"\x02\x09f") == b"00,OK"
+    assert "f" not in dev.fs
+    assert any("DELETE of open file" in v for v in dev.violations)
+
+
+def test_open_missing_directory_maps_to_205(build):
+    # driver against the fw-3.15 PATH status: every mode fails 205, the
+    # OLDFILE read-only retry included, and nothing is created
+    h = Harness(build, fs={"USB1/d/f": bytearray(b"1")})
+    h.call("dosio_uci_init")
+    for slot, mode in ((0, MODE_OLD), (1, MODE_NEW), (2, MODE_RW)):
+        h.dev.log.clear()
+        assert h.open(slot, "USB1/nodir/x", mode) == 1
+        assert h.err() == de.ERROR_OBJECT_NOT_FOUND
+        opens = [m for m in cmds(h) if m[1] == DOS_OPEN]
+        assert len(opens) == (2 if mode == MODE_OLD else 1), cmds(h)
+    assert set(h.dev.fs) == {"USB1/d/f"}
+    assert h.dev.targets[1].file is None and h.dev.targets[2].file is None
+    assert h.open(3, "USB1/d/f", MODE_OLD) == 0     # targets still free
+    assert_clean(h)
+
+
+def test_delete_missing_directory_maps_to_205(build):
+    h = Harness(build, fs={"USB1/d/f": bytearray(b"1")})
+    h.call("dosio_uci_init")
+    assert h.delete("USB1/nodir/f") == 1
+    assert h.err() == de.ERROR_OBJECT_NOT_FOUND
     assert_clean(h)
