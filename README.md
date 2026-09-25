@@ -68,4 +68,20 @@ The full 5150-case suite also runs on real Ultimate 64 hardware: `python3 -m tes
 ## Non-goals (for now)
 
 - Full-speed games or demos that race the beam on OCS.
-- Kickstart ROM emulation via copyrighted ROM images — we target HLE and freely redistributable test programs. No copyrighted material is (or will be) committed.
+- Kickstart ROM emulation via proprietary ROM images — we target HLE and freely redistributable test programs. (Booting the open-source AROS ROM is kept open as a future option once a chipset shim and supervisor mode exist; see "Third-party material".)
+
+## Third-party material
+
+- **Never in the repo:** proprietary or commercial Amiga material — Kickstart
+  ROMs, Workbench disks, commercial software, the Amiga NDK.
+- **User-owned proprietary media** (e.g. Workbench floppies from the
+  maintainer's own hardware collection) may be used *locally* for private
+  testing only: imaged into a cache outside the repo, never committed, never
+  redistributed, and never required by the test suite.
+- **Open-licensed third-party components** (e.g. vbcc under its own terms,
+  AROS under the AROS Public License) are fetched by pinned, hash-verified
+  scripts into a non-repo cache (`tools/*/install.sh` pattern) with their
+  licence recorded; binaries are not committed. Code that translates or
+  modifies open-licensed sources keeps that licence and lives in clearly
+  separated files. Reading such sources as a reference carries no
+  obligation; HLE code stays clean-room.
