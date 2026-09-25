@@ -7,12 +7,12 @@ A translation layer for running Amiga 500 programs on the **C64 Ultimate** and *
 | Milestone | State |
 |---|---|
 | **M0 — Hunk loader** | ✅ done (`m0-loader-green`) — Amiga Hunk executables parsed, relocated, staged into REU, and run end-to-end |
-| **M1 — 68000 interpreter** | ✅ done (`m1-vectors-green`, `hw-validated`) — full user-mode integer set, 5150 golden + 48 hand vectors green in VICE **and on real U64E hardware with zero divergence** |
-| **M2 — AmigaOS HLE** | 🔶 v0 — exec/dos calls serviced natively; a hello-world Hunk program prints on the C64 screen; compiler-built binaries pending (AllocMem next) |
+| **M1 — 68000 interpreter** | ✅ done (`m1-vectors-green`, `hw-validated`) — full user-mode integer set, 5150 golden + 63 hand vectors green in VICE **and on real U64E hardware with zero divergence** |
+| **M2 — AmigaOS HLE** | ✅ done — **vbcc-compiled C programs run to completion**: stdio incl. file I/O (`fopen` r/w/a/r+, `fseek`, `remove`), keyboard input on stdin, `malloc`/`free` on a real heap, pools, custom stacks, `getenv`/`time`/`system` |
 | M3 — Chipset shim | not started |
 | M4 — AOT translator | not started |
 
-Measured on a real Ultimate 64 Elite (48 MHz turbo): **~80k 68k instructions/sec** on an ALU mix, ~57k memory-bound — roughly a 0.5–1 MHz 68000. Details in [`docs/HARDWARE.md`](docs/HARDWARE.md); model in [`docs/PERF.md`](docs/PERF.md).
+Measured on a real Ultimate 64 Elite (48 MHz turbo): **~75–80k 68k instructions/sec** on an ALU mix and **~68k memory-bound** (+25% memory-bound / +43% read-modify-write since the REC-shadow memory API) — roughly a 0.5–1 MHz 68000. Details in [`docs/HARDWARE.md`](docs/HARDWARE.md); model in [`docs/PERF.md`](docs/PERF.md).
 
 ## Goal
 
@@ -32,7 +32,14 @@ The strategy mix (S1 runtime interpretation + S4 OS-call HLE first; S3 chipset s
 
 ## How it works today
 
-A 68000 interpreter written in ca65 assembly runs on the C64 side: guest memory maps 1:1 onto the REU (24-bit address space), instruction fetch runs through a 256-byte window (one REU DMA per page), all CCR flag logic is centralized in sized ALU primitives, and a generated 256-entry dispatch table routes opcodes to per-family handlers. AmigaOS library calls (`jsr -LVO(A6)`) land on A-line trap words planted in a fake ExecBase/DOSBase environment and are serviced natively — dos.library `Write()` currently prints to the VIC-II text screen.
+A 68000 interpreter written in ca65 assembly runs on the C64 side: guest memory maps 1:1 onto the REU (24-bit address space), instruction fetch runs through a 256-byte window (one REU DMA per page), data accesses go through a REC-shadow memory API (1–4 REU register accesses per call instead of 9, with 512 KB REU-block straddles split correctly), all CCR flag logic is centralized in sized ALU primitives, and a generated 256-entry dispatch table routes opcodes to per-family handlers.
+
+AmigaOS library calls (`jsr -LVO(A6)`) land on A-line trap words planted in full exec/dos vector tables (fake V40 ExecBase/DOSBase) and are serviced natively in 6502 code (clean-room HLE):
+
+- **exec** — FindTask/Process, AllocMem/FreeMem on a first-fit heap with coalescing and checked frees, pools, AllocVec, StackSwap (`docs/HLE.md`).
+- **dos files** — Open/Close/Read/Write/Seek/ChangeMode/DeleteFile/IoErr over a 2 MB REU RAM disk by default, or (opt-in) the Ultimate's own storage via its command interface — hardware-validated (`docs/HLE_DOS.md`).
+- **console** — Write to the VIC-II text screen with scrolling; Read from the real keyboard (KERNAL-free matrix scan, cooked line editing, EOF on Ctrl-D) (`docs/HLE_CON.md`).
+- Unimplemented library calls halt with a precise name, e.g. `dos.library/ReadItem (LVO -810)`.
 
 Correctness is enforced by golden vectors: sampled [SingleStepTests](https://github.com/SingleStepTests/680x0) cases (Musashi-generated, hardware-accurate) execute instruction-by-instruction on the interpreter and every architectural bit is compared — plus hand-written vectors for ops the upstream suite doesn't cover, and a self-modifying-code suite for the fetch window.
 
@@ -40,15 +47,22 @@ Correctness is enforced by golden vectors: sampled [SingleStepTests](https://git
 
 ```
 docs/           ARCHITECTURE (strategy+milestones), CONTRACTS (binding ABI),
-                RESOURCES (zp/ram/guest ownership), PERF, HARDWARE, HLE, M0
+                RESOURCES (zp/ram/guest ownership), PERF, HARDWARE, HLE,
+                HLE_DOS, HLE_CON, M0, WAVE*_BRIEF (per-wave contracts)
 host/           Python tools: hunk.py, image.py, fixturegen.py, vectors.py,
-                handvec.py, gen_dispatch.py, hle_env.py, rescheck.py (+ tests)
+                handvec.py, gen_dispatch.py, hle_env.py, hle_dos_env.py,
+                rescheck.py (+ tests)
 runtime/        6502/ca65: core.s (fetch/dispatch, REU memory API, EA, ALU),
-                ops/ (one instruction family per file, + hle.s),
+                ops/ (one instruction family per file; hle.s, hle_mem.s,
+                hle_con.s, hle_dos.s, dosio_ram.s, dosio_uci.s),
                 rc/ (resource-contract declarations), c64.cfg
 tests/          C64-side runner (runner.s, run_program.s), VICE/U64 drivers
-                (run_vectors, run_program, run_hello, smc), bench/, stub/
-fixtures/       Vendored vector samples, bench sweep data (own/free content only)
+                (run_vectors, run_program, run_hello, run_vbcc, run_dos,
+                run_con, smc, rec_*, bss_boot), bench/, stub/
+tools/vbcc/     pinned, hash-verified vbcc toolchain installer (installs
+                outside the repo)
+fixtures/       Vendored vector samples, bench sweep data, C test programs
+                and HLE unit sources (own/free content only)
 ```
 
 ## Development
@@ -60,10 +74,14 @@ make host-test    # host-side pytest suite
 make runtime      # build the interpreter/runner PRG (build/runner.prg)
 make vice-test    # full golden + hand vector suites in VICE (~35 s)
 make rescheck     # resource-contract checker
-python3 -m tests.run_hello --prg build/runner.prg   # the M2 hello demo
+sh tests/rec_gate.sh build build/gate            # the full gate, logged per step
+tools/vbcc/install.sh                            # vbcc toolchain (outside the repo)
+python3 -m tests.run_vbcc --prg build/runner.prg # compiled C programs (M2 exit bar)
+python3 -m tests.run_dos  --prg build/runner.prg # dos file I/O (add --backend u64 for hardware)
+python3 -m tests.run_con  --prg build/runner.prg # console keyboard input
 ```
 
-The full 5150-case suite also runs on real Ultimate 64 hardware: `python3 -m tests.run_vectors --backend u64 ...` (see `docs/HARDWARE.md`).
+The drivers take `--backend u64` to run on a real Ultimate 64 (through the harness's device lock). Validated on hardware so far: the full 5150-case suite, hand vectors, `run_program`, `run_hello`, `run_vbcc` (Wave 4 regression) and `run_dos` (Wave 5, inside one lock session with the device config snapshotted and restored exactly). `run_con`'s keyboard path is not yet validated on hardware (a manual key test is pending). See `docs/HARDWARE.md`.
 
 ## Non-goals (for now)
 
