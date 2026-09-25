@@ -44,7 +44,7 @@ Milestone-driven combination: **S1 + S4 first** (interpret a Hunk-format CLI pro
 1. **M0 — Loader** ✅ (tag `m0-loader-green`): Hunk parser + REU image/manifest on host; chunks staged through the contract memory API; end-to-end demo with runtime relocation verified in VICE.
 2. **M1 — Core interpreter** ✅ (tags `m1-vectors-green`, `hw-validated`): full 68000 user-mode integer set in 6502/ca65, validated against 5150 sampled SingleStepTests golden vectors + 48 hand vectors for uncovered ops — green in VICE **and on a real Ultimate 64 Elite with zero divergence**. Measured speed: `docs/HARDWARE.md` (analytic model: `docs/PERF.md`).
 3. **M2 — HLE exec/dos** ✅ done (Waves 4–5): vbcc-compiled C programs run to completion — stdio with file I/O (RAM disk; Ultimate storage opt-in, hardware-validated), keyboard input, a real heap, pools, custom stacks (`docs/HLE.md`, `docs/HLE_DOS.md`, `docs/HLE_CON.md`).
-4. **M3 — Chipset shim v0**: single static playfield → VIC-II bitmap; framebuffer conversion on vblank.
+4. **M3 — Chipset shim v0**: single static playfield → VIC-II bitmap; framebuffer conversion on vblank. Wave 6 groundwork: supervisor mode and 68000 exception processing (gated, `docs/CONTRACTS.md`), hot-path page-crossing guards (`docs/PERF.md` (f)), and the S3 plan with a modelled AROS boot to "insert disk" (`docs/S3_PLAN.md`; next increment S3.1).
 5. **M4 — AOT translator v0**: translate straight-line 68k basic blocks, falling back to the interpreter at block boundaries.
 
 ## Hardware access notes (measured — see `HARDWARE.md`)
