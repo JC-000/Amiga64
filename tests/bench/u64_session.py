@@ -32,10 +32,12 @@ Output: --out-dir (logs + JSON per phase) and --bench-json.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import glob
 import json
 import os
+import signal
 import sys
 import time
 import traceback
@@ -55,27 +57,247 @@ def dump(path: str, obj) -> None:
         json.dump(obj, f, indent=1)
 
 
+class SnapshotError(RuntimeError):
+    """The config snapshot is incomplete: nothing may run on the device."""
+
+
+def full_config(client) -> dict:
+    """{category: {item: value}} for every category (bodyless GETs only).
+    The REST answer nests the items under the category name.  A category
+    that answers with errors or without its items raises SnapshotError."""
+    out = {}
+    for cat in client.list_configs():
+        raw = client.get_config_category(cat)
+        items = raw.get(cat)
+        if raw.get("errors") or not isinstance(items, dict):
+            raise SnapshotError(f"config category {cat!r}: "
+                                f"{raw.get('errors') or 'no items'}")
+        out[cat] = items
+    return out
+
+
+def config_diff(a: dict, b: dict) -> dict:
+    """{category: {item: (a, b)}} for every item that differs."""
+    diff = {}
+    for cat in sorted(set(a) | set(b)):
+        ca, cb = a.get(cat) or {}, b.get(cat) or {}
+        d = {k: (ca.get(k), cb.get(k)) for k in sorted(set(ca) | set(cb))
+             if ca.get(k) != cb.get(k)}
+        if d:
+            diff[cat] = d
+    return diff
+
+
+def secret(item: str) -> bool:
+    """STRPASS items (fw 3.15: only "Network Password",
+    network_config.cc:18) never go into a dump or the log."""
+    return "password" in item.lower()
+
+
+def redacted(obj):
+    """*obj* (a full config, or a config_diff) with secret values masked."""
+    if isinstance(obj, dict):
+        return {k: ("<redacted>" if secret(str(k)) and not isinstance(v, dict)
+                    else redacted(v)) for k, v in obj.items()}
+    return obj
+
+
+class _Steps:
+    """Run restore steps so that no single failure (or ^C) skips the
+    rest: every step is tried *attempts* times; a KeyboardInterrupt or
+    SystemExit counts as a failed attempt and is re-raised once the whole
+    restore has finished."""
+
+    def __init__(self):
+        self.interrupt = None
+
+    def run(self, what: str, fn, attempts: int = 2):
+        """-> (True, result) or (False, None)."""
+        for n in range(1, attempts + 1):
+            try:
+                return True, fn()
+            except BaseException as e:           # noqa: BLE001 - see class
+                if not isinstance(e, Exception) and self.interrupt is None:
+                    self.interrupt = e
+                log(f"  {what} failed (attempt {n}/{attempts}): {e!r}")
+        return False, None
+
+
+def restore_config(client, before: dict, snap: dict, steps: _Steps) -> dict:
+    """Put the device back to *before*.  -> {"restored", "reset_ok",
+    "after", "diff"}; restored is True only for an empty final diff."""
+    from c64_test_harness.backends.ultimate64_helpers import (
+        U64StateSnapshot, restore_state)
+    steps.run("restore_state", lambda: restore_state(
+        client, U64StateSnapshot(**snap)), attempts=1)
+    for rnd in (1, 2):                          # re-read + per-item repair
+        ok, diff = steps.run(f"re-read {rnd}",
+                             lambda: config_diff(before, full_config(client)))
+        if not ok:
+            continue
+        if not diff:
+            break
+        for cat, items in diff.items():
+            for item, (was, cur) in items.items():
+                show = "<redacted>" if secret(item) else f"{was!r}"
+                if was is None:
+                    log(f"  not restoring {cat} / {item}: absent from the "
+                        f"snapshot (now {'<redacted>' if secret(item) else repr(cur)})")
+                    continue
+                if steps.run(f"set {cat} / {item} = {show}",
+                             lambda: client.set_config_item(cat, item, was))[0]:
+                    log(f"  restored {cat} / {item} = {show}")
+    reset_ok = steps.run("C64 reset", client.reset, attempts=1)[0]
+    steps.run("settle", lambda: time.sleep(3.0), attempts=1)
+
+    def final():
+        after = full_config(client)
+        return after, config_diff(before, after)
+    ok, r = steps.run("final re-read", final)
+    after, diff = r if ok else (None, None)
+    return {"restored": diff == {}, "reset_ok": reset_ok, "after": after,
+            "diff": diff}
+
+
+def _defer_sigint(steps: _Steps):
+    """Install a SIGINT handler that only records the ^C (into
+    steps.interrupt); -> the previous handler, or None when signals
+    cannot be handled here (not the main thread)."""
+    def handler(signum, frame):
+        if steps.interrupt is None:
+            steps.interrupt = KeyboardInterrupt()
+        log("^C received: deferred until the restore is done and the lock "
+            "released")
+    try:
+        return signal.signal(signal.SIGINT, handler)
+    except ValueError:
+        return None
+
+
+@contextlib.contextmanager
+def u64_hold(out_dir: str, lock_timeout: float = 6 * 3600.0):
+    """ONE DeviceLock hold with exact config snapshot/restore.
+
+    Right after the lock is acquired: device info, the harness
+    snapshot_state and the FULL config (every category) are recorded in
+    out_dir/config_before.json (passwords redacted).  Any failure there
+    (including a category answering with errors) aborts before the body
+    runs, with the device untouched.  On exit, also on error or ^C:
+    restore_config (restore_state; re-read + per-item repair, each step
+    retried; C64 reset; final re-read and diff into config_after.json),
+    then the lock is released and a ^C is re-raised.  During the whole
+    restore SIGINT is deferred (a handler records it; the previous
+    handler is put back after the lock is released).  Every device call,
+    the re-read/diff rounds, the settle sleep and the config_after.json
+    report run as _Steps steps, so a KeyboardInterrupt raised inside one
+    of them cannot skip the rest either (only the per-item log lines run
+    outside a step; a real ^C there is deferred by the handler).  No factory baseline
+    on entry, no flash save.  Yields a dict: target, info, before,
+    lock_wait_s; after the block, "restored" is True only for an empty
+    final diff and "reset_ok" says whether the C64 reset went through."""
+    from c64_test_harness import UnifiedManager
+    from c64_test_harness.backends.ultimate64_helpers import snapshot_state
+    hold = {"restored": False, "reset_ok": False}
+    t_req = time.monotonic()
+    log("requesting the device (DeviceLock) ...")
+    with UnifiedManager(backend="u64", lock_timeout=lock_timeout,
+                        baseline_on_entry=False) as mgr:
+        target = mgr.acquire()
+        snap = None
+        steps = _Steps()
+        try:
+            hold["lock_wait_s"] = waited = time.monotonic() - t_req
+            client = target.transport.client
+            before = full_config(client)
+            snap_ = dataclasses.asdict(snapshot_state(client))
+            info = client.get_info()
+            snap = snap_
+            hold.update(target=target, info=info, before=before)
+            log(f"acquired after {waited:.0f}s wait; {info.get('product')} "
+                f"fw {info.get('firmware_version')} fpga "
+                f"{info.get('fpga_version')} core {info.get('core_version')}")
+            log(f"config before: {snap}")
+            dump(os.path.join(out_dir, "config_before.json"),
+                 {"info": info, "snapshot_state": snap,
+                  "full": redacted(before), "lock_wait_s": waited,
+                  "time": time.strftime("%Y-%m-%dT%H:%M:%S")})
+            yield hold
+        finally:
+            prev = _defer_sigint(steps)
+            try:
+                if snap is None:
+                    log("no complete snapshot was taken: nothing ran, "
+                        "nothing to restore")
+                else:
+                    log("restoring config ...")
+                    r = restore_config(client, before, snap, steps)
+                    hold.update(restored=r["restored"],
+                                reset_ok=r["reset_ok"])
+
+                    def report():
+                        dump(os.path.join(out_dir, "config_after.json"),
+                             {"full": redacted(r["after"]),
+                              "diff_vs_before": redacted(r["diff"]),
+                              "restored": r["restored"],
+                              "reset_ok": r["reset_ok"],
+                              "time": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                        d = r["diff"]
+                        log("config after (full, all categories): " +
+                            ("IDENTICAL" if d == {} else "RE-READ FAILED"
+                             if d is None else f"DIFFERS {redacted(d)}"))
+                    steps.run("write config_after.json", report, attempts=1)
+            except BaseException as e:          # noqa: BLE001 - never skip
+                log(f"RESTORE FAILED: {e!r}\n{traceback.format_exc()}")
+                if not isinstance(e, Exception) and steps.interrupt is None:
+                    steps.interrupt = e
+            finally:
+                try:
+                    mgr.release(target)
+                finally:
+                    if prev is not None:
+                        signal.signal(signal.SIGINT, prev)
+            if steps.interrupt is not None:
+                raise steps.interrupt
+
+
 class Hw:
-    def __init__(self, target, out_dir):
+    def __init__(self, target, out_dir, vice=None):
+        """*vice*: a u64bench.ViceBoot for the dry run (target unused)."""
         self.target = target
-        self.t = target.transport
+        self.vice = vice
         self.out = out_dir
         self.cur_prg = None
 
+    @property
+    def t(self):
+        return self.target.transport
+
+    @property
+    def backend(self) -> str:
+        return "vice" if self.vice is not None else self.target.backend
+
     def speed(self, mhz: int) -> None:
-        if self.target.backend == "vice":      # dry-run backend: 1 MHz only
+        if self.vice is not None:              # dry-run backend: 1 MHz only
             return
         self.t.set_speed(mhz)
         time.sleep(0.5)
 
     def load(self, prg: str):
-        """Boot *prg* at 1 MHz (run_prg + dispatcher), return its labels."""
+        """Boot *prg* at 1 MHz (run_prg + dispatcher), return its labels.
+        On VICE every load is a fresh instance of *prg*, so a base or
+        mutant build really runs (and its own labels match it)."""
         from c64_test_harness import Labels
+        from tests.bench.u64bench import check_loaded
         from tests.run_vectors import prepare_target
-        self.speed(1)
-        prepare_target(self.target, prg)
+        labels = Labels.from_file(os.path.splitext(prg)[0] + ".lbl")
+        if self.vice is not None:
+            self.target = self.vice.load(prg)
+        else:
+            self.speed(1)
+            prepare_target(self.target, prg)
+        check_loaded(self.target, prg, labels)
         self.cur_prg = prg
-        return Labels.from_file(os.path.splitext(prg)[0] + ".lbl")
+        return labels
 
 
 # ------------------------------------------------------------------ phases
@@ -172,9 +394,9 @@ def ph_teeth(hw: Hw, a) -> dict:
     for tag, prg in (("normal", a.new), (mtag, a.noinval)):
         rows = {}
         for name, fn in LEGS.items():
-            if name == "mailbox" and hw.target.backend == "vice":
+            if name == "mailbox" and hw.backend == "vice":
                 continue                        # no mailbox on VICE
-            if name == "boot" and hw.target.backend != "vice":
+            if name == "boot" and hw.backend != "vice":
                 continue                        # mailbox dirties first
             labels = hw.load(prg)
             leg = Leg(hw.target, labels, "u64", rng)
@@ -239,28 +461,23 @@ def ph_bench(hw: Hw, a) -> dict:
 
 def vice_dry_run(a) -> int:
     """Exercise the phase code on VICE (logic check before device time).
-    VICE cannot swap PRGs inside one instance, so every phase uses --new
-    (the teeth 'noinval' row then runs the normal build and passes)."""
-    a.base = a.noinval = a.new
-    from c64_test_harness import UnifiedManager, ViceConfig
-    from tests.harness_util import REU_VICE_ARGS
-    cfg = ViceConfig(prg_path=a.new, warp=True, sound=False,
-                     extra_args=list(REU_VICE_ARGS))
+    VICE cannot swap PRGs inside one instance, so every Hw.load boots a
+    fresh instance of that PRG: --base and --noinval really run."""
+    from tests.bench.u64bench import ViceBoot
     rc = 0
-    with UnifiedManager(backend="vice", vice_config=cfg) as mgr:
-        target = mgr.acquire()
-        try:
-            hw = Hw(target, a.out_dir)
-            for ph in a.phases.split(","):
-                log(f"=== (vice dry run) phase {ph} ===")
-                try:
-                    r = PHASES[ph](hw, a)
-                    dump(os.path.join(a.out_dir, f"phase_{ph}.json"), r)
-                except Exception as e:
-                    rc = 1
-                    log(f"phase {ph} ERROR: {e!r}\n{traceback.format_exc()}")
-        finally:
-            mgr.release(target)
+    vice = ViceBoot()
+    try:
+        hw = Hw(None, a.out_dir, vice=vice)
+        for ph in a.phases.split(","):
+            log(f"=== (vice dry run) phase {ph} ===")
+            try:
+                r = PHASES[ph](hw, a)
+                dump(os.path.join(a.out_dir, f"phase_{ph}.json"), r)
+            except Exception as e:
+                rc = 1
+                log(f"phase {ph} ERROR: {e!r}\n{traceback.format_exc()}")
+    finally:
+        vice.close()
     return rc
 
 

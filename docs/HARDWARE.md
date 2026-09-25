@@ -487,3 +487,146 @@ removed after; `/USB1` top-level listing identical); Command Interface enabled
 for the session only; full-config re-read IDENTICAL. Measured: read 61 B/s /
 write 114 B/s at 1 MHz, read ~2.7 KB/s / write ~4.8-5.1 KB/s at 48 MHz.
 Details and model-vs-silicon notes: `docs/HLE_DOS.md` "Hardware validation".
+
+## Wave 5: run_dos on hardware (W5-T, 2026-09-24)
+
+`tests/run_dos.py --backend u64` ran the HLE DOS file-I/O scenarios on the
+U64E, **RAMDISK backend only**, at 1 MHz, in one DeviceLock hold. The build
+was `wave5/tools` on base 4ce6031; the `.s` sources are unchanged from the
+base.
+
+**Device state has changed since the Wave 4 sections above.** The device
+reported fw 3.15, but git **c47155b7**, FPGA 125, core **1.50**. Wave 4
+recorded git bce4535e and core 1.4F. So compare with earlier sections only
+with that in mind.
+
+**Lock and config:**
+- The session waited 1751 s for the lock, behind another project's live
+  lane.
+- Config as found: Turbo Control `Off`, CPU Speed `" 1"`, REU `Disabled` /
+  `2 MB`, Cartridge `""`, Cartridge Preference `Auto`, Badline Timing
+  `Enabled`, Bus Operation Mode `Quiet`.
+- The session took the full config (every category) and the harness
+  `snapshot_state` right after acquiring the lock, and set the CPU speed to
+  1 MHz explicitly. No factory baseline was applied on entry.
+- At the end it ran `restore_state`, reset the C64 and re-read the full
+  config. The diff was **empty (IDENTICAL)**. Nothing was saved to flash.
+- There were no storage writes and no UCI traffic.
+
+**Boot residue:** after `run_prg`, `dosio_want_uci` read `000000ff` and
+`hle_dos_magic` read `ffffffff`. The driver zeroes both and proves it by
+readback. The residue was harmless in this session, but a key or a magic
+left over from an earlier session would not be (`docs/HLE_DOS.md`
+"Testing"). Upstream, the boot stub now clears BSS (supervisor fix,
+`tests/bss_boot.py`), so the zeroing stays only as defence in depth.
+
+| | Checks |
+|---|---|
+| Hardware, 23 scenarios | **736/736** (about 6 min inside the hold) |
+| VICE, same 23 scenarios | 711/711 |
+| VICE, full (plus the `selection` leg) | 762/762 |
+
+**How the counts relate:**
+- **Hardware:** 711 + 25 = 736. The 25 u64-only checks are 2 zeroing
+  readbacks and one "`dosio_backend` = RAMDISK" check after each of the 23
+  scenarios.
+- **VICE:** 711 + 51 = 762. The 51 are the `selection` leg, which was not
+  run in this session. It never touches the device: it boots its own
+  fake-UCI build in a local VICE instance, whatever `--backend` says. Since
+  fix round 1, `--backend u64` runs it there after the hardware leg, and
+  labels its checks `[local VICE]`.
+- The final backend check is in both counts. Only its label differs.
+
+**No hardware-vs-VICE divergence.** Every scenario passed on both targets.
+
+Log: `build/evidence/w5-tools/hw/run_dos_u64.log`; config JSON in
+`build/evidence/w5-tools/hw/run_dos/`.
+
+Reproduce: `U64_HOST=<ip> python3 -m tests.run_dos --prg
+build/<pkg>/runner.prg --backend u64 --out-dir <dir>`.
+
+**Bench tooling fix (VICE only).** `tests/bench/u64_session.py` now boots a
+fresh VICE instance for every `Hw.load`. Before, it returned the other
+build's labels while VICE kept running the first PRG. That gave false
+results on VICE:
+- a JAM, with the `REC_NOINVAL` build as base;
+- a bogus icount `4294901760`, with the 158e684 build as base.
+
+The old dry run hid this by forcing base = new.
+
+`u64bench.check_loaded` guards against the same class of error on both
+backends:
+- As first committed (35c1c1e), it compared only 3×8 bytes at three
+  labels. Same-size builds fooled it: the `REC_MUT_REFILL` build booted
+  and checked as `REC_MUT_RESET` was ACCEPTED, although 214 bytes differ.
+- Since fix round 1, it compares the whole PRG image with C64 RAM after
+  boot. It masks only the bytes the boot itself rewrites:
+  - self-modified operands in the BASIC-stub page's boot code, found by
+    scanning that code (wave 5's BSS-clear page operand at `$081E`);
+  - on the U64, the dispatcher retarget at `main+7`.
+- Measured on VICE right after boot, 35c1c1e had no differing byte, and
+  `wave5/integration` had only `$081E`.
+- The mutant pair is now REFUSED (evidence in
+  `build/evidence/w5-tools/fix1/`).
+
+With the fix, a VICE dry run really runs the base and mutant builds:
+- `rec_wrap` fails on 158e684, as it did on silicon;
+- the `REC_NOINVAL` teeth legs fail: refill, reset_case, load_chunk and
+  foreign. The `boot` leg passes.
+
+### Fix round 1: restore path validated on the U64E (2026-09-25)
+
+The adversarial review of 35c1c1e found that `u64_hold` ran its whole
+restore in one `try`. A single failing PUT could skip the per-item
+fallback, and the next lock holder would inherit the session's settings.
+
+`restore_config` now runs these steps, and none of them can skip the
+rest:
+1. `restore_state`, in its own step;
+2. two rounds of full re-read, diff and per-item repair. Each step is tried
+   twice. An item absent from the snapshot is never written.
+3. the C64 reset;
+4. a final full re-read and diff.
+
+`restored` is True only for an empty final diff. A `^C` during the restore
+is held until the restore has finished and the lock is released, then
+re-raised.
+
+A snapshot with an errored or missing category aborts before the body
+runs, and the device is left untouched. `Network Password`, the only
+STRPASS item, is redacted in the config dumps. `host/tests/test_u64_hold.py`
+covers these fault paths (15 cases); 8 mutants of the restore path are
+each killed.
+
+**One short validation session.** It used the device only, with no PRG,
+no memory writes, no storage writes and no UCI:
+- The lock wait was 0 s. The device reported fw 3.15, git c47155b7,
+  core 1.50.
+- Config as found: another lane's state, Turbo Control `Manual`, CPU Speed
+  `48`, REU `Enabled` / `16 MB`, Command Interface `Disabled`. The
+  run_dos preflight passed on that snapshot.
+- The session set the CPU speed to 48 explicitly and changed `REU Size`
+  to `512 KB`.
+- The re-read showed exactly one difference, `REU Size`. The speed was
+  already 48, so the speed PUT changed nothing. This session did not
+  exercise a speed restore.
+- After the hold: `restored=True`, `reset_ok=True`, and the full re-read
+  diff was **IDENTICAL**.
+
+Log: `build/evidence/w5-tools/hw/validate_hold.log`; JSON in
+`build/evidence/w5-tools/hw/validate_hold/`.
+
+**Second validation session (speed restore), 2026-09-25.** The device was
+found at Turbo Control `Manual` / CPU Speed `48`, REU `16 MB`. The session
+set the speed to 1 MHz explicitly and REU Size to `512 KB`.
+- On fw 3.15, `set_speed(1)` switches Turbo Control to `Off` and leaves the
+  `CPU Speed` item at `48`. So the dirty re-read showed exactly two
+  differences, `Turbo Control` (`Manual` → `Off`) and `REU Size`.
+- The script's own post-check expected the item `CPU Speed` to differ, so
+  it raised inside the hold. That exercised the body-raises path on
+  silicon.
+- Result: `restored=True`, `reset_ok=True`, and the full re-read diff was
+  **IDENTICAL**.
+
+Log: `build/evidence/w5-tools/hw/validate_hold2.log`; JSON in
+`build/evidence/w5-tools/hw/validate_hold2/`.

@@ -388,10 +388,30 @@ Guest paths use the medium name without a leading slash: `USB1/amiga64-test/x`
 `PATH DOESN'T EXIST`).
 
 Model-vs-silicon notes (none affected results):
-- Firmware 3.15 answers some errors without the numeric `NN,` prefix:
-  `FILE DOESN'T EXIST`, `PATH DOESN'T EXIST`. The driver treats any
-  non-`00` status as failure, so the mapping held; the Python model's status
-  strings should be updated to these texts.
+- Firmware 3.15 answers FatFS errors without the numeric `NN,` prefix:
+  `FILE DOESN'T EXIST`, `PATH DOESN'T EXIST` (`file_system.cc`
+  `get_error_string`). Its fixed DOS messages keep the prefix:
+  `84,NO FILE TO CLOSE`, `85,NO FILE OPEN`, `82,FILE NOT FOUND`
+  (`dos.cc` lines 16-30). No DOS-target error has both forms, in
+  `~/Documents/1541ultimate` @ bce4535e (the device's build) or in
+  `~/Documents/1541u-315preview`. The driver treats any non-`00` status as
+  failure, so the mapping held.
+- W5-T (wave 5) aligned the Python model in `host/tests/test_hle_dos_uci.py`
+  with fw 3.15. The model already used the unprefixed FatFS texts. It now
+  also models:
+  - missing directories, which answer `PATH DOESN'T EXIST` before any
+    create flag is honoured;
+  - a failed FILE_INFO, which answers `82,FILE NOT FOUND` (the model used
+    `88,NO INFORMATION AVAILABLE` before);
+  - a DELETE of an open file, which succeeds (`FF_FS_LOCK` is 0). The
+    driver never sends one, because `dosio_delcheck` refuses first.
+
+  The driver, unchanged, passes all 42 tests against the updated model:
+  missing directory → 205 in every open mode and on delete.
+- A read error is not reported reliably by the firmware: `get_more_data`
+  (`dos.cc` 795-801) fills the status text but never points the reply at
+  it, so the previous status goes out. The driver does not rely on the
+  read status (see `dosio_uci_rdchunk`).
 - `FILE_STAT` on an existing file by its guest-relative name answered
   `82,FILE NOT FOUND` in a raw probe. The driver does not use FILE_STAT
   (it uses FILE_INFO on the open target), so this is informational.
@@ -402,6 +422,15 @@ Model-vs-silicon notes (none affected results):
 - `host/tests/test_hle_dos_env.py`: the LVO table and index range, collision-free merging into DOSBase, env slot staging, the `rc/guest.inc` mirrors, asm/host constant mirrors, and a RAMDISK format round-trip.
 - `host/tests/test_hle_dos_uci.py`: the UCI byte-level test described above.
 - `tests/run_dos.py`: RAMDISK end to end in VICE, plus the backend-selection leg on a second VICE instance. Run it with `python3 -m tests.run_dos --prg build/ws-b2/runner.prg`. The PRG's directory must contain `gen/dispatch.s`, as `make runtime` leaves it, for the `DOSIO_FAKE_UCI` variant build.
+- `tests/run_dos.py --backend u64` (W5-T): the same scenarios on the Ultimate 64 at `U64_HOST`, at 1 MHz, in one DeviceLock hold with a full-config snapshot/restore (`tests/bench/u64_session.u64_hold`, JSON in `--out-dir`). It is RAMDISK only:
+  - It fails closed. Every preflight failure below aborts the run before the first scenario; the device config is still restored.
+  - It refuses to run unless the session's config snapshot shows `Command Interface` = `Disabled`. A missing item counts as not Disabled.
+  - After boot it zeroes `dosio_want_uci` and `hle_dos_magic` and proves both by readback. Before the wave-5 boot-stub fix (supervisor, `tests/bss_boot.py`), C64 BSS was not cleared at boot on hardware: a residue of `"UCI!"` would select ULTDOS, and a residue of `"DOS!"` would skip the lazy init and keep stale backend vectors. The boot stub now clears BSS; the zeroing stays as defence in depth.
+  - It runs `hle_dos_init` once and proves that it selected RAMDISK, then zeroes `hle_dos_magic` again, so the first scenario still starts with a lazy init.
+  - It checks that `dosio_backend` reads RAMDISK after every scenario.
+  - The `selection` leg never touches the device, whatever `--backend` says: it boots its own `DOSIO_FAKE_UCI` build in a local VICE instance. With `--backend u64` it runs there after the hardware leg, and its checks are labelled `[local VICE]`.
+
+  Results are in `docs/HARDWARE.md`, section "Wave 5: run_dos on hardware".
 
 ### Why `run_dos.py` uses a test env
 
