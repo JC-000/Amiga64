@@ -305,3 +305,59 @@ def test_password_items_redacted_in_dumps(env, tmp_path):
         assert "hunter2" not in text, name
     # the in-memory compare still used the real value
     assert env.client.cfg["Network Settings"]["Network Password"] == "hunter2"
+
+
+# --- delta round (review of 98a48d3) ----------------------------------------
+
+def test_keyboard_interrupt_between_steps_finishes_restore(env, tmp_path,
+                                                            monkeypatch):
+    # reviewer case D3: ^C inside round 1's config_diff (outside any step
+    # before this round), after restore_state failed
+    real = us.config_diff
+    n = {"calls": 0}
+
+    def bad_diff(a, b):
+        n["calls"] += 1
+        if n["calls"] == 1:
+            raise KeyboardInterrupt()
+        return real(a, b)
+    monkeypatch.setattr(us, "config_diff", bad_diff)
+    out = session(env, tmp_path,
+                  fail={("set", "Turbo Control"): [1, Boom("t/o")]})
+    assert isinstance(out["exc"], KeyboardInterrupt)
+    assert_restored(env, out)
+
+
+def test_sigint_during_settle_is_deferred_until_released(env, tmp_path,
+                                                         monkeypatch):
+    # a real SIGINT during the post-reset settle sleep: the restore must
+    # finish (final re-read), the lock be released, the previous handler
+    # come back, and only then KeyboardInterrupt be raised
+    import os
+    import signal
+    prev = signal.getsignal(signal.SIGINT)
+    seen = {}
+
+    def sleep(s):
+        os.kill(os.getpid(), signal.SIGINT)
+        seen["released_at_sigint"] = env.released
+    monkeypatch.setattr(us.time, "sleep", sleep)
+    out = session(env, tmp_path)
+    assert isinstance(out["exc"], KeyboardInterrupt)
+    assert seen["released_at_sigint"] == 0
+    assert_restored(env, out)
+    assert signal.getsignal(signal.SIGINT) is prev
+
+
+def test_errors_list_with_items_is_a_snapshot_failure(env, tmp_path):
+    # NIT-a: a category answering WITH its items AND an errors list
+    def both(c):
+        if c == "SID Addressing":
+            return {c: dict(env.client.cfg[c]), "errors": ["partial"]}
+        return None
+    env.client.getcat = both
+    out = session(env, tmp_path)
+    assert isinstance(out["exc"], us.SnapshotError)
+    assert out["body_ran"] is False
+    assert [c for c in env.client.calls if c[0] == "set"] == []
+    assert env.released == 1

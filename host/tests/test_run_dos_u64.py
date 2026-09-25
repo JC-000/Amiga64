@@ -117,3 +117,40 @@ def test_command_interface_must_be_disabled(before, ok):
     else:
         with pytest.raises(RuntimeError):
             rd.u64_preflight(before)
+
+
+# --- delta round -------------------------------------------------------------
+
+@pytest.mark.parametrize("restored,reset_ok,fails", [
+    (True, True, 0), (True, False, 1), (False, True, 1), (False, False, 2)])
+def test_hold_outcome_is_checked(restored, reset_ok, fails):
+    # NIT-c: a failed C64 reset is a failure even if the config came back
+    s, _ = make()
+    rd.hold_checks(s, {"restored": restored, "reset_ok": reset_ok})
+    assert len(s.failures) == fails
+
+
+class WouldRun(Exception):
+    pass
+
+
+@pytest.mark.parametrize("backend", ["vice", "u64"])
+def test_only_unknown_name_is_an_error(backend, tmp_path, monkeypatch,
+                                       capsys):
+    # NIT-d: before anything boots or locks
+    import c64_test_harness
+    from tests.bench import u64_session
+
+    def boom(*a, **k):
+        raise WouldRun("reached a backend")
+    monkeypatch.setattr(c64_test_harness, "UnifiedManager", boom)
+    monkeypatch.setattr(u64_session, "u64_hold", boom)
+    prg = tmp_path / "r.prg"
+    prg.write_bytes(b"\x01\x08")
+    (tmp_path / "r.lbl").write_text("")
+    rc = rd.main(["--prg", str(prg), "--backend", backend,
+                  "--only", "reads,nosuch"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "nosuch" in err
+    assert "reads" in err and "selection" in err     # valid names listed

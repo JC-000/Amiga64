@@ -37,6 +37,7 @@ import dataclasses
 import glob
 import json
 import os
+import signal
 import sys
 import time
 import traceback
@@ -130,10 +131,10 @@ def restore_config(client, before: dict, snap: dict, steps: _Steps) -> dict:
     steps.run("restore_state", lambda: restore_state(
         client, U64StateSnapshot(**snap)), attempts=1)
     for rnd in (1, 2):                          # re-read + per-item repair
-        ok, now = steps.run(f"re-read {rnd}", lambda: full_config(client))
+        ok, diff = steps.run(f"re-read {rnd}",
+                             lambda: config_diff(before, full_config(client)))
         if not ok:
             continue
-        diff = config_diff(before, now)
         if not diff:
             break
         for cat, items in diff.items():
@@ -147,11 +148,30 @@ def restore_config(client, before: dict, snap: dict, steps: _Steps) -> dict:
                              lambda: client.set_config_item(cat, item, was))[0]:
                     log(f"  restored {cat} / {item} = {show}")
     reset_ok = steps.run("C64 reset", client.reset, attempts=1)[0]
-    time.sleep(3.0)
-    ok, after = steps.run("final re-read", lambda: full_config(client))
-    diff = config_diff(before, after) if ok else None
+    steps.run("settle", lambda: time.sleep(3.0), attempts=1)
+
+    def final():
+        after = full_config(client)
+        return after, config_diff(before, after)
+    ok, r = steps.run("final re-read", final)
+    after, diff = r if ok else (None, None)
     return {"restored": diff == {}, "reset_ok": reset_ok, "after": after,
             "diff": diff}
+
+
+def _defer_sigint(steps: _Steps):
+    """Install a SIGINT handler that only records the ^C (into
+    steps.interrupt); -> the previous handler, or None when signals
+    cannot be handled here (not the main thread)."""
+    def handler(signum, frame):
+        if steps.interrupt is None:
+            steps.interrupt = KeyboardInterrupt()
+        log("^C received: deferred until the restore is done and the lock "
+            "released")
+    try:
+        return signal.signal(signal.SIGINT, handler)
+    except ValueError:
+        return None
 
 
 @contextlib.contextmanager
@@ -165,7 +185,13 @@ def u64_hold(out_dir: str, lock_timeout: float = 6 * 3600.0):
     runs, with the device untouched.  On exit, also on error or ^C:
     restore_config (restore_state; re-read + per-item repair, each step
     retried; C64 reset; final re-read and diff into config_after.json),
-    then the lock is released and a ^C is re-raised.  No factory baseline
+    then the lock is released and a ^C is re-raised.  During the whole
+    restore SIGINT is deferred (a handler records it; the previous
+    handler is put back after the lock is released).  Every device call,
+    the re-read/diff rounds, the settle sleep and the config_after.json
+    report run as _Steps steps, so a KeyboardInterrupt raised inside one
+    of them cannot skip the rest either (only the per-item log lines run
+    outside a step; a real ^C there is deferred by the handler).  No factory baseline
     on entry, no flash save.  Yields a dict: target, info, before,
     lock_wait_s; after the block, "restored" is True only for an empty
     final diff and "reset_ok" says whether the C64 reset went through."""
@@ -197,6 +223,7 @@ def u64_hold(out_dir: str, lock_timeout: float = 6 * 3600.0):
                   "time": time.strftime("%Y-%m-%dT%H:%M:%S")})
             yield hold
         finally:
+            prev = _defer_sigint(steps)
             try:
                 if snap is None:
                     log("no complete snapshot was taken: nothing ran, "
@@ -206,22 +233,29 @@ def u64_hold(out_dir: str, lock_timeout: float = 6 * 3600.0):
                     r = restore_config(client, before, snap, steps)
                     hold.update(restored=r["restored"],
                                 reset_ok=r["reset_ok"])
-                    dump(os.path.join(out_dir, "config_after.json"),
-                         {"full": redacted(r["after"]),
-                          "diff_vs_before": redacted(r["diff"]),
-                          "restored": r["restored"],
-                          "reset_ok": r["reset_ok"],
-                          "time": time.strftime("%Y-%m-%dT%H:%M:%S")})
-                    d = r["diff"]
-                    log("config after (full, all categories): " +
-                        ("IDENTICAL" if d == {} else "RE-READ FAILED"
-                         if d is None else f"DIFFERS {redacted(d)}"))
+
+                    def report():
+                        dump(os.path.join(out_dir, "config_after.json"),
+                             {"full": redacted(r["after"]),
+                              "diff_vs_before": redacted(r["diff"]),
+                              "restored": r["restored"],
+                              "reset_ok": r["reset_ok"],
+                              "time": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                        d = r["diff"]
+                        log("config after (full, all categories): " +
+                            ("IDENTICAL" if d == {} else "RE-READ FAILED"
+                             if d is None else f"DIFFERS {redacted(d)}"))
+                    steps.run("write config_after.json", report, attempts=1)
             except BaseException as e:          # noqa: BLE001 - never skip
                 log(f"RESTORE FAILED: {e!r}\n{traceback.format_exc()}")
                 if not isinstance(e, Exception) and steps.interrupt is None:
                     steps.interrupt = e
             finally:
-                mgr.release(target)
+                try:
+                    mgr.release(target)
+                finally:
+                    if prev is not None:
+                        signal.signal(signal.SIGINT, prev)
             if steps.interrupt is not None:
                 raise steps.interrupt
 

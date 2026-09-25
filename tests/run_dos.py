@@ -1018,6 +1018,15 @@ def zero_dos_bss(sess, labels) -> None:
     zero("hle_dos_magic", "after the probe init")
 
 
+def hold_checks(sess, hold: dict) -> None:
+    """u64: the hold's own outcome counts -- a config that did not come back
+    exactly, or a C64 reset that failed, is a failure of the run."""
+    sess.check("u64: device config restored exactly", bool(hold["restored"]),
+               "see config_after.json")
+    sess.check("u64: C64 reset after the restore", bool(hold["reset_ok"]),
+               "the reset failed; see the session log")
+
+
 def run_suite(target, labels, scs, args):
     """Every scenario on one prepared target (RAMDISK backend)."""
     from c64_test_harness import read_bytes
@@ -1079,6 +1088,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.timeout is None:
         args.timeout = 600.0 if args.backend == "u64" else 60.0
 
+    scs = scenarios()
+    if args.only:
+        valid = [s.name for s in scs] + ["selection"]
+        unknown = sorted(set(args.only.split(",")) - set(valid))
+        if unknown:
+            print(f"error: unknown --only name(s): {', '.join(unknown)}; "
+                  f"valid: {', '.join(valid)}", file=sys.stderr)
+            return 2
+
     prg = os.path.abspath(args.prg)
     labels_path = (os.path.abspath(args.labels) if args.labels
                    else os.path.splitext(prg)[0] + ".lbl")
@@ -1086,7 +1104,6 @@ def main(argv: list[str] | None = None) -> int:
         if not os.path.exists(p):
             print(f"error: not found: {p}", file=sys.stderr)
             return 2
-    scs = scenarios()
     run_selection = True
     if args.only:
         want = set(args.only.split(","))
@@ -1111,9 +1128,7 @@ def main(argv: list[str] | None = None) -> int:
             log("CPU speed set to 1 MHz")
             prepare_target(target, prg)
             sess = run_suite(target, labels, scs, args)
-        if not hold["restored"]:
-            sess.check("u64: device config restored exactly", False,
-                       "see config_after.json")
+        hold_checks(sess, hold)
     else:
         vice_config = ViceConfig(prg_path=prg, warp=True, sound=False,
                                  extra_args=list(REU_VICE_ARGS))

@@ -168,3 +168,33 @@ def test_viceboot_close_after_failed_prepare(monkeypatch):
     assert calls == ["release", "shutdown"]        # instance not leaked
     v.close()
     assert calls == ["release", "shutdown"]
+
+
+# --- delta round: the mask is restricted to the stub page, both ways -------
+
+def test_mask_ignores_stores_outside_the_stub_page(tmp_path):
+    # a byte pattern far outside the stub page that decodes as a store
+    # INTO the stub page (`sta $0830`) must not mask $0830: dropping the
+    # scan-range restriction is caught
+    body = image()
+    body[0x0900:0x0903] = bytes([0x8D, 0x30, 0x08])
+    t = Target()
+    boot(t, body)
+    t.transport.ram[0x0830] ^= 0xFF
+    assert 0x0830 not in ub.load_mask(body, LOAD, "vice", Labels())
+    with pytest.raises(RuntimeError):
+        ub.check_loaded(t, write_prg(tmp_path, "o.prg", body), Labels())
+
+
+def test_mask_ignores_stub_stores_that_leave_the_stub_page(tmp_path):
+    # stub code storing OUTSIDE its page (a data pointer, not its own
+    # operand) must not mask the target: dropping the target restriction
+    # is caught
+    stub = bytes([0xA9, 0x00, 0x8D, 0x00, 0x10, 0x4C, 0x00, 0x10])
+    body = image(stub)
+    t = Target()
+    boot(t, body)
+    t.transport.ram[0x1000] ^= 0xFF
+    assert 0x1000 not in ub.load_mask(body, LOAD, "vice", Labels())
+    with pytest.raises(RuntimeError):
+        ub.check_loaded(t, write_prg(tmp_path, "p.prg", body), Labels())
