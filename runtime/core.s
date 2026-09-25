@@ -36,6 +36,36 @@
 
 .include "macros.inc"
 
+; ---------------------------------------------------------------------------
+; Hot-path page-cross guards (docs/PERF.md (f)).  A taken 6502 branch whose
+; target lies in another page costs +1 cycle; on the fetch/dispatch, memory
+; API, EA and ALU/CCR paths that is per guest instruction.  BRNC op, target
+; assembles to exactly `op target` plus a LINK-time assert that the taken
+; path stays in the branch's page, so any layout change that makes a hot
+; branch cross fails the production build.  HOTALIGN n is never-executed $EA
+; fill to an n-byte boundary; boundaries are absolute because core.s's CODE
+; starts page-aligned (asserted at core_code0).  Test-only variant builds
+; (FETCH_DIRECT A/B reference, REC_*/WINDOW_NOINVAL/EXC_MUT_* teeth builds)
+; lay out differently by design and only warn.
+; ---------------------------------------------------------------------------
+.if .defined(FETCH_DIRECT) .or .defined(REC_NOINVAL) .or .defined(REC_MUT_DIRTY) .or .defined(REC_MUT_RESET) .or .defined(REC_MUT_REFILL) .or .defined(WINDOW_NOINVAL) .or .defined(BRNC_WARN_ONLY)
+.macro BRNC op, target
+        op target
+        .assert >* = >(target), ldwarning, "hot-path branch crosses a page (PERF.md (f))"
+.endmacro
+emu_brnc_enforced = 0           ; @value guards only warn (variant/mutant build)
+.else
+emu_brnc_enforced = 1           ; @value guards fail the link (production/gate)
+.macro BRNC op, target
+        op target
+        .assert >* = >(target), lderror, "hot-path branch crosses a page (PERF.md (f))"
+.endmacro
+.endif
+.export emu_brnc_enforced       ; checked by tests/run_super_vectors.py, perf_cycles
+.macro HOTALIGN n
+        .align n, $EA
+.endmacro
+
 ; --- Contract ABI exports --------------------------------------------------
 .export emu_reset, emu_step, emu_run, dispatch_next, fetch_word
 .export mem_read8, mem_read16, mem_read32
@@ -47,6 +77,11 @@
 .export alu_not, alu_neg, alu_addx, alu_subx, alu_ext
 .export op_aline, op_fline, op_illegal
 .export emu_halt                ; convenience: A = HALT_* reason -> halt
+; Supervisor mode & exceptions (docs/CONTRACTS.md, W6-S)
+.export exc_group1, exc_group2  ; A = vector: raise (stacked PC = insn / next)
+.export sr_write, sp_swap       ; full-SR write with SP banking / A7<->r_osp
+.export emu_stop, emu_addrerr   ; halts with HALT_STOP / HALT_ADDRESS
+.export emu_rst_hook            ; RESET hook (patchable jmp)
 
 ; ZP map / constants re-exported so they land in build/runner.lbl for the
 ; host harness.  Group agents: use runtime/macros.inc, do NOT .import these.
@@ -55,7 +90,13 @@
 .exportzp r_pc, r_sr, op_lo, op_hi, m_addr, m_val
 .exportzp t_ea, t_op1, t_op2, t_res, t_tmp, st_halt, st_reason
 .exportzp m_rok                 ; label only: tests/rec_apisweep.py split-path check
+.exportzp st_exc, r_osp, st_ipc, st_iop, st_sp6, st_exl
 .export HALT_OK, HALT_ALINE, HALT_FLINE, HALT_ILLEGAL
+.export HALT_STOP, HALT_ADDRESS
+
+; Halt reasons added by W6-S (macros.inc holds $00-$03 and is frozen).
+HALT_STOP    = $04      ; @value STOP #imm executed (exception mode)
+HALT_ADDRESS = $05      ; @value odd PC from a vector / RTE (reason code only)
 .export buf_case, buf_result
 
 ; --- Imports ---------------------------------------------------------------
@@ -104,6 +145,12 @@ basic_stub:                             ; 10 SYS 2061
         lda #0                          ; $080D: ZP comes up with garbage --
         sta m_rok                       ; REC shadow invalid at boot (always,
                                         ; even in REC_NOINVAL builds)
+        sta st_exc                      ; exceptions off (emu_reset keeps it)
+        sta st_exl                      ; latched copy matches the plain loop
+        sta r_osp                       ; inactive SP = 0
+        sta r_osp+1
+        sta r_osp+2
+        sta r_osp+3
         ; Clear BSS.  C64 RAM survives a PRG reload on hardware, and HLE
         ; state in BSS trusts it (hle_dos_magic "DOS!", dosio_want_uci
         ; "UCI!"), so stale bytes must never reach a run.  BSS is
@@ -125,6 +172,8 @@ basic_stub:                             ; 10 SYS 2061
 @done:  jmp main
 
 .segment "CODE"
+core_code0:                     ; first CODE byte of the PRG (core.s links first)
+.assert <core_code0 = 0, lderror, "core.s CODE must start page-aligned (HOTALIGN, PERF.md (f))"
 
 ; ===========================================================================
 ; emu_reset — clear interpreter state ($10-$7F), st_halt = 0, and invalidate
@@ -132,6 +181,13 @@ basic_stub:                             ; 10 SYS 2061
 ; addresses between runs, bypassing or preceding the interpreter's own
 ; write-invalidation) and the REC shadow (C1: host tooling may have left
 ; the REC in any state).
+;
+; It also LATCHES st_exc into st_exl (docs/CONTRACTS.md "Supervisor mode &
+; exceptions"), which is the only copy the runtime ever tests:
+; the three step-loop entry points (emu_step, emu_run and dispatch_next's
+; run-mode branch) are patched to the exception-mode loop dispatch_gox when
+; st_exc != 0 and back to the plain loop otherwise, so the flag costs the
+; user-mode hot path nothing.  st_exc and r_osp ($88-$8C) are NOT cleared.
 ; ===========================================================================
 .proc emu_reset
         lda #0
@@ -144,6 +200,21 @@ basic_stub:                             ; 10 SYS 2061
 .endif
         lda #1
         sta w_inv
+        lda st_exc              ; latch: the loop patch below AND st_exl, which
+        sta st_exl              ; every runtime flag test reads -- so a write to
+        beq @plain              ; st_exc between resets changes nothing (F2)
+        lda #<dispatch_gox      ; exception mode
+        ldx #>dispatch_gox
+        ldy #<(dispatch_gox - (nx_br + 2))
+        bne @patch              ; always (offset asserted nonzero)
+@plain: lda #<dispatch_go
+        ldx #>dispatch_go
+        ldy #<(dispatch_go - (nx_br + 2))
+@patch: sta step_jv+1
+        sta run_jv+1
+        stx step_jv+2
+        stx run_jv+2
+        sty nx_br+1
         rts
 .endproc
 
@@ -167,27 +238,29 @@ basic_stub:                             ; 10 SYS 2061
 ; adds a ~380-cycle refill, amortized over up to 128 in-page words).
 ; ===========================================================================
 emu_step:
-        lda #1
-        sta st_step
-        bne dispatch_go         ; always
+        lda #1                  ; 2
+        sta st_step             ; 3
+step_jv:
+        jmp dispatch_go         ; 3 (was "bne dispatch_go", also 3): target
+                                ;   patched by emu_reset (st_exc latch)
 emu_run:
         lda #0
         sta st_step
-        ; fall through
+run_jv: jmp dispatch_go         ; patched by emu_reset (st_exc latch)
 dispatch_go:
         lda st_halt             ; 3
-        bne dispatch_done       ; 2 (not taken)
+        BRNC bne, dispatch_done       ; 2 (not taken)
 .ifdef FETCH_DIRECT
         jsr fetch_word          ; op_lo/op_hi <- (PC), PC += 2
 .else
         ; inlined fetch_word window hit path (must match the routine below)
         lda r_pc+1              ; 3   PC page == window page, window valid?
         eor w_pg0               ; 3
-        bne dg_miss             ; 2
+        BRNC bne, dg_miss             ; 2
         lda r_pc+2              ; 3
         eor w_pg1               ; 3
         ora w_inv               ; 3   0 only if both pages match AND valid
-        bne dg_miss             ; 2
+        BRNC bne, dg_miss             ; 2
         ldx r_pc                ; 3   in-window offset = PC low byte
         lda code_win,x          ; 4   guest [PC]   = opcode high byte
         sta op_hi               ; 3
@@ -198,7 +271,7 @@ dispatch_go:
         inx                     ; 2   PC += 2
         inx                     ; 2
         stx r_pc                ; 3
-        beq dg_wrap             ; 2   PC crossed into the next page
+        BRNC beq, dg_wrap             ; 2   PC crossed into the next page
 .endif
 dispatch_sel:
         ldx op_hi               ; 3
@@ -211,7 +284,7 @@ jvec:   jmp $FFFF               ; 3 (self-modified)
 .ifndef FETCH_DIRECT
 dg_wrap:                        ; PC page-cross retire (~1 in 128 fetches)
         inc r_pc+1
-        bne dispatch_sel
+        BRNC bne, dispatch_sel
         inc r_pc+2
         jmp dispatch_sel
 dg_miss:
@@ -221,11 +294,47 @@ dg_miss:
 
 dispatch_next:                  ; <- handlers return here
         lda st_halt             ; 3
-        bne dispatch_done       ; 2
+        BRNC bne, dispatch_done       ; 2
         lda st_step             ; 3
-        beq dispatch_go         ; 3: run mode -> next instruction
+nx_br:  BRNC beq, dispatch_go         ; 3: run mode -> next instruction (offset
+                                ;   patched by emu_reset: _go or _gox)
 dispatch_done:
         rts
+
+; ---------------------------------------------------------------------------
+; dispatch_gox — the exception-mode step loop (entered only when emu_reset
+; latched st_exc != 0).  Same contract as dispatch_go, plus a snapshot of
+; the instruction's start taken before the opcode fetch: its PC (st_ipc,
+; the stacked PC of group-1 exceptions), the opcode (st_iop, which the
+; exception decode in emu_halt needs after handlers clobbered op_lo/op_hi)
+; and the 6502 stack pointer (st_sp6: exc_raise unwinds to it, so an
+; exception raised inside a nested jsr -- e.g. op_illegal from ea_calc --
+; never returns into the half-done handler).  ~60 cycles more than the
+; plain loop; the plain loop itself is untouched.
+; ---------------------------------------------------------------------------
+dispatch_gox:
+        lda st_halt
+        bne dispatch_done
+        tsx
+        stx st_sp6
+        lda r_pc
+        sta st_ipc
+        lda r_pc+1
+        sta st_ipc+1
+        lda r_pc+2
+        sta st_ipc+2
+        lda r_pc+3
+        sta st_ipc+3
+        jsr fetch_word
+        lda op_lo
+        sta st_iop
+        lda op_hi
+        sta st_iop+1
+        jmp dispatch_sel
+
+.assert dispatch_gox - (nx_br + 2) < $80, error, "nx_br cannot reach dispatch_gox"
+.assert dispatch_go - (nx_br + 2) >= -$80, error, "nx_br cannot reach dispatch_go"
+.assert dispatch_gox - (nx_br + 2) <> 0, error, "emu_reset patch uses bne"
 
 ; ===========================================================================
 ; fetch_word — read guest big-endian word at PC into op_lo/op_hi (mirrored
@@ -260,9 +369,9 @@ dispatch_done:
         lda r_pc
         adc #2
         sta r_pc
-        bcc @nc
+        BRNC bcc, @nc
         inc r_pc+1
-        bne @nc
+        BRNC bne, @nc
         inc r_pc+2
 @nc:    jsr mem_read16
         lda m_val
@@ -277,11 +386,11 @@ dispatch_done:
 .proc fetch_word
         lda r_pc+1              ; 3   PC page == window page, window valid?
         eor w_pg0               ; 3
-        bne miss                ; 2
+        BRNC bne, miss                ; 2
         lda r_pc+2              ; 3
         eor w_pg1               ; 3
         ora w_inv               ; 3   0 only if both pages match AND valid
-        bne miss                ; 2
+        BRNC bne, miss                ; 2
 serve:  ldx r_pc                ; 3   in-window offset = PC low byte
         lda code_win,x          ; 4   guest [PC]   = high byte
         sta op_hi               ; 3
@@ -292,10 +401,10 @@ serve:  ldx r_pc                ; 3   in-window offset = PC low byte
         inx                     ; 2   PC += 2
         inx                     ; 2
         stx r_pc                ; 3
-        beq wrap                ; 2   PC crossed into the next page
+        BRNC beq, wrap                ; 2   PC crossed into the next page
         rts                     ; 6   hit total: 57
 wrap:   inc r_pc+1
-        bne wdone
+        BRNC bne, wdone
         inc r_pc+2
 wdone:  rts
 
@@ -396,10 +505,10 @@ miss:                           ; refill the window with PC's guest page:
         .local kill, done
         lda m_addr+1            ; 3
         eor w_pg0               ; 3
-        bne done                ; 3 taken = common exit (9 cycles)
+        BRNC bne, done                ; 3 taken = common exit (9 cycles)
         lda m_addr+2
         eor w_pg1
-        bne done
+        BRNC bne, done
 kill:   lda #1
         sta w_inv
 done:
@@ -409,22 +518,22 @@ done:
         .local chkhi, cross, kill, done
         lda m_addr+1            ; 3
         eor w_pg0               ; 3
-        beq chkhi               ; 2
+        BRNC beq, chkhi               ; 2
         lda m_addr              ; 3   page differs: overlap only possible if
         cmp #$100 - lastoff     ; 2   the write spills into the next page
-        bcc done                ; 3 taken = common exit (16 cycles)
+        BRNC bcc, done                ; 3 taken = common exit (16 cycles)
 cross:  lda m_addr+1            ; C=1 from the cmp: A = write page + 1
         adc #0
         eor w_pg0
-        bne done
+        BRNC bne, done
         lda m_addr+2
         adc #0                  ; propagate the +1 carry (eor kept C)
         eor w_pg1
-        bne done
-        beq kill                ; always
+        BRNC bne, done
+        BRNC beq, kill                ; always
 chkhi:  lda m_addr+2
         eor w_pg1
-        bne done
+        BRNC bne, done
 kill:   lda #1
         sta w_inv
 done:
@@ -443,28 +552,28 @@ REU_CMD_STASH_AL = REU_CMD_STASH | $20
 .macro MIO_PROG len
         .local warm, lenok, look, hiok, done
         lda m_rok               ; 3
-        bne warm                ; 3
+        BRNC bne, warm                ; 3
         lda #len                ; cold: REC state unknown
         jsr mio_full
         jmp done
 warm:   lda #len                ; 2
         cmp m_rlen              ; 3
-        beq lenok               ; 3
+        BRNC beq, lenok               ; 3
         sta m_rlen
         sta REC_LENLO
 lenok:  lda m_addr              ; 3
         cmp m_rlo               ; 3
-        beq look                ; 2
+        BRNC beq, look                ; 2
         sta m_rlo               ; 3
         sta REC_REULO           ; 4
 look:   lda m_addr+1            ; 3
         cmp m_rhi               ; 3
-        beq hiok                ; 3
+        BRNC beq, hiok                ; 3
         sta m_rhi
         sta REC_REUHI
 hiok:   lda m_addr+2            ; 3
         cmp m_rbk               ; 3
-        beq done                ; 3
+        BRNC beq, done                ; 3
         sta m_rbk
         sta REC_REUBANK
 done:
@@ -504,14 +613,14 @@ done:
         .local no
         lda m_addr              ; 3
         cmp #$100-(len-1)       ; 2
-        bcc no                  ; 3 taken = common path
+        BRNC bcc, no                  ; 3 taken = common path
         lda m_addr+1
         cmp #$FF
-        bne no
+        BRNC bne, no
         lda m_addr+2
         ora #$F8                ; bits 18-16 all set?
         cmp #$FF
-        beq slow
+        BRNC beq, slow
 no:
 .endmacro
 
@@ -563,7 +672,7 @@ loop:   lda #0
         sta REC_COMMAND
         iny
         cpy m_slen
-        bne loop
+        BRNC bne, loop
         pla
         tay
         pla
@@ -595,6 +704,7 @@ loop:   lda #0
         rts
 .endproc
 
+        HOTALIGN 128
 .proc mem_read16
         STRADDLE 2, split
         MIO_PROG 2
@@ -633,6 +743,7 @@ split:  lda #REU_CMD_FETCH
         jmp copy
 .endproc
 
+        HOTALIGN 128
 .proc mem_write8
         WINCHK_B
         lda m_val
@@ -660,6 +771,7 @@ split:  lda #REU_CMD_STASH
         jmp mio_split
 .endproc
 
+        HOTALIGN 128
 .proc mem_write32
         WINCHK_W 3
         lda m_val+3
@@ -782,15 +894,15 @@ ea_m6:                          ; d8(An,Xn) brief extension word
 ea_m7:                          ; abs.W / abs.L / d16(PC) / d8(PC,Xn) / #imm
         txa                     ; X still = mode|reg field
         and #7
-        beq ea_absw
+        BRNC beq, ea_absw
         cmp #1
-        beq ea_absl
+        BRNC beq, ea_absl
         cmp #2
-        beq ea_pcd16
+        BRNC beq, ea_pcd16
         cmp #3
-        beq ea_pcidx
+        BRNC beq, ea_pcidx
         cmp #4
-        beq ea_imm
+        BRNC beq, ea_imm
         jmp op_illegal
 
 ea_absw:                        ; abs.W, sign-extended to 32 bits
@@ -800,7 +912,7 @@ ea_absw:                        ; abs.W, sign-extended to 32 bits
         ldy #0
         lda op_hi
         sta t_ea+1
-        bpl @pos
+        BRNC bpl, @pos
         dey
 @pos:   sty t_ea+2
         sty t_ea+3
@@ -832,15 +944,15 @@ ea_pcidx:                       ; d8(PC,Xn)
 ea_imm:                         ; #imm: operand lives in the instruction
         jsr ea_pc_base          ; stream; t_ea points at the datum
         lda ea_size
-        beq @b
+        BRNC beq, @b
         cmp #2
-        beq @l
+        BRNC beq, @l
         lda #2                  ; word
         jmp ea_pc_add
 @b:     inc t_ea                ; byte datum = LOW byte of the ext word
-        bne @b1
+        BRNC bne, @b1
         inc t_ea+1
-        bne @b1
+        BRNC bne, @b1
         inc t_ea+2
 @b1:    lda #2
         jmp ea_pc_add
@@ -879,9 +991,9 @@ ea_pc_add:                      ; r_pc += A (bits 24-31 stay 0)
         clc
         adc r_pc
         sta r_pc
-        bcc @d
+        BRNC bcc, @d
         inc r_pc+1
-        bne @d
+        BRNC bne, @d
         inc r_pc+2
 @d:     rts
 
@@ -889,17 +1001,17 @@ ea_amount:                      ; A = operand byte count; byte on A7 -> 2
         ldx ea_size
         lda ea_szbytes,x
         cmp #1
-        bne @ok
+        BRNC bne, @ok
         ldy ea_reg
         cpy #$1C                ; 7*4 = A7
-        bne @ok
+        BRNC bne, @ok
         lda #2                  ; keep SP even (68k quirk)
 @ok:    rts
 
 ea_add_sext16:                  ; t_ea += sext16(op_hi:op_lo)
         ldy #0
         lda op_hi
-        bpl @pos
+        BRNC bpl, @pos
         dey                     ; Y = $FF
 @pos:   clc
         lda t_ea
@@ -921,7 +1033,7 @@ ea_add_sext16:                  ; t_ea += sext16(op_hi:op_lo)
 ea_add_brief:                   ; t_ea += sext8(op_lo) + index(op_hi)
         ldy #0
         lda op_lo
-        bpl @p
+        BRNC bpl, @p
         dey
 @p:     clc
         adc t_ea
@@ -942,10 +1054,10 @@ ea_add_brief:                   ; t_ea += sext8(op_lo) + index(op_hi)
         tax
         lda op_hi
         and #$08                ; W/L bit
-        bne @long
+        BRNC bne, @long
         ldy #0                  ; word index: sext16(Xn.w)
         lda r_d0+1,x
-        bpl @wp
+        BRNC bpl, @wp
         dey
 @wp:    clc
         lda r_d0,x
@@ -979,7 +1091,7 @@ ea_add_brief:                   ; t_ea += sext8(op_lo) + index(op_hi)
 ; --- ea_load ---------------------------------------------------------------
 ea_load:
         ldy ea_kind
-        bne @reg
+        BRNC bne, @reg
         tax                     ; memory operand: m_addr = t_ea
         lda t_ea
         sta m_addr
@@ -990,9 +1102,9 @@ ea_load:
         lda t_ea+3
         sta m_addr+3
         txa
-        beq @m8
+        BRNC beq, @m8
         cmp #2
-        beq @m32
+        BRNC beq, @m32
         jsr mem_read16
         lda m_val
         sta t_op1
@@ -1018,11 +1130,11 @@ ea_load:
         lda r_d0,y
         sta t_op1
         txa
-        beq @rd
+        BRNC beq, @rd
         lda r_d0+1,y
         sta t_op1+1
         cpx #2
-        bne @rd
+        BRNC bne, @rd
         lda r_d0+2,y
         sta t_op1+2
         lda r_d0+3,y
@@ -1030,9 +1142,10 @@ ea_load:
 @rd:    rts
 
 ; --- ea_store --------------------------------------------------------------
+        HOTALIGN 128
 ea_store:
         ldy ea_kind
-        bne @reg
+        BRNC bne, @reg
         tax                     ; memory operand: m_addr = t_ea
         lda t_ea
         sta m_addr
@@ -1043,9 +1156,9 @@ ea_store:
         lda t_ea+3
         sta m_addr+3
         txa
-        beq @m8
+        BRNC beq, @m8
         cmp #2
-        beq @m32
+        BRNC beq, @m32
         lda t_res
         sta m_val
         lda t_res+1
@@ -1068,11 +1181,11 @@ ea_store:
         lda t_res
         sta r_d0,y
         txa
-        beq @rd
+        BRNC beq, @rd
         lda t_res+1
         sta r_d0+1,y
         cpx #2
-        bne @rd
+        BRNC bne, @rd
         lda t_res+2
         sta r_d0+2,y
         lda t_res+3
@@ -1101,9 +1214,9 @@ ea_store:
         .local w, l, b
         tax
         dex
-        beq w
+        BRNC beq, w
         dex
-        beq l
+        BRNC beq, l
 b:      lda #0
         sta w_zacc
         lda t_op1
@@ -1144,6 +1257,7 @@ alu_add:
 alu_sub:
         sec
         ALUADDSUB sbc, flags_sub
+        HOTALIGN 128
 alu_cmp:
         sec
         ALUADDSUB sbc, flags_cmp
@@ -1163,12 +1277,13 @@ alu_subx:                       ; borrow-in = X flag (6502 sense inverted)
         tya
         ALUADDSUB sbc, flags_subx
 
+        HOTALIGN 128
 alu_neg:                        ; t_res = 0 - t_op1 (t_op2 unused)
         tax
         dex
-        beq @w
+        BRNC beq, @w
         dex
-        beq @l
+        BRNC beq, @l
         lda #0                  ; byte
         sta w_zacc
         sec
@@ -1210,8 +1325,8 @@ alu_neg:                        ; t_res = 0 - t_op1 (t_op2 unused)
 .macro ALULOGIC oper
         .local w, b
         cmp #1
-        beq w
-        bcc b
+        BRNC beq, w
+        BRNC bcc, b
         lda t_op1
         oper t_op2
         sta t_res
@@ -1250,13 +1365,14 @@ alu_and:
         ALULOGIC and
 alu_or:
         ALULOGIC ora
+        HOTALIGN 128
 alu_eor:
         ALULOGIC eor
 
 alu_not:                        ; t_res = ~t_op1 sized (t_op2 unused)
         cmp #1
-        beq @w
-        bcc @b
+        BRNC beq, @w
+        BRNC bcc, @b
         lda t_op1
         eor #$FF
         sta t_res
@@ -1295,11 +1411,11 @@ alu_not:                        ; t_res = ~t_op1 sized (t_op2 unused)
 ; V = C = 0, X unchanged.
 alu_ext:
         cmp #2
-        beq @l
+        BRNC beq, @l
         ldy #0                  ; byte -> word
         lda t_op1
         sta t_res
-        bpl @p1
+        BRNC bpl, @p1
         dey
 @p1:    sty t_res+1
         sta w_zacc              ; low byte
@@ -1311,7 +1427,7 @@ alu_ext:
         ldy #0
         lda t_op1+1
         sta t_res+1
-        bpl @p2
+        BRNC bpl, @p2
         dey
 @p2:    sty t_res+2
         sty t_res+3
@@ -1375,7 +1491,7 @@ flags_logic:                    ; N Z from result, V = C = 0, X unchanged
         sta w_zacc
         lda #0
         cpy #$80                ; C = 1 iff final byte has bit7 set
-        bcc @nn
+        BRNC bcc, @nn
         lda #$08
 @nn:    sta w_ptmp
         lda r_sr
@@ -1388,7 +1504,7 @@ fl_setx:                        ; A = P (C already 68k-sense): w_ptmp = XNVC
         jsr p_to_nvc
         sta w_ptmp
         and #$01
-        beq @nx
+        BRNC beq, @nx
         lda w_ptmp
         ora #$10
         sta w_ptmp
@@ -1404,7 +1520,7 @@ p_to_nvc:                       ; A = 6502 P -> A = 68k N($08)|V($02)|C($01)
         sta w_ptmp
         tya
         and #$40
-        beq @nv
+        BRNC beq, @nv
         lda #$02
         ora w_ptmp
         sta w_ptmp
@@ -1415,7 +1531,7 @@ p_to_nvc:                       ; A = 6502 P -> A = 68k N($08)|V($02)|C($01)
 
 fl_insert_z:                    ; w_ptmp = X/N/V/C; Z from w_zacc; -> CCR
         lda w_zacc
-        bne @nz
+        BRNC bne, @nz
         lda w_ptmp
         ora #$04
         sta w_ptmp
@@ -1424,7 +1540,7 @@ fl_insert_z:                    ; w_ptmp = X/N/V/C; Z from w_zacc; -> CCR
         rts
 fl_insert_z_sticky:             ; ADDX/SUBX/NEGX: Z cleared, never set
         lda w_zacc
-        bne @nz
+        BRNC bne, @nz
         lda r_sr                ; result zero -> keep previous Z
         and #$04
         ora w_ptmp
@@ -1435,8 +1551,28 @@ fl_insert_z_sticky:             ; ADDX/SUBX/NEGX: Z cleared, never set
 
 ; ===========================================================================
 ; Halt / trap handlers (core-owned dispatch targets)
+;
+; With st_exc clear every path below is today's halt, bit for bit (the
+; only addition is the st_exc test on the halting path).  With st_exc set
+; (exception mode, docs/CONTRACTS.md "Supervisor mode & exceptions") the
+; trap-class halts become 68000 exceptions through the guest vector table
+; at 0 (VBR fixed at 0 on the 68000):
+;   HALT_ALINE (non-HLE $Axxx)          -> vector 10, stacked PC = insn
+;   HALT_FLINE                          -> vector 11, stacked PC = insn
+;   op_illegal (illegal encodings/EAs)  -> vector  4, stacked PC = insn
+;   HALT_ILLEGAL from the G3 #imm,SR    -> executed here (sys_srimm), or
+;     forms (ANDI/ORI/EORI to SR)          vector 8 in user mode
+;   HALT_ILLEGAL from G6 DIVU/DIVS /0   -> vector 5, stacked PC = insn
+;                                          (upstream vectors), NZVC = 0
+; Everything else (HALT_OK $AFFF, HALT_STOP, HALT_ADDRESS, and the legal
+; but unimplemented TAS/MOVEP) stays a halt.  G3/G6/HLE are frozen and
+; halt through here unchanged; the exception-mode loop's snapshot
+; (st_ipc/st_iop/st_sp6) supplies what their halt sites no longer know.
 ; ===========================================================================
 emu_halt:                       ; A = HALT_* reason
+        ldx st_exl              ; 3   latched flag (never live st_exc)
+        bne exc_halt            ; 2
+halt_now:
         sta st_reason
         lda #1
         sta st_halt
@@ -1458,8 +1594,285 @@ op_fline:
         jmp emu_halt
 
 op_illegal:
+        ldx st_exl              ; latched flag
+        bne ill_x
         lda #HALT_ILLEGAL
         jmp emu_halt
+ill_x:  lda st_iop              ; MOVEP ($0108|Dn<<9|size<<6|An, mask
+        and #$38                ; $F138) is legal but unimplemented (G3
+        cmp #$08                ; stub): keep halting rather than raise a
+        bne @vec4               ; wrong illegal-instruction exception
+        lda st_iop+1
+        and #$F1
+        cmp #$01
+        bne @vec4
+        lda #HALT_ILLEGAL
+        jmp halt_unwind
+@vec4:  lda #4
+        jmp exc_group1
+
+; --- exception-mode halt decode (A = reason) --------------------------------
+exc_halt:
+        cmp #HALT_ALINE
+        bne @nal
+        lda #10
+        jmp exc_group1
+@nal:   cmp #HALT_FLINE
+        bne @nfl
+        lda #11
+        jmp exc_group1
+@nfl:   cmp #HALT_ILLEGAL
+        bne halt_unwind         ; OK / STOP / ADDRESS / others: halt
+        ldx st_iop              ; #imm,SR: $007C ORI, $027C ANDI, $0A7C EORI
+        cpx #$7C
+        bne @ndiv0
+        ldx st_iop+1
+        beq sys_srimm
+        cpx #$02
+        beq sys_srimm
+        cpx #$0A
+        beq sys_srimm
+        bne halt_unwind         ; always
+@ndiv0: tax                     ; A = HALT_ILLEGAL kept in X
+        lda st_iop              ; DIVU $80C0 / DIVS $81C0 (mask $F1C0)
+        and #$C0
+        cmp #$C0
+        bne @keep
+        lda st_iop+1
+        and #$F0
+        cmp #$80
+        bne @keep
+        lda r_sr                ; divide by zero: NZVC cleared, X kept
+        and #$10
+        sta r_sr
+        lda #5
+        jmp exc_group1
+@keep:  txa                     ; TAS etc.: legal, unimplemented -> halt
+halt_unwind:                    ; exception-mode halt: drop any nested
+        ldx st_sp6              ; 6502 frames first, so the handler that
+        txs                     ; halted is not resumed by the rts
+        jmp halt_now
+
+; --- ANDI/ORI/EORI #imm,SR (entered from exc_halt; PC = opcode + 2) ---------
+sys_srimm:
+        lda r_sr+1
+        and #$20
+        bne @sup
+        lda #8                  ; user mode: privilege violation
+        jmp exc_group1
+@sup:   jsr fetch_word          ; op_hi:op_lo = immediate word
+        lda st_iop+1
+        beq @or
+        cmp #$02
+        beq @and
+        lda r_sr                ; EORI
+        eor op_lo
+        pha
+        lda r_sr+1
+        eor op_hi
+        jmp @wr
+@and:   lda r_sr
+        and op_lo
+        pha
+        lda r_sr+1
+        and op_hi
+        jmp @wr
+@or:    lda r_sr
+        ora op_lo
+        pha
+        lda r_sr+1
+        ora op_hi
+@wr:    tax
+        pla
+        jsr sr_write
+        jmp dispatch_next
+
+; ---------------------------------------------------------------------------
+; sr_write — SR := X:A (X = high/system byte, A = low byte), masked to the
+; bits a 68000 implements ($A71F: T, S, I2-I0, XNZVC).  When S goes 1 -> 0
+; the active stack switches: A7 <-> r_osp.  (S cannot go 0 -> 1 here: only
+; supervisor code writes the SR, and exc_raise handles the exception entry.)
+; Clobbers A, X, Y.
+; ---------------------------------------------------------------------------
+sr_write:
+        and #$1F
+        sta r_sr
+        txa
+        and #$A7
+        tax                     ; X = new high byte
+        lda r_sr+1              ; old high byte
+        stx r_sr+1
+        and #$20
+        beq @done               ; was user (cannot happen, but harmless)
+        txa
+        and #$20
+        bne @done               ; still supervisor
+.ifndef EXC_MUT_NOSWAP
+        jmp sp_swap             ; S 1 -> 0: A7 becomes the USP
+.endif
+@done:  rts
+
+; sp_swap — exchange A7 and r_osp (4 bytes).  Clobbers A, X, Y.
+sp_swap:
+        ldx #3
+@lp:    lda r_a7,x
+        ldy r_osp,x
+        sta r_osp,x
+        sty r_a7,x
+        dex
+        bpl @lp
+        rts
+
+; ---------------------------------------------------------------------------
+; exc_group1 / exc_group2 — raise exception A (vector number 0-63).
+; group1: stacked PC = start of the current instruction (st_ipc): illegal,
+;         privilege violation, A-line, F-line; divide-by-zero too (the
+;         upstream vectors stack the DIVU address, not the next one).
+; group2: stacked PC = r_pc (the next instruction): TRAP, TRAPV, CHK.
+; exc_raise (68000 group 1/2 processing): unwind the 6502 stack to the
+; instruction start; save SR; S := 1, T := 0, switching A7 to the SSP when
+; coming from user mode; push PC (long) then SR (word) -- 6-byte frame at
+; SSP-6 -- and load PC from the vector at vector*4.  An odd vector halts
+; with HALT_ADDRESS (a 68000 would take an address error: reason code
+; only, docs/CONTRACTS.md).  Only reachable in exception mode.
+; Scratch: t_op2 (stacked PC), t_res+0/1 (stacked SR), t_res+2 (vector).
+; ---------------------------------------------------------------------------
+exc_group1:
+        ldx #3
+@cp:    ldy st_ipc,x
+        sty t_op2,x
+        dex
+        bpl @cp
+        jmp exc_raise
+exc_group2:
+        ldx #3
+@cp:    ldy r_pc,x
+        sty t_op2,x
+        dex
+        bpl @cp
+exc_raise:
+        sta t_res+2             ; vector
+        ldx st_sp6              ; unwind nested handler frames
+        txs
+        lda r_sr
+        sta t_res               ; stacked SR = SR before the exception
+        lda r_sr+1
+        sta t_res+1
+        and #$20
+        bne @sup
+.ifndef EXC_MUT_NOSWAP
+        jsr sp_swap             ; user -> supervisor: A7 := SSP
+.endif
+@sup:   lda t_res+1
+        ora #$20                ; S = 1
+        and #$7F                ; T = 0
+        sta r_sr+1
+        ; push PC (long) at A7-4
+        sec
+        lda r_a7
+        sbc #4
+        sta r_a7
+        sta m_addr
+        lda r_a7+1
+        sbc #0
+        sta r_a7+1
+        sta m_addr+1
+        lda r_a7+2
+        sbc #0
+        sta r_a7+2
+        sta m_addr+2
+        lda r_a7+3
+        sbc #0
+        sta r_a7+3
+        sta m_addr+3
+.ifdef EXC_MUT_FRAME
+        lda t_res               ; mutant: PC and SR swapped in the frame
+        sta m_val
+        lda t_res+1
+        sta m_val+1
+        lda #0
+        sta m_val+2
+        sta m_val+3
+.else
+        ldx #3
+@pc:    lda t_op2,x
+        sta m_val,x
+        dex
+        bpl @pc
+.endif
+        jsr mem_write32
+        ; push SR (word) at A7-2
+        sec
+        lda r_a7
+        sbc #2
+        sta r_a7
+        sta m_addr
+        lda r_a7+1
+        sbc #0
+        sta r_a7+1
+        sta m_addr+1
+        lda r_a7+2
+        sbc #0
+        sta r_a7+2
+        sta m_addr+2
+        lda r_a7+3
+        sbc #0
+        sta r_a7+3
+        sta m_addr+3
+.ifdef EXC_MUT_FRAME
+        lda t_op2
+        sta m_val
+        lda t_op2+1
+        sta m_val+1
+.else
+        lda t_res
+        sta m_val
+        lda t_res+1
+        sta m_val+1
+.endif
+        jsr mem_write16
+        ; PC := long at vector*4
+        lda t_res+2             ; vector < 64: vector*4 fits one byte
+        asl
+        asl
+        sta m_addr
+        lda #0
+        sta m_addr+1
+        sta m_addr+2
+        sta m_addr+3
+        jsr mem_read32
+        lda m_val
+        sta r_pc
+        lda m_val+1
+        sta r_pc+1
+        lda m_val+2
+        sta r_pc+2
+        lda #0                  ; PC bits 24-31 always 0 (contract)
+        sta r_pc+3
+        lda m_val
+        lsr
+        bcc @even
+        lda #HALT_ADDRESS
+        jmp halt_now
+@even:  jmp dispatch_next
+
+; --- STOP / RESET / RTE support for G5 -------------------------------------
+emu_stop:                       ; STOP #imm retired: halt, reason STOP
+        lda #HALT_STOP
+        jmp halt_now
+emu_addrerr:                    ; odd RTE target: halt, reason ADDRESS
+        lda #HALT_ADDRESS
+        jmp halt_now
+
+; RESET hook: G5's RESET (supervisor, exception mode) does jsr emu_rst_hook.
+; Default: nothing (the guest's peripherals are not modelled).  An embedder
+; that wants a callback patches the jmp operand (emu_rst_hook+1/+2) to a
+; routine ending in rts; it runs with the instruction retired except PC.
+emu_rst_hook:
+        jmp rst_nop
+rst_nop:
+        rts
+
 
 
 ; ===========================================================================
@@ -1475,4 +1888,6 @@ ea_modetab_hi:
         .byte >ea_m0, >ea_m1, >ea_m2, >ea_m3
         .byte >ea_m4, >ea_m5, >ea_m6, >ea_m7
 
+.import __ZP_LAST__
+.assert __ZP_LAST__ <= st_exc, lderror, "ZEROPAGE .res pool grew into the W6-S equates at $88 (rc/zp.inc)"
 .assert (__BSS_RUN__ & $FF) = 0, lderror, "boot BSS clear assumes page-aligned BSS (c64.cfg align = $100)"

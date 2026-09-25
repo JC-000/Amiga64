@@ -197,7 +197,33 @@ w_ptmp    = $7F         ; ALU/EA flag scratch
 ;  area starts at $0080, so these land at $80-$87 in declaration order —
 ;  see build/runner.map.  REC shadow: WS-A, docs/WAVE4_BRIEF.md C1/C4)
 
-; @region free $88-$FF UNALLOCATED - $88-$F8 is the remaining ld65 ZEROPAGE pool (c64.cfg: start $0080 size $0079); claim via this file + rescheck green
+; @region core $88-$94 supervisor mode & exceptions (W6-S, docs/CONTRACTS.md): flag, inactive SP, exception-mode instruction snapshot, latched flag
+; Outside the $10-$7F block on purpose: emu_reset does NOT clear these.
+; st_exc and r_osp belong to the embedder (the boot stub zeroes them; the
+; super vector driver pokes them before test_run_case); st_ipc/st_iop/
+; st_sp6 are rewritten at the start of every instruction in exception mode;
+; st_exl is written only by emu_reset (the latched copy of st_exc).
+; core.s asserts the linker's ZEROPAGE .res pool ends below st_exc.
+.ifndef st_exc
+st_exc    = $88         ; nonzero = deliver exceptions (latched by emu_reset)
+.endif
+.ifndef r_osp
+r_osp     = $89         ; 4 bytes LE: inactive SP (USP while S=1, else SSP)
+.endif
+.ifndef st_ipc
+st_ipc    = $8D         ; 4 bytes LE: PC of the current instruction (exc mode)
+.endif
+.ifndef st_iop
+st_iop    = $91         ; 2 bytes: its opcode word, lo/hi like op_lo/op_hi
+.endif
+.ifndef st_sp6
+st_sp6    = $93         ; 6502 SP at instruction start (exception unwind)
+.endif
+.ifndef st_exl
+st_exl    = $94         ; st_exc as LATCHED by emu_reset: every runtime test reads this
+.endif
+
+; @region free $95-$FF UNALLOCATED - $95-$F8 is still inside the ld65 ZEROPAGE pool (c64.cfg: start $0080 size $0079) but NOT usable by .res past $87 (core.s asserts); claim via this file + rescheck green
 
 ; --- Contract invariants (assemble-time; keep true under -D relocation) ----
 .assert r_a0 = r_d0 + $20, error, "getreg/setreg do reg*4 indexing from r_d0 - A regs must follow D regs contiguously"

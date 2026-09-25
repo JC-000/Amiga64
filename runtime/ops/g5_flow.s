@@ -6,9 +6,12 @@
 ;   fam_4   ($40-$4F): CLR/NEG/NEGX/NOT/TST, EXT/SWAP, LEA/PEA,
 ;                      JMP/JSR/RTS/RTR/NOP, LINK/UNLK, MOVE from SR,
 ;                      MOVE to CCR; MOVEM/NBCD forwarded to G6;
-;                      privileged/trap ops (MOVE to SR, MOVE USP, TRAP,
-;                      TRAPV, RESET, STOP, RTE, TAS, CHK) halt ILLEGAL
-;                      (M2 HLE hooks later).
+;                      system/trap ops (MOVE to SR, MOVE USP, TRAP,
+;                      TRAPV, RESET, STOP, RTE, CHK, ILLEGAL): with the
+;                      exception flag st_exc clear they halt ILLEGAL as
+;                      before; with it set they execute / raise 68000
+;                      exceptions (docs/CONTRACTS.md "Supervisor mode &
+;                      exceptions", W6-S).  TAS still halts ILLEGAL.
 ;   fam_bcc ($60-$6F): BRA/BSR/Bcc.
 ; Cross-ops exported (entered by plain jmp, original opcode in op_lo/op_hi):
 ;   op_dbcc (used by fam_5/G2), op_exg (used by fam_c/G3).
@@ -26,6 +29,8 @@
 .import alu_or, alu_neg, alu_not, alu_subx, alu_ext
 .import mem_read16, mem_read32, mem_write32
 .import fetch_word, dispatch_next, op_illegal, emu_halt
+.import exc_group1, exc_group2, sr_write      ; core: exceptions / SR (W6-S)
+.import emu_stop, emu_addrerr, emu_rst_hook
 .import op_movem, op_nbcd               ; G6 (dispatch stubs until it lands)
 
 ; --- File-local scratch (survives core calls, unlike t_tmp) ----------------
@@ -64,7 +69,10 @@ f4_odd:                         ; 0100 rrr1 xx...: LEA / CHK
         beq f4_lea
         cmp #$80
         bne @ill
-        lda #HALT_ILLEGAL       ; CHK <ea>,Dn: trap-class op, M2 hook later
+        lda st_exl
+        beq @hlt
+        jmp f4_chk              ; CHK <ea>,Dn (exception mode)
+@hlt:   lda #HALT_ILLEGAL       ; CHK: halt with the flag clear
         jmp emu_halt
 @ill:   jmp op_illegal          ; opmodes 100/101 undefined on 68000
 
@@ -229,7 +237,10 @@ f4_not:
         and #$C0
         cmp #$C0
         bne @go
-        lda #HALT_ILLEGAL       ; MOVE <ea>,SR is privileged
+        lda st_exl
+        beq @hlt
+        jmp f4_movetosr         ; MOVE <ea>,SR (exception mode)
+@hlt:   lda #HALT_ILLEGAL       ; flag clear: halt as before
         jmp emu_halt
 @go:    jsr f4_easetup
         lda g5_size
@@ -365,7 +376,13 @@ f4_tst:
         and #$C0
         cmp #$C0
         bne @go
-        lda #HALT_ILLEGAL
+        lda st_exl              ; exception mode: $4AFC ILLEGAL -> vector 4
+        beq @hlt
+        lda op_lo
+        cmp #$FC
+        bne @hlt
+        jmp op_illegal
+@hlt:   lda #HALT_ILLEGAL       ; TAS (unimplemented), or flag clear
         jmp emu_halt
 @go:    jsr f4_easetup
         lda #0
@@ -411,9 +428,19 @@ f4_e4e:
         jmp f4_unlk             ; $4E58-$4E5F
 @nunlk: cmp #$30
         beq @spec
-        lda #HALT_ILLEGAL       ; TRAP #n ($4E40-$4E4F): M2 hook;
-        jmp emu_halt            ; MOVE USP ($4E60-$4E6F): privileged;
-                                ; $4E78-$4E7F: 68010+ MOVEC etc.
+        ldx st_exl
+        bne @xsys
+        lda #HALT_ILLEGAL       ; TRAP #n ($4E40-$4E4F), MOVE USP ($4E60-
+        jmp emu_halt            ; $4E6F), $4E78-$4E7F (68010+ MOVEC etc.)
+@xsys:  cmp #$20                ; exception mode: A = op_lo & $38
+        bcc @trap               ; $00/$08: TRAP #0-15
+        cmp #$38
+        beq @ill                ; $4E78-$4E7F: illegal on the 68000
+        jmp f4_moveusp          ; $20/$28: MOVE An,USP / MOVE USP,An
+@trap:  lda op_lo
+        and #$0F
+        ora #$20                ; vector 32 + n
+        jmp exc_group2
 @spec:  lda op_lo
         and #$07
         cmp #$01
@@ -424,8 +451,16 @@ f4_e4e:
 @nrts:  cmp #$07
         bne @nrtr
         jmp f4_rtr              ; $4E77
-@nrtr:  lda #HALT_ILLEGAL       ; RESET/STOP/RTE/TRAPV privileged or trap,
+@nrtr:  ldx st_exl
+        bne @xspec
+        lda #HALT_ILLEGAL       ; RESET/STOP/RTE/TRAPV privileged or trap,
         jmp emu_halt            ; $4E74 RTD is 68010+
+@xspec: tax                     ; exception mode: A = op_lo & 7
+        lda f4_spec_lo,x
+        sta @sjv+1
+        lda f4_spec_hi,x
+        sta @sjv+2
+@sjv:   jmp $FFFF               ; self-modified (PRG is in RAM)
 @nop:   jmp dispatch_next
 @ill:   jmp op_illegal
 
@@ -582,6 +617,168 @@ f4_unlk:
         lda m_val+3
         sta r_a0+3,y
         jmp dispatch_next
+
+; ===========================================================================
+; System / trap ops (W6-S).  Reached ONLY with the exception flag st_exc set
+; (the decoders above halt ILLEGAL, exactly as before, when it is clear).
+; Semantics pinned by the upstream vectors (docs/CONTRACTS.md "Supervisor
+; mode & exceptions"); SR writes and SP banking go through core sr_write,
+; exceptions through core exc_group1 (stacked PC = instruction) and
+; exc_group2 (stacked PC = next instruction).
+; ===========================================================================
+
+; g5_priv — return if the SR's S bit is set, else raise a privilege
+; violation (vector 8, no return: exc_raise unwinds the jsr).  Call it
+; before ANY side effect (EA calculation, extension fetch).
+g5_priv:
+        lda r_sr+1
+        and #$20
+        beq @viol
+        rts
+@viol:  lda #8
+        jmp exc_group1
+
+; --- MOVE <ea>,SR ($46C0|EA): word source -> SR (masked, may clear S) ------
+f4_movetosr:
+        lda op_lo
+        and #$38
+        cmp #$08
+        beq @ill                ; An source: illegal encoding (vector 4)
+        jsr g5_priv
+        lda op_lo
+        and #$3F
+        tax
+        lda #1
+        jsr ea_calc
+        lda #1
+        jsr ea_load
+        lda t_op1
+        ldx t_op1+1
+        jsr sr_write
+        jmp dispatch_next
+@ill:   jmp op_illegal
+
+; --- MOVE An,USP ($4E60|n) / MOVE USP,An ($4E68|n).  Privileged, so S = 1
+; and the USP is the inactive stack pointer r_osp. -------------------------
+f4_moveusp:
+        jsr g5_priv
+        lda op_lo
+        and #$07
+        asl
+        asl
+        tay                     ; An*4
+        ldx #0
+        lda op_lo
+        and #$08
+        bne @toan
+@tousp: lda r_a0,y              ; MOVE An,USP
+        sta r_osp,x
+        iny
+        inx
+        cpx #4
+        bne @tousp
+        jmp dispatch_next
+@toan:  lda r_osp,x             ; MOVE USP,An
+        sta r_a0,y
+        iny
+        inx
+        cpx #4
+        bne @toan
+        jmp dispatch_next
+
+; --- $4E70-$4E77 in exception mode (NOP/RTS/RTR never get here) -----------
+f4_reset:                       ; RESET: privileged no-op + embedder hook
+        jsr g5_priv
+        jsr emu_rst_hook
+        jmp dispatch_next
+
+f4_stop:                        ; STOP #imm: SR := imm, then halt (STOP)
+        jsr g5_priv
+        jsr fetch_word
+        lda op_lo
+        ldx op_hi
+        jsr sr_write
+        jmp emu_stop
+
+f4_rte:                         ; RTE: SR := (A7), PC := 2(A7), A7 += 6;
+        jsr g5_priv             ; the new SR may switch to the USP
+        jsr pop_word
+        lda m_val
+        sta g5_disp
+        lda m_val+1
+        sta g5_disp+1
+        jsr pop_long
+        lda m_val
+        sta r_pc
+        lda m_val+1
+        sta r_pc+1
+        lda m_val+2
+        sta r_pc+2
+        lda #0                  ; PC bits 24-31 always 0 (contract)
+        sta r_pc+3
+        lda g5_disp
+        ldx g5_disp+1
+        jsr sr_write            ; after A7 += 6, so the SSP keeps it
+        lda r_pc
+        lsr
+        bcs @odd
+        jmp dispatch_next
+@odd:   jmp emu_addrerr         ; odd PC: address error (reason code only)
+
+f4_trapv:                       ; TRAPV: V set -> vector 7 (next PC)
+        lda r_sr
+        and #$02
+        bne @t
+        jmp dispatch_next
+@t:     lda #7
+        jmp exc_group2
+
+; --- CHK <ea>,Dn (word): trap (vector 6, next PC) if Dn.w < 0 (N := 1) or
+; Dn.w > src.w (N := 0).  Z/V/C cleared in every case; in range N is kept.
+; X always kept.  (Upstream CHK: all 4948 non-address-error cases.) ------
+f4_chk:
+        lda op_lo
+        and #$38
+        cmp #$08
+        bne @ok
+        jmp op_illegal          ; An source: illegal encoding (vector 4)
+@ok:    lda op_hi               ; Dn = opcode bits 11-9
+        and #$0E
+        asl
+        sta g5_reg              ; Dn*4
+        lda op_lo
+        and #$3F
+        tax
+        lda #1
+        jsr ea_calc
+        lda #1
+        jsr ea_load             ; t_op1+0/1 = upper bound
+        ldy g5_reg
+        lda r_d0+1,y
+        bmi @neg                ; Dn.w < 0
+        sec                     ; signed bound - Dn < 0  <=>  Dn > bound
+        lda t_op1
+        sbc r_d0,y
+        lda t_op1+1
+        sbc r_d0+1,y
+        bvc @nv
+        eor #$80
+@nv:    bmi @gt
+        lda r_sr                ; in range: X and N kept, Z V C cleared
+        and #$18
+        sta r_sr
+        jmp dispatch_next
+@gt:    lda r_sr
+        and #$10
+        sta r_sr
+        lda #6
+        jmp exc_group2
+@neg:   lda r_sr
+        and #$10
+        ora #$08
+        sta r_sr
+        lda #6
+        jmp exc_group2
 
 ; ===========================================================================
 ; fam_bcc — BRA (cond 0) / BSR (cond 1) / Bcc.  8-bit displacement in the
@@ -880,3 +1077,9 @@ f4_evtab_lo:                    ; even op_hi $40-$4E -> leaf decoder
 f4_evtab_hi:
         .byte >f4_negx, >f4_clr, >f4_neg, >f4_not
         .byte >f4_e48,  >f4_tst, >f4_e4c, >f4_e4e
+f4_spec_lo:                     ; $4E70-$4E77, exception mode (index = op & 7)
+        .byte <f4_reset, <dispatch_next, <f4_stop, <f4_rte
+        .byte <op_illegal, <dispatch_next, <f4_trapv, <dispatch_next
+f4_spec_hi:
+        .byte >f4_reset, >dispatch_next, >f4_stop, >f4_rte
+        .byte >op_illegal, >dispatch_next, >f4_trapv, >dispatch_next
