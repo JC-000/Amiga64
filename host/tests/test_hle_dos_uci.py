@@ -31,9 +31,15 @@ line at bce4535e: dos.cc, file_system.cc's strings, fs_errors_flags.h and
 command_protocol.vhd are unchanged, filemanager.cc and command_intf.cc moved
 (line numbers above are bce4535e's).  ~/Documents/1541u-315preview
 (v3.15-84) has the same strings.  On 2026-09-24 21:52 the device reported
-git c47155b7 (core 1.50): against bce4535e only filemanager.cc changed in
-these paths, and its fopen_impl / delete_file_impl logic is unchanged
-(moved to lines 738 / 1193).  No DOS-target error exists in both a
+git c47155b7 (core 1.50).  Against bce4535e that build also changes
+filemanager.cc (a successful open-for-write and its close now call the
+new discard_mounts_of_file; the status paths of fopen_impl /
+delete_file_impl are unchanged, moved to lines 738 / 1193),
+filesystem_fat.cc and file_system.h (new get_total / file_attrib) and
+ffconf.h (FF_USE_CHMOD 0 -> 1); dos.cc,
+file_system.cc (get_error_string), command_intf.cc and the VHDL are
+unchanged, and FF_FS_LOCK is still 0.  So the status strings and the
+open/delete rules modelled here hold for c47155b7 too.  No DOS-target error exists in both a
 numbered and an unnumbered form in either tree, so the model has one variant.
 
 Every pushed command is logged; the tests assert the exact bytes, the
@@ -369,8 +375,6 @@ class DosTarget:
             self.file = None
             if not self.parent_exists(name, dev):     # filemanager.cc:718-721
                 return [b""], b"PATH DOESN'T EXIST"   # before any create
-            if dev.readonly and flags & FA_WRITE:
-                return [b""], b"WRITE PROTECTED"
             exists = name in self.fs                  # filemanager.cc:723-734
             if exists and flags & FA_CREATE_NEW:
                 return [b""], b"FILE EXISTS"
@@ -379,6 +383,8 @@ class DosTarget:
                       or (flags & FA_OPEN_ALWAYS and not exists))
             if not exists and not create:
                 return [b""], b"FILE DOESN'T EXIST"
+            if dev.readonly and flags & FA_WRITE:     # file_open, cc:740
+                return [b""], b"WRITE PROTECTED"
             if create and (flags & FA_WRITE) == 0:
                 dev.violations.append("create without FA_WRITE")
             if create:
@@ -441,14 +447,14 @@ class DosTarget:
             name = next((k for k in self.fs if k.lower() == name.lower()), name)
             if not self.parent_exists(name, dev):     # filemanager.cc:1086-1088
                 return [b""], b"PATH DOESN'T EXIST"
+            if name not in self.fs:                   # find_pathentry first,
+                return [b""], b"FILE DOESN'T EXIST"   # file_system.cc:39-40
             if any(t.file == name for t in dev.targets.values()):
                 # FF_FS_LOCK is 0 (chan_fat/full/ffconf.h:265): FatFS
                 # unlinks an open file without complaint -> "00,OK" below
                 dev.violations.append(f"DELETE of open file {name}")
-            if dev.readonly:
+            if dev.readonly:                          # file_delete, cc:1091
                 return [b""], b"WRITE PROTECTED"
-            if name not in self.fs:                   # file_system.cc:39-40
-                return [b""], b"FILE DOESN'T EXIST"
             del self.fs[name]
             return [b""], b"00,OK"
         return [b""], b"21,UNKNOWN COMMAND"
@@ -1234,6 +1240,9 @@ def _status(dev, msg):
     (b"\x01\x02\x01NOSUCHROOT/amiga64-test/x", b"PATH DOESN'T EXIST"),
     # probe "delete missing" (dos.cc:208-221)
     (b"\x01\x09USB1/amiga64-test/nosuch", b"FILE DOESN'T EXIST"),
+    # delete under a missing directory: delete_file_impl returns
+    # find_pathentry's FR_NO_PATH (filemanager.cc:1086-1088)
+    (b"\x01\x09USB1/nodir/f", b"PATH DOESN'T EXIST"),
     # probes "close t1 (none open)" / "file_info t1 (none)": fixed Messages
     # (dos.cc:22-23)
     (b"\x01\x03", b"84,NO FILE TO CLOSE"),
@@ -1298,4 +1307,34 @@ def test_delete_missing_directory_maps_to_205(build):
     h.call("dosio_uci_init")
     assert h.delete("USB1/nodir/f") == 1
     assert h.err() == de.ERROR_OBJECT_NOT_FOUND
+    assert_clean(h)
+
+
+# fix round 1, N3: find_pathentry (existence) runs BEFORE the file system
+# sees the write (fopen_impl 718-734 then file_open 740; delete_file_impl
+# 1086-1091), so on write-protected media a missing file is still
+# "FILE DOESN'T EXIST" and only a real open-for-write / delete is refused.
+@pytest.mark.parametrize("msg,want", [
+    (b"\x01\x02\x03nosuch", b"FILE DOESN'T EXIST"),     # OLD, missing
+    (b"\x01\x02\x03ro", b"WRITE PROTECTED"),            # OLD, exists
+    (b"\x01\x02\x01ro", b"00,OK"),                      # read-only open
+    (b"\x01\x02\x0Bnew", b"WRITE PROTECTED"),           # create
+    (b"\x01\x02\x07ro", b"FILE EXISTS"),                # CREATE_NEW
+    (b"\x01\x09nosuch", b"FILE DOESN'T EXIST"),          # delete missing
+    (b"\x01\x09ro", b"WRITE PROTECTED"),                 # delete exists
+])
+def test_model_readonly_checks_existence_first(msg, want):
+    dev = UciDevice(fs={"ro": bytearray(b"1")}, readonly=True)
+    assert _status(dev, msg) == want
+    assert set(dev.fs) == {"ro"}
+
+
+def test_delete_missing_on_readonly_media_is_205(build):
+    h = Harness(build, fs={"ro": bytearray(b"1")})
+    h.dev.readonly = True
+    h.call("dosio_uci_init")
+    assert h.delete("nosuch") == 1
+    assert h.err() == de.ERROR_OBJECT_NOT_FOUND       # not 214
+    assert h.delete("ro") == 1
+    assert h.err() == de.ERROR_DISK_WRITE_PROTECTED
     assert_clean(h)

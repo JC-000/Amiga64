@@ -56,14 +56,22 @@ def dump(path: str, obj) -> None:
         json.dump(obj, f, indent=1)
 
 
+class SnapshotError(RuntimeError):
+    """The config snapshot is incomplete: nothing may run on the device."""
+
+
 def full_config(client) -> dict:
     """{category: {item: value}} for every category (bodyless GETs only).
-    The REST answer nests the items under the category name."""
+    The REST answer nests the items under the category name.  A category
+    that answers with errors or without its items raises SnapshotError."""
     out = {}
     for cat in client.list_configs():
-        raw = {k: v for k, v in client.get_config_category(cat).items()
-               if k != "errors"}
-        out[cat] = raw[cat] if list(raw) == [cat] else raw
+        raw = client.get_config_category(cat)
+        items = raw.get(cat)
+        if raw.get("errors") or not isinstance(items, dict):
+            raise SnapshotError(f"config category {cat!r}: "
+                                f"{raw.get('errors') or 'no items'}")
+        out[cat] = items
     return out
 
 
@@ -79,74 +87,143 @@ def config_diff(a: dict, b: dict) -> dict:
     return diff
 
 
+def secret(item: str) -> bool:
+    """STRPASS items (fw 3.15: only "Network Password",
+    network_config.cc:18) never go into a dump or the log."""
+    return "password" in item.lower()
+
+
+def redacted(obj):
+    """*obj* (a full config, or a config_diff) with secret values masked."""
+    if isinstance(obj, dict):
+        return {k: ("<redacted>" if secret(str(k)) and not isinstance(v, dict)
+                    else redacted(v)) for k, v in obj.items()}
+    return obj
+
+
+class _Steps:
+    """Run restore steps so that no single failure (or ^C) skips the
+    rest: every step is tried *attempts* times; a KeyboardInterrupt or
+    SystemExit counts as a failed attempt and is re-raised once the whole
+    restore has finished."""
+
+    def __init__(self):
+        self.interrupt = None
+
+    def run(self, what: str, fn, attempts: int = 2):
+        """-> (True, result) or (False, None)."""
+        for n in range(1, attempts + 1):
+            try:
+                return True, fn()
+            except BaseException as e:           # noqa: BLE001 - see class
+                if not isinstance(e, Exception) and self.interrupt is None:
+                    self.interrupt = e
+                log(f"  {what} failed (attempt {n}/{attempts}): {e!r}")
+        return False, None
+
+
+def restore_config(client, before: dict, snap: dict, steps: _Steps) -> dict:
+    """Put the device back to *before*.  -> {"restored", "reset_ok",
+    "after", "diff"}; restored is True only for an empty final diff."""
+    from c64_test_harness.backends.ultimate64_helpers import (
+        U64StateSnapshot, restore_state)
+    steps.run("restore_state", lambda: restore_state(
+        client, U64StateSnapshot(**snap)), attempts=1)
+    for rnd in (1, 2):                          # re-read + per-item repair
+        ok, now = steps.run(f"re-read {rnd}", lambda: full_config(client))
+        if not ok:
+            continue
+        diff = config_diff(before, now)
+        if not diff:
+            break
+        for cat, items in diff.items():
+            for item, (was, cur) in items.items():
+                show = "<redacted>" if secret(item) else f"{was!r}"
+                if was is None:
+                    log(f"  not restoring {cat} / {item}: absent from the "
+                        f"snapshot (now {'<redacted>' if secret(item) else repr(cur)})")
+                    continue
+                if steps.run(f"set {cat} / {item} = {show}",
+                             lambda: client.set_config_item(cat, item, was))[0]:
+                    log(f"  restored {cat} / {item} = {show}")
+    reset_ok = steps.run("C64 reset", client.reset, attempts=1)[0]
+    time.sleep(3.0)
+    ok, after = steps.run("final re-read", lambda: full_config(client))
+    diff = config_diff(before, after) if ok else None
+    return {"restored": diff == {}, "reset_ok": reset_ok, "after": after,
+            "diff": diff}
+
+
 @contextlib.contextmanager
 def u64_hold(out_dir: str, lock_timeout: float = 6 * 3600.0):
     """ONE DeviceLock hold with exact config snapshot/restore.
 
     Right after the lock is acquired: device info, the harness
     snapshot_state and the FULL config (every category) are recorded in
-    out_dir/config_before.json.  On exit (also on error): restore_state,
-    then every item still differing from the full snapshot is put back
-    one by one, the C64 is reset, the full config re-read and diffed
-    (out_dir/config_after.json).  No factory baseline on entry, no flash
-    save.  Yields a dict: target, info, lock_wait_s; after the block,
-    "restored" is True only for an empty re-read diff."""
+    out_dir/config_before.json (passwords redacted).  Any failure there
+    (including a category answering with errors) aborts before the body
+    runs, with the device untouched.  On exit, also on error or ^C:
+    restore_config (restore_state; re-read + per-item repair, each step
+    retried; C64 reset; final re-read and diff into config_after.json),
+    then the lock is released and a ^C is re-raised.  No factory baseline
+    on entry, no flash save.  Yields a dict: target, info, before,
+    lock_wait_s; after the block, "restored" is True only for an empty
+    final diff and "reset_ok" says whether the C64 reset went through."""
     from c64_test_harness import UnifiedManager
-    from c64_test_harness.backends.ultimate64_helpers import (
-        U64StateSnapshot, restore_state, snapshot_state)
-    hold = {"restored": False}
+    from c64_test_harness.backends.ultimate64_helpers import snapshot_state
+    hold = {"restored": False, "reset_ok": False}
     t_req = time.monotonic()
     log("requesting the device (DeviceLock) ...")
     with UnifiedManager(backend="u64", lock_timeout=lock_timeout,
                         baseline_on_entry=False) as mgr:
         target = mgr.acquire()
         snap = None
+        steps = _Steps()
         try:
             hold["lock_wait_s"] = waited = time.monotonic() - t_req
             client = target.transport.client
             before = full_config(client)
-            snap = dataclasses.asdict(snapshot_state(client))
+            snap_ = dataclasses.asdict(snapshot_state(client))
             info = client.get_info()
-            hold.update(target=target, info=info)
+            snap = snap_
+            hold.update(target=target, info=info, before=before)
             log(f"acquired after {waited:.0f}s wait; {info.get('product')} "
                 f"fw {info.get('firmware_version')} fpga "
                 f"{info.get('fpga_version')} core {info.get('core_version')}")
             log(f"config before: {snap}")
             dump(os.path.join(out_dir, "config_before.json"),
-                 {"info": info, "snapshot_state": snap, "full": before,
-                  "lock_wait_s": waited,
+                 {"info": info, "snapshot_state": snap,
+                  "full": redacted(before), "lock_wait_s": waited,
                   "time": time.strftime("%Y-%m-%dT%H:%M:%S")})
             yield hold
         finally:
-            log("restoring config ...")
             try:
                 if snap is None:
-                    raise RuntimeError("no snapshot was taken; config "
-                                       "untouched by this session")
-                restore_state(client, U64StateSnapshot(**snap))
-                for cat, items in config_diff(before,
-                                              full_config(client)).items():
-                    for item, (was, now) in items.items():
-                        try:
-                            client.set_config_item(cat, item, was)
-                            log(f"  restored {cat} / {item} = {was!r} "
-                                f"(was {now!r})")
-                        except Exception as e:
-                            log(f"  could not restore {cat} / {item} = "
-                                f"{was!r}: {e!r}")
-                client.reset()
-                time.sleep(3.0)
-                after = full_config(client)
-                diff = config_diff(before, after)
-                dump(os.path.join(out_dir, "config_after.json"),
-                     {"full": after, "diff_vs_before": diff,
-                      "time": time.strftime("%Y-%m-%dT%H:%M:%S")})
-                log("config after (full, all categories): "
-                    f"{'IDENTICAL' if not diff else diff}")
-                hold["restored"] = not diff
-            except Exception as e:
+                    log("no complete snapshot was taken: nothing ran, "
+                        "nothing to restore")
+                else:
+                    log("restoring config ...")
+                    r = restore_config(client, before, snap, steps)
+                    hold.update(restored=r["restored"],
+                                reset_ok=r["reset_ok"])
+                    dump(os.path.join(out_dir, "config_after.json"),
+                         {"full": redacted(r["after"]),
+                          "diff_vs_before": redacted(r["diff"]),
+                          "restored": r["restored"],
+                          "reset_ok": r["reset_ok"],
+                          "time": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                    d = r["diff"]
+                    log("config after (full, all categories): " +
+                        ("IDENTICAL" if d == {} else "RE-READ FAILED"
+                         if d is None else f"DIFFERS {redacted(d)}"))
+            except BaseException as e:          # noqa: BLE001 - never skip
                 log(f"RESTORE FAILED: {e!r}\n{traceback.format_exc()}")
-            mgr.release(target)
+                if not isinstance(e, Exception) and steps.interrupt is None:
+                    steps.interrupt = e
+            finally:
+                mgr.release(target)
+            if steps.interrupt is not None:
+                raise steps.interrupt
 
 
 class Hw:

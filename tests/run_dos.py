@@ -8,10 +8,14 @@ Usage:
 ``--backend u64`` (U64_HOST=...) runs the scenarios on the Ultimate 64 at
 1 MHz inside ONE DeviceLock hold with an exact full-config snapshot/restore
 (tests/bench/u64_session.u64_hold; config JSON in --out-dir).  RAMDISK only:
-after boot it zeroes ``dosio_want_uci`` and ``hle_dos_magic`` (defence in
-depth: before the wave-5 boot-stub fix, C64 BSS was not cleared) and checks ``dosio_backend`` = RAMDISK after every
-scenario.  The ``selection`` leg stays VICE-only: its fake-UCI build with
-the opt-in key would drive the real UCI, i.e. write to storage.
+it refuses to run unless the Command Interface is Disabled; after boot it
+zeroes ``dosio_want_uci`` and ``hle_dos_magic`` (defence in depth: before
+the wave-5 boot-stub fix, C64 BSS was not cleared), proves that
+``hle_dos_init`` selects RAMDISK, and checks ``dosio_backend`` = RAMDISK
+after every scenario; any preflight failure aborts.  The ``selection`` leg
+is VICE-only by construction (it boots its own fake-UCI build in a local
+VICE instance); with ``--backend u64`` it runs there after the hardware
+leg, and its checks are labelled "[local VICE]".
 
 Why a separate driver (docs/HLE_DOS.md "Testing"): until WS-B1's hle.s
 routes Read/Write on file kinds (fh_Args >= $10) to ``hle_dos_read`` /
@@ -968,23 +972,50 @@ def selection_checks(prg: str, timeout: float,
     return sess.checks, sess.failures
 
 
+def u64_preflight(before: dict) -> None:
+    """u64 only, before anything touches the machine: the Command
+    Interface must be Disabled in the session's config snapshot, so no
+    code path can reach the UCI (WAVE5_BRIEF C3: no storage writes).  A
+    missing item counts as not Disabled."""
+    ci = (before.get("C64 and Cartridge Settings") or {}).get(
+        "Command Interface")
+    if ci != "Disabled":
+        raise RuntimeError(f"refusing to run: Command Interface is {ci!r} "
+                           f"in the device config (must be 'Disabled')")
+
+
 def zero_dos_bss(sess, labels) -> None:
-    """u64 only: before the wave-5 boot-stub BSS clear (and on any older
-    core), a previous session can leave the opt-in key "UCI!" in
-    dosio_want_uci and "DOS!" in hle_dos_magic (which skips the lazy init,
-    keeping stale backend vectors).  Record the residue, zero both, prove it by readback: this
-    suite must never select ULTDOS (no storage writes, WAVE5_BRIEF C3)."""
+    """u64 only, fail-closed: before the wave-5 boot-stub BSS clear (and
+    on any older core), a previous session can leave the opt-in key "UCI!"
+    in dosio_want_uci and "DOS!" in hle_dos_magic (which skips the lazy
+    init, keeping stale backend vectors).  Record the residue, zero both
+    and prove it by readback; run hle_dos_init once and prove it selected
+    RAMDISK; zero hle_dos_magic again so the first scenario still starts
+    with a lazy init.  Any failure raises: this suite must never select
+    ULTDOS (no storage writes, WAVE5_BRIEF C3)."""
     from c64_test_harness import read_bytes, write_bytes
     from tests.harness_util import lookup_label
     t = sess.target.transport
-    for name in ("dosio_want_uci", "hle_dos_magic"):
+
+    def zero(name: str, what: str) -> None:
         addr = lookup_label(labels, name)
-        print(f"  u64: {name} residue at boot: "
-              f"{read_bytes(t, addr, 4).hex()}")
+        print(f"  u64: {name} {what}: {read_bytes(t, addr, 4).hex()}")
         write_bytes(t, addr, bytes(4))
         got = read_bytes(t, addr, 4)
-        sess.check(f"u64: {name} zeroed before the first dos call",
-                   got == bytes(4), f"readback {got.hex()}")
+        ok = got == bytes(4)
+        sess.check(f"u64: {name} zeroed ({what})", ok,
+                   f"readback {got.hex()}")
+        if not ok:
+            raise RuntimeError(f"{name} readback {got.hex()} after zeroing")
+
+    zero("dosio_want_uci", "residue at boot")
+    zero("hle_dos_magic", "residue at boot")
+    sess._call("hle_dos_init")
+    be = read_bytes(t, lookup_label(labels, "dosio_backend"), 1)[0]
+    sess.check("u64: hle_dos_init selects RAMDISK", be == 0, f"got {be}")
+    if be != 0:
+        raise RuntimeError(f"hle_dos_init selected backend {be}, not RAMDISK")
+    zero("hle_dos_magic", "after the probe init")
 
 
 def run_suite(target, labels, scs, args):
@@ -1040,7 +1071,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--backend", choices=["vice", "u64"], default="vice",
                     help="u64: the Ultimate 64 at U64_HOST, 1 MHz, one "
                          "DeviceLock hold with exact config snapshot/restore; "
-                         "RAMDISK only (the selection leg is VICE-only)")
+                         "RAMDISK only; the selection leg then runs on a "
+                         "local VICE")
     ap.add_argument("--out-dir", default="build/evidence/run_dos-u64",
                     help="u64: config_before/after.json")
     args = ap.parse_args(argv)
@@ -1060,24 +1092,20 @@ def main(argv: list[str] | None = None) -> int:
         want = set(args.only.split(","))
         scs = [s for s in scs if s.name in want]
         run_selection = "selection" in want
-    if args.backend == "u64" and run_selection:
-        # its DOSIO_FAKE_UCI build writes the opt-in key: on a device with
-        # a Command Interface that drives the real UCI (storage writes)
-        if args.only:
-            print("error: the selection leg is VICE-only", file=sys.stderr)
-            return 2
-        print("[selection] skipped: VICE-only (fake-UCI build + opt-in key "
-              "would drive the real UCI)")
-        run_selection = False
 
     from c64_test_harness import Labels, UnifiedManager, ViceConfig
     from tests.harness_util import REU_VICE_ARGS
     from tests.run_vectors import prepare_target
 
     labels = Labels.from_file(labels_path)
-    if args.backend == "u64":
+    if args.backend == "u64" and not scs:
+        from tests.run_program import Session
+        sess = Session(target=None, labels=labels, timeout=args.timeout)
+        print("[u64] no scenario selected: the device is not used")
+    elif args.backend == "u64":
         from tests.bench.u64_session import log, u64_hold
         with u64_hold(os.path.abspath(args.out_dir)) as hold:
+            u64_preflight(hold["before"])
             target = hold["target"]
             target.transport.set_speed(1)
             log("CPU speed set to 1 MHz")
@@ -1098,13 +1126,17 @@ def main(argv: list[str] | None = None) -> int:
                 mgr.release(target)
 
     if run_selection:
-        print("[selection] DOSIO_FAKE_UCI build (second VICE instance)")
+        # VICE-only by construction: selection_checks boots its own
+        # DOSIO_FAKE_UCI build in a local VICE instance, whatever --backend
+        tag = "[local VICE] " if args.backend == "u64" else ""
+        print(f"[selection] {tag}DOSIO_FAKE_UCI build (second VICE instance)")
         try:
             ok, bad = selection_checks(prg, args.timeout, args.budget)
-            sess.checks += ok
-            sess.failures += bad
+            sess.checks += [tag + c for c in ok]
+            sess.failures += [tag + f for f in bad]
         except Exception as e:  # noqa: BLE001 - report, don't mask
-            sess.check("selection: ran", False, f"{type(e).__name__}: {e}")
+            sess.check(f"{tag}selection: ran", False,
+                       f"{type(e).__name__}: {e}")
 
     n_ok, n_bad = len(sess.checks), len(sess.failures)
     print(f"{n_ok}/{n_ok + n_bad} checks passed")

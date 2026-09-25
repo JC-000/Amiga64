@@ -180,10 +180,35 @@ def hunk_rmw68k(n: int) -> bytes:
 
 # ------------------------------------------------------------------ loading
 
-# Code labels whose bytes in C64 RAM must match the PRG file: none of them is
-# self-modified, and the U64 dispatcher patches only main+7.
-LOAD_CHECK_LABELS = ("test_run_program", "test_load_chunk", "mem_rec_dirty")
-LOAD_CHECK_LEN = 8
+# check_loaded compares the whole PRG image with C64 RAM right after boot.
+# The only bytes a boot may legitimately change there (measured on VICE
+# for 35c1c1e and wave5/integration: build/evidence/w5-tools/fix1/) are:
+#  - self-modified operands of the BASIC-stub page's boot code: wave5's
+#    BSS clear rewrites the page operand of `@pg: sta $xx00,y` ($081E);
+#    found by scanning that code for absolute stores/incs/decs into the
+#    page, so no address is hard-wired;
+#  - on the U64, the dispatcher's retarget of the idle jmp at main+7
+#    (tests/harness_util.py, u64_install_dispatcher).
+# Every other self-modified operand (jvec, ea_jv, hle_jv, ...) and the
+# DATA segment only change once 68k code or an HLE call has run, i.e.
+# after this check.
+STUB_PAGE_END = 0x0900
+_ABS_WRITES = (0x8D, 0x8E, 0x8C, 0xEE, 0xCE)   # sta/stx/sty/inc/dec abs
+READ_CHUNK = 0x1000
+
+
+def load_mask(body: bytes, load: int, backend: str, labels) -> set[int]:
+    """Addresses check_loaded does not compare (see above)."""
+    from tests.harness_util import IDLE_JMP_OFFSET
+    mask = set()
+    for i in range(max(0, 0x080D - load), min(len(body), STUB_PAGE_END - load) - 2):
+        if body[i] in _ABS_WRITES:
+            tgt = body[i + 1] | body[i + 2] << 8
+            if load <= tgt < STUB_PAGE_END:
+                mask.add(tgt)
+    if backend != "vice":
+        mask.add(lookup_label(labels, "main") + IDLE_JMP_OFFSET + 2)
+    return mask
 
 
 def check_loaded(target, prg: str, labels) -> None:
@@ -191,19 +216,24 @@ def check_loaded(target, prg: str, labels) -> None:
 
     Every call a bench makes goes to a label address; if the loaded PRG is
     another build, those addresses land in foreign code and the bench
-    reports a false failure (JAM, bad halt, bogus icount)."""
+    reports a false failure (JAM, bad halt, bogus icount).  The whole
+    image is compared (same-size builds differ anywhere), except the
+    load_mask bytes."""
     with open(prg, "rb") as f:
         raw = f.read()
-    load = raw[0] | raw[1] << 8
-    for name in LOAD_CHECK_LABELS:
-        addr = lookup_label(labels, name)
-        want = raw[2 + addr - load:2 + addr - load + LOAD_CHECK_LEN]
-        got = read_bytes(target.transport, addr, LOAD_CHECK_LEN)
-        if got != want:
-            raise RuntimeError(
-                f"{os.path.relpath(prg, ROOT)} is not the loaded PRG: "
-                f"{name} ${addr:04X} holds {got.hex()}, the file has "
-                f"{want.hex()}")
+    load, body = raw[0] | raw[1] << 8, raw[2:]
+    got = bytearray()
+    for off in range(0, len(body), READ_CHUNK):
+        got += target.transport.read_memory(
+            load + off, min(READ_CHUNK, len(body) - off))
+    mask = load_mask(body, load, target.backend, labels)
+    bad = [load + i for i in range(len(body))
+           if got[i] != body[i] and load + i not in mask]
+    if bad:
+        raise RuntimeError(
+            f"{os.path.relpath(prg, ROOT)} is not the loaded PRG: "
+            f"{len(bad)} byte(s) differ, first at ${bad[0]:04X} "
+            f"(RAM {got[bad[0] - load]:02X}, file {body[bad[0] - load]:02X})")
 
 
 class ViceBoot:
@@ -219,17 +249,24 @@ class ViceBoot:
         cfg = ViceConfig(prg_path=prg, warp=True, sound=False,
                          extra_args=list(REU_VICE_ARGS))
         self.mgr = UnifiedManager(backend="vice", vice_config=cfg)
-        self.target = self.mgr.acquire()
-        prepare_target(self.target, prg)
+        try:
+            self.target = self.mgr.acquire()
+            prepare_target(self.target, prg)
+        except BaseException:
+            self.close()
+            raise
         return self.target
 
     def close(self) -> None:
-        if self.mgr is not None:
-            try:
-                self.mgr.release(self.target)
-            finally:
-                self.mgr.shutdown()
+        mgr, target = self.mgr, self.target
         self.mgr = self.target = None
+        if mgr is None:
+            return
+        try:
+            if target is not None:
+                mgr.release(target)
+        finally:
+            mgr.shutdown()
 
 
 # ------------------------------------------------------------------ driver

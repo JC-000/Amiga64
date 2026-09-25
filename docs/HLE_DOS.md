@@ -423,9 +423,12 @@ Model-vs-silicon notes (none affected results):
 - `host/tests/test_hle_dos_uci.py`: the UCI byte-level test described above.
 - `tests/run_dos.py`: RAMDISK end to end in VICE, plus the backend-selection leg on a second VICE instance. Run it with `python3 -m tests.run_dos --prg build/ws-b2/runner.prg`. The PRG's directory must contain `gen/dispatch.s`, as `make runtime` leaves it, for the `DOSIO_FAKE_UCI` variant build.
 - `tests/run_dos.py --backend u64` (W5-T): the same scenarios on the Ultimate 64 at `U64_HOST`, at 1 MHz, in one DeviceLock hold with a full-config snapshot/restore (`tests/bench/u64_session.u64_hold`, JSON in `--out-dir`). It is RAMDISK only:
+  - It fails closed. Every preflight failure below aborts the run before the first scenario; the device config is still restored.
+  - It refuses to run unless the session's config snapshot shows `Command Interface` = `Disabled`. A missing item counts as not Disabled.
   - After boot it zeroes `dosio_want_uci` and `hle_dos_magic` and proves both by readback. Before the wave-5 boot-stub fix (supervisor, `tests/bss_boot.py`), C64 BSS was not cleared at boot on hardware: a residue of `"UCI!"` would select ULTDOS, and a residue of `"DOS!"` would skip the lazy init and keep stale backend vectors. The boot stub now clears BSS; the zeroing stays as defence in depth.
+  - It runs `hle_dos_init` once and proves that it selected RAMDISK, then zeroes `hle_dos_magic` again, so the first scenario still starts with a lazy init.
   - It checks that `dosio_backend` reads RAMDISK after every scenario.
-  - The `selection` leg is skipped. Its fake-UCI build writes the opt-in key, and on a device with a Command Interface that would drive the real UCI and write to storage.
+  - The `selection` leg never touches the device, whatever `--backend` says: it boots its own `DOSIO_FAKE_UCI` build in a local VICE instance. With `--backend u64` it runs there after the hardware leg, and its checks are labelled `[local VICE]`.
 
   Results are in `docs/HARDWARE.md`, section "Wave 5: run_dos on hardware".
 
