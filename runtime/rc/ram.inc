@@ -47,6 +47,18 @@ buf_result = $C800      ; contract range $C800-$CFFF; $CE00 page carved out belo
 ; @region run $CF00-$CFFF buf_result tail - READY_FLAG at $CFFF (runner.s, buf_result+$7FF)
 
 ; @region sys $D000-$DEFF VIC/SID/color/CIA I/O block - hardware, not claimable
+.ifndef CIA1_PRA
+CIA1_PRA    = $DC00     ; CIA 1 port A: keyboard matrix column select (write)
+.endif
+.ifndef CIA1_PRB
+CIA1_PRB    = $DC01     ; CIA 1 port B: keyboard matrix row read
+.endif
+.ifndef CIA1_DDRA
+CIA1_DDRA   = $DC02     ; CIA 1 data direction A
+.endif
+.ifndef CIA1_DDRB
+CIA1_DDRB   = $DC03     ; CIA 1 data direction B
+.endif
 ; @region sys $DF00-$DF0A REU RAM-Expansion-Controller registers
 .ifndef REC_STATUS
 REC_STATUS  = $DF00

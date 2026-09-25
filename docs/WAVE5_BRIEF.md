@@ -53,6 +53,13 @@ Pre-landed: `hle.s` `Read` on console kinds 0/1 does `jmp hle_con_read`
 (stub: D0 = 0, EOF — the Wave-4 behaviour). Entry state: D1 = fh BPTR,
 D2 = buffer, D3 = length, return address on the guest stack; retire with
 `jmp hle_ret` after setting D0 (bytes read / 0 = EOF / -1 = error).
+**C2 amendment (2026-09-24, w5-con request):** `hle.s` exports its console
+output helpers for echo — `hle_con_load` (guest ENV_STATE cursor → `hle_cur`/
+`hle_col`), `hle_putc` (A = ASCII; same screen/scroll conventions as Write),
+`hle_con_save` (write the cursor back) — plus `hle_cur` (u16) and `hle_col`
+(u8). `hle_con.s` must bracket any use with load … save. CIA 1 registers are
+declared in `rc/ram.inc` as `CIA1_PRA/PRB/DDRA/DDRB` (sys region); use only
+those names.
 `hle_con.s` may call the memory API (C1 of Wave 4 applies to any direct REC
 use). No KERNAL calls (ROMs may be banked out; the runner runs with SEI).
 C64 RAM via BSS only; no new ZP.

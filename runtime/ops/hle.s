@@ -50,6 +50,7 @@
 .import hle_alloc, hle_free     ; runtime/ops/hle_mem.s (WAVE5 C1)
 .import hle_con_read            ; runtime/ops/hle_con.s (WAVE5 C2)
 .export hle_sz, hle_flg, hle_old, hle_ptr, hle_cnt   ; allocator ABI (C1)
+.export hle_putc, hle_con_load, hle_con_save, hle_cur, hle_col   ; console echo ABI (C2)
 
 HLE_FN_COUNT = 21               ; valid indices $A100-$A114 (hle_env.HLE_FN_COUNT)
 LIB_VERSION  = 40               ; OpenLibrary: newer versions -> NULL
