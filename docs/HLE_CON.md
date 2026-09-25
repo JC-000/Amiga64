@@ -286,3 +286,249 @@ default timeout. Results: `build/evidence/w5-con/mutants.txt` and
   RUN/STOP is not Ctrl-C: SetSignal still never reports a break.
 - `IsInteractive` is unchanged (console = DOSTRUE), and that is what makes
   vc.lib use small Reads and flush stdout.
+
+## Hardware validation (W6-K)
+
+Owner: w6-kbd (Wave 6, `docs/WAVE6_BRIEF.md` C1; fix round 1 after the
+adversarial review). Program: `fixtures/c/kbd_echo.c`. Driver:
+`tests/kbd_echo.py`. Host tests: `host/tests/test_kbd_echo.py`,
+`host/tests/test_kbd_u64_mock.py`. This section is about the items marked
+UNVALIDATED or "nothing" above: the row settle at 48 MHz, the port-1
+joystick mask, and real switches.
+
+### The program and the stream
+
+`kbd_echo` is a vbcc C program that reads through the normal console path
+(`Read` → `hle_con_read` → matrix scan, debounce, decode, line discipline,
+echo). It walks the operator through nine steps. Each step is one line
+ending in RETURN:
+
+1. hold Q;
+2. hold ; then /;
+3. a 3-key rollover;
+4. RSHIFT and C=;
+5. to 9. a port-1 joystick held UP, DOWN, LEFT and RIGHT, then FIRE,
+   while typing HOSE.
+
+For every character that `Read` delivered, it prints a row like
+` 'q' $71 c7r6` and then `STEP n PASS`, `FAIL` or `SKIP`. An empty line
+skips a step, and CTRL+D quits. A free mode follows. The program ends with
+`STEPS …` (P, F or S per step, `-` for a step that is not part of this
+run) and `RESULT`. The exit code is the number of failed steps.
+
+**The column and row on screen come from the key map, not from the scan.**
+The program prints the inverse of the key map for each delivered
+character. A guest program cannot read the scanner's state, because it is
+in C64 BSS, which is outside guest memory. `hle_con.s` is not W6-K's file,
+so no seam could be added. This is a deviation from the brief ("the raw
+column/row it scanned"), reported as such. The scanned position exists
+only in the driver's **stream**:
+- it polls `hle_con_nkey`, `hle_con_mat` and `hle_con_idle`;
+- it prints `key DOWN c7r6 Q` and the rows a port-1 stick holds low, and
+  mirrors the screen;
+- it flags `COLUMN BLEED?` when a key goes down in column c while column
+  c+1 of the same row is held (the scan runs from column 7 down to 0).
+
+The human session therefore always streams. There is no quiet mode.
+`hle_con_idle` is not exported. Its address is derived from the BSS
+declarations in `hle_con.s`, and used only if that layout reproduces every
+exported BSS label.
+
+**A real settle phantom reads `^q`, not `q^`.** The phantom is read in the
+same sample as Q, and a commit decodes in matrix order, so column 6 comes
+before column 7. The screen shows the ↑ glyph (the `^` key, hex `$5E`,
+`c6r6`) and then Q. The driver's screen mirror prints ↑ as `^` (and £ as
+`\`, ← as `_`).
+
+### Judging how a step was done, not only the characters
+
+The characters alone prove little. The queue-fed smoke types every answer
+with no key pressed at all and still gets `STEPS PPPPPPPPP`. So every
+stream sample is tagged with the step on screen, and `judge_step` checks
+the **manner** of each step and looks for **defects**:
+
+| Step | Performed means | A defect is |
+|---|---|---|
+| 1, 2 | Q (then ; and /) held continuously for at least 1.5 s | any other key down while it is held |
+| 3 | 3 or more non-modifier keys down at the same time | any key other than Z, I, P or RETURN down while three are held (a ghost) |
+| 4 | RSHIFT down when A and / go down; C= down when Q goes down; LEFT SHIFT never down | — |
+| 5-9 | the stick's row (UP r0, DOWN r1, LEFT r2, RIGHT r3, FIRE r4) seen held low in `hle_con_idle` when each of H, O, S and E goes down | any key on that row reading down while the stick holds it |
+| any | — | a `COLUMN BLEED?` in this step |
+
+In a control run, only the triggering action is required (the key held,
+or the stick seen). The broken build may garble the typing itself.
+
+**Run verdicts** (`judge_run`):
+- **Fixed build:** PASS only when every step is P, was performed, and
+  shows no defect. It is FAIL on any F or any defect. Otherwise it is
+  INCOMPLETE. **A SKIP is never a pass.**
+- **Control build (fix round 2):** DEFECT SHOWN **only when the stream
+  shows that control's own defect signature**:
+  - `nosettle`: the key one column lower on the same row goes down in the
+    **same sample** as the held key (c6r6 with Q, c5r2 with ;, c5r7
+    with /);
+  - `nojoymask`: keys on the stick's row read as down while the stick
+    holds that row.
+
+  INCONCLUSIVE when the target steps were performed, all P and clean.
+  Anything else is **INCOMPLETE: operator error, redo the leg**. That
+  covers an F or S from a typo, an early RETURN, a stray key without the
+  signature, or an unperformed step. It is never DEFECT SHOWN. So a typo
+  in a control run can no longer turn a clean control into a
+  "validation".
+
+### Positive controls
+
+A PASS at 48 MHz alone cannot tell "the fix works" apart from "this U64E
+never produces the phantom". So the session also runs the runner with the
+fix taken out, which is expected to fail:
+
+| Control | What is removed | Target steps |
+|---|---|---|
+| `nosettle` | the `jsr hle_con_settle` and `bcc` in the column loop (5 bytes of NOP) | 1, 2 |
+| `nojoymask` | the `and hle_con_idle` (3 bytes of NOP): port-1 rows read as keys | 5-9 |
+
+- **How a control is made.** The same uploaded runner is patched in C64
+  RAM while it sits idle. There is no second upload.
+  - The site is found in the runner PRG by the byte pattern of the scan's
+    column loop, and the operand of that loop's `and` must be
+    `hle_con_idle`. It must match exactly once.
+  - Every write is verified by readback. The patch is removed in a
+    `finally`, also verified by readback.
+  - These are the same edits as the text mutants in
+    `build/evidence/w6-kbd/mutbuild.py`, which survive VICE by
+    construction.
+- **How the operator knows.** The program gets the arguments
+  `CONTROL <name> <first> <last>`. It prints `*** CONTROL BUILD: <name>
+  ***` and "SUPPOSED TO FAIL", and runs only the target steps. The host
+  output says `THIS BUILD IS SUPPOSED TO SHOW THE DEFECT`.
+- **The session verdict.**
+  - **VALIDATED** requires all four of: the fixed build PASS at 48 MHz,
+    the fixed build PASS at 1 MHz (the negative control), `nosettle`
+    DEFECT SHOWN at 48 MHz, and `nojoymask` DEFECT SHOWN at 48 MHz.
+  - If the fixed build passes but a control comes out clean, the verdict
+    is **INCONCLUSIVE**. That is a different claim from VALIDATED.
+  - Any fixed-build defect or F is **FAIL**.
+  - Anything missing, skipped or not done as asked is **INCOMPLETE**.
+  - Only VALIDATED exits 0.
+
+**What the verdicts mean, given the stream.** Every run streams. On the
+U64 each stream poll is a REST memory read, which could stall the 6510
+inside a scan and lengthen the settle time. So a stream could in principle
+hide a phantom. The controls settle this by design: they run under
+exactly the same streaming conditions as the fixed build.
+- **VALIDATED** means that both defects were visible under streaming, and
+  that the fixed build was clean under the same conditions. A control that
+  shows its defect while streaming proves the stream does not mask that
+  defect.
+- **INCONCLUSIVE** means that a control's defect was **not seen under
+  streaming**. That can be the device (the defect does not occur there, so
+  the fix is harmless but not proven) or the stream.
+- **The follow-up, for INCONCLUSIVE only**, is to re-run just that control
+  with sparse polling, holding each key for about 4 s, for example
+  `--runs nosettle@48 --poll 1.0`. That is about 10 times fewer reads
+  during the holds. A non-default plan is never VALIDATED, so its output
+  is evidence for the supervisor's judgment, not a verdict.
+
+### What VICE covers (`--backend vice`, automated)
+
+| Leg | What it checks |
+|---|---|
+| `guided` | Presses every step's keys in VICE's matrix (snapshot `KEYBOARD` module) and checks the count and scanned position of every key event, that a held key does not repeat, that a modifier alone counts nothing, and each step's screen rows. A **control port 2** stick held while X is down must skip the sample. The judge must find steps 1-4 performed and clean, and steps 5-9 NOT performed (VICE has no port-1 stick), so the run is INCOMPLETE and never PASS. |
+| `teeth` | The shape of a real phantom: Q and ↑ in one commit give `^q`, `STEP 1 FAIL` and a flagged bleed. The judge gives FAIL as a fixed-build run and DEFECT SHOWN as a control. An empty line gives SKIP. |
+| `manner` | The right characters typed the wrong way: Q tapped, Z I P one at a time, LEFT SHIFT in step 4. The program says P, the judge says not performed, and the run is INCOMPLETE. |
+| `patch` | Each control patch is applied and removed with readback. `nosettle` observably stops the settle routine: `hle_con_sn` is left untouched by a scan. |
+| `control` | The `nosettle` control, with the real RAM patch and the CONTROL arguments, on VICE. VICE rows recover at once, so this is a device where the phantom never occurs. Run honestly, the verdict is INCONCLUSIVE. With a stray W after Q (an F), it is INCOMPLETE. Only with the signature injected (↑ down in the same sample as Q) is it DEFECT SHOWN. |
+| `--smoke` | No key presses. The idle scan must stay silent, then the queue feeds every answer and every step must PASS. The judge must say INCOMPLETE ("not a validation"). The control patch round trip is also checked. This leg also runs on the U64. |
+
+VICE can drive only control port 2 from a snapshot (evidence:
+`build/evidence/w6-kbd/joystick_probe.txt`):
+- undumping `JOYSTICK0` sets the value that the next dump writes as
+  `JOYSTICK1`, and CIA1 port A reads that value;
+- `JOYSTICK1` reaches neither port;
+- the binary monitor's Joyport-set had no visible effect.
+
+So `nojoymask` and `nosettle` survive VICE, and **only the hardware
+controls can kill them**. The mutant totals are in
+`build/evidence/w6-kbd/fix1/`.
+
+### The manual session (U64E, a person at the keyboard)
+
+The supervisor runs this with the user:
+
+```sh
+U64_HOST=10.43.23.81 python3 -m tests.kbd_echo --prg build/<pkg>/runner.prg \
+    --backend u64 --out-dir build/evidence/kbd-hw
+```
+
+1. **Firmware gate, fail fast.** The driver tries the DeviceLock for
+   10 s. If the lock is busy, it exits non-zero and names the holder (PID,
+   lockfile age). Otherwise it does one bodyless GET `/v1/info`. On
+   anything but the resting build (git `c47155b7`, core `1.50`; override
+   with `--expect-git` and `--expect-core`), it releases the lock in a
+   `finally` and exits non-zero, with nothing written. The manual mode
+   never re-queues. Only the unattended `--smoke` re-queues, every 5 min
+   for up to `--fw-wait-hours` (default 12), and it retries on a transient
+   GET error. On the resting build the driver keeps the lock, and
+   `u64_hold` joins that same hold (`allow_nested`).
+2. **Operator confirmation.** The driver prints the plan and waits up to
+   5 min for Enter on the host terminal (stdin must be a terminal). Only
+   then does it upload the runner (`run_prg`). No answer means it aborts
+   with nothing written. No command-line switch skips this step.
+3. **The hold.** It takes the exact full-config snapshot and restore of
+   `u64_hold`, with the config JSON in `--out-dir`. It re-checks the
+   firmware in the hold's own snapshot before anything else. It sets every
+   item the run depends on explicitly (a flash resets the device
+   settings): the CPU speed per run (Turbo Control through `set_speed`) and
+   REU enabled at 16 MB (`set_reu`). It boots the runner at 1 MHz, zeroes
+   the ULTDOS opt-in key and proves RAMDISK. The program opens no files,
+   so there are no storage writes.
+4. **The plan (`--runs`).** The default is
+   `fixed@48,nosettle@48,nojoymask@48,fixed@1`. Only this plan can be
+   VALIDATED.
+   - Each run prints its checklist and streams until the program exits.
+   - On `--max-minutes` (default 30 per run) or ^C, the driver feeds
+     CTRL+D through the queue. The patch removal and the config restore
+     still run.
+   - **A program that still has not ended stops the session.** The driver
+     does not rewrite a control patch under a CPU that may be executing
+     it. The restore's C64 reset drops the patch together with the runner.
+   - Before each fixed-build run the runner code is re-checked as the
+     original, with no patch left.
+   - The log is `--out-dir/session.log`, and the last line is
+     `SESSION VERDICT: …`.
+
+**Expected duration: about 35-45 minutes** with the lock held throughout:
+- gate, confirmation, boot and restore: about 2 min;
+- the fixed build at 48 MHz, 9 steps plus the free mode: about 10-12 min;
+- the `nosettle` control: about 2 min;
+- the `nojoymask` control, 5 stick steps: about 4-5 min;
+- the fixed build at 1 MHz: about 12-15 min, because the interpreter runs
+  about 1,600 68k instructions per second there, so each output row takes
+  about a second.
+
+**Before starting:**
+- There must be no joystick in control port 2 (by design it locks the
+  keyboard out).
+- A joystick must be in control port 1. Steps 5-9 need it, and a skipped
+  step makes the session INCOMPLETE.
+- **Type only while the `>` prompt shows.** There is no type-ahead.
+- On screen, letters show in one case. The hex code tells them apart:
+  `$71` is q, `$51` is Q.
+
+| Step | Do | Fixed build: expect | The defect (what a control should show) | Validates |
+|---|---|---|---|---|
+| 1 HOLD Q | hold Q for 2 s, release, RETURN | `> q`, ` 'q' $71 c7r6`, `STEP 1 PASS`; stream `key DOWN c7r6 Q`, held ≥ 1.5 s | `^q`: ↑ (`$5E`, c6r6) read in the same sample as Q, with the stream flagging `c6r6 UPARROW <- COLUMN BLEED? c7r6 Q is held`; or no character at all (the phantom keeps restarting the debounce) | the row settle at 48 MHz; debounce on a real switch |
+| 2 HOLD ; AND / | hold ; for 2 s, release; hold / for 2 s, release; RETURN | `;/` | `l;` (c5r2, bled from ;) or `,/` (c5r7, bled from /) | the settle on rows 2 and 7 |
+| 3 ROLLOVER | press Z and keep it down, add I, add P (all three held), release all, RETURN | `zip` in press order; stream shows three keys down at once | a letter missing, doubled or never pressed | 3-key rollover (Z, I and P form no ghost rectangle) |
+| 4 RSHIFT, C= | hold RIGHT SHIFT and type A and /, release; hold C= and type Q, release; RETURN; never LEFT SHIFT | `A?q` | `a/` (RSHIFT not decoded), or an extra character from C= | the RSHIFT decode; C= as a modifier only |
+| 5 STICK UP | stick in port 1 UP, type HOSE, release the stick, RETURN | `hose`; stream `rows r0 held low (masked)` | `1 3 5 7 9 + \` appear, and DEL rubs characters out | the port-1 row mask, row 0 |
+| 6 STICK DOWN | … DOWN … | `hose`, r1 | the step ends at once with an empty line (RETURN is on row 1): SKIP, then `w r y i p * _` land in the next line | row 1 |
+| 7 STICK LEFT | … LEFT … | `hose`, r2 | CTRL reads as held (row 2): letters become control codes, CTRL+D ends the program, CTRL+J ends the line; `a d g j l ;` | row 2 |
+| 8 STICK RIGHT | … RIGHT … | `hose`, r3 | `4 6 8 0 - 2` appear | row 3 |
+| 9 FIRE | hold FIRE, type HOSE, release FIRE, RETURN | `hose`, r4 | RSHIFT reads as held (row 4): HOSE comes out upper case, with `Z C B M >` and spaces | row 4 |
+| free | every key once, with and without SHIFT; an empty line ends | one row per character, matching the key map | `??`, a wrong position, a missing or doubled character | the whole key map on real hardware |
+
+**Report back:** the `SESSION VERDICT` line, the per-run lines
+`<run>: <verdict>`, the per-step judge lines (performed, notes, defects),
+and `session.log`.
