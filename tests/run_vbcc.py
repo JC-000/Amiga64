@@ -456,6 +456,7 @@ def stage_and_run(sess: Session, tag: str, blob: bytes, budget: int,
             b"\0\0\0\0")
     elif DOS_INIT and has_label(sess, "hle_dos_init"):
         sess._call("hle_dos_init")    # fresh WS-B2 handle pool per program
+    from tests.run_con import con_stdin; con_stdin(sess)  # W5-K: stdin = empty scripted queue (EOF), docs/HLE_CON.md
     t0 = time.monotonic()
     res = sess.run_program(pc, manifest["stack_top"], budget)
     dt = time.monotonic() - t0
