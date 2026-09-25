@@ -98,6 +98,12 @@ HEAP_BASE = $100000     ; first byte of the AllocMem pool
 .ifndef HEAP_END
 HEAP_END  = $7FFFFF     ; last byte of the AllocMem pool (inclusive)
 .endif
+.ifndef HEAP_CTL
+HEAP_CTL  = $100000     ; heap control block, 8 bytes BE: +0 free-list head, +4 rejected-free count (W5-H, docs/HLE.md "Heap")
+.endif
+.ifndef HEAP_FIRST
+HEAP_FIRST = $100008    ; first block header; every block = 8-byte header + payload
+.endif
 
 ; @region free $800000-$DFFFFF UNALLOCATED guest space - claim via this file + rescheck green
 
@@ -121,5 +127,6 @@ dosio_rd_end  = $FFFFFF ; last RAMDISK byte (inclusive)
 .assert (FH_POOL & 3) = 0,            error, "FileHandles must be longword aligned (BPTR)"
 .assert dosio_rd_base > HEAP_END,     error, "RAMDISK must sit above the AllocMem pool"
 .assert (HEAP_BASE & 7) = 0,          error, "AllocMem pool must be 8-byte aligned (MEM_BLOCKSIZE)"
+.assert HEAP_CTL = HEAP_BASE .and HEAP_FIRST = HEAP_CTL + 8, error, "heap control block must open the pool, blocks follow it"
 .assert FH_NIL + 44 <= $000C00,       error, "WS-B1 env structures must stay below the WS-B2 part ($000C00)"
 .assert ((FH_CONOUT | FH_CONIN | FH_NIL | ENV_PROCESS | ENV_CLI | ENV_CLI_NAME) & 3) = 0, error, "BPTR targets must be longword aligned"

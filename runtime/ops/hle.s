@@ -48,6 +48,7 @@
 .import hle_dos_read, hle_dos_write     ; WS-B2 file-handle I/O (C2)
 .import hle_dos_ioerr, hle_dos_ensure   ; IoErr() value (u32 LE) + lazy init
 .import hle_alloc, hle_free     ; runtime/ops/hle_mem.s (WAVE5 C1)
+.import hle_pool_alloc, hle_pool_delete ; W5-H pool entries (hle_mem.s)
 .import hle_con_read            ; runtime/ops/hle_con.s (WAVE5 C2)
 .export hle_sz, hle_flg, hle_old, hle_ptr, hle_cnt   ; allocator ABI (C1)
 
@@ -421,11 +422,11 @@ hle_setsignal:
         jmp hle_ret
 
 ; ===========================================================================
-; $A108 AllocMem — byteSize D0, requirements D1.  Bump allocation from the
-; HLE heap [HEAP_BASE, HEAP_END]: size rounded up to 8 (MEM_BLOCKSIZE),
-; result 8-byte aligned; MEMF_CLEAR (bit 16) zero-fills the rounded block;
+; $A108 AllocMem — byteSize D0, requirements D1.  First-fit allocation
+; from the HLE heap (hle_mem.s, docs/HLE.md "Heap"): result 8-byte aligned
+; behind an 8-byte hidden header; MEMF_CLEAR (bit 16) zero-fills the block;
 ; other flags are ignored (all guest memory is alike).  D0 = 0 for size 0
-; or when the heap cannot hold the block.
+; or when no free block or top space can hold it.
 ; ===========================================================================
 hle_allocmem:
         ldx #3
@@ -445,12 +446,11 @@ hle_ret_old:                    ; D0 := hle_old (0 on failure)
         jmp hle_ret
 
 ; ===========================================================================
-; $A109 FreeMem — memoryBlock A1, byteSize D0.  Bump-allocator semantics:
-; if the (8-rounded) block is the most recent allocation still live — it
-; ends exactly at heap_next — heap_next drops back to its start (LIFO
-; reclaim).  Anything else (NULL, not the top block, outside the heap) is
-; accepted and leaked: memory is never reused while a live block could
-; overlap it, so a FreeMem can never corrupt another allocation.
+; $A109 FreeMem — memoryBlock A1, byteSize D0.  Any order: the block is
+; coalesced with free neighbours / the top or put on the free list
+; (hle_mem.s).  Invalid frees (misaligned, outside the heap, interior,
+; wrong size, double free) are rejected and counted, changing nothing;
+; NULL is a no-op.  See docs/HLE.md "Heap" for the exact policy.
 ; ===========================================================================
 hle_freemem:
         ldx #3
@@ -505,11 +505,12 @@ hle_createpool:
 @out:   jmp hle_ret_old
 
 ; ===========================================================================
-; $A10C DeletePool — poolHeader A0.  Releasing a pool frees all its
-; allocations at once; with the bump heap that is a no-op (the memory is
-; leaked until the next run re-stages ENV_STATE).
+; $A10C DeletePool — poolHeader A0.  Frees every block owned by the pool
+; (AllocPooled records A0 as the owner in the hidden header), then the pool
+; header itself (hle_pool_delete).  NULL is a no-op.
 ; ===========================================================================
 hle_deletepool:
+        jsr hle_pool_delete
         jmp hle_ret
 
 ; ===========================================================================
@@ -534,7 +535,7 @@ hle_allocpooled:
         jsr mem_read32          ; pool memFlags
         lda m_val+2
         sta hle_flg
-        jsr hle_alloc
+        jsr hle_pool_alloc      ; owner := pool header (A0), for DeletePool
         jmp hle_ret_old
 
 ; ===========================================================================

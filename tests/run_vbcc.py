@@ -137,6 +137,7 @@ class Program:
     expect_files: dict[str, bytes | None] | None = None
     budget: int | None = None  # per-program instruction cap (overrides --budget)
     expect_addr: dict[str, int] | None = None   # RAMDISK extent address
+    pools: bool = False       # needs the W5-H hle.s pool wiring (skip without)
 
 
 def _scroll_line(n: int) -> str:
@@ -207,6 +208,13 @@ def programs() -> dict[str, Program]:
                               "f31": b"", "more": None}),
         Program("tspin", 0, ["spins=48 delta=1", "clock=-1"],
                 budget=3_000_000),
+        # --- W5-H heap reuse (docs/HLE.md "Heap") ------------------------------
+        Program("heap_churn", 0, ["churn ok", "total>2x heap=1",
+                                  "live<2MB=1 frees>50=1"]),
+        Program("heap_coalesce", 0, ["coalesce", "fragmented 2MB=NULL",
+                                     "merged 3MB=fit", "all freed 7MB=fit"]),
+        Program("heap_pool", 0, ["pools ok 40 rounds"], pools=True),
+        Program("heap_realloc", 0, ["realloc ok 30 rounds"]),
     ]
     return {p.name: p for p in progs}
 
@@ -230,6 +238,12 @@ def _big_data() -> bytes:
 
 UNIT_DIR = os.path.join(FIXTURE_DIR, "hle_unit")
 H = HEAP_BASE
+# W5-H allocator: HEAP_CTL (8 bytes) opens the heap and every block has an
+# 8-byte header, so the first payload is H + $10 and a request of n bytes
+# takes round8(n) + 8.  The pre-W5-H units below keep their programs; their
+# expected addresses moved with the layout (and u_alloc's "leaked" free is
+# now reused, u_alloc2's whole-heap request no longer fits).
+P = H + 0x10
 POISON32 = int.from_bytes(bytes([POISON_BYTE]) * 4, "big")
 NEG1 = 0xFFFF_FFFF
 FILE_FH = (0x00F000 - 44) >> 2          # BPTR of the FileHandle u_file builds
@@ -248,18 +262,22 @@ class Unit:
     files: dict[str, bytes] | None = None   # stage a fresh RAMDISK (Program)
     src: str | None = None              # fixture file (default: name)
     lazy: bool = False                  # zap hle_dos_magic, no host DOS init
+    pools: bool = False                 # needs the W5-H hle.s pool wiring
 
 
 def units() -> dict[str, Unit]:
     dos = hle_env.DOS_BASE
     us = [
-        Unit("u_alloc", {"D2": H, "D3": 0, "D4": 0, "D5": H + 104,
-                         "A3": POISON32, "D6": H + 104, "A2": H + 112,
-                         "A4": H + 128}, [], heap_next=H + 136),
-        Unit("u_alloc2", {"D2": 0, "D3": 0, "D4": H, "D5": 0, "D6": H,
-                          "D7": 0}, [], heap_next=H + 8),
-        Unit("u_pool", {"A2": H, "D3": H + 8, "D4": 0, "A3": H + 64,
-                        "D5": H + 72, "D6": POISON32, "A4": H + 72, "D7": 0},
+        # FreeMem(A) reuses A: A2 = A (split), A4 = the split's remainder
+        Unit("u_alloc", {"D2": P, "D3": 0, "D4": 0, "D5": P + 112,
+                         "A3": POISON32, "D6": P + 112, "A2": P,
+                         "A4": P + 24}, [], heap_next=H + 0x88),
+        # $700000 no longer fits (control block + header): D4 = 0, so the
+        # next AllocMem(1) succeeds; exact exhaustion is u_heap5's
+        Unit("u_alloc2", {"D2": 0, "D3": 0, "D4": 0, "D5": P, "D6": P + 16,
+                          "D7": 0}, [], heap_next=H + 0x28),
+        Unit("u_pool", {"A2": P, "D3": P + 16, "D4": 0, "A3": P + 80,
+                        "D5": P + 96, "D6": POISON32, "A4": P + 96, "D7": 0},
              []),
         Unit("u_dos", {"A2": hle_env.FH_CONOUT >> 2,
                        "A3": hle_env.FH_CONIN >> 2, "D4": NEG1, "D5": 0,
@@ -279,14 +297,14 @@ def units() -> dict[str, Unit]:
         Unit("u_dos3", {"D4": 0, "D5": 0, "D6": NEG1}, []),
         Unit("u_openlib", {"D2": dos, "D3": 0, "D4": 0, "D5": 0, "D6": 0,
                            "D7": dos, "A2": 40, "A3": 40}, []),
-        Unit("u_vec", {"D2": H + 4, "D3": 0, "D4": 104, "D5": H + 108,
-                       "D6": H + 108, "D7": H + 124}, [], heap_next=H + 128),
-        Unit("u_swap", {"D2": H + 252, "D3": 0xCAFEBABE, "D4": 0x00F000,
-                        "D5": H + 20, "D6": H + 260,
+        Unit("u_vec", {"D2": P + 4, "D3": 0, "D4": 104, "D5": P + 116,
+                       "D6": P + 116, "D7": P + 140}, [], heap_next=H + 0xA0),
+        Unit("u_swap", {"D2": P + 252, "D3": 0xCAFEBABE, "D4": 0x00F000,
+                        "D5": P + 20, "D6": P + 260,
                         "A4": hle_env.ENV_STACK_LOWER, "D7": 0x00F000,
                         "A5": 0}, []),
         # DateStamp: the first call of a run returns tick 1 (m2-post task 4)
-        Unit("u_dos4", {"D5": NEG1, "D6": H, "D2": 0, "D3": 0, "D4": 1,
+        Unit("u_dos4", {"D5": NEG1, "D6": P, "D2": 0, "D3": 0, "D4": 1,
                         "A4": POISON32, "D7": NEG1}, []),
         # m2-post: GetVar leaves its buffer alone + IoErr 205; Close on the
         # console/NIL: handles is DOSTRUE and leaves IoErr alone
@@ -314,6 +332,25 @@ def units() -> dict[str, Unit]:
                         "D7": hle_env.ENV_CLI >> 2}, []),
         Unit("u_unimpl", {}, [], reason=0x01,
              pc=hle_env.EXEC_BASE - 384 + 2),
+        # --- W5-H allocator (docs/HLE.md "Heap"); HEAP_CTL+4 = rejected frees
+        Unit("u_heap1", {"D2": H + 0x10, "D3": H + 0x58, "D4": 10,
+                         "D5": H + 0xA0, "D6": 11, "D7": H + 0x10,
+                         "A2": H + 0xE8, "A3": 0}, [], heap_next=H + 0x128),
+        Unit("u_heap2", {"D2": H + 0x10, "D3": H + 0x58, "D4": H + 0xA0,
+                         "A2": H + 0xE8, "D5": 3, "D6": H + 0x10,
+                         "D7": H + 0x10, "A3": 0, "A4": 3}, [],
+             heap_next=H + 0x20),
+        Unit("u_heap3", {"A2": H + 0x10, "D2": H + 0x80, "A3": H + 0x10,
+                         "D3": 0, "A4": H + 0x10, "D4": 0, "D5": 0,
+                         "D6": H + 0xB0, "D7": H + 0x10BC}, [],
+             heap_next=H + 0x10C8),
+        Unit("u_heap4", {"A2": H + 0x10, "D2": H + 0x20, "D3": H + 0x90,
+                         "D4": H + 0xD8, "D5": H + 0x10, "D6": H + 0xD8,
+                         "D7": 0, "A3": 1, "A4": 0xCAFEF00D}, [],
+             heap_next=H + 0xE0, pools=True),
+        Unit("u_heap5", {"D2": P, "D3": 0, "D4": 0, "D5": P,
+                         "D6": 0x7FFFF8, "A2": 0x7FFFF8, "D7": 0, "A3": 0,
+                         "A4": 0}, [], heap_next=0x800000),
     ]
     return {u.name: u for u in us}
 
@@ -492,6 +529,8 @@ def check_screen(sess: Session, tag: str, lines: list[str]) -> None:
 def run_one(sess: Session, prog: Program, blob: bytes, budget: int,
             poison: bool) -> None:
     tag = prog.name
+    if pool_skip(tag, prog.pools):
+        return
     if prog.needs_dos and hle_dos_is_stub(sess):
         print(f"[{tag}] SKIP: needs WS-B2's hle_dos.s (stub linked)")
         return
@@ -559,8 +598,39 @@ def hle_dos_is_stub(sess: Session) -> bool:
     return len(addrs) == 1
 
 
+POOL_WIRED: bool | None = None    # main(): pool_wiring() of the PRG
+
+
+def pool_wiring(prg: str, labels) -> bool | None:
+    """W5-H pool entries: None = the PRG has no hle_pool_delete (a pre-W5-H
+    allocator: pool tests run and must fail), True = hle.s calls both
+    hle_pool_alloc and hle_pool_delete (a JSR/JMP to each is in the code),
+    False = the entries exist but hle.s is not wired yet (pool tests SKIP;
+    the wiring is a supervisor merge step, docs/HLE.md "Heap")."""
+    from tests.harness_util import lookup_label
+    try:
+        adrs = [lookup_label(labels, n)
+                for n in ("hle_pool_alloc", "hle_pool_delete")]
+    except KeyError:
+        return None
+    with open(prg, "rb") as f:
+        code = f.read()[2:]
+    return all(any(bytes([op, a & 0xFF, a >> 8]) in code for op in (0x20, 0x4C))
+               for a in adrs)
+
+
+def pool_skip(tag: str, needs: bool) -> bool:
+    if needs and POOL_WIRED is False:
+        print(f"[{tag}] SKIP: needs the W5-H hle.s pool wiring "
+              f"(hle_pool_alloc/hle_pool_delete not called)")
+        return True
+    return False
+
+
 def run_unit(sess: Session, u: Unit, blob: bytes, budget: int) -> None:
     tag = u.name
+    if pool_skip(tag, u.pools):
+        return
     if u.seam and not hle_dos_is_stub(sess):
         # Real WS-B2 linked: the handle built on the stack is not an open
         # pool slot, so hle_dos_* must fail it cleanly — HALT_OK, D0 = -1,
@@ -653,6 +723,8 @@ def main(argv: list[str] | None = None) -> int:
     from tests.run_vectors import prepare_target
 
     labels = Labels.from_file(labels_path)
+    global POOL_WIRED
+    POOL_WIRED = pool_wiring(prg, labels)
     vice_config = ViceConfig(prg_path=prg, warp=True, sound=False,
                              extra_args=list(REU_VICE_ARGS))
     with UnifiedManager(backend=args.backend, vice_config=vice_config) as mgr:

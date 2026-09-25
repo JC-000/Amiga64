@@ -21,8 +21,9 @@ expects:
   Input()/Output()) and ``tc_SPLower``/``tc_SPUpper`` (the guest stack).
 - **FileHandles** (contract C2): 44-byte ``struct FileHandle`` records whose
   ``fh_Args`` holds the handle kind (console out / console in / NIL:).
-- **HLE state** (:data:`ENV_STATE`): heap bump pointer and console cursor.
-  Staging the env re-initialises them for the next run.
+- **HLE state** (:data:`ENV_STATE`): heap top and console cursor.  Staging
+  the env re-initialises them for the next run (top = HEAP_BASE marks the
+  heap pristine; the allocator formats :data:`HEAP_CTL` on its first call).
 - **Program exit**: a ``$AFFF`` HALT word sits at :data:`EXIT_ADDR`, and the
   env stages its address at ``[stack_top]``, so the program's final RTS
   halts ``HALT_OK`` (D0 = the program's return code).
@@ -73,10 +74,17 @@ PROG_END = _image.PROG_END   # last byte of the program load region (one source)
 # HLE heap (exec AllocMem/FreeMem + pools), contract C4
 HEAP_BASE = 0x100000         # first byte (8-byte aligned)
 HEAP_END = 0x7FFFFF          # last byte (inclusive)
+# W5-H allocator (runtime/ops/hle_mem.s, docs/HLE.md "Heap"): the heap opens
+# with an 8-byte control block (+0 u32 free-list head, +4 u32 rejected-free
+# count), formatted by the first AllocMem of a run; blocks follow it, each
+# an 8-byte header + payload.  Nothing inside the heap is staged by the host.
+HEAP_CTL = 0x100000          # control block (= HEAP_BASE)
+HEAP_FIRST = 0x100008        # first block header; first payload HEAP_FIRST+8
 
 # HLE state block at ENV_STATE (all big-endian, staged fresh for every run —
 # this is how the HLE is re-initialised per run without a runner hook):
-#   +0 u32 heap_next   next free heap byte (bump pointer), starts HEAP_BASE
+#   +0 u32 heap_next   heap top: start of the never-allocated space above the
+#                      last block; staged HEAP_BASE = pristine (see HEAP_CTL)
 #   +4 u16 cursor      console cursor, cell offset 0-1000 from SCREEN
 #   +6 u8  column      console cursor column 0-39
 #   +7 u8  reserved
