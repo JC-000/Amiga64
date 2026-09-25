@@ -103,3 +103,10 @@ The drivers take `--backend u64` to run on a real Ultimate 64 (through the harne
   modifies open-licensed sources keeps that licence and lives in clearly
   separated files. Reading such sources as a reference carries no
   obligation; HLE code stays clean-room.
+- **AROS m68k ROM (reference oracle only).** `tools/aros/fetch.sh` fetches a
+  pinned AROS nightly (APL 1.1) by exact URL and SHA256 into
+  `~/.cache/amiga64/aros/<hash>/`, together with its licence text and a
+  record of where the source is (`tools/aros/README.md`). The ROM is
+  never committed, never placed under `build/`, and never required by any
+  test. `tests/aros_oracle.py` boots it in FS-UAE to diff our vbcc programs
+  against a real AmigaOS-compatible system (`docs/ORACLE.md`).
