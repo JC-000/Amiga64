@@ -47,6 +47,9 @@ buf_result = $C800      ; contract range $C800-$CFFF; $CE00 page carved out belo
 ; @region run $CF00-$CFFF buf_result tail - READY_FLAG at $CFFF (runner.s, buf_result+$7FF)
 
 ; @region sys $D000-$DEFF VIC/SID/color/CIA I/O block - hardware, not claimable
+.ifndef VIC_RASTER
+VIC_RASTER  = $D012     ; VIC-II raster line low byte (read: speed-independent time base)
+.endif
 .ifndef CIA1_PRA
 CIA1_PRA    = $DC00     ; CIA 1 port A: keyboard matrix column select (write)
 .endif

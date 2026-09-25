@@ -59,7 +59,7 @@ output helpers for echo — `hle_con_load` (guest ENV_STATE cursor → `hle_cur`
 `hle_con_save` (write the cursor back) — plus `hle_cur` (u16) and `hle_col`
 (u8). `hle_con.s` must bracket any use with load … save. CIA 1 registers are
 declared in `rc/ram.inc` as `CIA1_PRA/PRB/DDRA/DDRB` (sys region); use only
-those names.
+those names; `VIC_RASTER` ($D012, read-only) is available as a speed-independent time base. `tests/run_vbcc.py` may gain exactly one w5-con line wiring an empty scripted stdin for batch programs (`con_stdin`), next to the `hle_dos_init` call.
 `hle_con.s` may call the memory API (C1 of Wave 4 applies to any direct REC
 use). No KERNAL calls (ROMs may be banked out; the runner runs with SEI).
 C64 RAM via BSS only; no new ZP.
