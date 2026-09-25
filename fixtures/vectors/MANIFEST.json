@@ -89,6 +89,12 @@
    "sampled": 50,
    "total": 8065
   },
+  "ANDItoSR": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
   "ASL.b": {
    "dropped": {},
    "retained_pool": 8065,
@@ -166,6 +172,14 @@
     "exception": 2200
    },
    "retained_pool": 5865,
+   "sampled": 50,
+   "total": 8065
+  },
+  "CHK": {
+   "dropped": {
+    "address-error": 3117
+   },
+   "retained_pool": 4948,
    "sampled": 50,
    "total": 8065
   },
@@ -253,6 +267,15 @@
    "sampled": 50,
    "total": 8065
   },
+  "DIVU.exc": {
+   "dropped": {
+    "address-error": 3101,
+    "no-exception": 4963
+   },
+   "retained_pool": 1,
+   "sampled": 1,
+   "total": 8065
+  },
   "EOR.b": {
    "dropped": {},
    "retained_pool": 8065,
@@ -272,6 +295,12 @@
     "exception": 3135
    },
    "retained_pool": 4930,
+   "sampled": 50,
+   "total": 8065
+  },
+  "EORItoSR": {
+   "dropped": {},
+   "retained_pool": 8065,
    "sampled": 50,
    "total": 8065
   },
@@ -415,6 +444,34 @@
    "sampled": 50,
    "total": 8065
   },
+  "MOVEfromSR": {
+   "dropped": {
+    "address-error": 3048
+   },
+   "retained_pool": 5017,
+   "sampled": 50,
+   "total": 8065
+  },
+  "MOVEfromUSP": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "MOVEtoSR": {
+   "dropped": {
+    "address-error": 3127
+   },
+   "retained_pool": 4938,
+   "sampled": 50,
+   "total": 8065
+  },
+  "MOVEtoUSP": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
   "MULS": {
    "dropped": {
     "exception": 3122
@@ -531,7 +588,19 @@
    "sampled": 50,
    "total": 8065
   },
+  "ORItoSR": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
   "PEA": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "RESET": {
    "dropped": {},
    "retained_pool": 8065,
    "sampled": 50,
@@ -614,6 +683,14 @@
     "exception": 893
    },
    "retained_pool": 7172,
+   "sampled": 50,
+   "total": 8065
+  },
+  "RTE": {
+   "dropped": {
+    "address-error": 4054
+   },
+   "retained_pool": 4011,
    "sampled": 50,
    "total": 8065
   },
@@ -706,6 +783,18 @@
    "total": 8065
   },
   "Scc": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "TRAP": {
+   "dropped": {},
+   "retained_pool": 8065,
+   "sampled": 50,
+   "total": 8065
+  },
+  "TRAPV": {
    "dropped": {},
    "retained_pool": 8065,
    "sampled": 50,

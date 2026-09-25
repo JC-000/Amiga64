@@ -208,6 +208,124 @@ of its own cycles/instruction; we spend ~400 host cycles/instruction.)
 
 Dispatch itself (22 cycles) is already negligible; do not micro-optimize it.
 
+## (f) Supervisor mode & exceptions (W6-S): cycle accounting
+
+**Criterion (C4, supervisor-amended 2026-09-25).** With `st_exc` clear:
+(i) the hot-path instruction streams are unchanged; (ii) REC access counts
+are identical; (iii) no loop gets slower, measured on the product path
+(`emu_run`) and on the program runner's step path; (iv) every residual delta
+is explained branch by branch.
+
+**Method.** `tests/perf_cycles.py` runs `tests/rec_budget.py`'s six loops
+(mem/stream/rmw/copy/alu/stack) with the screen off (no badline DMA) and
+times each call with the CIA2 timers (exact phi2 count in VICE); a
+40/240-iteration two-point delta leaves cycles per guest instruction.
+`--modes run` = `emu_reset` + `emu_run` from a stub (the PRODUCT path, one
+call per program); `--modes step` = `test_run_program` (emu_step per
+instruction; what run_dos/run_vbcc/run_con execute). `--base` measures a
+second PRG, `--max-delta D` fails above D. The PRG must be a gate build
+(`emu_brnc_enforced` = 1, below).
+
+**Numbers (cycles per guest instruction, flag clear; base = main b14f204).**
+
+| loop | base run | **W6-S run** | base step | W6-S step | W6-S step + run_program.diff |
+|---|---|---|---|---|---|
+| mem MOVE.L (A0),D1 | 526.555 | **-1.000** | 564.572 | +0.000 | -1.000 |
+| stream MOVE.L (A0)+,D1 | 571.505 | **-1.000** | 609.523 | +0.000 | -1.000 |
+| rmw ADDQ.L #1,(A0) | 593.000 | **-1.000** | 631.018 | +0.000 | -1.000 |
+| copy MOVE.L (A0)+,(A1)+ | 694.960 | **-1.000** | 732.977 | +0.000 | -1.000 |
+| alu ADDQ.L/ADD.L | 548.333 | **+0.000** | 586.357 | +1.000 | +0.000 |
+| stack BSR/RTS | 383.000 | **-0.667** | 421.023 | +0.333 | -0.667 |
+
+One-off per call: `emu_run` path 1623 -> 1666 cycles (the `emu_reset`
+latch + the halt test), step path 2968 -> 2941. Flag SET (exception-mode
+loop, `--exc`): +55 to +56 cycles per instruction. REC accesses
+(`tests/rec_budget.py --json-out`): API and loop counts identical to base.
+Evidence: `build/evidence/w6-super/fix1/green/perf_cycles*.txt`.
+
+**(i) Instruction streams.** `host/tests/test_super_hotpath.py` fingerprints
+the normalized instruction lines of fetch/dispatch + `dispatch_next`,
+`fetch_word`, the memory API, EA resolution and the ALU/CCR primitives
+against a snapshot of the base source (a `BRNC op, t` guard reads as the
+plain branch, `HOTALIGN` fill is dropped), pins the two audited step-loop
+entries (emu_step `bne` -> patchable `jmp`, same 3 cycles; emu_run + one
+`jmp`), and self-tests that one inserted NOP changes each region's
+fingerprint. The assembled PRGs agree at opcode level too (37 + 105 + 302 +
+337 + 497 instructions).
+
+**(iii)/(iv) Page crossings: guarded, not pinned.** A taken 6502 branch whose
+target is in another page costs +1 cycle; on the hot path that is per guest
+instruction, and ANY code growth reshuffles which branches cross (the base
+itself paid for several). Instead of pinning a layout, every conditional
+branch on the core.s hot path is written `BRNC op, target`: it assembles to
+exactly `op target` plus a LINK-time `.assert` that the taken target is in
+the branch's page, so a crossing FAILS the production build. Crossings are
+resolved with `HOTALIGN n` (never-executed `$EA` `.align` fill; absolute
+because core.s's CODE starts page-aligned, asserted at `core_code0`) before
+mem_read16, mem_write8, mem_write32, ea_store, alu_cmp, alu_neg and
+alu_eor (+211 bytes). Test-only variant builds (FETCH_DIRECT, REC_*,
+WINDOW_NOINVAL, `BRNC_WARN_ONLY`) only warn; the exported
+`emu_brnc_enforced` (1 = enforcing) is checked by `tests/run_super_vectors.py`
+and `tests/perf_cycles.py`, which refuse a non-gate PRG.
+`host/tests/test_super_brnc.py` is the teeth: fill inserted so that
+mem_read16's first guarded branch ends a page must fail the normal link and
+link with `BRNC_WARN_ONLY`. Guarded sites (74 guarded branch sites in runtime/core.s):
+
+- dispatch_go: bne dispatch_done, bne dg_miss, bne dg_miss, beq dg_wrap
+- dg_wrap: bne dispatch_sel
+- dispatch_next: bne dispatch_done
+- nx_br: beq dispatch_go
+- fetch_word: bcc @nc, bne @nc, bne miss, bne miss
+- serve: beq wrap
+- wrap: bne wdone
+- macro WINCHK_B: bne done, bne done
+- macro WINCHK_W: beq chkhi, bcc done
+- cross: bne done, bne done, beq kill
+- chkhi: bne done
+- macro MIO_PROG: bne warm
+- warm: beq lenok
+- lenok: beq look
+- look: beq hiok
+- hiok: beq done
+- macro STRADDLE: bcc no, bne no, beq slow
+- loop: bne loop
+- ea_m7: beq ea_absw, beq ea_absl, beq ea_pcd16, beq ea_pcidx, beq ea_imm
+- ea_absw: bpl @pos
+- ea_imm: beq @b, beq @l, bne @b1, bne @b1
+- ea_pc_add: bcc @d, bne @d
+- ea_amount: bne @ok, bne @ok
+- ea_add_sext16: bpl @pos
+- ea_add_brief: bpl @p, bne @long, bpl @wp
+- ea_load: bne @reg, beq @m8, beq @m32, beq @rd, bne @rd
+- ea_store: bne @reg, beq @m8, beq @m32, beq @rd, bne @rd
+- macro ALUADDSUB: beq w, beq l
+- alu_neg: beq @w, beq @l
+- macro ALULOGIC: beq w, bcc b
+- alu_not: beq @w, bcc @b
+- alu_ext: beq @l, bpl @p1, bpl @p2
+- flags_logic: bcc @nn
+- fl_setx: beq @nx
+- p_to_nvc: beq @nv
+- fl_insert_z: bne @nz
+- fl_insert_z_sticky: bne @nz
+
+Residue, attributed with `build/evidence/w6-super/perf/attrib.py` (count-only
+VICE exec checkpoints on every branch whose crossing differs between the
+two links; the sum of taken x crossing change equals the measured delta
+exactly): the step-mode +1.000 (alu) / +0.333 (stack) is the program
+runner's per-instruction `bne @step` in `tests/runner/run_program.s`
+crossing a page (+1/instr), offset by core's `mem_read32` STRADDLE branch and
+g2's `fam_5`+$7D no longer crossing (-1 each), plus g2 `fam_add`+$12C now
+crossing (+1 per ADD; frozen file). The proposed runner guard
+(`build/evidence/w6-super/perf/runner_guard/run_program.diff`: RUN_NOCROSS
+on `bne @step`/`bne @loop` + `.align 64` before the loop) removes the
+dominant term: measured column above. The product path has no runner loop
+and is at or below base on every loop.
+
+An earlier "layout control" (base padded only at the ends of core.s and
+g5_flow.s) is withdrawn: W6-S inserts code INSIDE core.s and g5_flow.s, so
+that control did not reproduce W6-S's core-internal layout (review F4).
+
 ## (e) Caveats
 
 - Every number above comes from **hand-written cycle comments**, not
