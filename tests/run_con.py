@@ -2,7 +2,7 @@
 
 Usage:
     python3 -m tests.run_con --prg build/w5-con/runner.prg
-        [--only NAME[,NAME]] [--legs units,script,matrix,batch]
+        [--only NAME[,NAME]] [--legs units,script,matrix,batch,scan]
         [--timeout SECS] [--budget N] [--vbcc-module FILE]
         [--backend auto|vice|u64]
 
@@ -45,6 +45,17 @@ They differ in where the keys come from:
             ``--vbcc-module FILE`` loads stage_and_run from another copy of
             run_vbcc.py: the teeth leg uses one with the wiring line deleted
             and must go red (a hang caught by the short --timeout).
+
+``scan``    VICE only, the scanner on its own: ``scan/kernal`` cross-checks
+            the key map against the KERNAL's decode tables read from the
+            emulated ROM ($EB81 / $EBC2); ``scan/debounce`` calls
+            ``hle_con_scan`` from a 6502 loop that waits 1, 4 or 16 raster
+            lines between samples and checks the commit comes after ~64
+            elapsed lines, not after 64 samples.
+
+The matrix leg's con_keys also presses chords: RSHIFT + A, RSHIFT + /,
+C= + Q, C= + A, T + H in one debounce window (both typed), and each
+modifier alone (must count no key).
 
 Every run has an instruction budget (--budget, default 2 000 000; the
 largest program here needs < 100 000) and every harness call a short
@@ -187,6 +198,14 @@ def units() -> dict[str, ConUnit]:
             _rec(4, b"tail", b"....", b"tail"),
             _rec(0),
         ], ["parq", "tail"]),
+        ConUnit("u_con5", b"a\r\nb\n\r\r\nc\r", [
+            _rec(2, b"a\n.."),
+            _rec(2, b"b\n.."),
+            _rec(1, b"\n..."),
+            _rec(1, b"\n..."),
+            _rec(2, b"c\n.."),
+            _rec(0),
+        ], ["a", "b", "", "", "c"]),
     ]
     return {u.name: u for u in us}
 
@@ -199,6 +218,14 @@ class ConProg:
     exit_code: int = 0
     matrix: bool = True       # also run through the real key matrix
     nread: int | None = None  # expected console Read calls (hle_con_nread)
+    # matrix leg: explicit chords instead of key_for(keys) — list of
+    # (matrix indices held together, key-down events the scanner must count)
+    chords: list[tuple[tuple[int, ...], int]] | None = None
+
+    def matrix_script(self) -> list[tuple[tuple[int, ...], int]]:
+        if self.chords is not None:
+            return self.chords
+        return [(key_for(ch)[1] + (key_for(ch)[0],), 1) for ch in self.keys]
 
 
 def _hexrows(data: bytes) -> list[str]:
@@ -212,10 +239,33 @@ KEYS_LINE = ("abcdefghijklmnopqrstuvwxyz0123456789"
              "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
              " +-.:@,\\*;=^/_!\"#$%&'()<>?[]{}|~`")
 KEYS_TYPED = KEYS_LINE + "#\x08"
+# Matrix-only chords (fix1, review items 2 and 5), typed after KEYS_LINE:
+# RSHIFT + A, RSHIFT + / (RSHIFT shares column 6 with "/": the modifier
+# mask must keep it from being the "first new key"), C= + Q (C= shares
+# column 7 with Q and sits on a lower row), C= + A, and T + H going down
+# in ONE debounce window (rollover: both typed, matrix order T then H).
+# The scripted leg types the same characters.
+KEYS_EXTRA = "A?qath"
+
+
+def _k(ch: str) -> int:
+    return key_for(ch)[0]
+
+
+def keys_chords() -> list[tuple[tuple[int, ...], int]]:
+    one = lambda ch: (key_for(ch)[1] + (key_for(ch)[0],), 1)
+    return ([one(ch) for ch in KEYS_LINE]
+            + [((RSHIFT, _k("a")), 1), ((RSHIFT, _k("/")), 1),
+               ((CBM, _k("q")), 1), ((CBM, _k("a")), 1),
+               ((_k("t"), _k("h")), 2)]
+            # a modifier alone is not a keystroke: nothing may be counted
+            + [((m,), 0) for m in (LSHIFT, RSHIFT, CTRL, CBM)]
+            + [one("#"), one("\x08"), one("\r")])
 
 
 def programs() -> dict[str, ConProg]:
-    ks = (KEYS_LINE + "\n").encode()
+    kl = KEYS_LINE + KEYS_EXTRA
+    ks = (kl + "\n").encode()
     ps = [
         ConProg("con_fgets", "hello\rworld 42\r" + EOF_KEY,
                 ["first? hello", "second? world 42", "a=6:hello",
@@ -234,9 +284,9 @@ def programs() -> dict[str, ConProg]:
                  "ok", "2=3:ok", "eof=1"], nread=11),
         ConProg("con_echo", "secret words\rbob\r",
                 ["secret words", "Name: bob", "Hi bob"], exit_code=13),
-        ConProg("con_keys", KEYS_TYPED + "\r",
-                [KEYS_LINE[:40], KEYS_LINE[40:80], KEYS_LINE[80:],
-                 f"n={len(ks)}"] + _hexrows(ks)),
+        ConProg("con_keys", KEYS_LINE + KEYS_EXTRA + "#\x08\r",
+                [kl[:40], kl[40:80], kl[80:], f"n={len(ks)}"] + _hexrows(ks),
+                chords=keys_chords()),
         # a program that never reads stdin must not wait for a key
         ConProg("hello", "", ["Hello from vbcc!", "2 + 40 = 42"]),
     ]
@@ -383,9 +433,14 @@ def program_done(sess: Session) -> bool:
     return read_bytes(sess.target.transport, TRAMP_DONE, 1)[0] == DONE_MAGIC
 
 
-def type_keys(sess: Session, mk: MatrixKeys, keys: str,
+def type_keys(sess: Session, mk: MatrixKeys,
+              chords: list[tuple[tuple[int, ...], int]],
               timeout: float) -> str | None:
-    """Type *keys* through the matrix; None on success, else the reason."""
+    """Press each chord through the matrix; None on success, else the reason.
+
+    A chord with n > 0 must make the scanner count exactly n key-down
+    events.  A chord with n = 0 (a modifier alone) must be committed to the
+    debounced matrix (hle_con_mat shows it) without any event counted."""
     from c64_test_harness import read_bytes
     t = sess.target.transport
     nkey_at = label(sess, "hle_con_nkey")
@@ -393,19 +448,34 @@ def type_keys(sess: Session, mk: MatrixKeys, keys: str,
     if nkey_at is None or mat_at is None:
         return "PRG has no matrix scanner (hle_con_nkey/hle_con_mat missing)"
     all_up = lambda: read_bytes(t, mat_at, 8) == bytes(8)
-    for i, ch in enumerate(keys):
-        idx, mods = key_for(ch)
+    for i, (idxs, n) in enumerate(chords):
+        what = f"chord {i} {idxs}"
         if not _poll(sess, "debounced matrix all up", all_up, timeout):
-            return f"key {i} {ch!r}: scanner never saw all keys up"
+            return f"{what}: scanner never saw all keys up"
         if program_done(sess):
-            return f"key {i} {ch!r}: program already finished"
+            return f"{what}: program already finished"
         n0 = read_bytes(t, nkey_at, 1)[0]
-        mk.set_keys(mods + (idx,))
-        got = _poll(sess, f"key {i} {ch!r}",
-                    lambda: read_bytes(t, nkey_at, 1)[0] != n0, timeout)
-        mk.set_keys(())
-        if not got:
-            return f"key {i} {ch!r} was never counted by the scanner"
+        mk.set_keys(idxs)
+        if n:
+            got = _poll(sess, what, lambda: (read_bytes(t, nkey_at, 1)[0]
+                                             - n0) & 0xFF >= n, timeout)
+            cnt = (read_bytes(t, nkey_at, 1)[0] - n0) & 0xFF
+            mk.set_keys(())
+            if not got or cnt != n:
+                return f"{what}: scanner counted {cnt} key(s), want {n}"
+        else:
+            want = bytearray(8)
+            for idx in idxs:
+                want[idx // 8] |= 1 << (idx % 8)
+            got = _poll(sess, f"{what} committed",
+                        lambda: read_bytes(t, mat_at, 8) == bytes(want),
+                        timeout)
+            cnt = (read_bytes(t, nkey_at, 1)[0] - n0) & 0xFF
+            mk.set_keys(())
+            if not got:
+                return f"{what}: never committed to hle_con_mat"
+            if cnt:
+                return f"{what}: modifier alone counted as {cnt} key(s)"
     t.resume()
     return None
 
@@ -502,12 +572,13 @@ def run_matrix(sess: Session, p: ConProg, blob: bytes, mk: MatrixKeys,
     sess.check(f"{tag}: console seam present", seam,
                "hle_con_* labels missing (stub console)")
     pc, manifest = stage(sess, tag, blob)
-    print(f"  {len(p.keys)} key(s) through the matrix")
+    print(f"  {len(p.matrix_script())} chord(s) through the matrix")
     t = sess.target.transport
     t0 = time.monotonic()
     ops0, sec0 = mk.ops, mk.seconds
     start_program(sess, pc, manifest["stack_top"], BUDGET)
-    err = type_keys(sess, mk, p.keys, timeout) if p.keys else None
+    script = p.matrix_script()
+    err = type_keys(sess, mk, script, timeout) if script else None
     sess.check(f"{tag}: every key counted by the matrix scanner", err is None,
                err or "")
     done = _poll(sess, "program exit", lambda: program_done(sess), timeout)
@@ -527,6 +598,130 @@ def run_matrix(sess: Session, p: ConProg, blob: bytes, mk: MatrixKeys,
         why = "not halted"
     check_prog(sess, tag, p, res, manifest, why)
     return True
+
+
+# --- scan leg: the matrix scanner itself, called directly (VICE) ------------
+
+SCRATCH = 0xC000          # buf_case: free between runs
+SCRATCH_OUT = 0xC100
+
+
+def _jsr_scratch(sess: Session, code: bytes) -> None:
+    from c64_test_harness import jsr, write_bytes
+    write_bytes(sess.target.transport, SCRATCH, code)
+    jsr(sess.target.transport, SCRATCH, timeout=sess.timeout)
+
+
+def kernal_expect(k: int, shifted: bool) -> str | None | bool:
+    """What the W5-K map must give for a key whose KERNAL decode is PETSCII
+    *k*: a character, None (no character), or True (a documented W5-K
+    extension where the KERNAL has a graphics character)."""
+    if 0x41 <= k <= 0x5A:
+        return chr(k + 0x20)                  # unshifted letter -> lowercase
+    if 0xC1 <= k <= 0xDA:
+        return chr(k - 0x80)                  # shifted letter -> uppercase
+    if 0x20 <= k <= 0x40 or 0x5B <= k <= 0x5F:
+        return chr(k)                         # digits, punctuation, @ [ ] \ ^ _
+    if k in (0x0D, 0x8D):
+        return "\r"
+    if k == 0x14:
+        return "\x08"                         # DEL -> BS
+    if k == 0xA0:
+        return " "                            # shifted SPACE
+    if k == 0xFF or k < 0x20 or 0x80 <= k < 0xA0:
+        return None                           # modifier / cursor / F-key / INST
+    return True                               # PETSCII graphics
+
+
+# Documented W5-K characters on keys where the KERNAL types graphics
+# (docs/HLE_CON.md "Key map").
+KERNAL_GRAPHICS_OK = {"{", "}", "`", "|", "~", "*", "=", "_", None}
+
+
+def run_kernal_map(sess: Session) -> None:
+    """Cross-check hle_con's key map against the C64 KERNAL's own decode
+    tables ($EB81 unshifted, $EBC2 shifted, 64 entries each, in the same
+    column * 8 + row order), read from the emulated ROM."""
+    from c64_test_harness import read_bytes
+    sess.con_tag = "scan/kernal"
+    # lda $01 / pha / lda #$37 / sta $01 / ldx #0 / lda $EB81,x /
+    # sta SCRATCH_OUT,x / inx / cpx #130 / bne / pla / sta $01 / rts
+    o = SCRATCH_OUT
+    code = bytes([0xA5, 0x01, 0x48, 0xA9, 0x37, 0x85, 0x01, 0xA2, 0x00,
+                  0xBD, 0x81, 0xEB, 0x9D, o & 0xFF, o >> 8, 0xE8, 0xE0, 130,
+                  0xD0, 0xF5, 0x68, 0x85, 0x01, 0x60])
+    _jsr_scratch(sess, code)
+    rom = read_bytes(sess.target.transport, SCRATCH_OUT, 130)
+    for layer, (tab, ours) in {"plain": (rom[0:64], KEYMAP_PLAIN),
+                               "shift": (rom[65:129], KEYMAP_SHIFT)}.items():
+        sess.check(f"scan/kernal: {layer} table terminator $FF",
+                   rom[64 if layer == "plain" else 129] == 0xFF,
+                   f"{rom[64]:02X}/{rom[129]:02X}")
+        bad = []
+        for idx in range(64):
+            want = kernal_expect(tab[idx], layer == "shift")
+            if want is True:
+                if ours[idx] not in KERNAL_GRAPHICS_OK:
+                    bad.append(f"{idx}: KERNAL ${tab[idx]:02X} ours {ours[idx]!r}")
+            elif ours[idx] != want:
+                bad.append(f"{idx}: KERNAL ${tab[idx]:02X} want {want!r} "
+                           f"ours {ours[idx]!r}")
+        sess.check(f"scan/kernal: {layer} map agrees with the KERNAL ROM "
+                   f"(64 entries)", not bad, "; ".join(bad))
+
+
+DEBOUNCE_WAITS = (1, 4, 16)   # raster lines between two scanner samples
+DEBOUNCE_GIVEUP = 200         # samples: never committed (reported, no hang)
+
+
+def run_debounce(sess: Session) -> None:
+    """The debounce window is CON_STABLE (64) elapsed raster lines whatever
+    the poll rate.  A 6502 loop calls hle_con_scan, then waits N raster-line
+    changes, until the scanner commits the all-up matrix that follows
+    hle_con_init's "all down" start; it counts the samples.  Sample 1 sees
+    the change; commit needs >= 64 more lines."""
+    from c64_test_harness import read_bytes
+    scan = label(sess, "hle_con_scan")
+    mat = label(sess, "hle_con_mat")
+    if scan is None or mat is None:
+        sess.check("scan/debounce: hle_con_scan exported", False, "missing")
+        return
+    cnt = SCRATCH_OUT
+    sess.con_tag = "scan/debounce"
+    for n in DEBOUNCE_WAITS:
+        sess._call("hle_con_init")
+        body = bytes([
+            0xA9, 0x00, 0x8D, cnt & 0xFF, cnt >> 8,          # lda #0 / sta cnt
+            0x20, scan & 0xFF, scan >> 8,                    # L: jsr scan
+            0xEE, cnt & 0xFF, cnt >> 8,                      # inc cnt
+            0xAD, cnt & 0xFF, cnt >> 8,                      # lda cnt
+            0xC9, DEBOUNCE_GIVEUP,                           # cmp #GIVEUP
+            0xF0, 0x15,                                      # beq done
+            0xAD, mat & 0xFF, mat >> 8,                      # lda mat
+            0xF0, 0x10,                                      # beq done
+            0xA2, n,                                         # ldx #n
+            0xAD, 0x12, 0xD0,                                # W: lda $D012
+            0xCD, 0x12, 0xD0,                                # V: cmp $D012
+            0xF0, 0xFB,                                      # beq V
+            0xCA, 0xD0, 0xF5,                                # dex / bne W
+            0x4C, (SCRATCH + 5) & 0xFF, (SCRATCH + 5) >> 8,  # jmp L
+            0x60])                                           # done: rts
+        _jsr_scratch(sess, body)
+        got = read_bytes(sess.target.transport, cnt, 1)[0]
+        # Sample 1 sees the change; the commit needs >= 64 more elapsed
+        # lines.  Each later sample adds n (the wait) + S lines, S = the
+        # sample itself: measured 18 lines at 1 MHz in VICE (10 samples =
+        # 182 lines; the row-settle checks cost most of it), bounded here
+        # by 0 < S <= 25.  A window that crosses the raster counter's frame
+        # wrap counts that step as 1 line (conservative): +1 sample.
+        #   at least 1 + ceil(64 / (n + 25)) samples (window not short);
+        #   at most  2 + ceil(64 / n)        samples (time, not samples:
+        #   counting one per sample would need 65 whatever n is).
+        lo = 1 + -(-64 // (n + 25))
+        hi = 2 + -(-64 // n)
+        sess.check(f"scan/debounce: commit after {lo}..{hi} samples at "
+                   f"{n} line(s) per poll", lo <= got <= hi, f"{got} samples")
+        print(f"  [scan/debounce] {n:2d} line(s) per poll: {got} samples")
 
 
 BATCH_PROGS = {   # run through run_vbcc.stage_and_run with no input staged
@@ -581,8 +776,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--prg", required=True, help="runner PRG")
     ap.add_argument("--labels", help="ld65 -Ln label file (default: PRG .lbl)")
     ap.add_argument("--only", help="comma-separated unit/program names")
-    ap.add_argument("--legs", default="units,script,matrix,batch",
-                    help="comma-separated subset of units,script,matrix,batch")
+    ap.add_argument("--legs", default="units,script,matrix,batch,scan",
+                    help="comma-separated subset of units,script,matrix,"
+                    "batch,scan")
     ap.add_argument("--timeout", type=float, default=60.0,
                     help="per-call / per-wait timeout in seconds (default 60)")
     ap.add_argument("--budget", type=int, default=BUDGET, metavar="N",
@@ -646,6 +842,12 @@ def main(argv: list[str] | None = None) -> int:
                         print()
                 if "batch" in legs and only is None:
                     run_batch(sess, load_vbcc(args.vbcc_module), args.out)
+                if "scan" in legs and only is None:
+                    if target.backend != "vice":
+                        skips.append("scan leg: VICE only (jsr)")
+                    else:
+                        run_kernal_map(sess)
+                        run_debounce(sess)
             except (TimeoutError, TransportError) as e:
                 # a Read that never returns (e.g. EOF never signalled):
                 # the machine is inside the hung run, nothing after it is
