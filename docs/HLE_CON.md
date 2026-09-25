@@ -118,6 +118,11 @@ timeout does. Drivers that run programs unattended must call
     unreadable and count as "up". The other rows still work, so a held
     joystick no longer locks out the whole keyboard. Keys on the masked
     rows cannot be typed while the joystick holds them.
+    Also, pressing a key on a row the port-1 joystick holds low pulls that
+    key's column low through the key switch, which the port-2 check below
+    then sees: the whole sample is skipped while that key is held (keys on
+    other rows are blocked only for that time; there is no permanent
+    lockout). Found by con-review, delta round.
   - Port 2 pulls port-A (column) lines low, which selects columns behind
     the scan's back, so no row reading can be trusted. When the port-A pins
     read back anything other than `$FF` with every column deselected, the
