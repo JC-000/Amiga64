@@ -19,7 +19,7 @@ Evidence goes to `build/evidence/<pkg>/{red,green,...}` in your worktree.
 | **W6-K** | `w6-kbd` | new `tests/kbd_echo.py`, new `fixtures/c/kbd_*.c` and/or `tests/kbd/*.s`, new `host/tests/test_kbd_*.py`, `docs/HLE_CON.md` (new "Hardware validation" section only) |
 | **W6-O** | `w6-oracle` | new `tools/aros/` (fetch script, pinned manifest, LICENSE note), new `tests/aros_oracle.py`, new `tests/oracle/` (FS-UAE config templates, startup scripts), new `host/tests/test_aros_oracle*.py`, new `docs/ORACLE.md`, README "Third-party material" (append the AROS entry only) |
 | **W6-Q** | `w6-quirk` | new `build/evidence/w6-quirk/**` only (repro scripts + upstream issue draft). No edits to the harness repo or to Amiga64 sources. |
-| **W6-S** | `w6-super` | `runtime/core.s`, `runtime/ops/g5_*.s` (flow/system ops), new `runtime/ops/g7_system.s`, `host/gen_dispatch.py`, `host/vectors.py`, `fixtures/vectors/` (new stems via the pinned fetch only), `runtime/rc/zp.inc` (claims inside $88–$9F only), `docs/CONTRACTS.md` ("Supervisor mode & exceptions" section: new, plus the one M1 bullet it supersedes), `docs/PERF.md` (new section), new `host/tests/test_super*.py` |
+| **W6-S** | `w6-super` | `runtime/core.s`, `runtime/ops/g5_*.s` (flow/system ops; *amended: no g7_system.s — frozen rescheck rejects unregistered .s files*), `host/gen_dispatch.py`, `host/vectors.py`, `fixtures/vectors/` (new stems via the pinned fetch only), `runtime/rc/zp.inc` (claims inside $88–$9F only), `docs/CONTRACTS.md` ("Supervisor mode & exceptions" section: new, plus the one M1 bullet it supersedes), `docs/PERF.md` (new section), new `host/tests/test_super*.py`, new `tests/run_super_vectors.py`, new `tests/perf_cycles.py` (*amended*) |
 | **W6-D** | `w6-s3plan` | new `docs/S3_PLAN.md`, new `tools/s3probe/**` (analysis scripts), new `build/evidence/w6-s3plan/**` |
 
 Frozen (supervisor only): `runtime/ops/hle*.s`, `runtime/ops/dosio_*.s`,
@@ -116,6 +116,15 @@ S3), and no address/bus error (reason code only).
   the sized ALU primitives) must not get slower. Prove it with
   `tests/rec_budget.py` and a cycle-accounting delta in `docs/PERF.md`. Keep
   the system byte out of the hot path: CCR stays where it is.
+  *Amended by the supervisor (2026-09-25):* "not slower" is proven by
+  (i) an opcode-level comparison showing the flag-clear hot-path instruction
+  streams are unchanged against base, (ii) identical REC counts, (iii) the
+  BRNC build-failing page-crossing guards on every hot-path branch in
+  `core.s` (plus `run_program.s`'s per-instruction loop and CODE
+  `align = $100` in `c64.cfg`, applied by the supervisor at merge), and
+  (iv) `tests/perf_cycles.py` showing a delta of 0 or less against base in
+  emu_run mode, with any residue attributed branch by branch. No
+  DATA-segment layout pin.
 - Work in your worktree only; this is an invasive refactor of frozen
   files that other packages build against. Because of that, W6-S merges
   **last**.

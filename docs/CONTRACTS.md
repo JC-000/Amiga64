@@ -162,7 +162,8 @@ exception mode these EXECUTE instead of raising vector 4 (flag clear: they
 execute today as well). Found by the W6-S review (`illea.py`): LEA (A0)+,A1
 `$43D8`, PEA (A0)+ `$4858`, JMP (A0)+ `$4ED8`, JSR -(A0) `$4EA0`, MOVEM.W
 D0,(A0)+ `$4898`, MOVEM.W -(A0),D0 `$4CA0`, CMPI.W #,d16(PC) `$0C7A`,
-ADDI.W #,#imm `$067C`, SUBQ.W #1,d16(PC) `$537A`. Upstream contains only
+ADDI.W #,#imm `$067C`, CMPI.W #,#imm `$0C7C` (W6-S re-review), SUBQ.W #1,d16(PC)
+`$537A`. Upstream contains only
 legal encodings, so no vector covers them; tighten EA legality in the owning
 groups before AROS depends on it.
 

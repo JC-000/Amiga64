@@ -47,6 +47,15 @@
 .include "../../runtime/rc/zp.inc"
 .include "../../runtime/rc/ram.inc"
 
+; RUN_NOCROSS op, target: the per-instruction branches of test_run_program
+; must not cross a page when taken (+1 cycle per guest instruction, docs/
+; PERF.md (f)); a crossing fails the link.  CODE starts page-aligned
+; (asserted in runtime/core.s), so `.align 64` below is absolute.
+.macro RUN_NOCROSS op, target
+        op target
+        .assert >* = >(target), lderror, "test_run_program hot branch crosses a page (PERF.md (f))"
+.endmacro
+
 RES_DONE    = buf_result + $00
 RES_HALT    = buf_result + $01
 RES_REASON  = buf_result + $02
@@ -151,11 +160,13 @@ RUN_BUDGET  = buf_case + 8              ; u32 LE max instructions, 0 = no cap
         beq     @loop
 @unlim: lda     #1
         sta     nobud
+        jmp     @loop                   ; once per run: skip the alignment fill
+        .align  64, $EA                 ; loop body (< 64 bytes) in one page
 
 @loop:  lda     st_halt
         bne     @dump                   ; program halted/trapped
         lda     nobud
-        bne     @step
+        RUN_NOCROSS bne, @step          ; taken every instruction (no budget)
         lda     icount                  ; budget check: icount == budget?
         cmp     RUN_BUDGET
         bne     @step
@@ -173,7 +184,7 @@ RUN_BUDGET  = buf_case + 8              ; u32 LE max instructions, 0 = no cap
         bne     @dump                   ; always
 @step:  jsr     emu_step
         inc     icount                  ; 32-bit retired counter++
-        bne     @loop
+        RUN_NOCROSS bne, @loop          ; taken 255 of 256 instructions
         inc     icount+1
         bne     @loop
         inc     icount+2
