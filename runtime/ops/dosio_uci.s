@@ -3,9 +3,9 @@
 ; Ultimate's file system through the Ultimate Command Interface (UCI).
 ; Owner: WS-B2 (m2-dos).  Docs: docs/HLE_DOS.md "ULTDOS backend".
 ;
-; HARDWARE STATUS: UNVALIDATED.  Written against the firmware source and
-; pinned byte-for-byte by host/tests/test_hle_dos_uci.py (6502 emulator +
-; firmware model); never run on a device yet.
+; HARDWARE STATUS: VALIDATED on the U64E, fw 3.15, 2026-09-24 (see
+; docs/HLE_DOS.md "Hardware validation").  Written against the firmware
+; source and pinned byte-for-byte by host/tests/test_hle_dos_uci.py.
 ;
 ; Sources followed (exact):
 ;  - Register protocol: 1541ultimate fpga/io/command_interface/vhdl_source/
