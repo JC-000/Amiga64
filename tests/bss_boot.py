@@ -59,6 +59,13 @@ def main(argv=None) -> int:
             write_bytes(t, want, b"UCI!")
             write_bytes(t, READY_FLAG, b"\x00")
             goto(t, SYS_ENTRY)                     # "reload": re-enter the PRG
+            # Let the boot clear run before the first monitor read: polling
+            # memory immediately after goto() was seen to leave VICE halted
+            # inside the clear loop (PC $0820) once BSS grew to 7 pages
+            # (harness/VICE interaction, not a runtime hang: without the
+            # early read the PRG always comes back READY).  The clear is a
+            # few ms of emulated time; 1 s of wall time is ample in warp.
+            time.sleep(1.0)
             deadline = time.time() + 10
             while read_bytes(t, READY_FLAG, 1)[0] != 0xA5:
                 if time.time() > deadline:
