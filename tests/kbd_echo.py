@@ -247,7 +247,10 @@ def bleed_suspect(idx: int, held: set[int]) -> int | None:
     a key in column c.  -> the held key at c+1 on the same row, or None."""
     c, r = divmod(idx, 8)
     src = (c + 1) * 8 + r
-    return src if c < 7 and src in held and src != idx else None
+    # a held modifier (RSHIFT is c6r4 above '.' c5r4) is not a source: a
+    # modifier held while its neighbour is typed is the normal case (fix3)
+    return src if c < 7 and src in held and src != idx and \
+        src not in MODS else None
 
 
 def key_events(prev: set[int], now: set[int], dn: int) -> list[str]:
@@ -378,7 +381,8 @@ def queue_keys(sess, data: bytes) -> None:
 
 # --- console labels ---------------------------------------------------------------
 
-STREAM_LABELS = ("hle_con_nkey", "hle_con_idle", "hle_con_mat")
+STREAM_LABELS = ("hle_con_nkey", "hle_con_idle", "hle_con_mat",
+                 "hle_con_raw")
 HLE_CON_SRC = os.path.join(PROJECT_ROOT, "runtime", "ops", "hle_con.s")
 
 
@@ -427,15 +431,44 @@ class Sample:
     step: int | None           # the step on screen when this poll was taken
     keys: frozenset            # debounced matrix (indices)
     idle: int                  # hle_con_idle
+    nkey: int | None = None    # hle_con_nkey (key-down events decoded)
+    line: str | None = None    # the echo line on screen ("> ..." row)
+    raw: frozenset | None = None   # hle_con_raw: last valid raw sample
 
 
-STEP_HDR = re.compile(r"STEP (\d+)/\d+")
-STEP_END = re.compile(r"STEP (\d+) (PASS|FAIL|SKIP)")
+# A program row can land after prompt residue ("> STEPS ..." when the free
+# mode ends on a prompt row, fix3 BUG 1): tolerate "> " before these rows.
+def echo_line(rows: list[str]) -> str | None:
+    """The console line being typed: the text after "> " on the lowest
+    prompt row on screen (None: no prompt row)."""
+    for r in reversed(rows):
+        if r.startswith(">"):
+            return r[2:]
+    return None
+
+
+STEP_HDR = re.compile(r"(?:> )?STEP (\d+)/\d+")
+STEP_END = re.compile(r"(?:> )?STEP (\d+) (PASS|FAIL|SKIP)")
+STEPS_ROW = re.compile(rf"STEPS ([PFS-]{{{len(STEPS)}}})(?![PFS-])")
+
+
+HB_EVERY = 1.0             # s between two heartbeat lines in the log
+HB_LINE = re.compile(r"^hb polls \+(\d+) max gap ([\d.]+)s")
+
+
+def _log_only(line: str) -> None:
+    """Write *line* to the session log only (not the operator's terminal):
+    the Tee that run_u64 installs has the log file as .f."""
+    f = getattr(sys.stdout, "f", None)
+    if f is not None:
+        f.write(line + "\n")
 
 
 class Stream:
     """Poll the scanner state and the screen; print what changed; keep a
-    step-tagged timeline for :func:`judge_step`."""
+    step-tagged timeline for :func:`judge_step`.  Every HB_EVERY s a
+    heartbeat "hb polls +N max gap Gs" goes to the session log (fix4), so
+    a replay can prove that polling was continuous."""
 
     def __init__(self, sess, out=print):
         self.sess = sess
@@ -447,6 +480,8 @@ class Stream:
         self.lo = min(self.at.values())
         self.span = max(self.at.values()) + 8 - self.lo
         self.t0 = time.monotonic()
+        self.hb_t = self.last_poll = self.t0
+        self.hb_n, self.hb_gap = 0, 0.0
         self.nkey = self.mat = self.idle = None
         self.rows = [""] * ROWS
         self.log: list[str] = []          # every line printed
@@ -455,6 +490,7 @@ class Stream:
         self.samples: list[Sample] = []
         self.step: int | None = None
         self.last_hdr = 0                 # steps only move forward
+        self.raw_extra: set[int] = set()
 
     def emit(self, line: str) -> None:
         line = f"[{time.monotonic() - self.t0:7.2f}] {line}"
@@ -466,7 +502,8 @@ class Stream:
         blk = read_bytes(self.sess.target.transport, self.lo, self.span)
         g = lambda n, k=1: blk[self.at[n] - self.lo:self.at[n] - self.lo + k]
         return {"nkey": g("hle_con_nkey")[0],
-                "idle": g("hle_con_idle")[0], "mat": g("hle_con_mat", 8)}
+                "idle": g("hle_con_idle")[0], "mat": g("hle_con_mat", 8),
+                "raw": g("hle_con_raw", 8)}
 
     def screen_step(self, row: str) -> None:
         m = STEP_HDR.match(row)
@@ -479,6 +516,14 @@ class Stream:
     def poll(self, screen: bool = True) -> dict:
         from c64_test_harness import read_bytes
         from tests.run_vbcc import SCREEN
+        now = time.monotonic()
+        self.hb_n += 1
+        self.hb_gap = max(self.hb_gap, now - self.last_poll)
+        self.last_poll = now
+        if now - self.hb_t >= HB_EVERY:
+            _log_only(f"[{now - self.t0:7.2f}] hb polls +{self.hb_n} max "
+                      f"gap {self.hb_gap:.2f}s")
+            self.hb_t, self.hb_n, self.hb_gap = now, 0, 0.0
         s = self.read_state()
         if self.nkey is None or self.mat == b"\xff" * 8:
             # first poll, or hle_con_init's "every key down": baseline only
@@ -495,9 +540,21 @@ class Stream:
         # hle_con_idle is only meaningful once the scanner has sampled
         # (hle_con_init's all-down matrix has been committed away)
         if s["mat"] != b"\xff" * 8:
-            self.samples.append(Sample(time.monotonic(), self.step,
+            self.samples.append(Sample(now, self.step,
                                        frozenset(mat_bits(s["mat"])),
-                                       s["idle"]))
+                                       s["idle"], s["nkey"],
+                                       raw=frozenset(mat_bits(s["raw"]))))
+            # diagnostic (fix3): keys in the latest raw sample that the
+            # debounce has not committed -- a key held but never settled
+            # (the "nothing" form of a phantom) shows here, a key never
+            # pressed does not
+            extra = {i for i in mat_bits(s["raw"]) if i not in MODS} - \
+                mat_bits(s["mat"])
+            if extra != self.raw_extra:
+                if extra:
+                    self.emit("raw (not debounced yet): " +
+                              ", ".join(pos(i) for i in sorted(extra)))
+                self.raw_extra = extra
             if s["idle"] != self.idle:
                 rows = joy_rows(s["idle"])
                 if rows or self.idle is not None:
@@ -514,12 +571,168 @@ class Stream:
                 self.screen_step(r)
                 self.emit(f"  | {r}")
             self.rows = rows
+            if self.samples and self.samples[-1].line is None:
+                self.samples[-1].line = echo_line(rows)
         return s
 
     def verdicts(self) -> str | None:
-        """The program's own STEPS line, if it printed one."""
-        return next((r.split()[1] for r in reversed(self.screen_log)
-                     if r.startswith("STEPS ")), None)
+        """The program's own STEPS summary (nine P/F/S/- letters), wherever
+        it landed on its row (after prompt residue too), else None."""
+        for r in reversed(self.screen_log):
+            m = STEPS_ROW.search(r)
+            if m:
+                return m[1]
+        return None
+
+
+# --- replaying a session log ----------------------------------------------------
+
+LOG_LINE = re.compile(r"^\[\s*([\d.]+)\] (.*)$")
+RUN_START = re.compile(r"^(\S+@\d+) started: ")
+RUN_END = re.compile(r"^(\S+@\d+): (PASS|FAIL|INCOMPLETE|DEFECT SHOWN|"
+                     r"INCONCLUSIVE) \(want")
+KEY_LINE = re.compile(r"^(key|mod) (DOWN|UP)\s+c(\d)r(\d) ")
+REL_LINE = re.compile(r"^\(\+(\d+) key event")
+MASK_LINE = re.compile(r"^\((\d+) key\(s\) down without an event")
+JOY_LINE = re.compile(r"^port-1 joystick: (?:rows ((?:r\d ?)+) held low|"
+                      r"released)")
+FILL = 0.1                 # s between synthetic samples
+POLL_GUARD = 0.25          # s: a live poll period (0.1 s sleep + the REST
+                           # reads); the live stream's last sample before a
+                           # logged change is up to this much earlier, so no
+                           # synthetic sample is placed there (holds are not
+                           # over-measured)
+
+
+def replay_stream() -> "Stream":
+    """A Stream with no session: fed from a log by replay_log()."""
+    st = Stream.__new__(Stream)
+    st.samples, st.bleeds, st.screen_log, st.log = [], [], [], []
+    st.step, st.last_hdr = None, 0
+    st.rows = [""] * ROWS
+    st.hb_seen, st.hb_worst = 0, 0.0
+    st.t0 = st.hb_t = st.last_poll = time.monotonic()
+    st.hb_n, st.hb_gap = 0, 0.0
+    st.out = print
+    st.continuity = "unproven (no heartbeat in this log)"
+    return st
+
+
+def _continuity(st) -> str:
+    if not st.hb_seen:
+        return "unproven (no heartbeat in this log)"
+    if st.hb_worst > ECHO_GAP_MAX:
+        return (f"BROKEN (a poll gap of {st.hb_worst:.2f}s > "
+                f"{ECHO_GAP_MAX}s: the replay cannot vouch for the state "
+                "between)")
+    return f"proven ({st.hb_seen} heartbeat(s), max gap {st.hb_worst:.2f}s)"
+
+
+def replay_log(path: str) -> list[tuple[Run, "Stream", str]]:
+    """Rebuild each run's stream from a session.log: every state change
+    the live stream printed (key DOWN/UP with the scanned position, +n
+    events a poll missed, the port-1 rows, the mirrored screen rows) at its
+    timestamp, plus synthetic samples every FILL s in between (the state is
+    constant there).  -> [(run, stream, verdict the live driver logged)]."""
+    runs, st, run = [], None, None
+    keys, idle, nkey, line, t_last = set(), 0xFF, 0, None, 0.0
+
+    def sample(t):
+        st.samples.append(Sample(t, st.step, frozenset(keys), idle, nkey,
+                                 line))
+    with open(path, errors="replace") as f:
+        for raw in f:
+            m = LOG_LINE.match(raw.rstrip("\n"))
+            if not m:
+                continue
+            t, msg = float(m[1]), m[2]
+            if st is None:
+                ms = RUN_START.match(msg)
+                if ms:
+                    run = parse_runs(ms[1])[0]
+                    st = replay_stream()
+                    keys, idle, nkey, line, t_last = set(), 0xFF, 0, None, t
+                continue
+            me = RUN_END.match(msg)
+            if me:
+                st.continuity = _continuity(st)
+                runs.append((run, st, me[2]))
+                st = None
+                continue
+            mh = HB_LINE.match(msg)
+            if mh:
+                st.hb_seen += 1
+                st.hb_worst = max(st.hb_worst, float(mh[2]))
+                continue
+            if t > t_last:                       # a new poll
+                k = t_last + FILL
+                while k < t - POLL_GUARD:
+                    sample(k)
+                    k += FILL
+                t_last = t
+                sample(t)
+            if msg.startswith("  | "):
+                row = msg[4:]
+                st.screen_log.append(row)
+                st.screen_step(row)
+                if row.startswith(">"):
+                    line = row[2:] if len(row) > 1 else ""
+                if st.samples:
+                    st.samples[-1].line = line
+                continue
+            mk = KEY_LINE.match(msg)
+            if mk:
+                idx = int(mk[3]) * 8 + int(mk[4])
+                if mk[2] == "DOWN":
+                    keys.add(idx)
+                    nkey += mk[1] == "key"
+                    if "COLUMN BLEED" in msg:
+                        st.bleeds.append((st.step, msg))
+                else:
+                    keys.discard(idx)
+            elif REL_LINE.match(msg):
+                nkey += int(REL_LINE.match(msg)[1])
+            elif MASK_LINE.match(msg):
+                nkey -= int(MASK_LINE.match(msg)[1])
+            elif JOY_LINE.match(msg):
+                rows = JOY_LINE.match(msg)[1]
+                idle = 0xFF
+                for r in (rows or "").split():
+                    idle &= ~(1 << int(r[1:]))
+            if st.samples:
+                s0 = st.samples[-1]
+                st.samples[-1] = Sample(s0.t, s0.step, frozenset(keys), idle,
+                                        nkey, s0.line)
+    return runs
+
+
+def replay_report(paths: list[str], out=print) -> dict[str, dict[str, str]]:
+    """Re-judge every run of each log; -> {path: {run: result}}."""
+    res = {}
+    for path in paths:
+        out(f"== {path}")
+        res[path] = {}
+        for run, st, logged in replay_log(path):
+            judges = {n: judge_step(st, n, control=run.kind == CONTROL)
+                      for n in run.steps}
+            v = st.verdicts()
+            got = judge_run(run.kind, v, judges, run.steps)
+            if st.continuity.startswith("BROKEN"):
+                got = "INCOMPLETE"
+            res[path][str(run)] = got
+            out(f"{run}: logged {logged}; replayed {got}; STEPS {v}; "
+                f"polling {st.continuity}")
+            for n, j in judges.items():
+                out(f"   step {n} {STEPS[n - 1].title}: performed "
+                    f"{'yes' if j.performed else 'NO'}; {'; '.join(j.notes)}"
+                    + (f"; DEFECT {' | '.join(j.defects)}" if j.defects
+                       else "")
+                    + (f"; SIGNATURE {' | '.join(j.signature)}"
+                       if j.signature else ""))
+        v = session_verdict(res[path])
+        out(f"SESSION VERDICT (replayed; the last run of each name counts): "
+            f"{v}: {SESSION_MEANING.get(v, '')}")
+    return res
 
 
 # --- judging the manner -----------------------------------------------------------
@@ -550,6 +763,91 @@ def _runs(samples: list[Sample], key: int) -> float:
 
 def _first_down(samples: list[Sample], key: int) -> Sample | None:
     return next((s for s in samples if key in s.keys), None)
+
+
+ECHO_GAP_MAX = 0.4         # s: longest poll gap an echo credit may span
+                           # (real sessions: 0.33 s at most; fix4)
+
+
+def _echo_idx(samples: list[Sample]) -> list[tuple[str, int, int]]:
+    """(character, index of the poll before, index of the poll after) for
+    every character the echo line gained between two consecutive polls.
+
+    - The line is tracked against a BASE: the last line accepted as real.
+      A step's samples start at an empty prompt, so the base starts "".
+      The new text is what follows the longest common prefix of the base
+      and the polled line: DEL shrinks the line and types nothing (fix4
+      G1; the base shrinks with it); DEL plus a new key between two polls
+      types just that key.
+    - The two polls may be at most ECHO_GAP_MAX apart (a stalled poll must
+      not widen what "held at both polls" covers).
+    - Every gain must be backed by decoded key events: hle_con_nkey must
+      have grown by at least as many over the gain's interval widened by
+      one poll on each side (the count and the echo are read at different
+      moments of a poll, so either can lead by one; a replayed log also
+      splits one poll's state and screen reads into two samples).  A row
+      the screen mirror re-emitted from before (a scroll read mid-copy) has
+      no events behind it and is not a keystroke."""
+    out, base = [], ""
+    for i in range(1, len(samples)):
+        a, b = samples[i - 1], samples[i]
+        if b.line is None or b.line == base:
+            continue
+        n = 0
+        while n < min(len(base), len(b.line)) and base[n] == b.line[n]:
+            n += 1
+        new = b.line[n:]
+        if not new:                       # DEL: nothing typed
+            base = b.line
+            continue
+        z = samples[i - 2] if i >= 2 else a
+        c = samples[i + 1] if i + 1 < len(samples) else b
+        if None not in (z.nkey, c.nkey) and \
+                (c.nkey - z.nkey) & 0xFF < len(new):
+            continue                      # no events: not a keystroke
+        base = b.line
+        if b.t - a.t > ECHO_GAP_MAX:
+            continue                      # typed, but not provably when
+        out += [(ch, i - 1, i) for ch in new]
+    return out
+
+
+def echo_typed(samples: list[Sample]) -> list[tuple[str, Sample, Sample]]:
+    """(character, poll before, poll after) for every character the echo
+    line gained between two polls (fix3 BUG 2; rules in _echo_idx).  A key
+    tapped between two polls never shows in the debounced matrix at a poll,
+    but its echo does; what was held during the tap is what both polls
+    show."""
+    return [(ch, samples[ia], samples[ib])
+            for ch, ia, ib in _echo_idx(samples)]
+
+
+def credit(samples: list[Sample], key: int, echo: str,
+           cond) -> tuple[int, int] | None:
+    """The polls (first, last) that prove *key* went down while *cond*
+    held: its FIRST poll in the matrix, if that satisfies cond; else an
+    echo gain of *echo* between two polls that both satisfy cond.  None:
+    not proven."""
+    f = next((i for i, s in enumerate(samples) if key in s.keys), None)
+    if f is not None and cond(samples[f]):
+        return f, f
+    for ch, ia, ib in _echo_idx(samples):
+        if ch == echo and cond(samples[ia]) and cond(samples[ib]):
+            return ia, ib
+    return None
+
+
+def typed_with(samples: list[Sample], key: int, echo: str, cond) -> bool:
+    return credit(samples, key, echo, cond) is not None
+
+
+def held_throughout(samples: list[Sample], spans, cond) -> float | None:
+    """None when every poll from the first span's start to the last span's
+    end satisfies cond, else the time of the first poll that does not
+    (fix4 continuity: letting go between two letters is not a hold)."""
+    lo, hi = min(a for a, _ in spans), max(b for _, b in spans)
+    return next((samples[i].t for i in range(lo, hi + 1)
+                 if not cond(samples[i])), None)
 
 
 def judge_step(stream: Stream, n: int, control: bool = False) -> StepJudge:
@@ -592,12 +890,19 @@ def judge_step(stream: Stream, n: int, control: bool = False) -> StepJudge:
             defects.append("with Z I P held, also down (ghost?): "
                            + ", ".join(pos(i) for i in sorted(extra)))
     elif step.kind == "mods":
-        for ch, mod in (("a", RSHIFT), ("/", RSHIFT), ("q", CBM)):
-            s = _first_down(ss, K(ch))
-            good = s is not None and mod in s.keys
+        spans = {}
+        for ch, echo, mod in (("a", "A", RSHIFT), ("/", "?", RSHIFT),
+                              ("q", "Q", CBM)):
+            spans[ch] = credit(ss, K(ch), echo,
+                               lambda s, mod=mod: mod in s.keys)
+            good = spans[ch] is not None
             notes.append(f"{KEY_NAMES[K(ch)]} with {KEY_NAMES[mod]}: "
                          f"{'yes' if good else 'NO'}")
             ok &= good
+        # no continuity across A and /: the C64 screen says "RSHIFT+A,
+        # RSHIFT+/", so letting RSHIFT go in between is doing it right
+        # (both attended fixed@1 runs did); each character's own credit
+        # needs RSHIFT at both of its polls
         if any(LSHIFT in s.keys for s in ss):
             notes.append("LEFT SHIFT was used")
             ok = False
@@ -608,12 +913,21 @@ def judge_step(stream: Stream, n: int, control: bool = False) -> StepJudge:
         if control:
             ok = bool(held)
         else:
+            held_r = lambda s: r in joy_rows(s.idle)
+            spans = []
             for ch in "hose":
-                s = _first_down(ss, K(ch))
-                good = s is not None and r in joy_rows(s.idle)
-                ok &= good
-                if not good:
+                sp = credit(ss, K(ch), ch.upper(), held_r)
+                ok &= sp is not None
+                if sp is None:
                     notes.append(f"{ch.upper()} not typed with the stick held")
+                else:
+                    spans.append(sp)
+            if len(spans) == 4:
+                gap = held_throughout(ss, spans, held_r)
+                if gap is not None:
+                    notes.append("stick not held continuously from H to E "
+                                 f"(released at t={gap:.2f})")
+                    ok = False
         rowkeys = {i for s in held for i in s.keys if i % 8 == r}
         if rowkeys:
             line = (f"stick on r{r}: keys on that row read down: "
@@ -1494,7 +1808,10 @@ def parse_mhz(text: str | None) -> list[int]:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python3 -m tests.kbd_echo",
                                  description=__doc__.split("\n")[0])
-    ap.add_argument("--prg", required=True, help="runner PRG")
+    ap.add_argument("--prg", help="runner PRG (required unless --replay)")
+    ap.add_argument("--replay", nargs="+", metavar="LOG",
+                    help="re-judge the runs of session.log files offline "
+                    "(no emulator, no device)")
     ap.add_argument("--labels", help="ld65 -Ln label file (default: PRG .lbl)")
     ap.add_argument("--backend", default="vice", choices=["vice", "u64"])
     ap.add_argument("--legs", default=",".join(VICE_LEGS),
@@ -1535,6 +1852,14 @@ def main(argv: list[str] | None = None) -> int:
         PROJECT_ROOT, "build", "evidence", "kbd_echo-u64"),
         help="u64: session.log + config_before/after.json")
     args = ap.parse_args(argv)
+    if args.replay:
+        res = replay_report(args.replay)
+        # as live: only a VALIDATED session exits 0
+        return 0 if all(session_verdict(r) == "VALIDATED"
+                        for r in res.values()) else 1
+    if not args.prg:
+        print("error: --prg is required", file=sys.stderr)
+        return 2
     if args.timeout is None:
         args.timeout = 600.0 if args.backend == "u64" else 60.0
     try:

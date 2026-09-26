@@ -358,6 +358,72 @@ the **manner** of each step and looks for **defects**:
 In a control run, only the triggering action is required (the key held,
 or the stick seen). The broken build may garble the typing itself.
 
+**"Typed with X held" (fix round 3, from the attended sessions).** The
+stream polls about every 0.12 s. A letter tapped faster than that is
+counted by `hle_con_nkey`, but it is never down in the debounced matrix at
+a poll. So a letter counts as typed with the stick (or a modifier) held in
+either of two cases:
+- its first poll in the matrix shows the condition;
+- its **echo** appeared on the prompt row between two polls that **both**
+  show the condition.
+
+An echo gain counts only if it is backed by decoded key events. The
+`hle_con_nkey` count must grow by at least as much over the gain's
+interval, widened by one poll on each side. A row that the screen mirror
+re-emitted while it read a scroll mid-copy has no events behind it, so it
+never counts.
+
+Fix round 4 (the fix3 review) tightened these rules:
+- **The line is compared with a base.** The base is the last line
+  accepted as real, and it starts empty at each step, because each step
+  opens a new prompt. What was typed is whatever follows the common
+  prefix of the base and the polled line. So DEL types nothing, and DEL
+  plus a new key between two polls types only that key (G1).
+- **At most 0.4 s between the two polls of an echo credit.** The attended
+  sessions never had a gap over 0.33 s.
+- **The matrix path uses the key's first down poll.** A key pressed
+  without the stick and held until the stick arrives does not count.
+- **The stick must be held at every poll** from the first HOSE letter's
+  credit to the last one's. Letting go between letters is not a hold. All
+  20 replayed fixed-build stick steps meet this.
+  - Modifiers get no such rule across A and /. The screen says
+    "RSHIFT+A, RSHIFT+/", so releasing RSHIFT in between is correct, and
+    both attended 1 MHz runs did so.
+  - Each character's own credit still needs its modifier at both of its
+    polls.
+- **Heartbeat.** About once a second the stream writes
+  `hb polls +N max gap Gs` to the session log (not to the terminal).
+  `--replay` reports whether polling was continuous:
+  - "proven", with the largest gap;
+  - "unproven", for logs made before the heartbeat existed;
+  - "BROKEN", for a gap over 0.4 s. The run then counts as INCOMPLETE,
+    because the replay cannot vouch for the state in between.
+
+  `--replay` exits 0 only when every replayed session is VALIDATED, as
+  live.
+
+`hle_con_idle` is refreshed on every sample that is not voided, whatever
+keys are down (`hle_con_scan`), so it is a continuous "stick held" signal.
+The false "not typed with the stick held" in the attended sessions came
+from missed taps, not from the idle signal.
+
+**Other stream details:**
+- **Bleed.** A held modifier is never a bleed source. RSHIFT (c6r4) sits
+  directly above `.` (c5r4), so typing `>` used to be flagged.
+- **Raw diagnostic.** The stream also reads `hle_con_raw`, the latest valid
+  raw sample. `raw (not debounced yet): …` shows a key that is held but
+  never committed. So from fix round 3 on, the "nothing" form of the
+  phantom (Q held, the debounce restarting) is distinguishable from Q
+  never pressed, even at `--poll 1.0`. Before, it was not: only the
+  debounced matrix and the event count were streamed.
+- **Replay.** `python3 -m tests.kbd_echo --replay LOG…` re-judges the runs
+  of session logs offline. It rebuilds each stream from the logged events
+  and adds no samples within one live poll period before a change, so it
+  never over-measures a hold. On the pre-fix judge it reproduced all 11
+  run verdicts and all 70 step judgments of the three attended sessions.
+  The logs are in `tests/kbd/replay/`, verbatim except for relative prg
+  paths.
+
 **Run verdicts** (`judge_run`):
 - **Fixed build:** PASS only when every step is P, was performed, and
   shows no defect. It is FAIL on any F or any defect. Otherwise it is

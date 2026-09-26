@@ -1,0 +1,87 @@
+[19:01:31] kbd_echo MANUAL on 10.43.23.81, runs nosettle@48, prg build/w6-int/runner.prg
+[19:01:31] firmware gate: Ultimate 64 Elite fw 3.15 git c47155b7 fpga 125 core 1.50 = resting build (git c47155b7, core 1.50): proceeding
+
+========================================================================
+MANUAL KEYBOARD SESSION: runs in this order: nosettle@48
+Controls are SUPPOSED to show the defect.
+The runner will now be uploaded (run_prg) and the config changed (restored at the end).
+Press Enter when the operator is at the C64 keyboard (abort in 300s)...
+========================================================================
+[19:01:34] confirmation: operator ready
+[19:01:34] requesting the device (DeviceLock) ...
+[19:01:34] acquired after 0s wait; Ultimate 64 Elite fw 3.15 fpga 125 core 1.50
+[19:01:34] config before: {'turbo_control': 'Off', 'cpu_speed': ' 1', 'reu_enabled': 'Disabled', 'reu_size': '2 MB', 'cartridge': '', 'badline_timing': 'Enabled', 'bus_operation_mode': 'Quiet', 'sid_addressing': {'SID Socket 1 Address': '$D400', 'SID Socket 2 Address': '$D400', 'Ext DualSID Range Split': 'Off', 'UltiSID 1 Address': '$D400', 'UltiSID 2 Address': '$D400', 'UltiSID Range Split': 'Off', 'Paddle Override': 'Enabled', 'Auto Address Mirroring': 'Enabled'}, 'cartridge_preference': 'Auto'}
+[19:01:34] device: Ultimate 64 Elite fw 3.15 git c47155b7 fpga 125 core 1.50 (lock wait 0s)
+[19:01:34] CPU speed 1 MHz for the boot; REU enabled 16 MB next (prepare_target: set_reu)
+  u64: dosio_want_uci residue at boot: 00000000
+  u64: hle_dos_magic residue at boot: 00000000
+  u64: hle_dos_magic after the probe init: 444f5321
+[19:01:37] CPU speed set to 48 MHz
+[19:01:37] control patch nosettle applied (readback ok): THIS RUN IS SUPPOSED TO SHOW THE DEFECT
+========================================================================
+CONTROL RUN nosettle@48: THIS BUILD IS SUPPOSED TO SHOW THE DEFECT
+(the 'nosettle' fix is taken out of the runner in RAM; the C64 screen says CONTROL BUILD)
+========================================================================
+Steps 1-2 of 9; each ends with RETURN and shows PASS or FAIL.
+Type ONLY while the '>' prompt shows (keys pressed while the program prints are lost).
+NO joystick in control port 2 (it locks the keyboard out by design).
+Do each step exactly as described: the driver checks HOW (held time, keys down
+at once, which SHIFT, the stick's row).  A skipped step is never a pass.
+
+STEP 1  HOLD Q
+   do:     hold Q for 2 s, release it, press RETURN
+   expect (defect): ^q: the UP-ARROW glyph ($5E, c6r6, read in the same sample as Q) then q; or nothing (the phantom keeps restarting the debounce)
+STEP 2  HOLD ; AND /
+   do:     hold ; for 2 s, release; hold / for 2 s, release; RETURN
+   expect (defect): l; (c5r2, bleed from ;) or ,/ (c5r7, bleed from /)
+
+This terminal shows what the SCANNER saw ('key DOWN c7r6 Q'); 'COLUMN BLEED?'
+marks the phantom the row settle must prevent.  Letters look the same in both
+cases on screen (upper-case charset); the hex code tells them apart.
+========================================================================
+[kbd_echo] 11516-byte hunk file, args b'CONTROL nosettle 1 2\n'
+  staged 24368 byte(s) in 22 record(s)
+[   0.04] nosettle@48 started: operator, follow the C64 screen  *** CONTROL: SUPPOSED TO SHOW THE DEFECT ***
+[   0.19]   | KBD-ECHO KEYBOARD CHECK (W6-K)
+[   1.34]   | *** CONTROL BUILD: NOSETTLE ***
+[   1.34]   | SUPPOSED TO FAIL: IT LACKS THE FIX,
+[   1.34]   | SO IT SHOULD SHOW THE DEFECT.
+[   1.34]   | EMPTY LINE: SKIP STEP. CTRL+D: QUIT
+[   1.34]   | STEP 1/9: HOLD Q
+[   1.34]   | HOLD Q 2S, RELEASE, RETURN
+[   1.34]   | >
+[   9.26] (+1 key event(s) released before this poll saw them)
+[   9.37]   | STEP 1 SKIP
+[   9.37]   | STEP 2/9: HOLD ; AND /
+[   9.37]   | HOLD ; 2S, RELEASE;
+[   9.37]   | HOLD / 2S, RELEASE; RETURN
+[   9.37]   | >
+[  12.71] key DOWN c6r2 ;
+[  12.82]   | > ;
+[  16.14] key UP   c6r2 ;
+[  17.28] key DOWN c6r7 /
+[  17.39]   | > ;/
+[  20.71] key DOWN c0r1 RETURN
+[  20.71] key UP   c6r7 /
+[  20.82]   |  ';' $3B C6R2
+[  20.82]   |  '/' $2F C6R7
+[  20.82]   | STEP 2 PASS
+[  20.82]   | STEPS SP-------
+[  20.82]   | RESULT PASS=1 FAIL=0 SKIP=1
+  D0=00000000  D1=00000000  D2=00000000  D3=00000000  D4=00001000  D5=00000018  D6=00000000  D7=00000000
+  A0=00100058  A1=00100010  A2=00000000  A3=00012A98  A4=0001A93A  A5=00100010  A6=000F0400  A7=0000F004
+  PC=00000442  SR=0004  instructions=23669  [halt reason=00]
+[  20.85] step 1 HOLD Q: program S; performed NO; Q held 0.0s
+[  20.85] step 2 HOLD ; AND /: program P; performed yes; ; held 2.3s; / held 2.3s
+[  20.85] nosettle@48: INCOMPLETE (want DEFECT SHOWN), STEPS SP-------
+[  20.85] nosettle@48: no defect signature, and a step was not done as asked or not P: operator error, REDO THIS LEG (--runs nosettle@48)
+  CHECK FAILED  manual/nosettle@48: DEFECT SHOWN  INCOMPLETE
+[19:02:11] control patch removed (readback ok)
+[19:02:11] restoring config ...
+[19:02:15] config after (full, all categories): IDENTICAL
+[19:02:15] nosettle@48: INCOMPLETE
+[19:02:15] SESSION VERDICT: INCOMPLETE (not the full plan): a step was skipped or not done as asked, a control had no defect signature and an operator error (redo that leg), or a run is missing: not validated
+  CHECK FAILED  session verdict VALIDATED  INCOMPLETE (not the full plan)
+10/12 checks passed
+FAIL  manual/nosettle@48: DEFECT SHOWN: INCOMPLETE
+FAIL  session verdict VALIDATED: INCOMPLETE (not the full plan)

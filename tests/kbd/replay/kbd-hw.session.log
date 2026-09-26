@@ -1,0 +1,1877 @@
+[17:24:20] kbd_echo MANUAL on 10.43.23.81, runs fixed@48, nosettle@48, nojoymask@48, fixed@1, prg build/w6-int/runner.prg
+[17:24:20] firmware gate: Ultimate 64 Elite fw 3.15 git c47155b7 fpga 125 core 1.50 = resting build (git c47155b7, core 1.50): proceeding
+
+========================================================================
+MANUAL KEYBOARD SESSION: runs in this order: fixed@48, nosettle@48, nojoymask@48, fixed@1
+Controls are SUPPOSED to show the defect.
+The runner will now be uploaded (run_prg) and the config changed (restored at the end).
+Press Enter when the operator is at the C64 keyboard (abort in 300s)...
+========================================================================
+[17:24:36] confirmation: operator ready
+[17:24:36] requesting the device (DeviceLock) ...
+[17:24:36] acquired after 0s wait; Ultimate 64 Elite fw 3.15 fpga 125 core 1.50
+[17:24:36] config before: {'turbo_control': 'Manual', 'cpu_speed': '48', 'reu_enabled': 'Disabled', 'reu_size': '16 MB', 'cartridge': '', 'badline_timing': 'Enabled', 'bus_operation_mode': 'Quiet', 'sid_addressing': {'SID Socket 1 Address': '$D400', 'SID Socket 2 Address': '$D400', 'Ext DualSID Range Split': 'Off', 'UltiSID 1 Address': '$D400', 'UltiSID 2 Address': '$D400', 'UltiSID Range Split': 'Off', 'Paddle Override': 'Enabled', 'Auto Address Mirroring': 'Enabled'}, 'cartridge_preference': 'Auto'}
+[17:24:36] device: Ultimate 64 Elite fw 3.15 git c47155b7 fpga 125 core 1.50 (lock wait 0s)
+[17:24:36] CPU speed 1 MHz for the boot; REU enabled 16 MB next (prepare_target: set_reu)
+  u64: dosio_want_uci residue at boot: 00000000
+  u64: hle_dos_magic residue at boot: 00000000
+  u64: hle_dos_magic after the probe init: 444f5321
+[17:24:39] CPU speed set to 48 MHz
+========================================================================
+FIXED BUILD at 48 MHz: every step must PASS
+========================================================================
+Steps 1-9 of 9; each ends with RETURN and shows PASS or FAIL.
+Type ONLY while the '>' prompt shows (keys pressed while the program prints are lost).
+NO joystick in control port 2 (it locks the keyboard out by design).
+Do each step exactly as described: the driver checks HOW (held time, keys down
+at once, which SHIFT, the stick's row).  A skipped step is never a pass.
+
+STEP 1  HOLD Q
+   do:     hold Q for 2 s, release it, press RETURN
+   expect: the line 'q', then STEP 1 PASS
+   defect: ^q: the UP-ARROW glyph ($5E, c6r6, read in the same sample as Q) then q; or nothing (the phantom keeps restarting the debounce)
+STEP 2  HOLD ; AND /
+   do:     hold ; for 2 s, release; hold / for 2 s, release; RETURN
+   expect: the line ';/', then STEP 2 PASS
+   defect: l; (c5r2, bleed from ;) or ,/ (c5r7, bleed from /)
+STEP 3  ROLLOVER
+   do:     press Z and keep it down, add I, add P (all three held), release all, RETURN
+   expect: the line 'zip', then STEP 3 PASS
+   defect: a missing or doubled letter, or a letter nobody pressed
+STEP 4  RSHIFT, C=
+   do:     hold RIGHT SHIFT: type A and /, release; hold C=: type Q, release; RETURN (do not touch LEFT SHIFT)
+   expect: the line 'A?q', then STEP 4 PASS
+   defect: a/ (RSHIFT not decoded), or an extra character from C=
+STEP 5  PORT-1 STICK UP
+   do:     hold the stick in CONTROL PORT 1 UP and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 5 PASS
+   defect: 1 3 5 7 9 + \ appear (row 0), DEL rubs characters out
+STEP 6  PORT-1 STICK DOWN
+   do:     hold the stick in CONTROL PORT 1 DOWN and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 6 PASS
+   defect: the step ends at once with an empty line (RETURN is on row 1): SKIP, then w r y i p * _ land in the next line
+STEP 7  PORT-1 STICK LEFT
+   do:     hold the stick in CONTROL PORT 1 LEFT and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 7 PASS
+   defect: CTRL reads as held (row 2): letters turn into control codes, CTRL+D ends the program, CTRL+J ends the line; a d g j l ;
+STEP 8  PORT-1 STICK RIGHT
+   do:     hold the stick in CONTROL PORT 1 RIGHT and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 8 PASS
+   defect: 4 6 8 0 - 2 appear (row 3)
+STEP 9  PORT-1 FIRE
+   do:     hold the stick in CONTROL PORT 1 FIRE and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 9 PASS
+   defect: RSHIFT reads as held (row 4): HOSE comes out upper case, with Z C B M > and spaces
+
+Then FREE mode: type any lines (every key once, with and without SHIFT);
+an empty line ends the program.
+
+This terminal shows what the SCANNER saw ('key DOWN c7r6 Q'); 'COLUMN BLEED?'
+marks the phantom the row settle must prevent.  Letters look the same in both
+cases on screen (upper-case charset); the hex code tells them apart.
+========================================================================
+[kbd_echo] 11516-byte hunk file, args b'\n'
+  staged 24368 byte(s) in 22 record(s)
+[   0.04] fixed@48 started: operator, follow the C64 screen
+[   0.18]   | KBD-ECHO KEYBOARD CHECK (W6-K)
+[   0.43]   | EMPTY LINE: SKIP STEP. CTRL+D: QUIT
+[   0.43]   | STEP 1/9: HOLD Q
+[   0.43]   | HOLD Q 2S, RELEASE, RETURN
+[   0.43]   | >
+[  41.76] ^C: feeding CTRL+D through the queue to end the program
+[  41.95]   | > EOF
+[  41.95]   | STEP 1 SKIP
+[  41.95]   | STEPS SSSSSSSSS
+[  42.20]   | RESULT PASS=0 FAIL=0 SKIP=9
+  CHECK FAILED  manual/fixed@48: program ended (^C)  ^C
+  D0=00000000  D1=00000000  D2=00000000  D3=00000000  D4=00001000  D5=0000000C  D6=00000000  D7=00000000
+  A0=00100038  A1=00100010  A2=00000000  A3=00012A98  A4=0001A93A  A5=00100010  A6=000F0400  A7=0000F004
+  PC=00000442  SR=0004  instructions=9332  [halt reason=00]
+[  42.23] step 1 HOLD Q: program S; performed NO; Q held 0.0s
+[  42.23] step 2 HOLD ; AND /: program S; performed NO; ; held 0.0s; / held 0.0s
+[  42.23] step 3 ROLLOVER: program S; performed NO; at most 0 keys down at once
+[  42.23] step 4 RSHIFT, C=: program S; performed NO; A with RSHIFT: NO; / with RSHIFT: NO; Q with C=: NO
+[  42.23] step 5 PORT-1 STICK UP: program S; performed NO; stick row r0 seen held in 0 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[  42.23] step 6 PORT-1 STICK DOWN: program S; performed NO; stick row r1 seen held in 0 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[  42.23] step 7 PORT-1 STICK LEFT: program S; performed NO; stick row r2 seen held in 0 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[  42.23] step 8 PORT-1 STICK RIGHT: program S; performed NO; stick row r3 seen held in 0 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[  42.23] step 9 PORT-1 FIRE: program S; performed NO; stick row r4 seen held in 0 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[  42.23] fixed@48: INCOMPLETE (want PASS), STEPS SSSSSSSSS
+  CHECK FAILED  manual/fixed@48: PASS  INCOMPLETE
+[17:25:35] CPU speed set to 48 MHz
+[17:25:35] control patch nosettle applied (readback ok): THIS RUN IS SUPPOSED TO SHOW THE DEFECT
+========================================================================
+CONTROL RUN nosettle@48: THIS BUILD IS SUPPOSED TO SHOW THE DEFECT
+(the 'nosettle' fix is taken out of the runner in RAM; the C64 screen says CONTROL BUILD)
+========================================================================
+Steps 1-2 of 9; each ends with RETURN and shows PASS or FAIL.
+Type ONLY while the '>' prompt shows (keys pressed while the program prints are lost).
+NO joystick in control port 2 (it locks the keyboard out by design).
+Do each step exactly as described: the driver checks HOW (held time, keys down
+at once, which SHIFT, the stick's row).  A skipped step is never a pass.
+
+STEP 1  HOLD Q
+   do:     hold Q for 2 s, release it, press RETURN
+   expect (defect): ^q: the UP-ARROW glyph ($5E, c6r6, read in the same sample as Q) then q; or nothing (the phantom keeps restarting the debounce)
+STEP 2  HOLD ; AND /
+   do:     hold ; for 2 s, release; hold / for 2 s, release; RETURN
+   expect (defect): l; (c5r2, bleed from ;) or ,/ (c5r7, bleed from /)
+
+This terminal shows what the SCANNER saw ('key DOWN c7r6 Q'); 'COLUMN BLEED?'
+marks the phantom the row settle must prevent.  Letters look the same in both
+cases on screen (upper-case charset); the hex code tells them apart.
+========================================================================
+[kbd_echo] 11516-byte hunk file, args b'CONTROL nosettle 1 2\n'
+[17:25:46] restoring config ...
+[17:25:46] ^C received: deferred until the restore is done and the lock released
+[17:25:46] ^C received: deferred until the restore is done and the lock released
+[17:25:47] ^C received: deferred until the restore is done and the lock released
+[17:25:47] ^C received: deferred until the restore is done and the lock released
+[17:25:47] ^C received: deferred until the restore is done and the lock released
+[17:25:48] ^C received: deferred until the restore is done and the lock released
+[17:25:56]   restore_state failed (attempt 1/1): Ultimate64TimeoutError('timeout after 10.0s: PUT http://10.43.23.81/v1/configs/U64%20Specific%20Settings/Turbo%20Control?value=Manual')
+[17:25:56]   re-read 1 failed (attempt 1/2): Ultimate64TimeoutError('connection failed: GET http://10.43.23.81/v1/configs: [Errno 64] Host is down')
+[17:25:56]   re-read 1 failed (attempt 2/2): Ultimate64TimeoutError('connection failed: GET http://10.43.23.81/v1/configs: [Errno 64] Host is down')
+[17:25:56]   re-read 2 failed (attempt 1/2): Ultimate64TimeoutError('connection failed: GET http://10.43.23.81/v1/configs: [Errno 64] Host is down')
+[17:25:56]   re-read 2 failed (attempt 2/2): Ultimate64TimeoutError('connection failed: GET http://10.43.23.81/v1/configs: [Errno 64] Host is down')
+[17:25:56]   C64 reset failed (attempt 1/1): Ultimate64TimeoutError('connection failed: PUT http://10.43.23.81/v1/machine:reset: [Errno 64] Host is down')
+[17:25:59]   final re-read failed (attempt 1/2): Ultimate64TimeoutError('connection failed: GET http://10.43.23.81/v1/configs: [Errno 64] Host is down')
+[17:25:59]   final re-read failed (attempt 2/2): Ultimate64TimeoutError('connection failed: GET http://10.43.23.81/v1/configs: [Errno 64] Host is down')
+[17:25:59] config after (full, all categories): RE-READ FAILED
+[18:26:57] kbd_echo MANUAL on 10.43.23.81, runs fixed@48, nosettle@48, nojoymask@48, fixed@1, prg build/w6-int/runner.prg
+[18:26:57] firmware gate: Ultimate 64 Elite fw 3.15 git c47155b7 fpga 125 core 1.50 = resting build (git c47155b7, core 1.50): proceeding
+
+========================================================================
+MANUAL KEYBOARD SESSION: runs in this order: fixed@48, nosettle@48, nojoymask@48, fixed@1
+Controls are SUPPOSED to show the defect.
+The runner will now be uploaded (run_prg) and the config changed (restored at the end).
+Press Enter when the operator is at the C64 keyboard (abort in 300s)...
+========================================================================
+[18:27:01] confirmation: operator ready
+[18:27:01] requesting the device (DeviceLock) ...
+[18:27:02] acquired after 0s wait; Ultimate 64 Elite fw 3.15 fpga 125 core 1.50
+[18:27:02] config before: {'turbo_control': 'Off', 'cpu_speed': ' 1', 'reu_enabled': 'Disabled', 'reu_size': '2 MB', 'cartridge': '', 'badline_timing': 'Enabled', 'bus_operation_mode': 'Quiet', 'sid_addressing': {'SID Socket 1 Address': '$D400', 'SID Socket 2 Address': '$D400', 'Ext DualSID Range Split': 'Off', 'UltiSID 1 Address': '$D400', 'UltiSID 2 Address': '$D400', 'UltiSID Range Split': 'Off', 'Paddle Override': 'Enabled', 'Auto Address Mirroring': 'Enabled'}, 'cartridge_preference': 'Auto'}
+[18:27:02] device: Ultimate 64 Elite fw 3.15 git c47155b7 fpga 125 core 1.50 (lock wait 0s)
+[18:27:02] CPU speed 1 MHz for the boot; REU enabled 16 MB next (prepare_target: set_reu)
+  u64: dosio_want_uci residue at boot: 00000000
+  u64: hle_dos_magic residue at boot: 00000000
+  u64: hle_dos_magic after the probe init: 444f5321
+[18:27:05] CPU speed set to 48 MHz
+========================================================================
+FIXED BUILD at 48 MHz: every step must PASS
+========================================================================
+Steps 1-9 of 9; each ends with RETURN and shows PASS or FAIL.
+Type ONLY while the '>' prompt shows (keys pressed while the program prints are lost).
+NO joystick in control port 2 (it locks the keyboard out by design).
+Do each step exactly as described: the driver checks HOW (held time, keys down
+at once, which SHIFT, the stick's row).  A skipped step is never a pass.
+
+STEP 1  HOLD Q
+   do:     hold Q for 2 s, release it, press RETURN
+   expect: the line 'q', then STEP 1 PASS
+   defect: ^q: the UP-ARROW glyph ($5E, c6r6, read in the same sample as Q) then q; or nothing (the phantom keeps restarting the debounce)
+STEP 2  HOLD ; AND /
+   do:     hold ; for 2 s, release; hold / for 2 s, release; RETURN
+   expect: the line ';/', then STEP 2 PASS
+   defect: l; (c5r2, bleed from ;) or ,/ (c5r7, bleed from /)
+STEP 3  ROLLOVER
+   do:     press Z and keep it down, add I, add P (all three held), release all, RETURN
+   expect: the line 'zip', then STEP 3 PASS
+   defect: a missing or doubled letter, or a letter nobody pressed
+STEP 4  RSHIFT, C=
+   do:     hold RIGHT SHIFT: type A and /, release; hold C=: type Q, release; RETURN (do not touch LEFT SHIFT)
+   expect: the line 'A?q', then STEP 4 PASS
+   defect: a/ (RSHIFT not decoded), or an extra character from C=
+STEP 5  PORT-1 STICK UP
+   do:     hold the stick in CONTROL PORT 1 UP and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 5 PASS
+   defect: 1 3 5 7 9 + \ appear (row 0), DEL rubs characters out
+STEP 6  PORT-1 STICK DOWN
+   do:     hold the stick in CONTROL PORT 1 DOWN and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 6 PASS
+   defect: the step ends at once with an empty line (RETURN is on row 1): SKIP, then w r y i p * _ land in the next line
+STEP 7  PORT-1 STICK LEFT
+   do:     hold the stick in CONTROL PORT 1 LEFT and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 7 PASS
+   defect: CTRL reads as held (row 2): letters turn into control codes, CTRL+D ends the program, CTRL+J ends the line; a d g j l ;
+STEP 8  PORT-1 STICK RIGHT
+   do:     hold the stick in CONTROL PORT 1 RIGHT and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 8 PASS
+   defect: 4 6 8 0 - 2 appear (row 3)
+STEP 9  PORT-1 FIRE
+   do:     hold the stick in CONTROL PORT 1 FIRE and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 9 PASS
+   defect: RSHIFT reads as held (row 4): HOSE comes out upper case, with Z C B M > and spaces
+
+Then FREE mode: type any lines (every key once, with and without SHIFT);
+an empty line ends the program.
+
+This terminal shows what the SCANNER saw ('key DOWN c7r6 Q'); 'COLUMN BLEED?'
+marks the phantom the row settle must prevent.  Letters look the same in both
+cases on screen (upper-case charset); the hex code tells them apart.
+========================================================================
+[kbd_echo] 11516-byte hunk file, args b'\n'
+  staged 24368 byte(s) in 22 record(s)
+[   0.04] fixed@48 started: operator, follow the C64 screen
+[   0.19]   | KBD-ECHO KEYBOARD CHECK (W6-K)
+[   0.19]   | EMPTY LINE: SKIP STEP. CTRL+D: QUIT
+[   0.44]   | STEP 1/9: HOLD Q
+[   0.44]   | HOLD Q 2S, RELEASE, RETURN
+[   0.44]   | >
+[   4.51] key DOWN c7r6 Q
+[   4.63]   | > Q
+[   5.99] key UP   c7r6 Q
+[   6.49] key DOWN c0r1 RETURN
+[   6.60]   |  'Q' $71 C7R6
+[   6.74] key UP   c0r1 RETURN
+[   6.85]   | STEP 1 PASS
+[   6.85]   | STEP 2/9: HOLD ; AND /
+[   6.85]   | HOLD ; 2S, RELEASE;
+[   6.85]   | HOLD / 2S, RELEASE; RETURN
+[   6.85]   | >
+[  15.41] key DOWN c6r2 ;
+[  15.53]   | > ;
+[  18.37] key UP   c6r2 ;
+[  19.63] key DOWN c0r1 RETURN
+[  19.74]   |  ';' $3B C6R2
+[  19.88] key UP   c0r1 RETURN
+[  19.99]   | STEP 2 FAIL, WANT ";/"
+[  19.99]   | STEP 3/9: ROLLOVER
+[  19.99]   | PRESS Z, KEEP IT; ADD I, KEEP IT;
+[  19.99]   | ADD P; RELEASE ALL; RETURN
+[  19.99]   | >
+[  42.90] mod DOWN c7r2 CTRL
+[  43.15] key DOWN c2r2 D
+[  43.26]   | > EOF
+[  43.26]   | STEP 3 SKIP
+[  43.26]   | STEPS PFSSSSSSS
+[  43.26]   |         ASS=1 FAIL=1 SKIP=7
+[  43.51]   | RESULT PASS=1 FAIL=1 SKIP=7
+  D0=00000001  D1=00000000  D2=00000001  D3=00000000  D4=00001000  D5=0000000C  D6=00000000  D7=00000000
+  A0=00100038  A1=00100010  A2=00000000  A3=00012A98  A4=0001A93A  A5=00100010  A6=000F0400  A7=0000F004
+  PC=00000442  SR=0000  instructions=25172  [halt reason=00]
+[  43.54] step 1 HOLD Q: program P; performed NO; Q held 1.2s
+[  43.54] step 2 HOLD ; AND /: program F; performed NO; ; held 2.7s; / held 0.0s
+[  43.54] step 3 ROLLOVER: program S; performed NO; at most 1 keys down at once
+[  43.54] step 4 RSHIFT, C=: program S; performed NO; A with RSHIFT: NO; / with RSHIFT: NO; Q with C=: NO
+[  43.54] step 5 PORT-1 STICK UP: program S; performed NO; stick row r0 seen held in 0 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[  43.54] step 6 PORT-1 STICK DOWN: program S; performed NO; stick row r1 seen held in 0 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[  43.54] step 7 PORT-1 STICK LEFT: program S; performed NO; stick row r2 seen held in 0 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[  43.54] step 8 PORT-1 STICK RIGHT: program S; performed NO; stick row r3 seen held in 0 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[  43.54] step 9 PORT-1 FIRE: program S; performed NO; stick row r4 seen held in 0 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[  43.54] fixed@48: FAIL (want PASS), STEPS PFSSSSSSS
+  CHECK FAILED  manual/fixed@48: PASS  FAIL
+[18:28:03] CPU speed set to 48 MHz
+[18:28:03] control patch nosettle applied (readback ok): THIS RUN IS SUPPOSED TO SHOW THE DEFECT
+========================================================================
+CONTROL RUN nosettle@48: THIS BUILD IS SUPPOSED TO SHOW THE DEFECT
+(the 'nosettle' fix is taken out of the runner in RAM; the C64 screen says CONTROL BUILD)
+========================================================================
+Steps 1-2 of 9; each ends with RETURN and shows PASS or FAIL.
+Type ONLY while the '>' prompt shows (keys pressed while the program prints are lost).
+NO joystick in control port 2 (it locks the keyboard out by design).
+Do each step exactly as described: the driver checks HOW (held time, keys down
+at once, which SHIFT, the stick's row).  A skipped step is never a pass.
+
+STEP 1  HOLD Q
+   do:     hold Q for 2 s, release it, press RETURN
+   expect (defect): ^q: the UP-ARROW glyph ($5E, c6r6, read in the same sample as Q) then q; or nothing (the phantom keeps restarting the debounce)
+STEP 2  HOLD ; AND /
+   do:     hold ; for 2 s, release; hold / for 2 s, release; RETURN
+   expect (defect): l; (c5r2, bleed from ;) or ,/ (c5r7, bleed from /)
+
+This terminal shows what the SCANNER saw ('key DOWN c7r6 Q'); 'COLUMN BLEED?'
+marks the phantom the row settle must prevent.  Letters look the same in both
+cases on screen (upper-case charset); the hex code tells them apart.
+========================================================================
+[kbd_echo] 11516-byte hunk file, args b'CONTROL nosettle 1 2\n'
+[18:28:15] control patch removed (readback ok)
+[18:28:15] restoring config ...
+[18:28:15] ^C received: deferred until the restore is done and the lock released
+[18:28:15] ^C received: deferred until the restore is done and the lock released
+[18:28:15] ^C received: deferred until the restore is done and the lock released
+[18:28:16] ^C received: deferred until the restore is done and the lock released
+[18:28:16] ^C received: deferred until the restore is done and the lock released
+[18:28:16] ^C received: deferred until the restore is done and the lock released
+[18:28:16] ^C received: deferred until the restore is done and the lock released
+[18:28:16] ^C received: deferred until the restore is done and the lock released
+[18:28:19] config after (full, all categories): IDENTICAL
+[18:28:21] kbd_echo MANUAL on 10.43.23.81, runs fixed@48, nosettle@48, nojoymask@48, fixed@1, prg build/w6-int/runner.prg
+[18:28:21] firmware gate: Ultimate 64 Elite fw 3.15 git c47155b7 fpga 125 core 1.50 = resting build (git c47155b7, core 1.50): proceeding
+
+========================================================================
+MANUAL KEYBOARD SESSION: runs in this order: fixed@48, nosettle@48, nojoymask@48, fixed@1
+Controls are SUPPOSED to show the defect.
+The runner will now be uploaded (run_prg) and the config changed (restored at the end).
+Press Enter when the operator is at the C64 keyboard (abort in 300s)...
+========================================================================
+[18:28:26] confirmation: operator ready
+[18:28:26] requesting the device (DeviceLock) ...
+[18:28:27] acquired after 0s wait; Ultimate 64 Elite fw 3.15 fpga 125 core 1.50
+[18:28:27] config before: {'turbo_control': 'Off', 'cpu_speed': ' 1', 'reu_enabled': 'Disabled', 'reu_size': '2 MB', 'cartridge': '', 'badline_timing': 'Enabled', 'bus_operation_mode': 'Quiet', 'sid_addressing': {'SID Socket 1 Address': '$D400', 'SID Socket 2 Address': '$D400', 'Ext DualSID Range Split': 'Off', 'UltiSID 1 Address': '$D400', 'UltiSID 2 Address': '$D400', 'UltiSID Range Split': 'Off', 'Paddle Override': 'Enabled', 'Auto Address Mirroring': 'Enabled'}, 'cartridge_preference': 'Auto'}
+[18:28:27] device: Ultimate 64 Elite fw 3.15 git c47155b7 fpga 125 core 1.50 (lock wait 0s)
+[18:28:27] CPU speed 1 MHz for the boot; REU enabled 16 MB next (prepare_target: set_reu)
+  u64: dosio_want_uci residue at boot: 00000000
+  u64: hle_dos_magic residue at boot: 00000000
+  u64: hle_dos_magic after the probe init: 444f5321
+[18:28:30] CPU speed set to 48 MHz
+========================================================================
+FIXED BUILD at 48 MHz: every step must PASS
+========================================================================
+Steps 1-9 of 9; each ends with RETURN and shows PASS or FAIL.
+Type ONLY while the '>' prompt shows (keys pressed while the program prints are lost).
+NO joystick in control port 2 (it locks the keyboard out by design).
+Do each step exactly as described: the driver checks HOW (held time, keys down
+at once, which SHIFT, the stick's row).  A skipped step is never a pass.
+
+STEP 1  HOLD Q
+   do:     hold Q for 2 s, release it, press RETURN
+   expect: the line 'q', then STEP 1 PASS
+   defect: ^q: the UP-ARROW glyph ($5E, c6r6, read in the same sample as Q) then q; or nothing (the phantom keeps restarting the debounce)
+STEP 2  HOLD ; AND /
+   do:     hold ; for 2 s, release; hold / for 2 s, release; RETURN
+   expect: the line ';/', then STEP 2 PASS
+   defect: l; (c5r2, bleed from ;) or ,/ (c5r7, bleed from /)
+STEP 3  ROLLOVER
+   do:     press Z and keep it down, add I, add P (all three held), release all, RETURN
+   expect: the line 'zip', then STEP 3 PASS
+   defect: a missing or doubled letter, or a letter nobody pressed
+STEP 4  RSHIFT, C=
+   do:     hold RIGHT SHIFT: type A and /, release; hold C=: type Q, release; RETURN (do not touch LEFT SHIFT)
+   expect: the line 'A?q', then STEP 4 PASS
+   defect: a/ (RSHIFT not decoded), or an extra character from C=
+STEP 5  PORT-1 STICK UP
+   do:     hold the stick in CONTROL PORT 1 UP and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 5 PASS
+   defect: 1 3 5 7 9 + \ appear (row 0), DEL rubs characters out
+STEP 6  PORT-1 STICK DOWN
+   do:     hold the stick in CONTROL PORT 1 DOWN and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 6 PASS
+   defect: the step ends at once with an empty line (RETURN is on row 1): SKIP, then w r y i p * _ land in the next line
+STEP 7  PORT-1 STICK LEFT
+   do:     hold the stick in CONTROL PORT 1 LEFT and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 7 PASS
+   defect: CTRL reads as held (row 2): letters turn into control codes, CTRL+D ends the program, CTRL+J ends the line; a d g j l ;
+STEP 8  PORT-1 STICK RIGHT
+   do:     hold the stick in CONTROL PORT 1 RIGHT and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 8 PASS
+   defect: 4 6 8 0 - 2 appear (row 3)
+STEP 9  PORT-1 FIRE
+   do:     hold the stick in CONTROL PORT 1 FIRE and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 9 PASS
+   defect: RSHIFT reads as held (row 4): HOSE comes out upper case, with Z C B M > and spaces
+
+Then FREE mode: type any lines (every key once, with and without SHIFT);
+an empty line ends the program.
+
+This terminal shows what the SCANNER saw ('key DOWN c7r6 Q'); 'COLUMN BLEED?'
+marks the phantom the row settle must prevent.  Letters look the same in both
+cases on screen (upper-case charset); the hex code tells them apart.
+========================================================================
+[kbd_echo] 11516-byte hunk file, args b'\n'
+  staged 24368 byte(s) in 22 record(s)
+[   0.04] fixed@48 started: operator, follow the C64 screen
+[   0.18]   | KBD-ECHO KEYBOARD CHECK (W6-K)
+[   0.44]   | EMPTY LINE: SKIP STEP. CTRL+D: QUIT
+[   0.44]   | STEP 1/9: HOLD Q
+[   0.44]   | HOLD Q 2S, RELEASE, RETURN
+[   0.44]   | >
+[   3.04] key DOWN c7r6 Q
+[   3.16]   | > Q
+[   5.32] key UP   c7r6 Q
+[   5.81] key DOWN c0r1 RETURN
+[   5.93]   |  'Q' $71 C7R6
+[   5.93]   | STEP 1 PASS
+[   5.93]   | STEP 2/9: HOLD ; AND /
+[   5.93]   | HOLD ; 2S, RELEASE;
+[   5.93]   | HOLD / 2S, RELEASE; RETURN
+[   5.93]   | >
+[   6.06] key UP   c0r1 RETURN
+[   9.27] key DOWN c6r2 ;
+[   9.38]   | > ;
+[  11.49] key UP   c6r2 ;
+[  11.99] key DOWN c6r7 /
+[  12.10]   | > ;/
+[  13.70] key UP   c6r7 /
+[  14.20] key DOWN c0r1 RETURN
+[  14.31]   |  ';' $3B C6R2
+[  14.31]   |  '/' $2F C6R7
+[  14.31]   | STEP 2 PASS
+[  14.31]   | STEP 3/9: ROLLOVER
+[  14.31]   | PRESS Z, KEEP IT; ADD I, KEEP IT;
+[  14.31]   | ADD P; RELEASE ALL; RETURN
+[  14.31]   | >
+[  14.45] key UP   c0r1 RETURN
+[  22.08] key DOWN c1r4 Z
+[  22.22]   | > Z
+[  26.69]   | > ZI
+[  26.82] key DOWN c4r1 I
+[  29.30] key DOWN c5r1 P
+[  29.42]   | > ZIP
+[  31.53] key UP   c1r4 Z
+[  31.53] key UP   c4r1 I
+[  31.53] key UP   c5r1 P
+[  32.27] key DOWN c0r1 RETURN
+[  32.38]   |  'Z' $7A C1R4
+[  32.38]   |  'I' $69 C4R1
+[  32.38]   |  'P' $70 C5R1
+[  32.52] key UP   c0r1 RETURN
+[  32.63]   | STEP 3 PASS
+[  32.63]   | STEP 4/9: RSHIFT, C=
+[  32.63]   | RSHIFT+A, RSHIFT+/, THEN C=+Q;
+[  32.63]   | NO LEFT SHIFT; RETURN
+[  32.63]   | >
+[  48.08] mod DOWN c6r4 RSHIFT
+[  51.05] mod UP   c6r4 RSHIFT
+[  54.03] mod DOWN c7r5 C=
+[  56.76] mod UP   c7r5 C=
+[  57.98] mod DOWN c6r4 RSHIFT
+[  59.32]   | > A
+[  59.45] key DOWN c1r2 A
+[  60.95] key UP   c1r2 A
+[  63.51]   | > A]
+[  63.64] (+1 key event(s) released before this poll saw them)
+[  64.64] key DOWN c6r7 /
+[  64.75]   | > A]?
+[  64.89] key UP   c6r7 /
+[  66.39] mod UP   c6r4 RSHIFT
+[  67.39] mod DOWN c7r5 C=
+[  71.87] key DOWN c7r6 Q
+[  71.98]   | > A]?Q
+[  72.12] key UP   c7r6 Q
+[  74.35] mod UP   c7r5 C=
+[  75.96]   |  'P' $70ASS
+[  75.96]   | STEP 4/9: RSHIFT, C=
+[  75.96]   | RSHIFT+A, RSHIFT+/, THEN C=+Q;
+[  75.96]   | NO LEFT SHIFT; RETURN
+[  75.96]   | > A]?Q
+[  75.96]   |  'A' $41 C1R2+SH
+[  76.09] key DOWN c0r1 RETURN
+[  76.20]   |  'Z' $7A C1R4
+[  76.20]   |  'I' $69 C4R1
+[  76.20]   |  'P' $70 C5R1
+[  76.21]   | STEP 3 PASS
+[  76.21]   |  ']' $7D C5R3+SH
+[  76.21]   |  'Q' $71 C7R6
+[  76.21]   | STEP 4 FAIL, WANT "A?Q"
+[  76.34] key UP   c0r1 RETURN
+[  76.46]   | > ;/
+[  76.46]   |  ';' $3B C6R2
+[  76.46]   |  '/' $2F C6R7
+[  76.46]   | STEP 2 PASS
+[  76.46]   | STEP 3/9: ROLLOVER
+[  76.46]   | PRESS Z, KEEP IT; ADD I, KEEP IT;
+[  76.46]   | ADD P; RELEASE ALL; RETURN
+[  76.46]   | > ZIP
+[  76.46]   |  '?' $3F C6R7+SH
+[  76.46]   |  'Q' $71 C7R6
+[  76.46]   | STEP 4 FAIL, WANT "A?Q"
+[  76.46]   | STEP 5/9: PORT-1 STICK UP
+[  76.46]   | HOLD THE STICK UP, TYPE HOSE,
+[  76.46]   | RELEASE THE STICK; RETURN
+[  76.46]   | >
+[  87.97] port-1 joystick: rows r0 held low (masked)
+[  89.94] key DOWN c3r5 H
+[  90.06]   | > H
+[  90.19] key UP   c3r5 H
+[  90.31]   | > HO
+[  90.44] (+1 key event(s) released before this poll saw them)
+[  90.79]   | > HOS
+[  90.93] (+1 key event(s) released before this poll saw them)
+[  91.17] key DOWN c1r6 E
+[  91.29]   | > HOSE
+[  91.42] key UP   c1r6 E
+[  93.14] port-1 joystick: released (no row held)
+[  94.38] key DOWN c0r1 RETURN
+[  94.49]   |  'Q' $71 C7R6
+[  94.49]   | STEP 4 FAIL, WANT "A?Q"
+[  94.49]   | STEP 5/9: PORT-1 STICK UP
+[  94.49]   | HOLD THE STICK UP, TYPE HOSE,
+[  94.49]   | RELEASE THE STICK; RETURN
+[  94.49]   | > HOSE
+[  94.49]   |  'H' $68 C3R5
+[  94.49]   |  'O' $6F C4R6
+[  94.49]   |  'S' $73 C1R5
+[  94.63] key UP   c0r1 RETURN
+[  94.74]   |  'I' $69 C4R1
+[  94.74]   |  'P' $70 C5R1
+[  94.74]   | STEP 3 PASS
+[  94.74]   | STEP 4/9: RSHIFT, C=
+[  94.74]   | RSHIFT+A, RSHIFT+/, THEN C=+Q;
+[  94.74]   | NO LEFT SHIFT; RETURN
+[  94.74]   | > A]?Q
+[  94.74]   |  'A' $41 C1R2+SH
+[  94.74]   |  ']' $7D C5R3+SH
+[  94.74]   |  '?' $3F C6R7+SH
+[  94.74]   |  'E' $65 C1R6
+[  94.74]   | STEP 5 PASS
+[  94.74]   | STEP 6/9: PORT-1 STICK DOWN
+[  94.74]   | HOLD THE STICK DOWN, TYPE HOSE,
+[  94.74]   | RELEASE THE STICK; RETURN
+[  94.74]   | >
+[  98.58] port-1 joystick: rows r1 held low (masked)
+[ 100.58] key DOWN c3r5 H
+[ 100.69]   | > H
+[ 100.82] key UP   c3r5 H
+[ 100.93]   | > HO
+[ 101.07] key DOWN c4r6 O
+[ 101.32] key UP   c4r6 O
+[ 101.43]   | > HOS
+[ 101.56] (+1 key event(s) released before this poll saw them)
+[ 101.81] key DOWN c1r6 E
+[ 101.91]   | > HOSE
+[ 102.05] key UP   c1r6 E
+[ 104.02] port-1 joystick: released (no row held)
+[ 105.01] key DOWN c0r1 RETURN
+[ 105.12]   |  'P' $70 C5R1
+[ 105.12]   | STEP 3 PASS
+[ 105.12]   | STEP 4/9: RSHIFT, C=
+[ 105.12]   | RSHIFT+ASHIFT; RETURN
+[ 105.12]   | STEP 6/9 STICK DOWN, TYPE HOSE,
+[ 105.12]   | RELEASE THE STICK; RETURN
+[ 105.12]   | > HOSE
+[ 105.12]   |  'H' $68 C3R5
+[ 105.12]   |  'O' $6F C4R6
+[ 105.12]   |  'S' $73 C1R5
+[ 105.36]   | STEP 6/9: PORT-1 STICK DOWN
+[ 105.36]   | HOLD THE STICK DOWN, TYPE HOSE,
+[ 105.36]   | RELEASE THE STICK; RETURN
+[ 105.36]   | > HOSE
+[ 105.36]   |  'H' $68 C3R5
+[ 105.36]   |  'O' $6F C4R6
+[ 105.36]   |  'S' $73 C1R5
+[ 105.36]   |  'E' $65 C1R6
+[ 105.36]   | STEP 6 PASS
+[ 105.36]   | STEP 7/9: PORT-1 STICK LEFT
+[ 105.36]   | HOLD THE STICK LEFT, TYPE HOSE,
+[ 105.36]   | RELEASE THE STICK; RETURN
+[ 105.36]   | >
+[ 105.49] key UP   c0r1 RETURN
+[ 107.47] port-1 joystick: rows r2 held low (masked)
+[ 108.82]   | > H
+[ 108.95] (+1 key event(s) released before this poll saw them)
+[ 109.07]   | > HO
+[ 109.20] (+1 key event(s) released before this poll saw them)
+[ 109.56]   | > HOS
+[ 109.70] (+1 key event(s) released before this poll saw them)
+[ 109.81]   | > HOSE
+[ 109.94] (+1 key event(s) released before this poll saw them)
+[ 110.43] key DOWN c0r1 RETURN
+[ 110.54]   |  'O' $6F C4R6
+[ 110.54]   |  'S' $73 C1R5
+[ 110.54]   |  'E' $65 C1R6
+[ 110.54]   | STEP 6 PASS
+[ 110.54]   | STEP 7/9: PORT-1 STICK LEFT
+[ 110.54]   | HOLD THE STICK LEFT, TYPE HOSE,
+[ 110.54]   | RELEASE THE STICK; RETURN
+[ 110.54]   | > HOSE
+[ 110.54]   |  'H' $68 C3R5
+[ 110.79]   | HOLD THE STICK UP, TYPE HOSE,
+[ 110.79]   | RELEASE THE STICK; RETURN
+[ 110.79]   | > HOSE
+[ 110.79]   |  'H' $68 C4R6
+[ 110.79]   |  'H' $68 C3R5
+[ 110.79]   |  'O' $6F C4R6
+[ 110.79]   |  'S' $73 C1R5
+[ 110.79]   |  'E' $65 C1R6
+[ 110.79]   | STEP 6 PASS
+[ 110.79]   |  'H' $68 C4R6
+[ 110.79]   |  'S' $73 C1R5
+[ 110.79]   |  'E' $65 C1R6
+[ 110.79]   | STEP 7 PASS     IGHT, TYPE HOSE,
+[ 110.79]   | RELEASE THE STICK; RETURN
+[ 110.79]   | >
+[ 110.93] key UP   c0r1 RETURN
+[ 111.04]   | STEP 7/9: PORT-1 STICK LEFT
+[ 111.04]   | HOLD THE STICK LEFT, TYPE HOSE,
+[ 111.04]   | RELEASE THE STICK; RETURN
+[ 111.04]   | > HOSE
+[ 111.04]   |  'H' $68 C3R5
+[ 111.04]   |  'O' $6F C4R6
+[ 111.04]   |  'S' $73 C1R5
+[ 111.04]   |  'E' $65 C1R6
+[ 111.04]   | STEP 7 PASS
+[ 111.04]   | STEP 8/9: PORT-1 STICK RIGHT
+[ 111.04]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 111.04]   | RELEASE THE STICK; RETURN
+[ 111.04]   | >
+[ 111.42] port-1 joystick: released (no row held)
+[ 113.88] port-1 joystick: rows r3 held low (masked)
+[ 115.85] key DOWN c3r5 H
+[ 115.96]   | > H
+[ 116.10] key DOWN c4r6 O
+[ 116.10] key UP   c3r5 H
+[ 116.21]   | > HO
+[ 116.35] key UP   c4r6 O
+[ 116.60] key DOWN c1r5 S
+[ 116.71]   | > HOS
+[ 116.85] key UP   c1r5 S
+[ 117.10] (+1 key event(s) released before this poll saw them)
+[ 117.21]   | > HOSE
+[ 117.85] port-1 joystick: released (no row held)
+[ 118.84] key DOWN c0r1 RETURN
+[ 118.95]   | STEP 5 PASS
+[ 118.95]   | STEP 6/9: PORT-1 STICK DOWN
+[ 118.95]   | HOLD THE STICK DOWN, TYPE HOSE,
+[ 118.95]   | RELEASE THE STICK; RETURN
+[ 118.95]   | > HOSE
+[ 118.95]   |  'H' $68 C3R5
+[ 118.95]   |  'O' $6F C4R6
+[ 118.95]   | HOLD THETHE STICK; RETURN
+[ 118.95]   | > HOSE
+[ 118.95]   |  'H' $68 C3R5
+[ 118.95]   |  'O' $6F C4R6
+[ 118.95]   |  'S' $73 C1R5
+[ 118.95]   |  'E' $65 C1R6
+[ 119.09] key UP   c0r1 RETURN
+[ 119.20]   |  'S' $73 C1R5
+[ 119.20]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 119.20]   | RELEASE THE STICK; RETURN
+[ 119.20]   | > HOSE
+[ 119.20]   |  'H' $68 C3R5
+[ 119.20]   |  'O' $6F C4R6
+[ 119.20]   |  'S' $73 C1R5
+[ 119.20]   |  'E' $65 C1R6
+[ 119.20]   | STEP 8 PASS
+[ 119.20]   | STEP 9/9: PORT-1 FIRE
+[ 119.20]   | HOLD FIRE, TYPE HOSE,
+[ 119.20]   | RELEASE FIRE; RETURN
+[ 119.20]   | >
+[ 122.82] port-1 joystick: rows r4 held low (masked)
+[ 124.05] key DOWN c3r5 H
+[ 124.17]   | > H
+[ 124.30] key DOWN c4r6 O
+[ 124.30] key UP   c3r5 H
+[ 124.41]   | > HO
+[ 124.55] key UP   c4r6 O
+[ 124.67]   | > HOS
+[ 124.80] (+1 key event(s) released before this poll saw them)
+[ 124.91]   | > HOSE
+[ 125.04] (+1 key event(s) released before this poll saw them)
+[ 126.53] port-1 joystick: released (no row held)
+[ 127.04] key DOWN c0r1 RETURN
+[ 127.16]   | STEP 8/9: PORT-1 STICK RPE HOSE,
+[ 127.16]   | RELEASE THE STICK; RETURN
+[ 127.16]   | > HOSE
+[ 127.16]   |  'H' $68 C3R5
+[ 127.16]   |  'O' $6F C4R6
+[ 127.16]   |  'S' $73 C1R5
+[ 127.16]   |  'E' $65 C1R6
+[ 127.16]   | STEP 9/9: PORT-1 FIRE
+[ 127.16]   | HOLD FIRE, TYPE HOSE,
+[ 127.16]   | RELEASE FIRE; RETURN
+[ 127.16]   | > HOSE   C3R5
+[ 127.16]   |  'O' $6F C4R6
+[ 127.16]   |  'S' $73 C1R5
+[ 127.16]   |  'E' $65 C1R6
+[ 127.16]   | FREE: TYPE LINES, EMPTY LINE ENDS
+[ 127.16]   | >
+[ 127.29] key UP   c0r1 RETURN
+[ 127.41]   |  'H' $68 C3R5
+[ 127.41]   |  'O' $6F C4R6
+[ 127.41]   |  'S' $73 C1R5
+[ 127.41]   |  'E' $65 C1R6
+[ 127.41]   | STEP 7 PASS
+[ 127.41]   | STEP 8/9: PORT-1 STICK RIGHT
+[ 127.41]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 127.41]   | STEP 8 PASS
+[ 127.41]   | STEP 9/9: PORT-1 FIRE
+[ 127.41]   | HOLD FIRE, TYPE HOSE,
+[ 127.41]   | RELEASE FIRE; RETURN
+[ 127.41]   | > HOSE
+[ 127.41]   |  'H' $68 C3R5
+[ 127.41]   |  'O' $6F C4R6
+[ 127.41]   |  'S' $73 C1R5
+[ 127.41]   |  'E' $65 C1R6
+[ 127.41]   | STEP 9 PASS
+[ 127.41]   | FREE: TYPE LINES, EMPTY LINE ENDS
+[ 127.41]   | >
+[ 135.73] key DOWN c5r2 L
+[ 135.84]   | > L
+[ 135.97] key UP   c5r2 L
+[ 135.97] (+1 key event(s) released before this poll saw them)
+[ 136.08]   | > LIN
+[ 136.22] key DOWN c1r6 E
+[ 136.22] (+1 key event(s) released before this poll saw them)
+[ 136.33]   | > LINE
+[ 136.46] key UP   c1r6 E
+[ 136.46] (+1 key event(s) released before this poll saw them)
+[ 136.57]   | > LINES
+[ 137.22] key DOWN c0r1 RETURN
+[ 137.35]   | RELEASE FIRE; RETURN
+[ 137.35]   | > HOSE
+[ 137.35]   |  'H' $68 C3R5
+[ 137.35]   |  'O' $6F C4R6
+[ 137.35]   |  'S' $73 C1R5
+[ 137.35]   |  'E' $65 C1R6
+[ 137.35]   | STEP 9 PASS
+[ 137.35]   | FREE: TYPE LINES, EMPTY LINE ENDS
+[ 137.35]   | > LINES
+[ 137.35]   |  'L' $6C C5R2
+[ 137.35]   |  'N' $6E C4R7
+[ 137.35]   |  'E' $65 C1R6
+[ 137.48] key UP   c0r1 RETURN
+[ 137.60]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 137.60]   | RELEASE THE STICK; RETURN
+[ 137.60]   | > HOSE
+[ 137.60]   |  'H' $68 C3R5
+[ 137.60]   |  'O' $6F C4R6
+[ 137.60]   |  'S' $73 C1R5
+[ 137.60]   |  'E' $65 C1R6
+[ 137.60]   | STEP 8 PASS
+[ 137.60]   | STEP 9/9: PORT-1 FIRE
+[ 137.60]   | HOLD FIRE, TYPE HOSE,
+[ 137.60]   |  'I' $69 C4R1
+[ 137.60]   |  'N' $6E C4R7
+[ 137.60]   |  'E' $65 C1R6
+[ 137.60]   |  'S' $73 C1R5
+[ 137.60]   | >
+[ 138.73] key DOWN c0r1 RETURN
+[ 138.84]   | STEPS PPPFPPPPP
+[ 138.84]   | RESULT PASS=8 FAIL=1 SKIP=0
+  D0=00000001  D1=00000000  D2=00000001  D3=00000000  D4=00001000  D5=0000000C  D6=00000000  D7=00000000
+  A0=00100038  A1=00100010  A2=00000000  A3=00012A98  A4=0001A93A  A5=00100010  A6=000F0400  A7=0000F004
+  PC=00000442  SR=0000  instructions=151577  [halt reason=00]
+[ 138.87] step 1 HOLD Q: program P; performed yes; Q held 2.0s
+[ 138.87] step 2 HOLD ; AND /: program P; performed NO; ; held 2.0s; / held 1.5s
+[ 138.87] step 3 ROLLOVER: program P; performed yes; at most 3 keys down at once
+[ 138.87] step 4 RSHIFT, C=: program F; performed yes; A with RSHIFT: yes; / with RSHIFT: yes; Q with C=: yes
+[ 138.87] step 5 PORT-1 STICK UP: program P; performed NO; stick row r0 seen held in 21 poll(s); O not typed with the stick held; S not typed with the stick held
+[ 138.87] step 6 PORT-1 STICK DOWN: program P; performed NO; stick row r1 seen held in 22 poll(s); S not typed with the stick held
+[ 138.87] step 7 PORT-1 STICK LEFT: program P; performed NO; stick row r2 seen held in 14 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[ 138.87] step 8 PORT-1 STICK RIGHT: program P; performed NO; stick row r3 seen held in 16 poll(s); E not typed with the stick held
+[ 138.87] step 9 PORT-1 FIRE: program P; performed NO; stick row r4 seen held in 15 poll(s); S not typed with the stick held; E not typed with the stick held
+[ 138.87] fixed@48: FAIL (want PASS), STEPS PPPFPPPPP
+  CHECK FAILED  manual/fixed@48: PASS  FAIL
+[18:31:03] CPU speed set to 48 MHz
+[18:31:03] control patch nosettle applied (readback ok): THIS RUN IS SUPPOSED TO SHOW THE DEFECT
+========================================================================
+CONTROL RUN nosettle@48: THIS BUILD IS SUPPOSED TO SHOW THE DEFECT
+(the 'nosettle' fix is taken out of the runner in RAM; the C64 screen says CONTROL BUILD)
+========================================================================
+Steps 1-2 of 9; each ends with RETURN and shows PASS or FAIL.
+Type ONLY while the '>' prompt shows (keys pressed while the program prints are lost).
+NO joystick in control port 2 (it locks the keyboard out by design).
+Do each step exactly as described: the driver checks HOW (held time, keys down
+at once, which SHIFT, the stick's row).  A skipped step is never a pass.
+
+STEP 1  HOLD Q
+   do:     hold Q for 2 s, release it, press RETURN
+   expect (defect): ^q: the UP-ARROW glyph ($5E, c6r6, read in the same sample as Q) then q; or nothing (the phantom keeps restarting the debounce)
+STEP 2  HOLD ; AND /
+   do:     hold ; for 2 s, release; hold / for 2 s, release; RETURN
+   expect (defect): l; (c5r2, bleed from ;) or ,/ (c5r7, bleed from /)
+
+This terminal shows what the SCANNER saw ('key DOWN c7r6 Q'); 'COLUMN BLEED?'
+marks the phantom the row settle must prevent.  Letters look the same in both
+cases on screen (upper-case charset); the hex code tells them apart.
+========================================================================
+[kbd_echo] 11516-byte hunk file, args b'CONTROL nosettle 1 2\n'
+  staged 24368 byte(s) in 22 record(s)
+[   0.04] nosettle@48 started: operator, follow the C64 screen  *** CONTROL: SUPPOSED TO SHOW THE DEFECT ***
+[   0.19]   | KBD-ECHO KEYBOARD CHECK (W6-K)
+[   0.43]   | *** CONTROL BUILD: NOSETTLE ***
+[   0.43]   | SUPPOSED TO FAIL: IT LACKS THE FIX,
+[   0.43]   | SO IT SHOULD SHOW THE DEFECT.
+[   0.43]   | EMPTY LINE: SKIP STEP. CTRL+D: QUIT
+[   0.43]   | STEP 1/9: HOLD Q
+[   0.43]   | HOLD Q 2S, RELEASE, RETURN
+[   0.43]   | >
+[   7.48] key DOWN c7r6 Q
+[   7.59]   | > Q
+[   9.21] key UP   c7r6 Q
+[   9.96] (+1 key event(s) released before this poll saw them)
+[  10.07]   |  'Q' $71 C7R6
+[  10.07]   | STEP 1 PASS
+[  10.07]   | STEP 2/9: HOLD ; AND /
+[  10.07]   | HOLD ; 2S, RELEASE;
+[  10.08]   | HOLD / 2S, RELEASE; RETURN
+[  10.08]   | >
+[  13.22] key DOWN c6r2 ;
+[  13.33]   | > ;
+[  15.20] key UP   c6r2 ;
+[  15.94] key DOWN c6r7 /
+[  16.05]   | > ;/
+[  17.90] key UP   c6r7 /
+[  18.40] key DOWN c0r1 RETURN
+[  18.51]   |  ';' $3B C6R2
+[  18.77]   |  '/' $2F C6R7
+[  18.77]   | STEP 2 PASS
+[  18.77]   | STEPS PP-------
+[  18.77]   | RESULT PASS=2 FAIL=0 SKIP=0
+  D0=00000000  D1=00000000  D2=00000000  D3=00000000  D4=00001000  D5=00000018  D6=00000000  D7=00000000
+  A0=00100058  A1=00100010  A2=00000000  A3=00012A98  A4=0001A93A  A5=00100010  A6=000F0400  A7=0000F004
+  PC=00000442  SR=0004  instructions=26900  [halt reason=00]
+[  18.79] step 1 HOLD Q: program P; performed NO; Q held 1.5s
+[  18.79] step 2 HOLD ; AND /: program P; performed yes; ; held 1.7s; / held 1.7s
+[  18.79] nosettle@48: INCOMPLETE (want DEFECT SHOWN), STEPS PP-------
+[  18.79] nosettle@48: no defect signature, and a step was not done as asked or not P: operator error, REDO THIS LEG (--runs nosettle@48)
+  CHECK FAILED  manual/nosettle@48: DEFECT SHOWN  INCOMPLETE
+[18:31:35] control patch removed (readback ok)
+[18:31:36] CPU speed set to 48 MHz
+[18:31:36] control patch nojoymask applied (readback ok): THIS RUN IS SUPPOSED TO SHOW THE DEFECT
+========================================================================
+CONTROL RUN nojoymask@48: THIS BUILD IS SUPPOSED TO SHOW THE DEFECT
+(the 'nojoymask' fix is taken out of the runner in RAM; the C64 screen says CONTROL BUILD)
+========================================================================
+Steps 5-9 of 9; each ends with RETURN and shows PASS or FAIL.
+Type ONLY while the '>' prompt shows (keys pressed while the program prints are lost).
+NO joystick in control port 2 (it locks the keyboard out by design).
+Do each step exactly as described: the driver checks HOW (held time, keys down
+at once, which SHIFT, the stick's row).  A skipped step is never a pass.
+
+STEP 5  PORT-1 STICK UP
+   do:     hold the stick in CONTROL PORT 1 UP and type HOSE; release the stick; RETURN
+   expect (defect): 1 3 5 7 9 + \ appear (row 0), DEL rubs characters out
+STEP 6  PORT-1 STICK DOWN
+   do:     hold the stick in CONTROL PORT 1 DOWN and type HOSE; release the stick; RETURN
+   expect (defect): the step ends at once with an empty line (RETURN is on row 1): SKIP, then w r y i p * _ land in the next line
+STEP 7  PORT-1 STICK LEFT
+   do:     hold the stick in CONTROL PORT 1 LEFT and type HOSE; release the stick; RETURN
+   expect (defect): CTRL reads as held (row 2): letters turn into control codes, CTRL+D ends the program, CTRL+J ends the line; a d g j l ;
+STEP 8  PORT-1 STICK RIGHT
+   do:     hold the stick in CONTROL PORT 1 RIGHT and type HOSE; release the stick; RETURN
+   expect (defect): 4 6 8 0 - 2 appear (row 3)
+STEP 9  PORT-1 FIRE
+   do:     hold the stick in CONTROL PORT 1 FIRE and type HOSE; release the stick; RETURN
+   expect (defect): RSHIFT reads as held (row 4): HOSE comes out upper case, with Z C B M > and spaces
+
+This terminal shows what the SCANNER saw ('key DOWN c7r6 Q'); 'COLUMN BLEED?'
+marks the phantom the row settle must prevent.  Letters look the same in both
+cases on screen (upper-case charset); the hex code tells them apart.
+========================================================================
+[kbd_echo] 11516-byte hunk file, args b'CONTROL nojoymask 5 9\n'
+  staged 24368 byte(s) in 22 record(s)
+[   0.04] nojoymask@48 started: operator, follow the C64 screen  *** CONTROL: SUPPOSED TO SHOW THE DEFECT ***
+[   0.19]   | KBD-ECHO KEYBOARD CHECK (W6-K)
+[   0.43]   | *** CONTROL BUILD: NOJOYMASK ***
+[   0.43]   | SUPPOSED TO FAIL: IT LACKS THE FIX,
+[   0.43]   | SO IT SHOULD SHOW THE DEFECT.
+[   0.43]   | EMPTY LINE: SKIP STEP. CTRL+D: QUIT
+[   0.43]   | STEP 5/9: PORT-1 STICK UP
+[   0.43]   | HOLD THE STICK UP, TYPE HOSE,
+[   0.43]   | RELEASE THE STICK; RETURN
+[   0.43]   | >
+[  13.62] key DOWN c0r0 DEL   <- COLUMN BLEED? c1r0 3 is held
+[  13.62] key DOWN c1r0 3   <- COLUMN BLEED? c2r0 5 is held
+[  13.62] key DOWN c2r0 5   <- COLUMN BLEED? c3r0 7 is held
+[  13.62] key DOWN c3r0 7   <- COLUMN BLEED? c4r0 9 is held
+[  13.62] key DOWN c4r0 9   <- COLUMN BLEED? c5r0 + is held
+[  13.62] key DOWN c5r0 +   <- COLUMN BLEED? c6r0 POUND is held
+[  13.62] key DOWN c6r0 POUND   <- COLUMN BLEED? c7r0 1 is held
+[  13.62] key DOWN c7r0 1
+[  13.62] port-1 joystick: rows r0 held low (masked)
+[  13.73]   | > 3579+\1
+[  15.85] key DOWN c3r5 H
+[  15.96]   | > 3579+\1H
+[  16.10] key UP   c3r5 H
+[  16.60] key DOWN c4r6 O
+[  16.71]   | > 3579+\1HO
+[  16.84] key UP   c4r6 O
+[  17.59] (+1 key event(s) released before this poll saw them)
+[  17.71]   | > 3579+\1HOS
+[  17.84] key DOWN c1r6 E
+[  17.95]   | > 3579+\1HOSE
+[  18.09] key UP   c1r6 E
+[  19.56] key UP   c0r0 DEL
+[  19.56] key UP   c1r0 3
+[  19.56] key UP   c2r0 5
+[  19.56] key UP   c3r0 7
+[  19.56] key UP   c4r0 9
+[  19.56] key UP   c5r0 +
+[  19.56] key UP   c6r0 POUND
+[  19.56] key UP   c7r0 1
+[  19.56] port-1 joystick: released (no row held)
+[  20.79] key DOWN c0r1 RETURN
+[  21.16]   |  '3' $33 C1R0
+[  21.16]   |  '5' $35 C2R0
+[  21.16]   |  '7' $37 C3R0
+[  21.16]   |  '9' $39 C4R0
+[  21.41]   |  '+' $2B C5R0
+[  21.41]   |  '\' $5C C6R0
+[  21.41]   |  '1' $31 C7R0
+[  21.41]   |  'H' $68 C3R5
+[  21.41]   |  'O' $6F C4R6
+[  21.66]   |  'S' $73 C1R5
+[  21.66]   |  'E' $65 C1R6
+[  21.66]   | STEP 5 FAIL, WANT "HOSE"
+[  21.66]   | STEP 6/9: PORT-1 STICK DOWN
+[  21.66]   | HOLD THE STICK DOWN, TYPE HOSE,
+[  21.66]   | RELEASE THE STICK; RETURN
+[  21.66]   | >
+[  21.79] key UP   c0r1 RETURN
+[  25.75] key DOWN c0r1 RETURN   <- COLUMN BLEED? c1r1 W is held
+[  25.75] key DOWN c1r1 W   <- COLUMN BLEED? c2r1 R is held
+[  25.75] key DOWN c2r1 R   <- COLUMN BLEED? c3r1 Y is held
+[  25.75] key DOWN c3r1 Y   <- COLUMN BLEED? c4r1 I is held
+[  25.75] key DOWN c4r1 I   <- COLUMN BLEED? c5r1 P is held
+[  25.75] key DOWN c5r1 P   <- COLUMN BLEED? c6r1 * is held
+[  25.75] key DOWN c6r1 *   <- COLUMN BLEED? c7r1 LEFTARROW is held
+[  25.75] key DOWN c7r1 LEFTARROW
+[  25.75] port-1 joystick: rows r1 held low (masked)
+[  25.86]   | STEP 6 SKIP
+[  25.86]   | STEP 7/9: PORT-1 STICK LEFT
+[  25.86]   | HOLD THE STICK LEFT, TYPE HOSE,
+[  25.86]   | RELEASE THE STICK; RETURN
+[  25.86]   | > WRYIP*_
+[  28.71] key UP   c0r1 RETURN
+[  28.71] key UP   c1r1 W
+[  28.71] key UP   c2r1 R
+[  28.71] key UP   c3r1 Y
+[  28.71] key UP   c4r1 I
+[  28.71] key UP   c5r1 P
+[  28.71] key UP   c6r1 *
+[  28.71] key UP   c7r1 LEFTARROW
+[  28.71] port-1 joystick: released (no row held)
+[  34.87] key DOWN c0r2 CRSR-R   <- COLUMN BLEED? c1r2 A is held
+[  34.87] key DOWN c1r2 A   <- COLUMN BLEED? c2r2 D is held
+[  34.87] key DOWN c2r2 D   <- COLUMN BLEED? c3r2 G is held
+[  34.87] key DOWN c3r2 G   <- COLUMN BLEED? c4r2 J is held
+[  34.87] key DOWN c4r2 J   <- COLUMN BLEED? c5r2 L is held
+[  34.87] key DOWN c5r2 L   <- COLUMN BLEED? c6r2 ; is held
+[  34.87] key DOWN c6r2 ;   <- COLUMN BLEED? c7r2 CTRL is held
+[  34.87] mod DOWN c7r2 CTRL
+[  34.87] port-1 joystick: rows r2 held low (masked)
+[  34.98]   |  'E' $65 C1R6
+[  34.98]   | STEP 5 FAIL, WANT "HOSE"
+[  34.98]   | STEP 6/9: PORT-1 STICK DOWN
+[  34.98]   | HOLD THE STICK DOWN, TYPE HOSE,
+[  34.98]   | RELEASE THE STICK; RETURN
+[  34.98]   | >
+[  34.98]   | STEP 6 SKIP
+[  34.98]   | STEP 7/9: PORT-1 STICK LEFT
+[  34.98]   | HOLD THE STICK LEFT, TYPE HOSE,
+[  34.98]   | RELEASE THE STICK; RETURN
+[  34.98]   | > WRYIP*_
+[  34.98]   |  'W' $77 C1R1
+[  35.24]   |  'S' $73 C1R5
+[  35.24]   |  'R' $72 C2R1
+[  35.24]   |  'Y' $79 C3R1
+[  35.24]   |  'P' $70 C5R1
+[  35.24]   |  '*' $2A C6R1
+[  35.49]   |  '\' $5C C6R0
+[  35.49]   |  '1' $31 C7R0
+[  35.49]   |  'H' $68 C3R5
+[  35.49]   |  'O' $6F C1R5
+[  35.49]   |  'E' $65 C1R6
+[  35.49]   | STEP 5 FAIL, WANT "HOSE"
+[  35.49]   | STEP 6/9: PORT-1K; RETURN
+[  35.49]   |  'I' $69 C4R1
+[  35.49]   |  'P' $70 C5R1
+[  35.49]   |  '*' $2A C6R1
+[  35.49]   |  '_' $5F C7R1
+[  35.49]   | STEP 7 FAIL, WANT "HOSE"
+[  35.49]   | STEP 8/9: PORT-1 STICK RIGHT
+[  35.49]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[  35.49]   | RELEASE THE STICK; RETURN
+[  35.49]   | >
+[  35.73]   |  'O' $6F C4R6
+[  35.73]   |  'S' $73 C1R5
+[  35.73]   |  'E' $65 C1R6
+[  35.73]   | STEP 5 FAIL, WANT "HOSE"
+[  35.73]   | STEP 6/9: PORT-1 STICK DOWN
+[  35.73]   | HOLD THE STICK DOWN, TYPE HOSE,
+[  35.73]   | RELEASE THE STICK; RETURN
+[  35.87] key UP   c0r2 CRSR-R
+[  35.87] key UP   c1r2 A
+[  35.87] key UP   c2r2 D
+[  35.87] key UP   c3r2 G
+[  35.87] key UP   c4r2 J
+[  35.87] key UP   c5r2 L
+[  35.87] key UP   c6r2 ;
+[  35.87] mod UP   c7r2 CTRL
+[  35.87] port-1 joystick: released (no row held)
+[  39.06] key DOWN c0r3 F7   <- COLUMN BLEED? c1r3 4 is held
+[  39.06] key DOWN c1r3 4   <- COLUMN BLEED? c2r3 6 is held
+[  39.06] key DOWN c2r3 6   <- COLUMN BLEED? c3r3 8 is held
+[  39.06] key DOWN c3r3 8   <- COLUMN BLEED? c4r3 0 is held
+[  39.06] key DOWN c4r3 0   <- COLUMN BLEED? c5r3 - is held
+[  39.06] key DOWN c5r3 -   <- COLUMN BLEED? c6r3 HOME is held
+[  39.06] key DOWN c6r3 HOME   <- COLUMN BLEED? c7r3 2 is held
+[  39.06] key DOWN c7r3 2
+[  39.06] port-1 joystick: rows r3 held low (masked)
+[  39.18]   | > 4680-2
+[  40.30] key UP   c0r3 F7
+[  40.30] key UP   c1r3 4
+[  40.30] key UP   c2r3 6
+[  40.30] key UP   c3r3 8
+[  40.30] key UP   c4r3 0
+[  40.30] key UP   c5r3 -
+[  40.30] key UP   c6r3 HOME
+[  40.30] key UP   c7r3 2
+[  40.30] port-1 joystick: released (no row held)
+[  42.63]   | > 4680-2H
+[  42.76] key DOWN c1r5 S
+[  42.76] key DOWN c4r6 O
+[  42.76] (+1 key event(s) released before this poll saw them)
+[  42.88]   | > 4680-2HOSE
+[  43.01] key UP   c1r5 S
+[  43.01] key UP   c4r6 O
+[  43.01] (+1 key event(s) released before this poll saw them)
+[  46.49] key DOWN c0r1 RETURN
+[  46.62]   |  'S' $73 C1R5
+[  46.62]   |  'E' $65 C1R6
+[  46.62]   | STEP 5 FAIL, WANT "HOSE"
+[  46.62]   | STEP 6/9: PORT-1 STICK DOWN
+[  46.62]   | HOLD THE STICK DOWN, TYPE HOSE,
+[  46.62]   | RELEASE THE STICK; RETURN
+[  46.62]   | >
+[  46.62]   | STEP 6 SKIP
+[  46.62]   | STEP 7/9: PORT-1 STICK LEFT
+[  46.62]   | HOLD THE STICK LEFT, TYPN
+[  46.62]   |  '6' $36 C2R3
+[  46.62]   |  '8' $38 C3R3
+[  46.88]   | HOLD THE STICK LEFT, TYPE HOSE,
+[  46.88]   | RELEASE THE STIC
+[  46.88]   |  '4' $34 C2R3
+[  46.88]   |  '0' $30 C4R3
+[  46.88]   |  '-' $2D C5R3
+[  46.88]   |  '2' $32 C7R3
+[  46.88]   |  'H' $68 C3R5
+[  47.12]   | RELEASE THE STICK; RETURN
+[  47.12]   | > WRYIP* C1R1
+[  47.12]   | > 4680-2HOSE
+[  47.12]   |  '4' $34 C1R3
+[  47.12]   |  '6' $36 C2R3
+[  47.12]   |  'O' $6F C4R6
+[  47.12]   |  'S' $73 C1R5
+[  47.12]   | STEP 8 FAIL, WANT "HOSE"
+[  47.12]   | STEP 9/9: PORT-1 FIRE
+[  47.26] key UP   c0r1 RETURN
+[  47.37]   |  'Y' $79 C3R1
+[  47.37]   |  'I' $69 C4R1
+[  47.37]   |  'P' $70 C5R1
+[  47.37]   |  '*' $2A C6R1
+[  47.37]   |  '_' $5F C7R1
+[  47.37]   | STEP 7 FAIL, WANT "HOSE"
+[  47.37]   | STEP 8/9: PORT-1 STICK RIGHT
+[  47.37]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[  47.37]   | RELEASE THE STICK; RETURN
+[  47.37]   |  'E' $65 C1R6
+[  47.37]   | STEP 8 FAIL, WANT "HOSE"
+[  47.37]   | STEP 9/9: PORT-1 FIRE
+[  47.37]   | HOLD FIRE, TYPE HOSE,
+[  47.37]   | RELEASE FIRE; RETURN
+[  47.37]   | >
+[  51.05]   | > ZCBM>
+[  51.19] key DOWN c0r4 F1   <- COLUMN BLEED? c1r4 Z is held
+[  51.19] key DOWN c1r4 Z   <- COLUMN BLEED? c2r4 C is held
+[  51.19] key DOWN c2r4 C   <- COLUMN BLEED? c3r4 B is held
+[  51.19] key DOWN c3r4 B   <- COLUMN BLEED? c4r4 M is held
+[  51.19] key DOWN c4r4 M   <- COLUMN BLEED? c5r4 . is held
+[  51.19] key DOWN c5r4 .   <- COLUMN BLEED? c6r4 RSHIFT is held
+[  51.19] mod DOWN c6r4 RSHIFT
+[  51.19] key DOWN c7r4 SPACE
+[  51.19] port-1 joystick: rows r4 held low (masked)
+[  52.42] key DOWN c3r5 H
+[  52.53]   | > ZCBM> H
+[  52.66] key UP   c3r5 H
+[  52.78]   | > ZCBM> HO
+[  52.91] (+1 key event(s) released before this poll saw them)
+[  53.42] key DOWN c1r5 S
+[  53.53]   | > ZCBM> HOS
+[  53.66] key DOWN c1r6 E
+[  53.66] key UP   c1r5 S
+[  53.77]   | > ZCBM> HOSE
+[  53.91] key UP   c1r6 E
+[  54.89] key UP   c0r4 F1
+[  54.89] key UP   c1r4 Z
+[  54.89] key UP   c2r4 C
+[  54.89] key UP   c3r4 B
+[  54.89] key UP   c4r4 M
+[  54.89] key UP   c5r4 .
+[  54.89] mod UP   c6r4 RSHIFT
+[  54.89] key UP   c7r4 SPACE
+[  54.89] port-1 joystick: released (no row held)
+[  55.39] key DOWN c0r1 RETURN
+[  55.50]   |  'H' $68 C3R5
+[  55.50]   |  'O' $6F C4R6
+[  55.50]   |  'S' $73 C1R5
+[  55.50]   |  'E' $65 C1R6
+[  55.50]   | STEP 8 FAIL, WANT "HOSE"
+[  55.50]   | STEP 9/9: PORT-1 FIRE
+[  55.50]   | HOLD FIRE, TYPE HOSE,
+[  55.50]   | RELEASE FIRE; RETURN
+[  55.50]   | > ZCBM> HOSE
+[  55.50]   |  'Z' $5A C1R4+SH
+[  55.50]   |  'C' $43 C2R4+SH
+[  55.50]   |  'B' $42 C3R4+SH
+[  55.75]   | RELEASE HOSE
+[  55.75]   |  '4' $34 C1R3
+[  55.75]   |  '6' $36 C2R3
+[  55.75]   |  '8' $38 C3R3
+[  55.75]   |  '0' $30 C4R3
+[  55.75]   |  '-' $2D C5R3
+[  55.75]   |  '2' $32 C7R3
+[  55.75]   |  'Z' $5A C2R4+SH
+[  55.75]   |  'B' $42 C3R4+SH
+[  55.75]   |  'M' $4D C4R4+SH
+[  55.75]   |  '>' $3E C5R4+SH
+[  55.75]   |  ' ' $20 C7R4
+[  55.75]   |  'H' $48 C3R5+SH
+[  56.00]   | > 4680-2HOSE
+[  56.00]   | RELEASE FIRE; RETURN
+[  56.00]   | > ZCBM> HOSE
+[  56.00]   |  'Z' $5A C1R4+SH
+[  56.00]   |  'C' $43 C2R4+SH
+[  56.00]   |  '>' $3E C7R4
+[  56.00]   |  'H' $48 C3R5+SH
+[  56.00]   |  'O' $4F C4R6+SH
+[  56.00]   |  'S' $53 C1R5+SH
+[  56.00]   |  'E' $45 C1R6+SH
+[  56.00]   | STEP 9 FAIL, WANT "HOSE"
+[  56.25]   | HOLD FIRE, TYPE HOSE,
+[  56.25]   | RELEASE FIRE; RETURN
+[  56.25]   | > ZCBM> HOSE
+[  56.25]   |  'Z' $5A C1R4+SH
+[  56.25]   |  'C' $43 C2R4+SH
+[  56.25]   |  'B' $42 C3R4+SH
+[  56.25]   |  'M' $4D C4R4+SH
+[  56.25]   |  '>' $3E C5R4+SH
+[  56.25]   |  ' ' $20 C7R4
+[  56.25]   |  'H' $48 C3R5+SH
+[  56.25]   |  'O' $4F C4R6+SH
+[  56.25]   |  'S' $53 C1R5+SH
+[  56.25]   |  'E' $45 C1R6+SH
+[  56.25]   | STEP 9 FAIL, WANT "HOSE"
+[  56.25]   | STEPS ----FSFFF
+[  56.25]   | RESULT PASS=0 FAIL=4 SKIP=1
+  D0=00000004  D1=00000000  D2=00000004  D3=00000000  D4=00001000  D5=00000018  D6=00000000  D7=00000000
+  A0=00100058  A1=00100010  A2=00000000  A3=00012A98  A4=0001A93A  A5=00100010  A6=000F0400  A7=0000F004
+  PC=00000442  SR=0000  instructions=153470  [halt reason=00]
+[  56.28] step 5 PORT-1 STICK UP: program F; performed yes; stick row r0 seen held in 24 poll(s); DEFECT: stick on r0: keys on that row read down: c0r0 DEL, c1r0 3, c2r0 5, c3r0 7, c4r0 9, c5r0 +, c6r0 POUND, c7r0 1 | key DOWN c0r0 DEL   <- COLUMN BLEED? c1r0 3 is held | key DOWN c1r0 3   <- COLUMN BLEED? c2r0 5 is held | key DOWN c2r0 5   <- COLUMN BLEED? c3r0 7 is held | key DOWN c3r0 7   <- COLUMN BLEED? c4r0 9 is held | key DOWN c4r0 9   <- COLUMN BLEED? c5r0 + is held | key DOWN c5r0 +   <- COLUMN BLEED? c6r0 POUND is held | key DOWN c6r0 POUND   <- COLUMN BLEED? c7r0 1 is held
+[  56.28] step 6 PORT-1 STICK DOWN: program S; performed yes; stick row r1 seen held in 1 poll(s); DEFECT: stick on r1: keys on that row read down: c0r1 RETURN, c1r1 W, c2r1 R, c3r1 Y, c4r1 I, c5r1 P, c6r1 *, c7r1 LEFTARROW | key DOWN c0r1 RETURN   <- COLUMN BLEED? c1r1 W is held | key DOWN c1r1 W   <- COLUMN BLEED? c2r1 R is held | key DOWN c2r1 R   <- COLUMN BLEED? c3r1 Y is held | key DOWN c3r1 Y   <- COLUMN BLEED? c4r1 I is held | key DOWN c4r1 I   <- COLUMN BLEED? c5r1 P is held | key DOWN c5r1 P   <- COLUMN BLEED? c6r1 * is held | key DOWN c6r1 *   <- COLUMN BLEED? c7r1 LEFTARROW is held
+[  56.28] step 7 PORT-1 STICK LEFT: program F; performed yes; stick row r2 seen held in 3 poll(s); DEFECT: stick on r2: keys on that row read down: c0r2 CRSR-R, c1r2 A, c2r2 D, c3r2 G, c4r2 J, c5r2 L, c6r2 ;, c7r2 CTRL | key DOWN c0r2 CRSR-R   <- COLUMN BLEED? c1r2 A is held | key DOWN c1r2 A   <- COLUMN BLEED? c2r2 D is held | key DOWN c2r2 D   <- COLUMN BLEED? c3r2 G is held | key DOWN c3r2 G   <- COLUMN BLEED? c4r2 J is held | key DOWN c4r2 J   <- COLUMN BLEED? c5r2 L is held | key DOWN c5r2 L   <- COLUMN BLEED? c6r2 ; is held | key DOWN c6r2 ;   <- COLUMN BLEED? c7r2 CTRL is held
+[  56.28] step 8 PORT-1 STICK RIGHT: program F; performed yes; stick row r3 seen held in 5 poll(s); DEFECT: stick on r3: keys on that row read down: c0r3 F7, c1r3 4, c2r3 6, c3r3 8, c4r3 0, c5r3 -, c6r3 HOME, c7r3 2 | key DOWN c0r3 F7   <- COLUMN BLEED? c1r3 4 is held | key DOWN c1r3 4   <- COLUMN BLEED? c2r3 6 is held | key DOWN c2r3 6   <- COLUMN BLEED? c3r3 8 is held | key DOWN c3r3 8   <- COLUMN BLEED? c4r3 0 is held | key DOWN c4r3 0   <- COLUMN BLEED? c5r3 - is held | key DOWN c5r3 -   <- COLUMN BLEED? c6r3 HOME is held | key DOWN c6r3 HOME   <- COLUMN BLEED? c7r3 2 is held
+[  56.28] step 9 PORT-1 FIRE: program F; performed yes; stick row r4 seen held in 15 poll(s); DEFECT: stick on r4: keys on that row read down: c0r4 F1, c1r4 Z, c2r4 C, c3r4 B, c4r4 M, c5r4 ., c6r4 RSHIFT, c7r4 SPACE | key DOWN c0r4 F1   <- COLUMN BLEED? c1r4 Z is held | key DOWN c1r4 Z   <- COLUMN BLEED? c2r4 C is held | key DOWN c2r4 C   <- COLUMN BLEED? c3r4 B is held | key DOWN c3r4 B   <- COLUMN BLEED? c4r4 M is held | key DOWN c4r4 M   <- COLUMN BLEED? c5r4 . is held | key DOWN c5r4 .   <- COLUMN BLEED? c6r4 RSHIFT is held
+[  56.28] nojoymask@48: DEFECT SHOWN (want DEFECT SHOWN), STEPS ----FSFFF
+[18:32:46] control patch removed (readback ok)
+[18:32:46] CPU speed set to 1 MHz
+========================================================================
+FIXED BUILD at 1 MHz: every step must PASS
+========================================================================
+Steps 1-9 of 9; each ends with RETURN and shows PASS or FAIL.
+Type ONLY while the '>' prompt shows (keys pressed while the program prints are lost).
+NO joystick in control port 2 (it locks the keyboard out by design).
+Do each step exactly as described: the driver checks HOW (held time, keys down
+at once, which SHIFT, the stick's row).  A skipped step is never a pass.
+
+STEP 1  HOLD Q
+   do:     hold Q for 2 s, release it, press RETURN
+   expect: the line 'q', then STEP 1 PASS
+   defect: ^q: the UP-ARROW glyph ($5E, c6r6, read in the same sample as Q) then q; or nothing (the phantom keeps restarting the debounce)
+STEP 2  HOLD ; AND /
+   do:     hold ; for 2 s, release; hold / for 2 s, release; RETURN
+   expect: the line ';/', then STEP 2 PASS
+   defect: l; (c5r2, bleed from ;) or ,/ (c5r7, bleed from /)
+STEP 3  ROLLOVER
+   do:     press Z and keep it down, add I, add P (all three held), release all, RETURN
+   expect: the line 'zip', then STEP 3 PASS
+   defect: a missing or doubled letter, or a letter nobody pressed
+STEP 4  RSHIFT, C=
+   do:     hold RIGHT SHIFT: type A and /, release; hold C=: type Q, release; RETURN (do not touch LEFT SHIFT)
+   expect: the line 'A?q', then STEP 4 PASS
+   defect: a/ (RSHIFT not decoded), or an extra character from C=
+STEP 5  PORT-1 STICK UP
+   do:     hold the stick in CONTROL PORT 1 UP and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 5 PASS
+   defect: 1 3 5 7 9 + \ appear (row 0), DEL rubs characters out
+STEP 6  PORT-1 STICK DOWN
+   do:     hold the stick in CONTROL PORT 1 DOWN and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 6 PASS
+   defect: the step ends at once with an empty line (RETURN is on row 1): SKIP, then w r y i p * _ land in the next line
+STEP 7  PORT-1 STICK LEFT
+   do:     hold the stick in CONTROL PORT 1 LEFT and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 7 PASS
+   defect: CTRL reads as held (row 2): letters turn into control codes, CTRL+D ends the program, CTRL+J ends the line; a d g j l ;
+STEP 8  PORT-1 STICK RIGHT
+   do:     hold the stick in CONTROL PORT 1 RIGHT and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 8 PASS
+   defect: 4 6 8 0 - 2 appear (row 3)
+STEP 9  PORT-1 FIRE
+   do:     hold the stick in CONTROL PORT 1 FIRE and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 9 PASS
+   defect: RSHIFT reads as held (row 4): HOSE comes out upper case, with Z C B M > and spaces
+
+Then FREE mode: type any lines (every key once, with and without SHIFT);
+an empty line ends the program.
+
+This terminal shows what the SCANNER saw ('key DOWN c7r6 Q'); 'COLUMN BLEED?'
+marks the phantom the row settle must prevent.  Letters look the same in both
+cases on screen (upper-case charset); the hex code tells them apart.
+========================================================================
+[kbd_echo] 11516-byte hunk file, args b'\n'
+  staged 24368 byte(s) in 22 record(s)
+[   0.04] fixed@1 started: operator, follow the C64 screen
+[   0.93]   | KBD-ECHO KEYBOARD CHECK (W6-K)
+[   1.41]   | EMPTY LINE: SKIP STEP. CTRL+D: QUIT
+[   2.65]   | STEP 1/9: HOLD Q
+[   2.90]   | HOLD Q 2S, RELEASE, RETURN
+[   3.15]   | >
+[   6.72] key DOWN c7r6 Q
+[   6.83]   | > Q
+[   9.19] key UP   c7r6 Q
+[   9.69] key DOWN c0r1 RETURN
+[  11.57]   |  'Q' $71 C7R6
+[  12.31]   | STEP 1 PASS
+[  13.55]   | STEP 2/9: HOLD ; AND /
+[  13.80]   | HOLD ; 2S, RELEASE;
+[  14.18] key UP   c0r1 RETURN
+[  14.30]   | HOLD / 2S, RELEASE; RETURN
+[  14.30]   | >
+[  16.66] key DOWN c6r2 ;
+[  16.77]   | > ;
+[  18.88] key UP   c6r2 ;
+[  19.61] key DOWN c6r7 /
+[  19.72]   | > ;/
+[  21.60] key UP   c6r7 /
+[  22.12] key DOWN c0r1 RETURN
+[  24.23]   |  ';' $3B C6R2
+[  25.97]   |  '/' $2F C6R7
+[  26.72]   | STEP 2 PASS
+[  27.71]   | STEP 3/9: ROLLOVER
+[  28.22]   | PRESS Z, KEEP IT; ADD I, KEEP IT;
+[  28.48]   | AD
+[  28.72]   | ADD P; RELEASE ALL; RETURN
+[  28.72]   | >
+[  28.86] key UP   c0r1 RETURN
+[  33.75]   | > Z
+[  33.89] key DOWN c1r4 Z
+[  35.12] key DOWN c4r1 I
+[  35.24]   | > ZI
+[  36.88] key DOWN c5r1 P
+[  37.00]   | > ZIP
+[  39.16] key UP   c1r4 Z
+[  39.16] key UP   c4r1 I
+[  39.16] key UP   c5r1 P
+[  40.41] key DOWN c0r1 RETURN
+[  42.28]   |  'Z' $7A C1R4
+[  44.02]   |  'I' $69 C4R1
+[  46.00]   |  'P' $70 C5R1
+[  46.51]   | STEP 3 PASS
+[  47.74]   | STEP 4/9: RSHIFT, C=
+[  48.00]   | RSHIFT+A, RSHIFT+/, THEN C=+Q;
+[  48.50]   | > ZIP
+[  48.50]   |  'Z' $7A C1R4
+[  48.50]   |  'I' $69 C4R1
+[  48.50]   |  'P' $70 C5R1
+[  48.50]   | STEP 3 PASS
+[  48.50]   | STEP 4/9: RSHIFT, C=
+[  48.50]   | RSHIFT+A, RSHIFT+/, THEN C=+Q;
+[  48.50]   | NO LEFT SHIFT; RETURN
+[  48.50]   | >
+[  48.63] key UP   c0r1 RETURN
+[  48.75]   | ADD P; RELEASE ALL; RETURN
+[  48.75]   | > ZIP
+[  48.75]   |  'Z' $7A C1R4
+[  48.75]   |  'I' $69 C4R1
+[  48.75]   |  'P' $70 C5R1
+[  48.75]   | STEP 3 PASS
+[  48.75]   | STEP 4/9: RSHIFT, C=
+[  48.75]   | RSHIFT+A, RSHIFT+/, THEN C=+Q;
+[  48.75]   | NO LEFT SHIFT; RETURN
+[  48.75]   | >
+[  61.42] mod DOWN c6r4 RSHIFT
+[  61.94] mod UP   c6r4 RSHIFT
+[  66.71] mod DOWN c7r5 C=
+[  67.21] mod DOWN c6r4 RSHIFT
+[  67.71] key DOWN c1r2 A
+[  67.83]   | > A
+[  67.97] key UP   c1r2 A
+[  70.00] mod UP   c6r4 RSHIFT
+[  70.00] mod UP   c7r5 C=
+[  72.03] mod DOWN c6r4 RSHIFT
+[  73.41]   | > A?
+[  73.54] (+1 key event(s) released before this poll saw them)
+[  74.56] mod UP   c6r4 RSHIFT
+[  76.07] mod DOWN c7r5 C=
+[  78.70]   | > A?Q
+[  78.83] (+1 key event(s) released before this poll saw them)
+[  79.59] mod UP   c7r5 C=
+[  80.11] key DOWN c0r1 RETURN
+[  82.50]   |  'A' $41 C1R2+SH
+[  84.76]   | STEP 3 P: RSHIFT, C=
+[  84.76]   | RSHIFT+A, RSHIFT+/, THEN C=+Q;
+[  84.76]   | NO LEFT SHIFT; RETURN
+[  84.76]   | > A?Q
+[  84.76]   |  'A' $41 C1R2+SH
+[  84.76]   |  '?' $3F C6R7+SH
+[  85.01]   | STEP 3 PASS
+[  85.01]   | STEP 4/9: RSHIFT, C=
+[  85.01]   | RSHIFT+A, RSHIFT+/, THEN C=+Q;
+[  85.01]   | NO LEFT SHIFT; RETURN
+[  85.01]   | > A?Q
+[  85.01]   |  'A' $41 C1R2+SH
+[  85.01]   |  '?' $3F C6R7+SH
+[  86.76]   |  'Q' $71 C7R6
+[  87.52]   | STEP 4 PASS
+[  88.77]   | STEP 5/9: PORT-1 STICK UP
+[  89.27]   | HOLD THE STICK UP, TYPE HOSE,
+[  89.52]   | STEP 2/9: HOLD ; AND /
+[  89.52]   | HOLD ; 2S, RELEASE;
+[  89.52]   | HOLD / 2S, RELEASE; RETURN
+[  89.52]   | > ;/     C6R2
+[  89.52]   | RELEASE THE STICK; RETURN
+[  89.65] key UP   c0r1 RETURN
+[  89.77]   | HOLD / 2S, RELEASE; RETURN
+[  89.77]   | > ;/
+[  89.77]   |  ';' $3B C6R2
+[  89.77]   | >
+[  93.94] port-1 joystick: rows r0 held low (masked)
+[  95.30]   | > H
+[  95.45] (+1 key event(s) released before this poll saw them)
+[  95.69] key DOWN c4r6 O
+[  95.81]   | > HO
+[  95.94] key UP   c4r6 O
+[  96.06]   | > HOS
+[  96.19] (+1 key event(s) released before this poll saw them)
+[  96.31]   | > HOSE
+[  96.44] (+1 key event(s) released before this poll saw them)
+[  97.68] port-1 joystick: released (no row held)
+[  98.19] key DOWN c0r1 RETURN
+[ 100.34]   |  'H' $68 C3R5
+[ 102.09]   |  'O' $6F C4R6
+[ 103.86]   |  'S' $73 C1R5
+[ 105.37]   |  'E' $65 C1R6
+[ 106.13]   | STEP 5 PASS
+[ 107.39]   | STEP 6/9: PORT-1 STICK DOWN
+[ 107.89]   | HOLD THE STICK DOWN, TYPE HOSE,
+[ 108.39]   | > ZIP
+[ 108.39]   |  'Z' $7A C1R4
+[ 108.39]   |  'I' $69 C4R1
+[ 108.39]   |  'P' $70 C5R1
+[ 108.39]   | STEP 3 PASS
+[ 108.39]   | STEP 4/9: RSHIFT, C=
+[ 108.39]   | RSHIFT+A, RSHIFTETURN
+[ 108.39]   |  'A?Q
+[ 108.39]   |  'A' $41 C1R2+SH
+[ 108.39]   | RELEASE THE STICK; RETURN
+[ 108.39]   | >
+[ 108.53] key UP   c0r1 RETURN
+[ 108.64]   |  'Z' $7A C1R4
+[ 108.64]   |  'I' $69 C4R1
+[ 108.64]   |  'P' $70 C5R1
+[ 108.64]   | STEP 3 PASS
+[ 108.64]   | STEP 4/9: RSHIFT, C=
+[ 108.64]   | RSHIFT+A, RSHIFT+/, THEN C=+Q;
+[ 108.64]   | NO LEFT SHIFT; RETURN
+[ 108.64]   |  'A' $41 C1R2+SH
+[ 108.64]   |  '?' $3F C6R7+SH
+[ 110.29] port-1 joystick: rows r1 held low (masked)
+[ 111.64]   | > H
+[ 111.76] (+1 key event(s) released before this poll saw them)
+[ 112.02] key DOWN c4r6 O
+[ 112.14]   | > HO
+[ 112.27] key UP   c4r6 O
+[ 112.52] key DOWN c1r5 S
+[ 112.63]   | > HOS
+[ 112.77] key DOWN c1r6 E
+[ 112.77] key UP   c1r5 S
+[ 112.88]   | > HOSE
+[ 113.02] key UP   c1r6 E
+[ 114.27] port-1 joystick: released (no row held)
+[ 114.77] key DOWN c0r1 RETURN
+[ 116.67]   | RELEASE THE STICK; RETURN
+[ 116.67]   | > HOSE
+[ 116.67]   |  'H' $68 C3R5
+[ 116.67]   |  'O' $6F C4R6
+[ 116.67]   |  'S' $73 C1R5
+[ 116.67]   |  'E' $65 C1R6
+[ 116.67]   | STEP 5 PASS
+[ 116.67]   | STEP 6/9: PORT-1 STICK DOWN
+[ 116.67]   | HOLD THE STICK DOWN, TYPE HOSE,
+[ 116.67]   | RELEASE THE STICK; RETURN
+[ 116.67]   | > HOSE
+[ 116.67]   |  'H' $68 C3R5
+[ 116.91]   |  'I' $69 C4R1
+[ 116.91]   |  'P' $70 C5R1
+[ 116.91]   | STEP 3 PASS
+[ 116.91]   | STEP 4/9: RSHIFT, C=
+[ 116.91]   | RSHIFT+A, RSHIFT+/, THEN C=+Q;
+[ 116.91]   | NO LEFT SHIFT; RETURN
+[ 116.91]   | > A?Q
+[ 116.91]   |  'A' $41 C1R2+SH
+[ 116.91]   |  '?' $3F C6R7+SH
+[ 116.91]   |  'Q' $71 C7R6
+[ 116.91]   | STEP 4 PASS
+[ 116.91]   | STEP 5/9: PORT-1 STICK UP
+[ 116.91]   | HOLD THE STICK UP, TYPE HOSE,
+[ 118.41]   | RELEASE THE STIC
+[ 118.41]   |  'H' $68 C3R5
+[ 118.41]   |  'O' $6F
+[ 118.66]   | RELEASE THE STICK; RETURN
+[ 118.66]   | > HOSE
+[ 118.66]   |  'H' $68 C3R5
+[ 118.66]   |  'O' $6F C4R6
+[ 120.16]   |  'S' $73 C1R5
+[ 121.93]   |  'E' $65 C1R6
+[ 122.45]   | STEP 4/9: RSHIFT, C=
+[ 122.45]   | RSHIFT+A, RSHIFT+/, THEN C=+Q;
+[ 122.45]   | NO LEFT SHIFT; RETURN
+[ 122.45]   | > A?Q    C1R2+SH
+[ 122.45]   | STEP 6 PASS
+[ 122.71]   | RSHIFT+A, RSHIFT+/, THEN C=+Q;
+[ 122.71]   | NO LEFT SHIFT; RETURN
+[ 122.71]   | > A?Q
+[ 122.71]   |  'A' $41 C1R2+SH
+[ 123.96]   | STEP 7/9: PORT-1 STICK LEFT
+[ 124.22]   | STEP 7/9: PORT-1 STICK LEFT
+[ 124.47]   | STEP 6 PASS
+[ 124.47]   | HOLD THE STICK LEFT, TYPE HOSE,
+[ 124.72]   | RELEASE THE STICK; RETURN
+[ 124.85] key UP   c0r1 RETURN
+[ 124.97]   | >
+[ 125.85] port-1 joystick: rows r2 held low (masked)
+[ 127.10] key DOWN c3r5 H
+[ 127.21]   | > H
+[ 127.35] key DOWN c4r6 O
+[ 127.35] key UP   c3r5 H
+[ 127.46]   | > HO
+[ 127.60] key UP   c4r6 O
+[ 127.84] key DOWN c1r5 S
+[ 127.96]   | > HOS
+[ 128.09] key DOWN c1r6 E
+[ 128.09] key UP   c1r5 S
+[ 128.21]   | > HOSE
+[ 128.34] key UP   c1r6 E
+[ 128.84] port-1 joystick: released (no row held)
+[ 129.59] key DOWN c0r1 RETURN
+[ 131.50]   |  'H' $68 C3R5
+[ 133.27]   |  'O' $6F C4R6
+[ 135.01]   |  'S' $73 C1R5
+[ 136.52]   |  'S' $73 C1R5
+[ 136.52]   |  'E' $65 C1R6
+[ 136.77]   |  'O' $6F C4R6
+[ 136.78]   |  'S' $73 C1R5
+[ 136.78]   |  'E' $65 C1R6
+[ 137.27]   | STEP 7 PASS
+[ 138.77]   | STEP 8/9: PORT-1 STICK RIGHT
+[ 139.28]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 139.52]   | RELEASE THE STICK; RETURN
+[ 139.65] key UP   c0r1 RETURN
+[ 139.77]   | >
+[ 142.65] port-1 joystick: rows r3 held low (masked)
+[ 143.65] (+1 key event(s) released before this poll saw them)
+[ 143.77]   | > H
+[ 144.02]   | > HO
+[ 144.16] (+1 key event(s) released before this poll saw them)
+[ 144.52]   | > HOS
+[ 144.65] (+1 key event(s) released before this poll saw them)
+[ 144.76]   | > HOSE
+[ 144.91] (+1 key event(s) released before this poll saw them)
+[ 145.90] port-1 joystick: released (no row held)
+[ 146.65] key DOWN c0r1 RETURN
+[ 148.78]   |  'H' $68 C3R5
+[ 150.54]   |  'O' $6F C4R6
+[ 152.33]   |  'S' $73 C1R5
+[ 153.83]   | STEP 6/9: PORT-1 STICK DOWN
+[ 153.83]   | HOLD THE STICK DOWN, TYPE HOSE,
+[ 153.83]   | RELEASE THE STICK; RETURN
+[ 153.83]   | > HOSE
+[ 153.83]   |  'H' $68 C3R5
+[ 153.83]   |  'O' $6F C4R6
+[ 153.83]   |  'S' $73 C1R5
+[ 153.83]   |  'E' $65 C1R6
+[ 153.83]   | STEP 6 PASS
+[ 153.83]   | STEP 7/9: PORT-1 STICK LE HOSE,
+[ 153.83]   | > HOSE   HE STICK; RETURN
+[ 153.83]   | > HOSE
+[ 153.83]   |  'E' $65 C1R6
+[ 154.08]   | HOLD THE STICK DOWN, TYPE HOSE,
+[ 154.08]   | RELEASE THE STICK; RETURN
+[ 154.08]   | > HOSE
+[ 154.08]   |  'H' $68 C3R5
+[ 154.08]   |  'O' $6F C4R6
+[ 154.08]   |  'S' $73 C1R5
+[ 154.08]   |  'E' $65 C1R6
+[ 154.08]   | STEP 6 PASS
+[ 154.08]   | STEP 7/9: PORT-1 STICK LEFT
+[ 154.08]   | HOLD THE STICK LEFT, TYPE HOSE,
+[ 154.08]   | > HOSE
+[ 154.08]   |  'H' $68 C3R5
+[ 154.58]   | STEP 8 PASS
+[ 155.84]   | STEP 9/9: PORT-1 FIRE
+[ 156.09]   | HOLD FIRE, TYPE HOSE,
+[ 156.58]   | RELEASE FIRE; RETURN
+[ 156.58]   | >
+[ 156.72] key UP   c0r1 RETURN
+[ 159.97] port-1 joystick: rows r4 held low (masked)
+[ 161.08]   | > H
+[ 161.23] (+1 key event(s) released before this poll saw them)
+[ 161.58]   | > HO
+[ 161.72] (+1 key event(s) released before this poll saw them)
+[ 162.09]   | > HOS
+[ 162.23] (+1 key event(s) released before this poll saw them)
+[ 162.34]   | > HOSE
+[ 162.47] (+1 key event(s) released before this poll saw them)
+[ 163.47] port-1 joystick: released (no row held)
+[ 164.74] key DOWN c0r1 RETURN
+[ 166.85]   |  'H' $68 C3R5
+[ 168.60]   |  'O' $6F C4R6
+[ 170.10]   |  'H' $68 C3R5
+[ 170.10]   |  'O' $6F C4R6
+[ 170.10]   |  'S' $73 C1R5
+[ 170.10]   |  'E' $65 C1R6
+[ 170.10]   | STEP 8 PASS
+[ 170.10]   | STEP 9/9: PORT-1 FIRE
+[ 170.10]   | HOLD FIRE, TYPE HOSE,
+[ 170.10]   | RELEASE FIRE; RETURN
+[ 170.10]   | > HOSE
+[ 170.10]   |  'H' $68 C3R5
+[ 170.10]   |  'O' $6F C4R6
+[ 170.10]   |  'S' $73 C1R5
+[ 170.35]   | STEP 7/9: PORT-1 STICK LEFT
+[ 170.35]   | HOLD THE STICK LEFT, TYPE HOSE,
+[ 170.35]   | RELEASE THE STICK; RETURN
+[ 170.35]   | > HOSE
+[ 170.35]   |  'H' $68 C3R5
+[ 170.35]   |  'O' $6F C4R6
+[ 170.35]   |  'S' $73 C1R5
+[ 170.35]   |  'E' $65 C1R6
+[ 170.35]   | STEP 7 PASS
+[ 170.35]   | STEP 8/9: PORT-1 STICK RIGHT
+[ 170.35]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 170.35]   | RELEASE THE STICK; RETURN
+[ 170.35]   | > HOSE
+[ 171.85]   |  'E' $65 C1R6
+[ 172.36]   |  'E' $65 C1R6
+[ 172.36]   | STEP 9 P
+[ 172.62]   |  'S' $73 C1R5
+[ 172.62]   |  'E' $65 C1R6
+[ 172.62]   | STEP 9 PASS
+[ 172.88]   | > HOSE   C3R5
+[ 172.88]   |  'O' $6F C4R6
+[ 172.88]   |  'S' $73 C1R5
+[ 172.88]   |  'E' $65 C1R6
+[ 172.88]   | STEP 9 PASS
+[ 172.88]   | FREE: TYPE LINES, EMPTY LINE ENDS
+[ 173.14]   | > HOSE
+[ 173.14]   |  'H' $68 C3R5
+[ 173.14]   |  'O' $6F C4R6
+[ 173.14]   |  'S' $73 C1R5
+[ 173.14]   |  'E' $65 C1R6
+[ 173.14]   | STEP 9 PASS
+[ 173.14]   | FREE: TYPE LINES, EMPTY LINE ENDS
+[ 173.14]   | >
+[ 173.28] key UP   c0r1 RETURN
+[ 801.81] key DOWN c4r1 I
+[ 801.92]   | > I
+[ 802.06] key DOWN c4r7 N
+[ 802.06] key UP   c4r1 I
+[ 802.18]   | > INE
+[ 802.32] key UP   c4r7 N
+[ 802.32] (+2 key event(s) released before this poll saw them)
+[ 802.44]   | > INES
+[ 803.46]   | > INE
+[ 803.60] (+2 key event(s) released before this poll saw them)
+[ 803.71]   | > I
+[ 803.86] (+1 key event(s) released before this poll saw them)
+[ 803.97]   | >
+[ 804.11] key DOWN c0r0 DEL
+[ 804.11] (+1 key event(s) released before this poll saw them)
+[ 804.36] key UP   c0r0 DEL
+[ 804.88] key DOWN c5r2 L
+[ 804.99]   | > L
+[ 805.12] key UP   c5r2 L
+[ 805.12] (+1 key event(s) released before this poll saw them)
+[ 805.24]   | > LIN
+[ 805.37] key DOWN c1r6 E
+[ 805.37] (+1 key event(s) released before this poll saw them)
+[ 805.50]   | > LINE
+[ 805.63] key UP   c1r6 E
+[ 805.63] (+1 key event(s) released before this poll saw them)
+[ 805.75]   | > LINES
+[ 806.41] key DOWN c0r1 RETURN
+[ 808.55]   |  'L' $6C C5R2
+[ 810.30]   |  'I' $69 C4R1
+[ 812.09]   |  'N' $6E C4R7
+[ 813.62]   | STEP 9 PPE LINES, EMPTY LINE ENDS
+[ 813.62]   | > LINES
+[ 813.62]   |  'L' $6C C5R2
+[ 813.62]   |  'I' $69 C4R1
+[ 813.62]   |  'N' $6E C4R7
+[ 813.62]   |  'E' $65 C1R6
+[ 813.87]   | STEP 9 PASS
+[ 813.87]   | FREE: TYPE LINES, EMPTY LINE ENDS
+[ 813.87]   | > LINES
+[ 813.87]   |  'L' $6C C5R2
+[ 813.87]   |  'I' $69 C4R1
+[ 813.87]   |  'N' $6E C4R7
+[ 813.87]   |  'E' $65 C1R6
+[ 815.38]   |  'S' $73 C1R5
+[ 815.52] key UP   c0r1 RETURN
+[ 815.64]   | >
+[ 819.34] (+1 key event(s) released before this poll saw them)
+[ 819.46]   | > QW
+[ 819.60] key DOWN c1r6 E
+[ 819.60] (+1 key event(s) released before this poll saw them)
+[ 819.71]   | > QWE
+[ 819.85] key UP   c1r6 E
+[ 819.97]   | > QWER
+[ 820.11] key DOWN c2r6 T
+[ 820.11] (+1 key event(s) released before this poll saw them)
+[ 820.24]   | > QWERT
+[ 820.38] key DOWN c3r1 Y
+[ 820.38] key UP   c2r6 T
+[ 820.51]   | > QWERTY
+[ 820.64] key DOWN c3r6 U
+[ 820.65] key UP   c3r1 Y
+[ 820.77]   | > QWERTYU
+[ 820.91] key DOWN c4r1 I
+[ 820.91] key DOWN c4r6 O
+[ 820.91] key UP   c3r6 U
+[ 821.02]   | > QWERTYUIOP
+[ 821.16] key UP   c4r1 I
+[ 821.16] key UP   c4r6 O
+[ 821.16] (+1 key event(s) released before this poll saw them)
+[ 821.67] key DOWN c1r2 A
+[ 821.79]   | > QWERTYUIOPAS
+[ 821.93] key DOWN c2r2 D
+[ 821.93] key DOWN c2r5 F
+[ 821.93] key UP   c1r2 A
+[ 821.93] (+3 key event(s) released before this poll saw them)
+[ 822.06]   | > QWERTYUIOPASDFAF
+[ 822.20] key UP   c2r2 D
+[ 822.20] key UP   c2r5 F
+[ 822.45] key DOWN c3r2 G
+[ 822.57]   | > QWERTYUIOPASDFAFGHJK
+[ 822.70] key DOWN c4r5 K
+[ 822.70] key UP   c3r2 G
+[ 822.70] (+2 key event(s) released before this poll saw them)
+[ 822.96] key UP   c4r5 K
+[ 822.96] (+1 key event(s) released before this poll saw them)
+[ 823.07]   | > QWERTYUIOPASDFAFGHJKL
+[ 823.46] key DOWN c1r4 Z
+[ 823.58]   | > QWERTYUIOPASDFAFGHJKLZXC
+[ 823.72] key DOWN c3r7 V
+[ 823.72] key UP   c1r4 Z
+[ 823.72] (+3 key event(s) released before this poll saw them)
+[ 823.84]   | > QWERTYUIOPASDFAFGHJKLZXCBV
+[ 823.97] key UP   c3r7 V
+[ 824.22] key DOWN c3r4 B
+[ 824.22] key DOWN c4r7 N
+[ 824.34]   | > QWERTYUIOPASDFAFGHJKLZXCBVBN
+[ 824.47] key DOWN c4r4 M
+[ 824.47] key UP   c3r4 B
+[ 824.47] key UP   c4r7 N
+[ 824.47] (+1 key event(s) released before this poll saw them)
+[ 824.59]   | > QWERTYUIOPASDFAFGHJKLZXCBVBNVM
+[ 824.73] key UP   c4r4 M
+[ 831.31] key DOWN c0r1 RETURN
+[ 835.22]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 835.22]   | RELEASE THE STICK; RETURN
+[ 835.22]   | > HOSE
+[ 835.22]   |  'H' $68 C3R5
+[ 835.22]   |  'O' $6F C4R6
+[ 835.22]   |  'S' $73 C1R5
+[ 835.22]   |  'E' $65 C1R6
+[ 835.22]   | STEP 8 PASS
+[ 835.22]   | STEP 9/9: PORT-1 FIRE
+[ 835.22]   | HOLD FIRE, TYPE HOSE,
+[ 835.22]   |  'Q' $71 C7R6
+[ 835.47]   | RELEASE THE STICK; RETURN
+[ 835.47]   | > HOSE
+[ 835.47]   |  'H' $68 C3R5
+[ 835.47]   |  'O' $6F C4R6
+[ 835.47]   |  'S' $73 C1R5
+[ 835.47]   |  'E' $65 C1R6
+[ 835.47]   | STEP 8 PASS
+[ 835.47]   | STEP 9/9: PORT-1 FIRE
+[ 835.47]   | HOLD FIRE, TYPE HOSE,
+[ 835.47]   | RELEASE FIRE; RETURN
+[ 836.99]   |  'W' $77 C1R1
+[ 838.57]   |  'O' $6F C4R6
+[ 838.57]   |  'S' $73 C1R6
+[ 838.57]   |  'E' $65 C1R6
+[ 838.81]   |  'S' $73 C1R5
+[ 838.82]   |  'E' $65 C1R6
+[ 840.37]   |  'R' $72 C2R1
+[ 841.92]   |  'O' $6F C4R6
+[ 841.92]   |  'S' $73 C1R5
+[ 841.92]   |  'E' $65 C1R6
+[ 841.92]   | STEP 8 PASS
+[ 841.92]   | STEP 9/9: PORT-1 FIRE
+[ 841.92]   | HOLD FIRE, TYPE HOSE,
+[ 841.92]   | RELEASE FIRE; RETURN
+[ 841.92]   | > HOSE
+[ 841.92]   |  'H' $68 C3R5
+[ 841.92]   |  'O' $6F C4R6
+[ 841.92]   |  'T' $74 C2R6
+[ 842.17]   |  'S' $73 C1R5
+[ 842.17]   |  'E' $65 C1R6
+[ 842.17]   | STEP 8 PASS
+[ 842.17]   | STEP 9/9: PORT-1 FIRE
+[ 842.17]   | HOLD FIRE, TYPE HOSE,
+[ 842.17]   | RELEASE FIRE; RETURN
+[ 842.17]   | > HOSE
+[ 842.17]   |  'H' $68 C3R5
+[ 842.17]   |  'O' $6F C4R6
+[ 842.17]   |  'S' $73 C1R5
+[ 843.73]   |  'Y' $79 C3R1
+[ 845.51]   |  'U' $75 C3R6
+[ 847.30]   |  'I' $69 C4R1
+[ 849.03]   |  'O' $6F C4R6
+[ 850.76]   | >ELEASE FIRE; RETURN
+[ 850.76]   | > HOSE
+[ 850.76]   |  'H' $68 C4R6
+[ 850.76]   |  'P' $70 C5R1
+[ 851.01]   | > HOSE
+[ 851.01]   |  'H' $68 C3R5
+[ 851.01]   |  'O' $6F C4R6
+[ 852.50]   |  'A' $61 C1R2
+[ 854.23]   |  'S' $73 C1R5
+[ 855.71]   |  'T' $74 C2R6
+[ 855.71]   |  'Y' $79 C3R1
+[ 855.71]   |  'U' $75 C3R6
+[ 855.71]   |  'I' $69 C4R1
+[ 855.71]   |  'O' $6F C4R6
+[ 855.71]   |  'P' $70 C5R1
+[ 855.71]   |  'A' $61 C1R2
+[ 855.71]   |  'S' $73 C1R5
+[ 855.71]   |  'D' $64 C2R2
+[ 855.96]   |  'R' $72 C2R1
+[ 855.96]   |  'T' $74 C2R6
+[ 855.96]   |  'Y' $79 C3R1
+[ 855.96]   |  'U' $75 C3R6
+[ 855.96]   |  'I' $69 C4R1
+[ 855.96]   |  'O' $6F C4R6
+[ 855.96]   |  'P' $70 C5R1
+[ 855.96]   |  'A' $61 C1R2
+[ 855.96]   |  'S' $73 C1R5
+[ 855.96]   |  'D' $64 C2R2
+[ 857.44]   |  'O' $6F C4R6
+[ 857.44]   |  'S' $73 C1R5
+[ 857.44]   |  'E' $65 C1R6
+[ 857.44]   | STEP 9 PASS
+[ 857.44]   | FREE: TYPE LINES, EMPTY LINE ENDS
+[ 857.44]   | > LINES
+[ 857.44]   |  'L' $6C C5R2
+[ 857.44]   |  'I' $69 C4R1
+[ 857.44]   |  'N' $6E C4R7
+[ 857.44]   |  'E' $65 C1R6
+[ 857.44]   |  'F' $66 C2R5
+[ 857.69]   |  'S' $73 C1R5
+[ 857.69]   |  'E' $65 C1R6
+[ 857.69]   | STEP 9 PASS
+[ 857.69]   | FREE: TYPE LINES, EMPTY LINE ENDS
+[ 857.69]   | > LINES
+[ 857.69]   |  'L' $6C C5R2
+[ 857.69]   |  'I' $69 C4R1
+[ 857.69]   |  'N' $6E C4R7
+[ 857.69]   |  'E' $65 C1R6
+[ 857.69]   |  'S' $73 C1R5
+[ 859.18]   |  'A' $61 C1R2
+[ 860.93]   |  'F' $66 C2R5
+[ 862.67]   |  'G' $67 C3R2
+[ 864.41]   |  'H' $68 C3R5
+[ 866.16]   |  'J' $6A C4R2
+[ 867.91]   |  'K' $6B C4R5
+[ 869.65]   |  'I' $69 C4R1
+[ 869.65]   |  'N' $6E C4R7
+[ 869.65]   |  'E' $65 C1R6
+[ 869.65]   |  'S' $73UIOPASDFAFGHJKLZXCBVBNVM
+[ 869.65]   |  'L' $6C C5R2
+[ 869.89]   |  'N' $6E C4R7
+[ 869.89]   |  'E' $65 C1R6
+[ 869.89]   |  'S' $73 C1R5
+[ 869.89]   | > QWERTYUIOPASDFAFGHJKLZXCBVBNVM
+[ 871.38]   |  'Z' $7A C1R4
+[ 873.12]   |  'X' $78 C2R7
+[ 875.10]   |  'H' $68 C4R2
+[ 875.10]   |  'K' $6B C4R5
+[ 875.10]   |  'L' $6C C5R2
+[ 875.10]   |  'Z' $7A C1R4
+[ 875.10]   |  'X' $78 C2R7
+[ 875.10]   |  'C' $43 C2R4+SH
+[ 875.35]   |  'H' $68 C3R5
+[ 875.35]   |  'J' $6A C4R2
+[ 875.35]   |  'K' $6B C4R5
+[ 875.35]   |  'L' $6C C5R2
+[ 875.35]   |  'Z' $7A C1R4
+[ 875.35]   |  'X' $78 C2R7
+[ 875.35]   |  'C' $43 C2R4+SH
+[ 876.83]   |  'C' $43 C2R4+SH
+[ 876.83]   |  'B' $62 C3R4
+[ 877.08]   |  'X' $78 C2R7
+[ 877.08]   |  'C' $43 C2R4+SH
+[ 877.08]   |  'B' $62 C3R4
+[ 878.58]   |  'B' $62 C3R4
+[ 878.58]   |  'V' $76
+[ 878.83]   |  'C' $43 C2R4+SH
+[ 878.83]   |  'B' $62 C3R4
+[ 878.83]   |  'V' $76 C3R7
+[ 880.33]   |  'L' $6C C1R4
+[ 880.33]   |  'X' $78 C2R7
+[ 880.33]   |  'C' $43 C2R4+SH
+[ 880.33]   |  'B' $62 C3R4
+[ 880.33]   |  'V' $76 C3R7
+[ 880.33]   |  'B' $62 C3R4
+[ 880.58]   |  'L' $6C C5R2
+[ 880.58]   |  'Z' $7A C1R4
+[ 880.58]   |  'X' $78 C2R7
+[ 880.58]   |  'C' $43 C2R4+SH
+[ 880.59]   |  'B' $62 C3R4
+[ 880.59]   |  'V' $76 C3R7
+[ 880.59]   |  'B' $62 C3R4
+[ 882.31]   |  'N' $6E C4R7
+[ 884.07]   |  'V' $76 C3R7
+[ 885.82]   |  'M' $6D C4R4
+[ 885.82]   | >
+[ 885.95] key UP   c0r1 RETURN
+[ 886.06]   |  'V' $76 C3R7
+[ 886.06]   |  'M' $6D C4R4
+[ 886.06]   | >
+[1385.51] key DOWN c0r1 RETURN
+[1386.12]   | STEPS PPPPPPPPP
+[1387.38]   |  'Z' $7A C1R4
+[1387.38]   |  'X' $78 C2R7
+[1387.38]   |  'C' $43 C2R4+SH
+[1387.38]   |  'B' $62 C3R4
+[1387.38]   |  'V' $76 C3R7
+[1387.38]   |  'B' $62 C3R4
+[1387.38]   |  'N' $6E C4R7
+[1387.38]   |  'V' $76 C3R7
+[1387.38]   |  'M' $6D C4R4
+[1387.38]   | >
+[1387.38]   | STEPS PPPPPPPPP
+[1387.38]   | RESULT PASS=9 FAIL=0 SKIP=0
+[1387.63]   |  'O' $6F C4R6
+[1387.63]   |  'P' $70 C5R1
+[1387.63]   |  'A' $61 C1R2
+[1387.63]   |  'S' $73 C1R5
+[1387.63]   |  'D' $64 C2R2
+[1387.63]   |  'F' $66 C2R5
+[1387.63]   |  'A' $61 C1R2
+[1387.63]   |  'F' $66 C2R5
+[1387.63]   |  'G' $67 C3R2
+[1387.63]   |  'H' $68 C3R5
+[1387.63]   |  'J' $6A C4R2
+[1387.63]   |  'K' $6B C4R5
+[1387.63]   |  'L' $6C C5R2
+  D0=00000000  D1=00000000  D2=00000000  D3=00000000  D4=00001000  D5=0000000C  D6=00000000  D7=00000000
+  A0=00100038  A1=00100010  A2=00000000  A3=00012A98  A4=0001A93A  A5=00100010  A6=000F0400  A7=0000F004
+  PC=00000442  SR=0004  instructions=233466  [halt reason=00]
+[1387.66] step 1 HOLD Q: program P; performed yes; Q held 2.2s
+[1387.66] step 2 HOLD ; AND /: program P; performed yes; ; held 2.0s; / held 1.7s
+[1387.66] step 3 ROLLOVER: program P; performed yes; at most 3 keys down at once
+[1387.66] step 4 RSHIFT, C=: program P; performed NO; A with RSHIFT: yes; / with RSHIFT: NO; Q with C=: NO
+[1387.66] step 5 PORT-1 STICK UP: program P; performed NO; stick row r0 seen held in 15 poll(s); H not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[1387.66] step 6 PORT-1 STICK DOWN: program P; performed NO; stick row r1 seen held in 16 poll(s); H not typed with the stick held
+[1387.66] step 7 PORT-1 STICK LEFT: program P; performed yes; stick row r2 seen held in 12 poll(s)
+[1387.66] step 8 PORT-1 STICK RIGHT: program P; performed NO; stick row r3 seen held in 13 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[1387.66] step 9 PORT-1 FIRE: program P; performed NO; stick row r4 seen held in 14 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[1387.66] fixed@1: INCOMPLETE (want PASS), STEPS PPPPPPPPP
+  CHECK FAILED  manual/fixed@1: PASS  INCOMPLETE
+[18:56:11] restoring config ...
+[18:56:15] config after (full, all categories): IDENTICAL
+[18:56:15] fixed@48: FAIL
+[18:56:15] nosettle@48: INCOMPLETE
+[18:56:15] nojoymask@48: DEFECT SHOWN
+[18:56:15] fixed@1: INCOMPLETE
+[18:56:15] SESSION VERDICT: FAIL: the fixed build shows a defect or a wrong character
+  CHECK FAILED  session verdict VALIDATED  FAIL
+20/24 checks passed
+FAIL  manual/fixed@48: PASS: FAIL
+FAIL  manual/nosettle@48: DEFECT SHOWN: INCOMPLETE
+FAIL  manual/fixed@1: PASS: INCOMPLETE
+FAIL  session verdict VALIDATED: FAIL
