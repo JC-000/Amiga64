@@ -1476,7 +1476,8 @@ def test_ab_a_single_step_2_phantom_does_not_count():
     assert ns[2].settle
     one = ke.ab_verdict([pair(1, nosettle=ns)] + [pair(i) for i in
                                                    range(2, 6)])
-    assert one.startswith("NOT REPRODUCED")
+    # fix8 F3 (was NOT REPRODUCED): a single one asks for more pairs
+    assert one.startswith("REDO") and "not yet repeated" in one
     two = ke.ab_verdict([pair(1, nosettle=ns), pair(2, nosettle=ns)] +
                         [pair(i) for i in range(3, 6)])
     assert two.startswith("NECESSARY")
@@ -1515,3 +1516,137 @@ def test_ab_unproven_polling_discards_the_pair():
                              proven=False)] +
                        [pair(i) for i in range(2, 5)])
     assert ab.startswith("REDO") and "pair1: polling not proven" in ab
+
+
+# --- fix8 (fix7 review, build/evidence/w6-kbd-review7/REVIEW.md) -------------
+# The review's attacks on real A/B session logs, adopted inverted; its
+# guards G1-G8 run unchanged in test_fix7_attacks.py (fix8/green).
+
+from tests import kbd_ab_logs as abl  # noqa: E402
+
+
+def test_F1_A1_uparrow_in_raw_with_q_committed_is_the_signature():
+    """review7 A1, inverted: Q commits alone, then UPARROW (Q's c-1) keeps
+    flickering into raw while Q is held: the settle's own trace.
+    nosettle: signature; fixed: a settle defect (the A/B STOPs)."""
+    st = abl.live(abl.UPRAW1, step=1)
+    jc = ke.judge_step(st, 1, control=True)
+    assert ke.judge_run(ke.CONTROL, "PP-------",
+                        {1: jc, 2: ke.StepJudge(True, [], [])},
+                        range(1, 3)) == "DEFECT SHOWN"
+    jf = ke.judge_step(st, 1)
+    assert any("UPARROW" in d for d in jf.defects)
+    assert jc.settle and jf.settle
+
+
+def test_F1_A1_five_such_pairs_read_necessary(tmp_path):
+    """review7 A1 end to end, inverted."""
+    v, _ = abl.ab(tmp_path, [(1.0, {"nosettle": (abl.UPRAW1, abl.CLEAN2)})]
+                  * 5)
+    assert v.startswith("NECESSARY"), v
+
+
+def test_F2_A2_uparrow_committed_mid_hold_is_the_signature(tmp_path):
+    """review7 A2, inverted: UPARROW committed two polls into Q's hold
+    (COLUMN BLEED? c7r6 Q is held) is a settle signature, never a kept
+    zero."""
+    st = abl.live(abl.UPLATE1, step=1)
+    jc = ke.judge_step(st, 1, control=True)
+    assert jc.signature
+    v, out = abl.ab(tmp_path, [(1.0, {"nosettle": (abl.UPLATE1,
+                                                   abl.CLEAN2)})] +
+                    [abl.CLEAN] * 4)
+    assert v.startswith("NECESSARY"), v
+
+
+def test_F2_A2b_the_same_in_the_fixed_build_stops(tmp_path):
+    """review7 A2b, inverted: STOP, not REDO 'stray key'."""
+    v, _ = abl.ab(tmp_path, [(1.0, {"fixed": (abl.UPLATE1, abl.CLEAN2)})] +
+                  [abl.CLEAN] * 4)
+    assert v.startswith("STOP") and "pair1#1" in v, v
+
+
+def test_F2_a_nosettle_stray_key_discards_the_pair(tmp_path):
+    """A nosettle stray key that is not the settle's (W with Q) is no
+    clean zero: the pair is discarded."""
+    W = ke.K("w")
+    stray = [abl.state()] + [abl.state({abl.Q, W}, 2)] * 5 + \
+        [abl.state(set(), 2)]
+    v, _ = abl.ab(tmp_path, [(1.0, {"nosettle": (stray, abl.CLEAN2)})] +
+                  [abl.CLEAN] * 4)
+    assert v.startswith("REDO") and "pair1#1" in v and "stray" in v, v
+
+
+def test_F3_A3_a_step_2_signature_never_reads_not_reproduced(tmp_path):
+    """review7 A3, inverted: one step-2 settle signature (/ raw-only, r7
+    low at idle) in a kept pair: REDO ('not yet repeated'), never NOT
+    REPRODUCED."""
+    v, _ = abl.ab(tmp_path, [(1.0, {"nosettle": (abl.CLEAN1,
+                                                 abl.SLASH_R7)})] +
+                  [abl.CLEAN] * 4)
+    assert not v.startswith("NOT REPRODUCED"), v
+    assert v.startswith("REDO") and "not yet repeated" in v, v
+
+
+def test_F3_a_defect_like_pair_never_reads_not_reproduced(tmp_path):
+    """A nosettle run 'defect-like, not settle-specific' (a chattering Q)
+    next to 5 clean pairs: REDO, not NOT REPRODUCED."""
+    chat = [abl.state()] + [abl.state(set(), 0, raw={abl.Q})] * 2 + \
+        [abl.state({abl.Q}, 1)] * 4 + [abl.state(set(), 1)]
+    v, _ = abl.ab(tmp_path, [(1.0, {"nosettle": (chat, abl.CLEAN2)})] +
+                  [abl.CLEAN] * 5)
+    assert v.startswith("REDO") and "not settle-specific" in v, v
+
+
+def test_F5_A4_a_log_passed_twice_counts_once(tmp_path):
+    """review7 A4, inverted."""
+    v, out = abl.ab(tmp_path, [abl.CLEAN] * 3, extra_paths=(0, 1))
+    assert v.startswith("REDO: 3 of 5"), v
+    assert sum("passed twice" in l for l in out) == 2
+
+
+def test_F6_A5_row_low_at_idle_before_the_press_does_not_count():
+    """review7 A5, inverted: r6 low at idle BEFORE Q goes down, then a
+    chattering Q: no settle evidence (only polls while Q is held or raw
+    count)."""
+    s = [abl.state(idle=abl.R6LOW), abl.state()] + \
+        [abl.state(set(), 0, raw={abl.Q})] * 2 + \
+        [abl.state({abl.Q}, 1)] * 3 + [abl.state(set(), 1)]
+    st = abl.live(s, step=1)
+    jc = ke.judge_step(st, 1, control=True)
+    assert not jc.settle and "not settle-specific" in jc.not_judgeable
+
+
+def test_D2_the_host_checklist_and_the_c64_screen_say_count_10():
+    how = ke.checklist(ke.parse_runs("nosettle@48")[0])
+    assert any("count of 10" in l for l in how)
+    assert not any("2 s" in l for l in how)
+    c = (Path(ke.PROJECT_ROOT) / "fixtures" / "c" / "kbd_echo.c").read_text()
+    assert "count 10" in c and "2s" not in c
+
+
+def test_D1_doc_drifts_are_gone():
+    doc = (Path(ke.PROJECT_ROOT) / "docs" / "HLE_CON.md").read_text()
+    assert "raw-only (in the raw samples, not the debounced matrix) for " \
+        "1.5 s and never committed" not in doc
+    assert "row 6 low at the idle read" not in doc
+    ab = doc[doc.index("### The settle A/B"):]
+    for must in ("SHIFT LOCK", "touch no other key", "HOLD Q (COUNT 10)",
+                 "RETURN alone", "once"):
+        assert must in ab, must
+
+
+def test_K5_no_vetoes_nothing_with_idle_evidence_only():
+    """fix8 mutant kill (no_vetoes): with r6-low-at-idle as the only
+    settle evidence (no UPARROW, so the fix8 F1 path cannot add it back),
+    a 'no' still changes nothing."""
+    s = [state()] + [state(set(), 0, raw={Q_}),
+                     state(set(), 0, idle=R6LOW, raw=set()),
+                     state(set(), 0, raw={Q_})] + [state()] * 2
+    got = set()
+    for answer in (None, False):
+        st, _ = live1(s, step=1)
+        if answer is False:
+            st.denied.add(1)
+        got.add(ctl7(ke.judge_step(st, 1, control=True)))
+    assert got == {"DEFECT SHOWN"}

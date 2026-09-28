@@ -146,12 +146,14 @@ def _stick(n: int, name: str, row: int, fails_as: str) -> Step:
 
 
 STEPS = [
-    Step("HOLD Q", "hold Q for 2 s, release it, press RETURN", "q",
+    Step("HOLD Q", "hold Q to a count of 10 (5 s or more), release it, "
+         "press RETURN", "q",
          "^q: the UP-ARROW glyph ($5E, c6r6, read in the same sample as Q) "
          "then q; or nothing (the phantom keeps restarting the debounce)",
          "hold", keys="q"),
     Step("HOLD ; AND /",
-         "hold ; for 2 s, release; hold / for 2 s, release; RETURN", ";/",
+         "hold ; to a count of 10, release; hold / to a count of 10, "
+         "release; RETURN", ";/",
          "l; (c5r2, bleed from ;) or ,/ (c5r7, bleed from /)", "hold",
          keys=";/"),
     Step("ROLLOVER",
@@ -999,6 +1001,11 @@ def _ab_discard(p: ABPair) -> str:
             d for j in fx for d in j.defects)
     if any(j.settle for j in ns):
         return ""
+    if any(j.defects for j in ns):
+        # fix8 F2: a nosettle defect that is not the settle's is no clean
+        # zero
+        return "nosettle@48 stray key: " + " | ".join(
+            d for j in ns for d in j.defects)
     nj = [j.not_judgeable for j in ns if j.not_judgeable]
     if nj:
         return "nosettle@48 not judgeable: " + " | ".join(nj)
@@ -1018,9 +1025,13 @@ def ab_verdict(pairs: list[ABPair]) -> str:
     - NECESSARY: a kept pair's nosettle step 1 has a settle-specific
       signature, or step 2 has one in 2 kept pairs or more (the ; and /
       phantoms carry R4);
+    - REDO when a single step-2 signature or a defect-like nosettle run
+      was seen (fix8 F3: never NOT REPRODUCED next to a signature);
     - NOT REPRODUCED: AB_PAIRS kept pairs at --poll 1.0 and none of that,
       with its limits;
-    - REDO otherwise, with the reasons."""
+    - REDO otherwise, with the reasons.
+    A nosettle stray key that is not the settle's discards its pair
+    (fix8 F2)."""
     stop, kept, gone, nonspec = [], [], [], []
     for p in pairs:
         fx = [p.fixed[n] for n in (1, 2)]
@@ -1045,8 +1056,20 @@ def ab_verdict(pairs: list[ABPair]) -> str:
         return ("NECESSARY: settle-specific signature(s) " + "; ".join(
             s1 + (s2 if len(s2) >= 2 else [])) + f"; {len(kept)} kept "
             "pair(s), every kept fixed@48 run clean")
-    tail = "".join(f"; not counted: {x}" for x in nonspec + s2)
+    discards = "".join(f"; discarded {p.label}: {w}" for p, w in gone)
+    # fix8 F3: NOT REPRODUCED never with a signature or a defect-like run
+    # anywhere: a single step-2 signature (R4) or a debounce that kept
+    # restarting without settle evidence asks for more pairs
     slow = [p for p, _ in kept if p.poll == 1.0]
+    if s2:
+        return (f"REDO: {len(s2)} step-2 settle-specific signature, not yet "
+                "repeated in another pair (R4): run more pairs; "
+                + "; ".join(s2) + discards)
+    if nonspec:
+        return ("REDO: defect-like, not settle-specific (the debounce kept "
+                "restarting with no settle evidence): run more pairs; "
+                + "; ".join(nonspec) + discards)
+    tail = ""
     if len(slow) >= AB_PAIRS:
         bound = 1 - 0.05 ** (1 / len(slow))
         return (f"NOT REPRODUCED: 0 of {len(slow)} kept pairs at --poll 1.0 "
@@ -1055,8 +1078,8 @@ def ab_verdict(pairs: list[ABPair]) -> str:
                 f"{bound:.0%} (95%), and delays under about 1.15 s are "
                 "invisible at this poll; this is not 'the settle is "
                 f"unnecessary'{tail}")
-    return (f"REDO: {len(slow)} of {AB_PAIRS} kept pairs at --poll 1.0"
-            + "".join(f"; discarded {p.label}: {w}" for p, w in gone) + tail)
+    return f"REDO: {len(slow)} of {AB_PAIRS} kept pairs at --poll 1.0" + \
+        discards
 
 
 def _ab_pair(path: str, i: int, ab: dict, proven: bool) -> ABPair:
@@ -1071,8 +1094,14 @@ def replay_report(paths: list[str], out=print,
                   assume_poll: float | None = None
                   ) -> dict[str, list[ReplaySession]]:
     """Re-judge every run of each log, session by session."""
-    res, pairs = {}, []
+    res, pairs, seen = {}, [], set()
     for path in paths:
+        real = os.path.realpath(path)
+        if real in seen:
+            # fix8 F5: a log passed twice would count its pairs twice
+            out(f"== {path}: passed twice, skipped")
+            continue
+        seen.add(real)
         out(f"== {path}")
         res[path] = []
         rows = []
@@ -1103,7 +1132,11 @@ def replay_report(paths: list[str], out=print,
                         + (f"; SIGNATURE {' | '.join(j.signature)}"
                            if j.signature else ""))
             if ls.plan in AB_PLANS:
-                pairs.append(_ab_pair(path, i, ab, proven))
+                pr = _ab_pair(path, i, ab, proven)
+                if any(q.label == pr.label for q in pairs):
+                    out(f"A/B pair {pr.label} passed twice: counted once")
+                else:
+                    pairs.append(pr)
             sv = replay_session_verdict(results, ls.plan, proven)
             res[path].append(ReplaySession(ls.header, ls.plan, results,
                                            proven, sv))
@@ -1292,16 +1325,23 @@ def _settle_evidence(samples: list[Sample], key: int, ph: int | None
       row after *key*'s column; only after column 0 is there no settle
       before the next sample's idle read.  In nosettle nothing waits, and
       a row still low at the idle read masks *key* out of that sample.
-    A chattering switch gives neither."""
+    A chattering switch gives neither.  The idle rows count only while
+    the key is held (fix8 F6)."""
     out = []
     if ph is not None:
         n = sum(key in (s.raw or ()) and ph in (s.raw or ()) for s in samples)
         if n:
             out.append(f"{pos(ph)} in raw with {KEY_NAMES[key]} at {n} "
                        "poll(s)")
+    # the idle read only while the key is held (fix8 F6): from its first
+    # poll in raw or the matrix to the poll after its last (a masked
+    # sample has it in neither)
+    on = [i for i, s in enumerate(samples)
+          if key in s.keys or key in (s.raw or ())]
+    held = samples[on[0]:on[-1] + 2] if on else []
     r = key % 8
     if r >= 5:
-        n = sum(r in joy_rows(s.idle) for s in samples)
+        n = sum(r in joy_rows(s.idle) for s in held)
         if n:
             out.append(f"r{r} low at the idle read at {n} poll(s)")
     return out
@@ -1411,6 +1451,7 @@ def judge_step(stream: Stream, n: int, control: bool = False) -> StepJudge:
                                f"scanner saw no {name} raw-only at 2 polls: "
                                f"{seen}")
             ok &= good
+            n_settle = len(settle)
             extra = {i for s in ss if k in s.keys for i in nonmod(s)} - {k}
             if extra:
                 defects.append(f"with {KEY_NAMES[k]} held, also down: "
@@ -1424,6 +1465,20 @@ def judge_step(stream: Stream, n: int, control: bool = False) -> StepJudge:
                 sig.append(f"phantom {pos(ph)} went down with "
                            f"{KEY_NAMES[k]} (settle signature)")
                 settle.append(sig[-1])
+            # fix8 F1/F2: the c-1 key at any poll while the key is held,
+            # in raw (flickering, never committed) or committed later
+            # (COLUMN BLEED?), even when the key itself committed cleanly:
+            # the row still low from the key's column, read as column c-1
+            both = lambda s: s.keys | (s.raw or frozenset())
+            late = sum(k in both(s) and ph in both(s) for s in ss) \
+                if ph is not None else 0
+            if late and len(settle) == n_settle and not any(
+                    pos(ph) in x for x in settle):
+                line = (f"{pos(ph)} with {name} held at {late} poll(s), in "
+                        "raw or committed (the row still low from "
+                        f"{name}'s column: settle signature)")
+                (sig if control else defects).append(line)
+                settle.append(line)
     elif step.kind == "rollover":
         most = max((len(nonmod(s)) for s in ss), default=0)
         notes.append(f"at most {most} keys down at once")

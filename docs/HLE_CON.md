@@ -354,7 +354,8 @@ the **manner** of each step and looks for **defects**:
 | 4 | RSHIFT down when A and / go down; C= down when Q goes down; LEFT SHIFT never down | — |
 | 5-9 | the stick's row (UP r0, DOWN r1, LEFT r2, RIGHT r3, FIRE r4) seen held low in `hle_con_idle` when each of H, O, S and E goes down | any key on that row reading down while the stick holds it |
 | 1, 2 | — | a `COLUMN BLEED?` in this step (in steps 3-9 it is only a note: I and P, neighbours on row 1, going down between two polls is normal rollover typing; fix round 5, decision (a)) |
-| 1, 2 (fixed build) | — | a held key raw-only (in the raw samples, not the debounced matrix) for 1.5 s and never committed (the settle "nothing" form), or raw-only for 0.2 s or more before it committed (the delayed commit; fix round 6) |
+| 1, 2 (fixed build) | — | the debounce kept restarting on the held key: raw-only (in the raw samples, not the debounced matrix) for 0.2 s or more, committed later or never, or at 2 polls or more when never committed; "settle" when the column c-1 key is in raw or the key's row (5-7) is low at the idle read, else "keyboard/debounce, not settle-specific" (fix rounds 6-7) |
+| 1, 2 | the column c-1 key (↑ for Q, L for ;, `,` for /) in raw or committed at any poll while the key is held (fix round 8): the settle signature in `nosettle`, a settle defect in the fixed build | |
 
 In a control run, only the triggering action is required (the key held,
 or the stick seen). The broken build may garble the typing itself.
@@ -472,6 +473,13 @@ from missed taps, not from the idle signal.
     called the idle read unsettled in both builds; that holds only for
     keys in column 0. Q is column 7.)
 
+  The column c-1 key is settle evidence **whenever** it shows while the
+  key is held, in raw or committed, even when the held key itself
+  committed cleanly (fix round 8, review7 F1/F2): in the marginal regime
+  Q commits alone and ↑ then keeps flickering into raw, or commits a few
+  polls later (`COLUMN BLEED? c7r6 Q is held`). Fix round 7 looked for it
+  only when Q was raw-only, so such runs read "clean commit".
+
   So:
   - with that evidence: **FAIL** in the fixed build (a failure of the
     fix), **DEFECT SHOWN** in `nosettle` (`StepJudge.settle`, and the
@@ -511,11 +519,8 @@ from missed taps, not from the idle signal.
   `defect-like: …`, `clean commit`, `nothing: raw brief / no Q seen /
   scanner dead`), Q's longest raw-only run, the hold, row-6 idle polls,
   dead-scanner polls, and the operator's answer. A replay of A/B sessions
-  ends with one `A/B:` line (see "The settle A/B").
-  replayed verdict, the polling, step 1 classified (phantom, delayed
-  commit, nothing with raw-only Q, nothing with a brief or no Q, clean
-  commit), Q's longest raw-only run, the hold, row-6 idle
-  polls, and the operator's answer.
+  ends with one `A/B:` line (see "The settle A/B"). A log passed twice is
+  replayed once ("passed twice, skipped"), and an A/B pair counts once.
 - **Replay.** `python3 -m tests.kbd_echo --replay LOG…` re-judges the runs
   of session logs offline. It rebuilds each stream from the logged events.
   - **Each session on its own.** A log may hold several sessions (before
@@ -642,11 +647,19 @@ REPRODUCED | REDO | STOP: <reason>` (`ab_verdict`).
 - **Only settle-specific evidence counts** (see "The debounce
   restarting, and what is settle-specific"): the step-1 phantom (↑ with
   Q in one sample), or a debounce that kept restarting with ↑ in raw or
-  row 6 low at the idle read. A delayed commit or "nothing" form
+  the held key's row (r6 for Q, r7 for /) low at the idle read. A
+  delayed commit or "nothing" form
   **without** that evidence is reported as **defect-like, not
   settle-specific** and never counts: a chattering Q must not prove the
-  fix necessary. A step-2 (; or /) signature counts only when it repeats
-  in another kept pair (R4).
+  fix necessary. ↑ in raw or committed at any poll of Q's hold counts,
+  even after Q committed cleanly. A step-2 (; or /) signature counts
+  only when it repeats in another kept pair (R4); a single one gives
+  REDO ("not yet repeated"), never NOT REPRODUCED.
+- **NOT REPRODUCED is printed only when no kept pair shows any
+  signature in any step and no nosettle run is defect-like** (fix round
+  8, F3); otherwise the line is NECESSARY or REDO.
+- A nosettle run with a stray key that is not the settle's (W with Q)
+  is no clean zero: its pair is discarded.
 - **Never the operator's answer.**
 - **A signature counts even if its run is INCOMPLETE** for another step
   (K4).
@@ -680,17 +693,23 @@ REPRODUCED | REDO | STOP: <reason>` (`ab_verdict`).
 **Operator script.** The supervisor runs this with the user at the C64.
 Each session takes about 5 minutes (gate, boot and restore about 2 min,
 then two runs), so 5 pairs take about 25 minutes before any redo.
-Before starting: **no joystick in either port**.
 
-In **every** run:
-- at the step 1 prompt, hold **Q for a count of 10** (at least 5 s by the
-  clock, so the stream sees it at 4-5 polls), release, RETURN;
-- at step 2, hold **; for a count of 10**, release, hold **/ for a count
-  of 10**, release, RETURN;
-- in the fixed run, press RETURN alone at steps 3-9 and at the free mode
-  prompt (they are not judged at this poll; the checklist says so);
-- after a nosettle run, answer the question however you like: it is
-  logged and does not count.
+Tell the operator before the first session:
+- **No joystick in either port. SHIFT LOCK up.**
+- Each session first waits for **Enter on the host terminal** (the
+  operator confirmation): press Enter when you sit at the C64.
+- In **every** run, at step 1 the screen says `HOLD Q (COUNT 10)`: hold
+  **Q to a count of 10** (at least 5 s by the clock, so the stream sees it
+  at 4-5 polls), release, RETURN. At step 2 hold **; to a count of 10**,
+  release, hold **/ to a count of 10**, release, RETURN. (A driver older
+  than fix round 8 printed `HOLD Q 2S`: ignore that, count to 10.)
+- **While holding Q, ; or /, touch no other key.**
+- In the fixed run, press **RETURN alone** at steps 3-9 and at the free
+  mode prompt. At `--poll 1.0` the checklist says so; at `--poll 0.1`
+  (AB 6/7) it does not, but RETURN alone is fine there too: the run's own
+  verdict is then FAIL or INCOMPLETE, and the A/B reads only steps 1-2.
+- After each nosettle run the host asks a **y/n question** per hold step.
+  Answer as you like: it is logged and does not count.
 
 ```sh
 cd /Users/someone/Documents/Amiga64/.claude/worktrees/w6-kbd  # or the merged tree
@@ -709,16 +728,19 @@ AB 5 nosettle@48,fixed@48 1.0
 # optional: the same at the default poll
 AB 6 nosettle@48,fixed@48 0.1
 AB 7 fixed@48,nosettle@48 0.1
-# the table to report (logged and replayed verdicts) and the A/B line
+# the table (logged and replayed verdicts) and the A/B line; the glob
+# passes each pair directory once
 python3 -m tests.kbd_echo --replay $D/pair*/session.log | \
     grep -E '^(SUMMARY| ses|  +[0-9]+ |A/B)'
 ```
 
-Each `--out-dir` must be new (a non-empty one is refused). When the A/B
-line says REDO for a pair, run it again under a new name (`AB 3b …`); the
-discarded one stays on disk and its reason is in the A/B line. On STOP,
-stop and report. Report back: the SUMMARY rows (logged and replayed), the
-A/B line, and the `session.log` files.
+Each `--out-dir` must be new (a non-empty one is refused). Pass each pair
+directory to `--replay` **once** (a log passed twice is skipped, but a
+copy under another name would count twice). When the A/B line says REDO
+for a pair, run it again under a new name (`AB 3b …`); the discarded one
+stays on disk and its reason is in the A/B line. On STOP, stop and
+report. Report back: the SUMMARY rows (logged and replayed), the A/B
+line, and the `session.log` files.
 
 ### What VICE covers (`--backend vice`, automated)
 

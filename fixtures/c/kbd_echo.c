@@ -53,8 +53,8 @@ static const char *const title[NSTEP] = {
     "PORT-1 STICK RIGHT", "PORT-1 FIRE"
 };
 static const char *const how[NSTEP][2] = {
-    { "hold Q 2s, release, RETURN", "" },
-    { "hold ; 2s, release;", "hold / 2s, release; RETURN" },
+    { "hold Q (count 10), release, RETURN", "" },
+    { "hold ; (count 10), release;", "hold / (count 10), release; RETURN" },
     { "press Z, keep it; add I, keep it;", "add P; release all; RETURN" },
     { "RSHIFT+A, RSHIFT+/, then C=+Q;", "no LEFT SHIFT; RETURN" },
     { "hold the stick UP, type HOSE,", "release the stick; RETURN" },
