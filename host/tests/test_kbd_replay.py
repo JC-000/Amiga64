@@ -791,8 +791,9 @@ def test_F5_replay_rebuilds_raw_and_reads_the_confirmation(tmp_path):
                        "(Q)"], "DEFECT SHOWN"),
             ("c.log", ["[  13.10] operator: step 1 held as asked (Q)? yes"],
              "DEFECT SHOWN"),
+            # fix7 K5: a "no" never changes an instrument verdict
             ("d.log", ["[  13.10] operator: step 1 held as asked (Q)? no"],
-             "NOT JUDGEABLE")):
+             "DEFECT SHOWN")):
         log = write_log(tmp_path, base + extra + end, name)
         s, = ke.replay_report([log], out=lambda *a: None)[log]
         assert s.results["nosettle@48"] == want, name
@@ -920,19 +921,20 @@ def test_R1_raw_only_hold_scores_without_the_answer_and_no_vetoes_it():
     j1, got = ctl(live_stream(raw, step=1)[0], answer=True)
     assert got == "DEFECT SHOWN"
     j1, got = ctl(live_stream(raw, step=1)[0], answer=False)
-    assert got == "NOT JUDGEABLE" and "says" in j1.not_judgeable
+    assert got == "DEFECT SHOWN"          # fix7 K5: "no" changes nothing
 
 
 def test_R1_row6_idle_low_is_noted_never_scored():
-    """review5 test_R1_row6…: the idle read precedes every settle in BOTH
-    builds (hle_con.s: lda CIA1_PRB / sta hle_con_idle before @col), so r6
-    low there does not tell nosettle from fixed: noted, NOT JUDGEABLE."""
+    """review5 test_R1_row6…: r6 low at idle with Q never in raw at all is
+    no raw-only evidence: a "yes" is NOT JUDGEABLE, never a signature.
+    (fix7 K3: r6 low at idle IS settle evidence, but only next to a
+    debounce that kept restarting; see test_K3_*.)"""
     r6 = 0xFF & ~(1 << 6)
     st, out = live_stream([state()] + [state(idle=r6)] * 12 + [state()],
                           step=1)
     j1, got = ctl(st, answer=True)
     assert got == "NOT JUDGEABLE" and not j1.signature
-    assert "r6" in j1.not_judgeable
+    assert "saw no Q" in j1.not_judgeable
 
 
 def test_R1_a_log_without_raw_scores_nothing_on_the_answer(tmp_path):
@@ -1101,7 +1103,7 @@ def test_R6_every_nosettle_hold_step_is_asked_whatever_the_outcome(
     got, lines, asked = _leg(monkeypatch, _clean_holds(), "PP-------",
                              ke.Run("nosettle", 48))
     assert got == "INCONCLUSIVE"
-    assert [q.split(" asked you")[0] for q in asked] == \
+    assert [q.split(":")[0] for q in asked] == \
         ["nosettle@48 step 1", "nosettle@48 step 2"]
     assert not any("never" in q or "committed" in q for q in asked)
     assert "operator: step 1 held as asked (Q)? yes" in lines
@@ -1170,3 +1172,346 @@ def test_ras_liveness_is_replayed_and_named_in_a_not_judgeable(tmp_path):
     assert by_t[5.0].live is True
     j1 = ke.judge_step(st, 1, control=True)
     assert "not sampling" in j1.not_judgeable
+
+
+# --- fix7 (fix6 review, build/evidence/w6-kbd-review6/REVIEW.md) -------------
+# The review's attacks (test_fix6_attacks.py) adopted inverted, at the
+# A/B's --poll 1.0; its guards G1, G2 adopted as they are.
+
+P1 = ke.poll_period(1.0)                 # 1.15 s
+R6LOW = 0xFF & ~(1 << 6)
+SEMI_, SLASH_ = ke.K(";"), ke.K("/")
+
+
+def live1(states, step):
+    """live_stream at --poll 1.0, the judge told so."""
+    st, out = live_stream(states, step=step, dt=P1)
+    st.period = P1
+    return st, out
+
+
+def ctl7(j1, v="SP-------", j2=None):
+    return ke.judge_run(ke.CONTROL, v, {1: j1, 2: j2 or ke.StepJudge(
+        True, [], [])}, range(1, 3))
+
+
+def fixed7(j1, v="PPSSSSSSS"):
+    js = {n: ke.StepJudge(False, [], [], [], "period") for n in range(3, 10)}
+    js.update({1: j1, 2: ke.StepJudge(True, [], [])})
+    return ke.judge_run(ke.FIXED, v, js, range(1, 10))
+
+
+def row7(st, run, got):
+    st.continuity = "proven (test)"
+    return ke.step1_row(st, run, got, 1, "INCOMPLETE")
+
+
+def test_G1_one_poll_in_the_debounce_window_is_not_a_delay():
+    """review6 guard G1, adopted."""
+    st, _ = live1([state(), state(set(), 0, raw={Q_})] + [state({Q_}, 1)] * 4
+                  + [state(set(), 1)], step=1)
+    j1 = ke.judge_step(st, 1)
+    assert j1.performed and not j1.defects, j1.notes
+    assert ke._raw_only([s for s in st.samples if s.step == 1], Q_,
+                        ke.gap_max(P1)) == (0.0, 1)
+
+
+def test_G2_replay_worst_single_sighting_stays_below_delay_min(tmp_path):
+    """review6 guard G2, adopted: fill + the state/screen split give at
+    most GAP_SLACK (0.15 s) < DELAY_MIN (0.2 s)."""
+    lines = ["[   0.04] fixed@48 started (--poll 1s): operator, follow the "
+             "C64 screen",
+             "[   1.00]   | STEP 1/9: HOLD Q", "[   1.00]   | >",
+             "[   2.00] raw (not debounced yet): c7r6 Q",
+             "[   2.14]   | > q",
+             "[   3.29] key DOWN c7r6 Q",
+             "[   3.29] raw (not debounced yet): none",
+             "[   7.90] key UP   c7r6 Q", "[   9.00]   | STEP 1 PASS",
+             "[   9.10] fixed@48: INCOMPLETE (want PASS), STEPS None"]
+    hb = [f"[{k + 0.5:8.2f}] hb polls +1 max gap 1.29s" for k in range(1, 9)]
+    log = write_log(tmp_path, sorted(lines + hb, key=lambda l: float(
+        ke.LOG_LINE.match(l)[1])))
+    (run, st, _), = ke.replay_log(log)
+    assert st.continuity.startswith("proven")
+    ss = [s for s in st.samples if s.step == 1]
+    raw_s, _ = ke._raw_only(ss, Q_, ke.gap_max(P1))
+    assert 0.14 <= raw_s < ke.DELAY_MIN < ke.GAP_SLACK + 0.1
+    j1 = ke.judge_step(st, 1)
+    assert j1.performed and not j1.defects
+    assert "clean commit" in row7(st, ke.Run("fixed", 48), "x")
+
+
+# K1: only settle-specific evidence is a settle signature
+
+def test_K1_A4_chatter_without_settle_evidence_is_not_a_signature():
+    """review6 A4, inverted: Q raw-only at two polls, never with UPARROW
+    in raw, no r6 low at idle, then committed: a chattering switch looks
+    the same in either build.  nosettle: NOT JUDGEABLE ('defect-like, not
+    settle-specific'), never DEFECT SHOWN; fixed: FAIL, said to be the
+    keyboard/debounce, not the settle."""
+    chat = [state()] + [state(set(), 0, raw={Q_})] * 2 + \
+        [state({Q_}, 1)] * 3 + [state(set(), 1)]
+    st, _ = live1(chat, step=1)
+    jc = ke.judge_step(st, 1, control=True)
+    assert not jc.signature and not jc.settle
+    assert "not settle-specific" in jc.not_judgeable
+    assert ctl7(jc, "PP-------") == "NOT JUDGEABLE"
+    jf = ke.judge_step(st, 1)
+    assert fixed7(jf) == "FAIL" and not jf.settle
+    assert any("not settle-specific" in d for d in jf.defects)
+
+
+def test_K1_the_c_minus_1_key_in_raw_makes_it_settle_specific():
+    """The same two raw-only polls with UPARROW (c6r6, Q's c-1) in raw:
+    the settle mechanism's own trace.  nosettle DEFECT SHOWN (settle), the
+    fixed build FAIL with a settle signature."""
+    st, _ = live1([state()] + [state(set(), 0, raw={Q_, UPK})] * 2 +
+                  [state({Q_}, 1)] * 3 + [state(set(), 1)], step=1)
+    jc = ke.judge_step(st, 1, control=True)
+    assert ctl7(jc, "PP-------") == "DEFECT SHOWN"
+    assert any("settle-specific" in x and "UPARROW" in x
+               for x in jc.signature)
+    jf = ke.judge_step(st, 1)
+    assert fixed7(jf) == "FAIL"
+    assert any("settle-specific" in d for d in jf.defects)
+    assert jc.settle and jf.settle
+
+
+# K2: the same raw-only span, committed or not
+
+def test_K2_A2_never_committed_two_raw_only_polls_is_judged_like_a_delay():
+    """review6 A2, inverted: two raw-only polls (1.15 s) with the
+    settle trace (UPARROW in raw), never committed: the fixed build FAILs
+    and nosettle shows the signature, exactly as when it commits."""
+    never = [state()] + [state(set(), 0, raw={Q_, UPK})] * 2 + [state()] * 3
+    st, _ = live1(never, step=1)
+    jf = ke.judge_step(st, 1)
+    assert jf.defects and fixed7(jf, "SPSSSSSSS") == "FAIL"
+    jc = ke.judge_step(st, 1, control=True)
+    assert jc.settle and ctl7(jc) == "DEFECT SHOWN"
+    assert "settle: nothing" in row7(st, ke.Run("nosettle", 48), "x")
+
+
+# K3: the idle-mask flicker is settle evidence
+
+def test_K3_A3_idle_mask_flicker_scores_in_nosettle():
+    """review6 A3, inverted: {Q, UP} / {} with r6 low at idle,
+    alternating, never committed.  Raw-only polls are counted, not only
+    consecutive seconds, for a key never committed: 2 polls with the
+    settle trace -> DEFECT SHOWN."""
+    flick = [state()] + [state(set(), 0, raw={Q_, UPK}) if i % 2 == 0 else
+                         state(set(), 0, idle=R6LOW, raw=set())
+                         for i in range(5)] + [state()]
+    st, out = live1(flick, step=1)
+    jc = ke.judge_step(st, 1, control=True)
+    assert ctl7(jc) == "DEFECT SHOWN"
+    assert any("r6 low" in x for x in jc.signature)
+
+
+def test_K3_row6_low_at_idle_alone_is_settle_evidence_for_q():
+    """Only the fixed build's settle before column 6 waits for row 6 after
+    Q's column 7; nosettle reads the next idle with row 6 maybe still low.
+    r6 is no port-1 joystick row (r0-r4).  Q never debounced, raw-only at
+    2 polls, r6 low at idle: settle-specific."""
+    st, _ = live1([state()] + [state(set(), 0, raw={Q_}),
+                               state(set(), 0, idle=R6LOW, raw=set()),
+                               state(set(), 0, raw={Q_})] + [state()] * 2,
+                  step=1)
+    jc = ke.judge_step(st, 1, control=True)
+    assert ctl7(jc) == "DEFECT SHOWN"
+    assert any("r6 low" in x for x in jc.signature)
+
+
+def test_K3_a_joystick_row_low_at_idle_is_not_settle_evidence():
+    """guard: ; is c6r2: row 2 is a port-1 joystick line (LEFT), so r2 low
+    at idle proves nothing about the settle."""
+    r2 = 0xFF & ~(1 << 2)
+    st, _ = live1([state()] + [state(set(), 0, raw={SEMI_}),
+                               state(set(), 0, idle=r2, raw=set()),
+                               state(set(), 0, raw={SEMI_})] + [state()] * 2,
+                  step=2)
+    jc = ke.judge_step(st, 2, control=True)
+    assert not jc.signature and ctl7(ke.StepJudge(True, [], []), "PP-------",
+                                     jc) != "DEFECT SHOWN"
+
+
+def test_K3_the_doc_no_longer_says_both_builds():
+    doc = (Path(ke.PROJECT_ROOT) / "docs" / "HLE_CON.md").read_text()
+    src = Path(ke.__file__).read_text()
+    for text in (doc, src):
+        assert "both builds read the idle mask before any settle" not in text
+        assert "both builds read idle before any settle" not in text
+
+
+# K4: a signature is never buried by another step
+
+def test_K4_A6_a_phantom_survives_an_undone_step_2():
+    """review6 A6, inverted."""
+    st, _ = live1([state(), state({Q_, UPK}, 2)] + [state({Q_, UPK}, 2)] * 3 +
+                  [state(set(), 2)], step=1)
+    j1 = ke.judge_step(st, 1, control=True)
+    s2, _ = live1([state()] + [state({SEMI_}, 1)] * 2 + [state(set(), 1)] +
+                  [state({SLASH_}, 2)] * 2 + [state(set(), 2)], step=2)
+    j2 = ke.judge_step(s2, 2, control=True)
+    assert not j2.performed
+    assert ctl7(j1, "FP-------", j2) == "DEFECT SHOWN"
+
+
+# K5: the answer never changes an instrument verdict
+
+@pytest.mark.parametrize("raw", [{Q_}, {Q_, UPK}])
+def test_K5_A5_no_answer_changes_any_form(raw):
+    """review6 A5, inverted: 'no' (or 'yes') changes nothing where the
+    instrument saw a raw-only Q, whether the form is settle-specific or
+    not, committed or not."""
+    for tail in ([state()] * 2, [state({Q_}, 1)] * 3 + [state(set(), 1)]):
+        base = [state()] + [state(set(), 0, raw=raw)] * 3 + tail
+        got = set()
+        for answer in (None, True, False):
+            st, _ = live1(base, step=1)
+            if answer is not None:
+                (st.confirmed if answer else st.denied).add(1)
+            got.add(ctl7(ke.judge_step(st, 1, control=True),
+                         "SP-------" if len(tail) == 2 else "PP-------"))
+        assert len(got) == 1, (raw, got)
+
+
+# K6: a dead scanner gates the verdict
+
+def test_K6_A8_a_dead_scanner_is_not_judgeable_and_shown():
+    """review6 A8, inverted: fixed build, hle_con_ras frozen through step
+    1, Q never seen: NOT JUDGEABLE 'scanner not sampling' (the A/B stops
+    on it), not 'Q never pressed'; SUMMARY shows the dead polls."""
+    dead, out = live1([fstate(ras=7)] * 6, step=1)
+    j = ke.judge_step(dead, 1)
+    assert not j.performed and "not sampling" in j.not_judgeable
+    r = row7(dead, ke.Run("fixed", 48), "NOT JUDGEABLE")
+    assert "scanner dead" in r
+    alive, _ = live1([fstate(ras=r) for r in (1, 2, 3, 4, 5, 6)], step=1)
+    j = ke.judge_step(alive, 1)
+    assert not j.not_judgeable
+
+
+# D1 / D2 / D3 and the A/B reading rule
+
+def _hold(keys_by_step, n_polls=5):
+    """A clean nosettle/fixed step-1 and step-2 stream at --poll 1.0."""
+    out = {}
+    for n, keys in keys_by_step.items():
+        states = [state()]
+        nk = 0
+        for k in keys:
+            nk += 1
+            states += [state({k}, nk)] * n_polls + [state(set(), nk)]
+        out[n] = live1(states, step=n)[0]
+    return out
+
+
+def _judges(streams, control):
+    return {n: ke.judge_step(st, n, control=control)
+            for n, st in streams.items()}
+
+
+def _clean(control, q_states=None):
+    ss = _hold({1: [Q_], 2: [SEMI_, SLASH_]})
+    if q_states is not None:
+        ss[1] = live1(q_states, step=1)[0]
+    return _judges(ss, control)
+
+
+PHANTOM = [state()] + [state({Q_, UPK}, 2)] * 5 + [state(set(), 2)]
+CHATTER = [state()] + [state(set(), 0, raw={Q_})] * 2 + [state({Q_}, 1)] * 4 \
+    + [state(set(), 1)]
+
+
+def pair(i, fixed=None, nosettle=None, poll=1.0, proven=True):
+    return ke.ABPair(f"pair{i}", poll, proven,
+                     fixed or _clean(False), nosettle or _clean(True))
+
+
+def test_ab_necessary_needs_a_settle_specific_signature():
+    ab = ke.ab_verdict([pair(1, nosettle=_clean(True, PHANTOM))] +
+                       [pair(i) for i in range(2, 6)])
+    assert ab.startswith("NECESSARY") and "pair1" in ab
+
+
+def test_ab_A4_chatter_never_reads_as_necessary():
+    ab = ke.ab_verdict([pair(1, nosettle=_clean(True, CHATTER))] +
+                       [pair(i) for i in range(2, 6)])
+    assert not ab.startswith("NECESSARY")
+    assert "not settle-specific" in ab
+
+
+def test_ab_not_reproduced_needs_five_kept_pairs_and_states_the_limits():
+    ab = ke.ab_verdict([pair(i) for i in range(1, 6)])
+    assert ab.startswith("NOT REPRODUCED")
+    assert "45%" in ab and "1.15" in ab
+    ab = ke.ab_verdict([pair(i) for i in range(1, 5)])
+    assert ab.startswith("REDO")
+
+
+def test_ab_A7_a_tapped_fixed_q_discards_the_pair():
+    """review6 A7, inverted: the fixed partner must HOLD Q (performed),
+    not tap it."""
+    tap = [state(), state({Q_}, 1), state(set(), 1)] + [state()] * 3
+    ab = ke.ab_verdict([pair(1, fixed=_clean(False, tap))] +
+                       [pair(i) for i in range(2, 6)])
+    assert ab.startswith("REDO") and "pair1" in ab
+
+
+def test_ab_a_settle_signature_in_the_fixed_build_stops():
+    ab = ke.ab_verdict([pair(1, fixed=_clean(False, PHANTOM))] +
+                       [pair(i) for i in range(2, 6)])
+    assert ab.startswith("STOP") and "pair1" in ab
+
+
+def test_ab_a_single_step_2_phantom_does_not_count():
+    """; and / phantoms carry R4 (a brushed neighbour reads the same at
+    --poll 1.0): they count only when repeated in another kept pair."""
+    L = ke.K("l")
+    s2 = [state()] + [state({SEMI_, L}, 2)] * 5 + [state(set(), 2)] + \
+        [state({SLASH_}, 3)] * 5 + [state(set(), 3)]
+    ns = _clean(True)
+    ns[2] = ke.judge_step(live1(s2, step=2)[0], 2, control=True)
+    assert ns[2].settle
+    one = ke.ab_verdict([pair(1, nosettle=ns)] + [pair(i) for i in
+                                                   range(2, 6)])
+    assert one.startswith("NOT REPRODUCED")
+    two = ke.ab_verdict([pair(1, nosettle=ns), pair(2, nosettle=ns)] +
+                        [pair(i) for i in range(3, 6)])
+    assert two.startswith("NECESSARY")
+
+
+def test_ab_line_and_logged_column_in_the_replay(tmp_path):
+    """D3: the SUMMARY shows the logged verdict next to the replayed one;
+    a replay of A/B sessions ends with one 'A/B:' line."""
+    log = str(LOGS / "kbd-hw-2.session.log")
+    out = []
+    ke.replay_report([log], out=out.append, assume_poll=0.1)
+    i = next(i for i, l in enumerate(out) if l.startswith("SUMMARY"))
+    assert "logged" in out[i + 1]
+    assert out[i + 2].split()[2] == "INCOMPLETE"      # fixed@48 logged
+    assert not any(l.startswith("A/B") for l in out)   # not an A/B session
+    body = (tmp_path / "ab.log")
+    body.write_text("[10:00:00] kbd_echo MANUAL on 192.0.2.1, runs "
+                    "nosettle@48, fixed@48, poll 1s, prg x\n")
+    out = []
+    ke.replay_report([str(body)], out=out.append)
+    assert out[-1].startswith("A/B (docs/HLE_CON.md 'The settle A/B'): REDO")
+
+
+def test_D1_script_and_question_ask_for_a_long_hold():
+    doc = (Path(ke.PROJECT_ROOT) / "docs" / "HLE_CON.md").read_text()
+    ab = doc[doc.index("### The settle A/B"):]
+    assert "count of 10" in ab and "slow count of 5" not in ab
+    assert "45%" in ab and "not reproduced" in ab.lower()
+    assert "about 2 s" not in Path(ke.__file__).read_text()
+
+
+def test_ab_unproven_polling_discards_the_pair():
+    """fix7 mutant kill (ab_unproven_ok): a pair whose polling no
+    heartbeat proves is discarded, even with a phantom in it."""
+    ab = ke.ab_verdict([pair(1, nosettle=_clean(True, PHANTOM),
+                             proven=False)] +
+                       [pair(i) for i in range(2, 5)])
+    assert ab.startswith("REDO") and "pair1: polling not proven" in ab

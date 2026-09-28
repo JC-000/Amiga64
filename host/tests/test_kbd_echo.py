@@ -452,8 +452,11 @@ def test_judge_run_control():
                         r) == "INCOMPLETE"
     assert ke.judge_run(ke.CONTROL, "PP" + v, {1: _j(), 2: _j()},
                         r) == "INCONCLUSIVE"
-    # an unperformed step is INCOMPLETE even with a signature elsewhere
+    # fix7 K4 (was INCOMPLETE): a signature is an observed fact, and an
+    # unperformed step elsewhere does not hide it
     assert ke.judge_run(ke.CONTROL, "FS" + v, {1: sig, 2: _j(False)},
+                        r) == "DEFECT SHOWN"
+    assert ke.judge_run(ke.CONTROL, "PS" + v, {1: _j(), 2: _j(False)},
                         r) == "INCOMPLETE"
 
 

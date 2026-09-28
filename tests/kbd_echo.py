@@ -927,26 +927,32 @@ def file_verdict(verdicts: list[str]) -> str:
     return min(verdicts, key=VERDICT_RANK.__getitem__, default="INCOMPLETE")
 
 
-def step1_row(st, run: Run, got: str, session: int) -> str:
-    """One --replay SUMMARY row: the run's verdict and its step 1 (HOLD Q)
-    as the A/B protocol reads it (docs/HLE_CON.md)."""
+def step1_row(st, run: Run, got: str, session: int, logged: str = "-") -> str:
+    """One --replay SUMMARY row: the run's logged and replayed verdicts and
+    its step 1 (HOLD Q) as the A/B reads it (docs/HLE_CON.md)."""
     pol = st.continuity.split()[0].rstrip(",")
+    head = f"{session:4d} {str(run):14s} {logged:14s} {got:14s} {pol:9s}"
     if 1 not in run.steps:
-        return (f"{session:4d} {str(run):14s} {got:14s} {pol:9s} "
-                f"{'-':30s} {'-':>6s} {'-':>6s} {'-':>5s} -")
+        return f"{head} {'-':30s} {'-':>6s} {'-':>6s} {'-':>5s} {'-':>4s} -"
     ss = [s for s in st.samples if s.step == 1]
     q = K("q")
-    period = st.period
-    gmax = gap_max(period) if period is not None else ECHO_GAP_MAX
+    gmax = gap_max(st.period) if st.period is not None else ECHO_GAP_MAX
     j = judge_step(st, 1, control=run.kind == CONTROL)
     never = not any(q in s.keys for s in ss)
     raw_s, raw_n = _raw_only(ss, q, gmax) if st.raw_known else (0.0, 0)
-    if any("phantom" in x for x in j.signature + j.defects):
+    dead = sum(s.live is False for s in ss)
+    form = "nothing" if never else "delayed commit"
+    if any("phantom" in x for x in j.settle):
         cls = "phantom (^ with Q)"
+    elif j.settle:
+        cls = f"settle: {form}"
+    elif any("not settle-specific" in x
+             for x in j.defects + [j.not_judgeable]):
+        cls = f"defect-like: {form}"
     elif not never:
-        cls = "delayed commit" if raw_s >= DELAY_MIN else "clean commit"
-    elif raw_s >= HOLD_MIN:
-        cls = "nothing: raw-only"
+        cls = "clean commit"
+    elif dead >= 2:
+        cls = "nothing: scanner dead"
     elif raw_n:
         cls = "nothing: raw brief"
     else:
@@ -955,27 +961,124 @@ def step1_row(st, run: Run, got: str, session: int) -> str:
         cls += " (no raw)"
     low = sum(6 in joy_rows(s.idle) for s in ss)
     ans = "yes" if 1 in st.confirmed else "no" if 1 in st.denied else "-"
-    return (f"{session:4d} {str(run):14s} {got:14s} {pol:9s} {cls:30s} "
+    return (f"{head} {cls:30s} "
             f"{(f'{raw_s:.1f}s' if st.raw_known else 'n/a'):>6s} "
-            f"{_runs(ss, q, gmax):5.1f}s {low:5d} {ans}")
+            f"{_runs(ss, q, gmax):5.1f}s {low:5d} {dead:4d} {ans}")
 
 
-SUMMARY_HDR = (" ses run            replayed       polling   step 1 (HOLD Q)"
-               "                raw-only   held r6low operator")
+SUMMARY_HDR = (" ses run            logged         replayed       polling   "
+               "step 1 (HOLD Q)                raw-only   held r6low dead "
+               "operator")
+
+
+@dataclass
+class ABPair:
+    """One A/B session (docs/HLE_CON.md "The settle A/B"): nosettle@48 and
+    fixed@48, each {step: StepJudge} for steps 1-2."""
+    label: str
+    poll: float | None
+    proven: bool
+    fixed: dict
+    nosettle: dict
+
+
+AB_PLANS = ("nosettle@48,fixed@48", "fixed@48,nosettle@48")
+AB_PAIRS = 5                  # kept pairs at --poll 1.0 for NOT REPRODUCED
+
+
+def _ab_discard(p: ABPair) -> str:
+    """Why an A/B pair is discarded ("" = kept)."""
+    fx = [p.fixed[n] for n in (1, 2)]
+    ns = [p.nosettle[n] for n in (1, 2)]
+    if not p.proven:
+        return "polling not proven by a heartbeat"
+    if not all(j.performed for j in fx):
+        return "fixed@48 steps 1-2 not held as asked (a tap is no hold)"
+    if any(j.defects for j in fx):
+        return "fixed@48 stray key: " + " | ".join(
+            d for j in fx for d in j.defects)
+    if any(j.settle for j in ns):
+        return ""
+    nj = [j.not_judgeable for j in ns if j.not_judgeable]
+    if nj:
+        return "nosettle@48 not judgeable: " + " | ".join(nj)
+    if not all(j.performed for j in ns):
+        return "nosettle@48 steps 1-2 not held as asked"
+    return ""
+
+
+def ab_verdict(pairs: list[ABPair]) -> str:
+    """The A/B reading rule (fix7, review6 section 5), automated:
+    - STOP: a fixed@48 run shows a settle signature, the debounce
+      restarting, or a dead scanner in steps 1-2 (a failure of the fix);
+    - a pair is discarded (:func:`_ab_discard`) when its polling is not
+      proven, its fixed run did not hold Q, ; and / or had a stray key, or
+      its nosettle run, without a signature, was not done as asked or is
+      NOT JUDGEABLE (e.g. defect-like, not settle-specific);
+    - NECESSARY: a kept pair's nosettle step 1 has a settle-specific
+      signature, or step 2 has one in 2 kept pairs or more (the ; and /
+      phantoms carry R4);
+    - NOT REPRODUCED: AB_PAIRS kept pairs at --poll 1.0 and none of that,
+      with its limits;
+    - REDO otherwise, with the reasons."""
+    stop, kept, gone, nonspec = [], [], [], []
+    for p in pairs:
+        fx = [p.fixed[n] for n in (1, 2)]
+        bad = [x for j in fx for x in j.settle] + \
+            [d for j in fx for d in j.defects if "debounce" in d] + \
+            [j.not_judgeable for j in fx if "not sampling" in j.not_judgeable]
+        if bad:
+            stop.append(f"{p.label}: fixed@48: " + " | ".join(bad))
+            continue
+        nonspec += [f"{p.label}: {p.nosettle[n].not_judgeable}"
+                    for n in (1, 2)
+                    if "not settle-specific" in p.nosettle[n].not_judgeable]
+        why = _ab_discard(p)
+        (gone if why else kept).append((p, why))
+    if stop:
+        return "STOP: " + "; ".join(stop) + " (report: the fix failed)"
+    s1 = [f"{p.label} step 1: {p.nosettle[1].settle[0]}" for p, _ in kept
+          if p.nosettle[1].settle]
+    s2 = [f"{p.label} step 2: {p.nosettle[2].settle[0]}" for p, _ in kept
+          if p.nosettle[2].settle]
+    if s1 or len(s2) >= 2:
+        return ("NECESSARY: settle-specific signature(s) " + "; ".join(
+            s1 + (s2 if len(s2) >= 2 else [])) + f"; {len(kept)} kept "
+            "pair(s), every kept fixed@48 run clean")
+    tail = "".join(f"; not counted: {x}" for x in nonspec + s2)
+    slow = [p for p, _ in kept if p.poll == 1.0]
+    if len(slow) >= AB_PAIRS:
+        bound = 1 - 0.05 ** (1 / len(slow))
+        return (f"NOT REPRODUCED: 0 of {len(slow)} kept pairs at --poll 1.0 "
+                "showed a settle-specific signature: if the defect occurs, "
+                f"its per-run rate under this detector is below "
+                f"{bound:.0%} (95%), and delays under about 1.15 s are "
+                "invisible at this poll; this is not 'the settle is "
+                f"unnecessary'{tail}")
+    return (f"REDO: {len(slow)} of {AB_PAIRS} kept pairs at --poll 1.0"
+            + "".join(f"; discarded {p.label}: {w}" for p, w in gone) + tail)
+
+
+def _ab_pair(path: str, i: int, ab: dict, proven: bool) -> ABPair:
+    missing = {n: StepJudge(False, [], [], [], "run missing") for n in (1, 2)}
+    fx, ns = ab.get("fixed@48"), ab.get("nosettle@48")
+    label = os.path.basename(os.path.dirname(os.path.abspath(path)))
+    return ABPair(f"{label}#{i + 1}", fx[0].poll_s if fx else None, proven,
+                  fx[1] if fx else missing, ns[1] if ns else missing)
 
 
 def replay_report(paths: list[str], out=print,
                   assume_poll: float | None = None
                   ) -> dict[str, list[ReplaySession]]:
     """Re-judge every run of each log, session by session."""
-    res = {}
+    res, pairs = {}, []
     for path in paths:
         out(f"== {path}")
         res[path] = []
         rows = []
         for i, ls in enumerate(read_sessions(path)):
             out(f"-- session {i + 1}: {ls.header or '(no session header)'}")
-            results, proven = {}, bool(ls.runs)
+            results, proven, ab = {}, bool(ls.runs), {}
             for lr in ls.runs:
                 st = _replay_run(lr, assume_poll)
                 run = lr.run
@@ -984,7 +1087,8 @@ def replay_report(paths: list[str], out=print,
                 v = st.verdicts()
                 got = judge_run(run.kind, v, judges, run.steps)
                 results[str(run)] = got
-                rows.append(step1_row(st, run, got, i + 1))
+                rows.append(step1_row(st, run, got, i + 1, lr.logged))
+                ab[str(run)] = (st, judges)
                 proven &= st.continuity.startswith("proven")
                 out(f"{run}: logged {lr.logged}; replayed {got}; STEPS {v}; "
                     f"polling {st.continuity}")
@@ -998,6 +1102,8 @@ def replay_report(paths: list[str], out=print,
                            else "")
                         + (f"; SIGNATURE {' | '.join(j.signature)}"
                            if j.signature else ""))
+            if ls.plan in AB_PLANS:
+                pairs.append(_ab_pair(path, i, ab, proven))
             sv = replay_session_verdict(results, ls.plan, proven)
             res[path].append(ReplaySession(ls.header, ls.plan, results,
                                            proven, sv))
@@ -1016,6 +1122,8 @@ def replay_report(paths: list[str], out=print,
         out(SUMMARY_HDR)
         for r in rows:
             out(r)
+    if pairs:
+        out(f"A/B (docs/HLE_CON.md 'The settle A/B'): {ab_verdict(pairs)}")
     return res
 
 
@@ -1036,6 +1144,11 @@ class StepJudge:
     # gap is a stall).  Only set on a step not proven performed; such a
     # step is NOT JUDGEABLE, not operator error.
     not_judgeable: str = ""
+    # settle-specific evidence (fix7 K1): the phantom, or a debounce that
+    # kept restarting with the column c-1 key in raw or the held key's row
+    # low at idle.  Only this may count as "the settle fix is necessary";
+    # in the fixed build it is a failure of the fix.
+    settle: list[str] = field(default_factory=list)
 
 
 NOT_JUDGEABLE = "NOT JUDGEABLE"
@@ -1167,6 +1280,33 @@ def _raw_only(samples: list[Sample], key: int, gmax: float
             sum(key in (s.raw or frozenset()) - s.keys for s in samples))
 
 
+def _settle_evidence(samples: list[Sample], key: int, ph: int | None
+                     ) -> list[str]:
+    """What only the missing row settle produces while *key* is held
+    (fix7 K1, K3):
+    - the column c-1 key on the same row in raw together with *key* (a
+      row still low from *key*'s column read as the next column's);
+    - *key*'s row low at the idle read, for rows 5-7 (r0-r4 are port-1
+      joystick lines).  hle_con_scan settles before every column, so in
+      the fixed build the settle before column c-1 already waited for the
+      row after *key*'s column; only after column 0 is there no settle
+      before the next sample's idle read.  In nosettle nothing waits, and
+      a row still low at the idle read masks *key* out of that sample.
+    A chattering switch gives neither."""
+    out = []
+    if ph is not None:
+        n = sum(key in (s.raw or ()) and ph in (s.raw or ()) for s in samples)
+        if n:
+            out.append(f"{pos(ph)} in raw with {KEY_NAMES[key]} at {n} "
+                       "poll(s)")
+    r = key % 8
+    if r >= 5:
+        n = sum(r in joy_rows(s.idle) for s in samples)
+        if n:
+            out.append(f"r{r} low at the idle read at {n} poll(s)")
+    return out
+
+
 def held_throughout(samples: list[Sample], spans, cond) -> float | None:
     """None when every poll from the first span's start to the last span's
     end satisfies cond, at most ECHO_GAP_MAX apart, else the time of the
@@ -1194,24 +1334,27 @@ def judge_step(stream: Stream, n: int, control: bool = False) -> StepJudge:
     stall, or, for a tapped step (3-9) of the fixed build, the period is
     over ECHO_GAP_MAX (decision (b)).
 
-    The settle defect without a phantom (fix6 R1, R2), measured on the
-    held key's raw-only samples (:func:`_raw_only`):
-    - "nothing" form: never committed, raw-only for HOLD_MIN or more;
-    - delayed commit: committed, but raw-only for DELAY_MIN or more first.
-    Either is a defect in the fixed build and the signature in a control.
-    The operator's answer (stream.confirmed / denied, asked in every
-    nosettle hold step) never scores by itself: a "yes" with no raw
-    evidence is NOT JUDGEABLE, and a "no" against raw evidence makes the
-    signature NOT JUDGEABLE too."""
+    The debounce restarting (fix6 R1/R2, fix7 K1-K3), measured on the
+    held key's raw-only samples (:func:`_raw_only`): raw-only for
+    DELAY_MIN or more, committed later ("delayed commit") or never ("the
+    nothing form"), or at 2 polls or more when never committed.  With
+    settle-specific evidence (:func:`_settle_evidence`) it is the signature
+    in a control and a defect in the fixed build (StepJudge.settle);
+    without, a control step is NOT JUDGEABLE ("defect-like, not
+    settle-specific") and the fixed build FAILs "keyboard/debounce".
+    The operator's answer (asked in every nosettle hold step) never
+    changes a verdict the instrument supports (K5); only where the scanner
+    saw no raw-only key does a "yes" make the step NOT JUDGEABLE, never a
+    signature.  A frozen hle_con_ras (2 polls or more) with the key never
+    seen is NOT JUDGEABLE too (K6)."""
     step = STEPS[n - 1]
     ss = [s for s in stream.samples if s.step == n]
-    notes, defects, sig = [], [], []
+    notes, defects, sig, settle = [], [], [], []
     ok = True
     period = getattr(stream, "period", poll_period(POLL_DEFAULT))
     gmax = gap_max(period) if period is not None else ECHO_GAP_MAX
     raw_known = getattr(stream, "raw_known", True)
     confirmed = getattr(stream, "confirmed", set())
-    denied = getattr(stream, "denied", set())
     nj_hold = ""
     nonmod = lambda s: {i for i in s.keys if i not in MODS}
     if step.kind == "hold":
@@ -1221,45 +1364,52 @@ def judge_step(stream: Stream, n: int, control: bool = False) -> StepJudge:
             notes.append(f"{KEY_NAMES[k]} held {held:.1f}s")
             good = held >= HOLD_MIN
             name = KEY_NAMES[k]
+            c, r = divmod(k, 8)
+            ph = (c - 1) * 8 + r if c > 0 and (c - 1) * 8 + r not in MODS \
+                else None
             never = not any(k in s.keys for s in ss)
             raw_s, raw_n = _raw_only(ss, k, gmax) if raw_known else (0.0, 0)
             if raw_n:
                 notes.append(f"{name} raw-only (not debounced) at {raw_n} "
                              f"poll(s), longest {raw_s:.1f}s" +
                              (", never committed" if never else ""))
-            if never and raw_s >= HOLD_MIN:
-                line = (f"{name} raw-only for {raw_s:.1f}s, never debounced "
-                        "(the settle 'nothing' form)")
-                if not control:
-                    defects.append(line)
-                elif n in denied:
-                    nj_hold = (f"the operator says {name} was not held as "
-                               f"asked, but raw shows it held {raw_s:.1f}s")
+            # a healthy press is raw-only at one poll at most: the same
+            # raw-only span counts committed or not (K2), and for a key
+            # never committed so do raw-only polls that are not
+            # consecutive (K3: the idle-mask flicker masks every other one)
+            if raw_s >= DELAY_MIN or (never and raw_n >= 2):
+                form = ("never committed (the 'nothing' form)" if never
+                        else "then committed (delayed commit)")
+                line = (f"{name} raw-only at {raw_n} poll(s), longest "
+                        f"{raw_s:.1f}s, {form}: the debounce kept restarting")
+                ev = _settle_evidence(ss, k, ph)
+                if ev:
+                    line += "; settle-specific: " + "; ".join(ev)
+                    (sig if control else defects).append(line)
+                    settle.append(line)
+                    good = good or control     # raw proves the press
+                elif control:
+                    nj_hold = (line + "; defect-like, not settle-specific "
+                               "(no column c-1 key in raw, no row low at "
+                               "idle: a chattering switch looks the same)")
+                    good = False
                 else:
-                    sig.append(line)
-                    good = True
-            elif never and n in confirmed and ss:
-                r = k % 8
-                seen = (f"raw showed {name} at {raw_n} poll(s) "
-                        f"({raw_s:.1f}s)" if raw_n else
-                        "raw never showed it" if raw_known else
-                        "raw is not in this log")
-                low = sum(r in joy_rows(s.idle) for s in ss)
-                if low:
-                    seen += (f"; row r{r} low in the idle read at {low} "
-                             "poll(s) (the idle mask: both builds read idle "
-                             "before any settle, so it is no signature)")
+                    defects.append("keyboard/debounce, not settle-specific: "
+                                   + line)
+            elif never and ss:
                 dead = sum(s.live is False for s in ss)
-                if dead:
-                    seen += f"; the scanner was not sampling at {dead} poll(s)"
-                nj_hold = (f"the operator says {name} was held, but the "
-                           f"scanner saw no {name} raw-only for {HOLD_MIN}s: "
-                           f"{seen}")
-            elif not never and raw_s >= DELAY_MIN:
-                line = (f"{name} raw-only for {raw_s:.1f}s before a "
-                        "commit (delayed commit: the debounce kept "
-                        "restarting)")
-                (sig if control else defects).append(line)
+                seen = (f"raw showed {name} at {raw_n} poll(s)" if raw_n
+                        else "raw never showed it" if raw_known
+                        else "raw is not in this log")
+                if dead >= 2:
+                    # K6: nothing seen proves nothing when nothing was sampled
+                    nj_hold = (f"the scanner was not sampling at {dead} "
+                               f"poll(s) (hle_con_ras frozen): {name} never "
+                               f"seen proves nothing; {seen}")
+                elif n in confirmed:
+                    nj_hold = (f"the operator says {name} was held, but the "
+                               f"scanner saw no {name} raw-only at 2 polls: "
+                               f"{seen}")
             ok &= good
             extra = {i for s in ss if k in s.keys for i in nonmod(s)} - {k}
             if extra:
@@ -1267,14 +1417,13 @@ def judge_step(stream: Stream, n: int, control: bool = False) -> StepJudge:
                                + ", ".join(pos(i) for i in sorted(extra)))
             # nosettle signature: the key one column lower on the same row
             # goes down in the SAME sample as the held key
-            c, r = divmod(k, 8)
-            ph = (c - 1) * 8 + r if c > 0 else None
             first = next((i for i, s in enumerate(ss) if k in s.keys), None)
-            if ph is not None and ph not in MODS and first is not None and \
+            if ph is not None and first is not None and \
                     ph in ss[first].keys and \
                     (first == 0 or ph not in ss[first - 1].keys):
                 sig.append(f"phantom {pos(ph)} went down with "
                            f"{KEY_NAMES[k]} (settle signature)")
+                settle.append(sig[-1])
     elif step.kind == "rollover":
         most = max((len(nonmod(s)) for s in ss), default=0)
         notes.append(f"at most {most} keys down at once")
@@ -1360,7 +1509,7 @@ def judge_step(stream: Stream, n: int, control: bool = False) -> StepJudge:
             # whatever gap_max allows at this --poll
             nj = (f"a poll gap of {stall:.2f}s > {ECHO_GAP_MAX}s: a tapped "
                   "step cannot be proven across it")
-    return StepJudge(performed, defects, notes, sig, nj)
+    return StepJudge(performed, defects, notes, sig, nj, settle)
 
 
 FIXED, CONTROL = "fixed", "control"
@@ -1389,11 +1538,13 @@ def judge_run(kind: str, verdicts: str | None, judges: dict[int, StepJudge],
             return "INCOMPLETE"
         return NOT_JUDGEABLE if nj else "PASS"
     # control: only the control's own signature counts as its defect; any
-    # other F, S or stray key is operator error (redo the leg)
-    if undone:
-        return "INCOMPLETE"
+    # other F, S or stray key is operator error (redo the leg).  A
+    # signature is an observed fact: another step undone never hides it
+    # (fix7 K4)
     if any(judges[n].signature for n in steps):
         return "DEFECT SHOWN"
+    if undone:
+        return "INCOMPLETE"
     # a NOT JUDGEABLE step's own S or F may be the defect it could not
     # decide (fix6: the "nothing" form ends in S), so only the others count
     if any((v[n] != "P" and not judges[n].not_judgeable) or judges[n].defects
@@ -2232,8 +2383,9 @@ def leg_manual(sess, blob: bytes, run: Run, budget: int, poll: float,
     for n in hold_question_steps(run) if done else []:
         held = " and ".join(KEY_NAMES[K(c)] for c in STEPS[n - 1].keys)
         yes = (ask or ask_operator)(
-            f"{run} step {n} asked you to hold {held} for about 2 s at the "
-            "'>' prompt.  Did you?  (y = yes; n = no, or not sure)")
+            f"{run} step {n}: did you hold {held} at the '>' prompt as the "
+            "checklist asked?  (y = yes; n = no, or not sure; the answer "
+            "is logged only, it does not change the verdict)")
         st.emit(f"operator: step {n} held as asked ({held})? "
                 + {True: "yes", False: "no", None: "no answer"}[yes])
         if yes:
