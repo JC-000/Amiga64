@@ -11,6 +11,7 @@ two polls was never "typed with the stick held"), and the SHIFT false bleed.
 
 from __future__ import annotations
 
+import sys
 import types
 from pathlib import Path
 
@@ -756,31 +757,6 @@ def _nothing_form(raw_seen=True, confirmed=False, control=True):
     return st, out, ke.judge_step(st, 1, control=control)
 
 
-@pytest.mark.parametrize("raw_seen", [True, False])
-def test_F5_nothing_form_scores_only_with_the_operator_confirmation(raw_seen):
-    j2 = ke.StepJudge(True, [], [])
-    st, out, j1 = _nothing_form(raw_seen)
-    assert not j1.performed and not j1.signature
-    assert ke.judge_run(ke.CONTROL, "SP-------", {1: j1, 2: j2},
-                        range(1, 3)) == "INCOMPLETE"
-    assert ke.nothing_form_steps(st, ke.Run("nosettle", 48),
-                                 "SP-------") == [1]
-    st, out, j1 = _nothing_form(raw_seen, confirmed=True)
-    assert j1.performed and j1.signature
-    assert ("raw showed" if raw_seen else "raw never showed") in \
-        j1.signature[0]
-    assert ke.judge_run(ke.CONTROL, "SP-------", {1: j1, 2: j2},
-                        range(1, 3)) == "DEFECT SHOWN"
-
-
-def test_F5_no_confirmation_is_asked_when_q_was_committed():
-    Q = ke.K("q")
-    st, _ = live_stream([state()] + [state({Q}, 1)] * 8 + [state()], step=1)
-    assert ke.nothing_form_steps(st, ke.Run("nosettle", 48),
-                                 "PP-------") == []
-    assert ke.nothing_form_steps(st, ke.Run("fixed", 48), "S" * 9) == []
-
-
 def test_F5_fixed_build_raw_only_hold_is_a_defect():
     st, out, j1 = _nothing_form(control=False)
     assert j1.defects and "raw" in j1.defects[0]
@@ -803,16 +779,23 @@ def test_F5_replay_rebuilds_raw_and_reads_the_confirmation(tmp_path):
     base = sorted(base + hb, key=lambda l: float(ke.LOG_LINE.match(l)[1]))
     end = ["[  13.20] nosettle@48: INCOMPLETE (want DEFECT SHOWN), STEPS "
            "SP-------"]
-    conf = ["[  13.10] operator confirms: step 1 held as asked (Q)"]
     Q = ke.K("q")
     (run, st, _), = ke.replay_log(write_log(tmp_path, base + end, "a.log"))
     by_t = {round(s.t, 2): s for s in st.samples}
     assert Q in by_t[2.25].raw and Q not in by_t[5.0].raw
-    assert ke.replay_report([str(tmp_path / "a.log")], out=lambda *a: None)[
-        str(tmp_path / "a.log")][0].results["nosettle@48"] == "INCOMPLETE"
-    log = write_log(tmp_path, base + conf + end, "b.log")
-    s, = ke.replay_report([log], out=lambda *a: None)[log]
-    assert s.results["nosettle@48"] == "DEFECT SHOWN"
+    # fix6 R1: raw-only Q for 3 s is the instrument's evidence; the answer
+    # (none, yes, or the fix5 "confirms" form) only vetoes it when "no"
+    for name, extra, want in (
+            ("a.log", [], "DEFECT SHOWN"),
+            ("b.log", ["[  13.10] operator confirms: step 1 held as asked "
+                       "(Q)"], "DEFECT SHOWN"),
+            ("c.log", ["[  13.10] operator: step 1 held as asked (Q)? yes"],
+             "DEFECT SHOWN"),
+            ("d.log", ["[  13.10] operator: step 1 held as asked (Q)? no"],
+             "NOT JUDGEABLE")):
+        log = write_log(tmp_path, base + extra + end, name)
+        s, = ke.replay_report([log], out=lambda *a: None)[log]
+        assert s.results["nosettle@48"] == want, name
 
 
 # F6: a rejected gain does not slide
@@ -847,31 +830,235 @@ def test_mods_echo_credit_is_refused_across_a_gap_over_0_4_s():
     assert not ke.judge_step(st_of(rows, step=4, dt=0.5), 4).performed
 
 
-def test_nothing_form_is_asked_only_after_an_empty_line():
-    st, _, _ = _nothing_form()
-    run = ke.Run("nosettle", 48)
-    assert ke.nothing_form_steps(st, run, "SP-------") == [1]
-    assert ke.nothing_form_steps(st, run, "PP-------") == []
-    assert ke.nothing_form_steps(st, run, "FP-------") == []
 
 
-@pytest.mark.parametrize("answer,want", [(True, "DEFECT SHOWN"),
-                                         (False, "INCOMPLETE")])
-def test_leg_manual_asks_and_uses_the_operator_answer(monkeypatch, answer,
-                                                      want):
+# --- fix6 (fix5 review, build/evidence/w6-kbd-review5/REVIEW.md) -------------
+# Adopted inverted from test_fix5_attacks.py where noted.  Each fails on
+# 8df7fa3 by its behaviour (build/evidence/w6-kbd/fix6/red), except the
+# guards marked "guard", which pin what must stay clean.
+
+UPK = ke.K("^")
+
+
+def fstate(keys=(), nkey=0, idle=0xFF, raw=None, ras=None):
+    s = state(keys, nkey, idle, raw)
+    if ras is not None:
+        s["ras"] = ras
+    return s
+
+
+def delayed_commit_states():
+    """Q raw-only for 3 s (flickering with the UPARROW phantom: the
+    debounce keeps restarting), then committed alone."""
+    return [state()] + [state(set(), 0, raw={Q_, UPK} if i % 2 else {Q_})
+                        for i in range(12)] + \
+        [state({Q_}, 1)] * 8 + [state(set(), 1)]
+
+
+Q_ = ke.K("q")
+
+
+def ctl(st, answer=None):
+    if answer is not None:
+        (st.confirmed if answer else st.denied).add(1)
+    j1 = ke.judge_step(st, 1, control=True)
+    return j1, ke.judge_run(ke.CONTROL, "SP-------",
+                            {1: j1, 2: ke.StepJudge(True, [], [])},
+                            range(1, 3))
+
+
+# R1: the operator's "y" alone never scores
+
+def test_R1_confirmation_alone_is_not_judgeable():
+    """review5 test_R1_confirmation_alone…, inverted: raw is known and
+    saw no Q; the operator says held -> NOT JUDGEABLE, not DEFECT SHOWN."""
+    st, out = live_stream([state()] * 14, step=1)
+    j1, got = ctl(st, answer=True)
+    assert not j1.signature and "saw no" in j1.not_judgeable
+    assert got == "NOT JUDGEABLE"
+
+
+def test_R1_a_one_poll_raw_tap_is_not_judgeable_and_not_never():
+    """review5 test_R1_…tap…, inverted; and R6: one raw poll is not
+    'raw never showed it'."""
+    st, out = live_stream([state()] * 4 + [state(set(), 0, raw={Q_})] +
+                          [state()] * 9, step=1)
+    j1, got = ctl(st, answer=True)
+    assert got == "NOT JUDGEABLE" and not j1.signature
+    assert "raw showed Q at 1 poll" in j1.not_judgeable
+    assert "never" not in j1.not_judgeable
+
+
+def test_R1_replay_of_a_proven_log_needs_raw_evidence(tmp_path):
+    """review5 test_R1_replay…, inverted."""
+    lines = [
+        "[   0.04] nosettle@48 started (--poll 1s): operator, follow the C64 "
+        "screen",
+        "[   1.00]   | STEP 1/9: HOLD Q", "[   1.00]   | >",
+        "[   8.00]   | > ", "[   8.00]   | STEP 1 SKIP",
+        "[   8.00]   | STEP 2/9: HOLD ; AND /", "[   8.00]   | >",
+        "[   9.15] key DOWN c6r2 ;", "[  12.60] key UP   c6r2 ;",
+        "[  13.75] key DOWN c6r7 /", "[  17.20] key UP   c6r7 /",
+        "[  18.35]   | STEP 2 PASS", "[  18.35]   | STEPS SP-------"]
+    hb = [f"[{k + 0.5:8.2f}] hb polls +1 max gap 1.15s" for k in range(1, 18)]
+    body = sorted(lines + hb, key=lambda l: float(ke.LOG_LINE.match(l)[1]))
+    log = write_log(tmp_path, [
+        "[10:00:00] kbd_echo MANUAL on 192.0.2.1, runs nosettle@48, "
+        "poll 1s, prg x"] + body +
+        ["[  18.40] operator confirms: step 1 held as asked (Q)",
+         "[  18.50] nosettle@48: DEFECT SHOWN (want DEFECT SHOWN), STEPS "
+         "SP-------"])
+    s, = ke.replay_report([log], out=lambda *a: None)[log]
+    assert s.proven and s.results["nosettle@48"] == "NOT JUDGEABLE"
+
+
+def test_R1_raw_only_hold_scores_without_the_answer_and_no_vetoes_it():
+    raw = [state()] + [state(set(), 0, raw={Q_} | ({UPK} if i % 2 else set()))
+                       for i in range(12)] + [state()]
+    j1, got = ctl(live_stream(raw, step=1)[0])
+    assert got == "DEFECT SHOWN" and "raw-only" in j1.signature[0]
+    j1, got = ctl(live_stream(raw, step=1)[0], answer=True)
+    assert got == "DEFECT SHOWN"
+    j1, got = ctl(live_stream(raw, step=1)[0], answer=False)
+    assert got == "NOT JUDGEABLE" and "says" in j1.not_judgeable
+
+
+def test_R1_row6_idle_low_is_noted_never_scored():
+    """review5 test_R1_row6…: the idle read precedes every settle in BOTH
+    builds (hle_con.s: lda CIA1_PRB / sta hle_con_idle before @col), so r6
+    low there does not tell nosettle from fixed: noted, NOT JUDGEABLE."""
+    r6 = 0xFF & ~(1 << 6)
+    st, out = live_stream([state()] + [state(idle=r6)] * 12 + [state()],
+                          step=1)
+    j1, got = ctl(st, answer=True)
+    assert got == "NOT JUDGEABLE" and not j1.signature
+    assert "r6" in j1.not_judgeable
+
+
+def test_R1_a_log_without_raw_scores_nothing_on_the_answer(tmp_path):
+    lines = ["[   0.04] nosettle@48 started: operator, follow the C64 screen",
+             "[   1.00]   | STEP 1/9: HOLD Q", "[   1.00]   | >",
+             "[   6.00]   | > ", "[   6.00]   | STEP 1 SKIP",
+             "[   6.00]   | STEP 2/9: HOLD ; AND /", "[   6.00]   | >",
+             "[   7.00] key DOWN c6r2 ;", "[   9.40] key UP   c6r2 ;",
+             "[  10.00] key DOWN c6r7 /", "[  12.40] key UP   c6r7 /",
+             "[  13.00]   | STEP 2 PASS", "[  13.00]   | STEPS SP-------",
+             "[  13.10] operator confirms: step 1 held as asked (Q)",
+             "[  13.20] nosettle@48: DEFECT SHOWN (want DEFECT SHOWN), STEPS "
+             "SP-------"]
+    log = write_log(tmp_path, lines)
+    s, = ke.replay_report([log], out=lambda *a: None, assume_poll=0.1)[log]
+    assert s.results["nosettle@48"] == "NOT JUDGEABLE"
+
+
+# R2: the delayed commit
+
+def test_R2_fixed_build_delayed_commit_is_a_fail():
+    """review5 test_R2_fixed…, inverted."""
+    st, _ = live_stream(delayed_commit_states(), step=1)
+    j1 = ke.judge_step(st, 1)
+    assert any("delayed commit" in d for d in j1.defects)
+    judges = {n: ke.StepJudge(True, [], []) for n in range(1, 10)}
+    judges[1] = j1
+    assert ke.judge_run(ke.FIXED, "P" * 9, judges, range(1, 10)) == "FAIL"
+
+
+def test_R2_nosettle_delayed_commit_is_the_signature():
+    """review5 test_R2_nosettle…, inverted."""
+    st, _ = live_stream(delayed_commit_states(), step=1)
+    j1 = ke.judge_step(st, 1, control=True)
+    assert any("delayed commit" in s for s in j1.signature)
+    assert ke.judge_run(ke.CONTROL, "PP-------",
+                        {1: j1, 2: ke.StepJudge(True, [], [])},
+                        range(1, 3)) == "DEFECT SHOWN"
+
+
+def test_R2_guard_a_press_seen_raw_only_at_one_poll_is_clean():
+    """guard: a poll that lands inside the 4 ms debounce window sees Q
+    raw-only once; the next poll has it committed."""
+    st, _ = live_stream([state(), state(set(), 0, raw={Q_})] +
+                        [state({Q_}, 1)] * 10 + [state(set(), 1)], step=1)
+    j1 = ke.judge_step(st, 1)
+    assert j1.performed and not j1.defects
+
+
+def test_R2_guard_replay_within_one_poll_is_no_delay(tmp_path):
+    """guard: in a replay one poll's state line and screen line are about
+    0.12 s apart; a raw-only Q seen at the state read and committed before
+    the next poll is not a delayed commit (DELAY_MIN 0.2 s)."""
+    lines = ["[   0.04] fixed@48 started (--poll 0.1s): operator, follow the "
+             "C64 screen",
+             "[   1.00]   | STEP 1/9: HOLD Q", "[   1.00]   | >",
+             "[   2.00] raw (not debounced yet): c7r6 Q",
+             "[   2.12]   | > Q",
+             "[   2.25] key DOWN c7r6 Q", "[   2.25] raw (not debounced yet): "
+             "none", "[   5.00] key UP   c7r6 Q",
+             "[   5.50]   | STEP 1 PASS",
+             "[   6.00] fixed@48: INCOMPLETE (want PASS), STEPS None"]
+    hb = [f"[{k + 0.1:8.2f}] hb polls +4 max gap 0.26s" for k in range(1, 6)]
+    log = write_log(tmp_path, sorted(lines + hb, key=lambda l: float(
+        ke.LOG_LINE.match(l)[1])))
+    (run, st, _), = ke.replay_log(log)
+    j1 = ke.judge_step(st, 1)
+    assert j1.performed and not j1.defects, (j1.notes, j1.defects)
+
+
+# R3: between --poll 0.1 and 0.25
+
+def test_R3_gaps_over_0_4_s_make_a_tapped_step_not_judgeable():
+    """review5 test_R3_…, inverted."""
+    rows = [(HELD, "", 0), (HELD, "H", 1), (HELD, "HO", 2), (HELD, "HOS", 3),
+            (HELD, "HOSE", 4), (0xFF, "HOSE", 4)]
+    st = ke.replay_stream()
+    st.period = ke.poll_period(0.2)
+    st.samples = [ke.Sample(0.42 * i, 5, frozenset(), idl, nk, line)
+                  for i, (idl, line, nk) in enumerate(rows)]
+    j = ke.judge_step(st, 5)
+    assert not j.performed and "0.42" in j.not_judgeable
+
+
+# R5: one log per session, for real
+
+def test_R5_tee_refuses_an_existing_log(tmp_path):
+    """review5 test_R5_tee…, inverted."""
+    p = tmp_path / "session.log"
+    p.write_text("OLD SESSION\n")
+    with pytest.raises(FileExistsError):
+        ke.Tee(str(p), sys.__stdout__)
+    assert p.read_text() == "OLD SESSION\n"
+
+
+def test_R5_default_out_dir_is_unique():
+    """review5 test_R5_default…, inverted."""
+    assert ke.default_out_dir() != ke.default_out_dir()
+
+
+def test_R5_a_non_empty_out_dir_is_refused(tmp_path, monkeypatch):
+    prg = tmp_path / "r.prg"
+    prg.write_bytes(b"\x01\x08")
+    (tmp_path / "r.lbl").write_text("")
+    out = tmp_path / "ev"
+    out.mkdir()
+    (out / "config_before.json").write_text("{}")   # a crashed session's
+    monkeypatch.setenv("U64_HOST", "192.0.2.1")
+    monkeypatch.setattr(ke, "run_u64",
+                        lambda *a: pytest.fail("must not start"))
+    assert ke.main(["--prg", str(prg), "--backend", "u64",
+                    "--out-dir", str(out)]) == 2
+    assert (out / "config_before.json").read_text() == "{}"
+
+
+# R6: the question is asked for every nosettle hold step, neutrally
+
+def _leg(monkeypatch, samples, verdicts, run):
     from tests.run_program import Session
-    src, _, _ = _nothing_form()
-    Sm, SL = ke.K(";"), ke.K("/")
-    src.samples += [ke.Sample(4.0 + 0.25 * i, 2, frozenset({Sm}), 0xFF, 1)
-                    for i in range(9)]
-    src.samples += [ke.Sample(7.0 + 0.25 * i, 2, frozenset({SL}), 0xFF, 2)
-                    for i in range(9)]
     lines, asked = [], []
 
     class FS(ke.Stream):
         def __init__(self, sess, out=print):
-            self.samples, self.bleeds = src.samples, []
-            self.screen_log, self.confirmed = [], set()
+            self.samples, self.bleeds = samples, []
+            self.screen_log = []
+            self.confirmed, self.denied = set(), set()
 
         def emit(self, line):
             lines.append(line)
@@ -883,7 +1070,7 @@ def test_leg_manual_asks_and_uses_the_operator_answer(monkeypatch, answer,
             pass
 
         def verdicts(self):
-            return "SP-------"
+            return verdicts
     monkeypatch.setattr(ke, "stage_program", lambda *a: (0, {"stack_top": 0}))
     monkeypatch.setattr(ke, "control_args", lambda b: b"\n")
     monkeypatch.setattr(ke, "Stream", FS)
@@ -894,9 +1081,92 @@ def test_leg_manual_asks_and_uses_the_operator_answer(monkeypatch, answer,
     monkeypatch.setattr(ke, "result", lambda s: res)
     sess = Session(target=types.SimpleNamespace(backend="u64"), labels={},
                    timeout=1.0)
-    got = ke.leg_manual(sess, b"", ke.Run("nosettle", 48), 1, 0.1, 1.0,
-                        ask=lambda q: asked.append(q) or answer)
-    assert len(asked) == 1 and "step 1" in asked[0]
-    assert any(l.startswith("operator confirms: step 1") == answer and
-               "step 1 held as asked" in l for l in lines)
-    assert got == want
+    got = ke.leg_manual(sess, b"", run, 1, 0.1, 1.0,
+                        ask=lambda q: asked.append(q) or True)
+    return got, lines, asked
+
+
+def _clean_holds():
+    Sm, SL = ke.K(";"), ke.K("/")
+    return ([ke.Sample(0.25 * i, 1, frozenset({Q_}), 0xFF, 1)
+             for i in range(9)] +
+            [ke.Sample(4.0 + 0.25 * i, 2, frozenset({Sm}), 0xFF, 2)
+             for i in range(9)] +
+            [ke.Sample(7.0 + 0.25 * i, 2, frozenset({SL}), 0xFF, 3)
+             for i in range(9)])
+
+
+def test_R6_every_nosettle_hold_step_is_asked_whatever_the_outcome(
+        monkeypatch):
+    got, lines, asked = _leg(monkeypatch, _clean_holds(), "PP-------",
+                             ke.Run("nosettle", 48))
+    assert got == "INCONCLUSIVE"
+    assert [q.split(" asked you")[0] for q in asked] == \
+        ["nosettle@48 step 1", "nosettle@48 step 2"]
+    assert not any("never" in q or "committed" in q for q in asked)
+    assert "operator: step 1 held as asked (Q)? yes" in lines
+    got, lines, asked = _leg(monkeypatch, _clean_holds(), "P" * 9,
+                             ke.Run("fixed", 48))
+    assert asked == []
+
+
+def test_R6_a_no_answer_is_replayed_as_a_denial(tmp_path):
+    st = ke._replay_run(ke.LoggedRun(
+        ke.Run("nosettle", 48), 0.1, True, 0.0,
+        [(1.0, "operator: step 1 held as asked (Q)? no"),
+         (1.1, "operator: step 2 held as asked (;, /)? yes")], "INCOMPLETE"),
+        None)
+    assert st.denied == {1} and st.confirmed == {2}
+
+
+# hle_con_ras: the stream proves the scanner was sampling
+
+def test_ras_liveness_is_streamed_and_replayed(tmp_path):
+    rs = [10, 20, 30, 30, 30, 30, 40, 50]
+    st, out = live_stream([fstate(ras=r) for r in rs], step=1)
+    lv = [l for l in out if l.startswith("scanner:")]
+    assert lv == ["scanner: not sampling (hle_con_ras unchanged over 3 "
+                  "polls)", "scanner: sampling"]
+    assert [s.live for s in st.samples] == [None, None, True, True, False,
+                                            False, True, True]
+    assert "hle_con_ras" in ke.STREAM_LABELS
+
+
+# the one-row-per-run replay summary
+
+def test_replay_prints_one_summary_row_per_run(tmp_path):
+    log = str(LOGS / "kbd-hw-2.session.log")
+    out = []
+    ke.replay_report([log], out=out.append, assume_poll=0.1)
+    i = next(i for i, l in enumerate(out) if l.startswith("SUMMARY"))
+    rows = out[i + 2:i + 6]
+    assert [r.split()[1] for r in rows] == ["fixed@48", "nosettle@48",
+                                            "nojoymask@48", "fixed@1"]
+    assert "clean commit" in rows[1]           # step 1 of nosettle@48
+
+
+def test_ras_liveness_is_replayed_and_named_in_a_not_judgeable(tmp_path):
+    """fix6 mutant kill (live_replay_off): the replay rebuilds Sample.live
+    from the scanner lines, and a 'yes' over a dead scanner says so."""
+    lines = ["[   0.04] nosettle@48 started (--poll 0.1s): operator, follow "
+             "the C64 screen",
+             "[   1.00]   | STEP 1/9: HOLD Q", "[   1.00]   | >",
+             "[   2.00] scanner: not sampling (hle_con_ras unchanged over 3 "
+             "polls)", "[   5.00] scanner: sampling",
+             "[   6.00]   | > ", "[   6.00]   | STEP 1 SKIP",
+             "[   6.00]   | STEP 2/9: HOLD ; AND /", "[   6.00]   | >",
+             "[   7.00] key DOWN c6r2 ;", "[   9.40] key UP   c6r2 ;",
+             "[  10.00] key DOWN c6r7 /", "[  12.40] key UP   c6r7 /",
+             "[  13.00]   | STEP 2 PASS", "[  13.00]   | STEPS SP-------",
+             "[  13.10] operator: step 1 held as asked (Q)? yes",
+             "[  13.20] nosettle@48: NOT JUDGEABLE (want DEFECT SHOWN), "
+             "STEPS SP-------"]
+    hb = [f"[{k + 0.1:8.2f}] hb polls +4 max gap 0.26s" for k in range(1, 13)]
+    log = write_log(tmp_path, sorted(lines + hb, key=lambda l: float(
+        ke.LOG_LINE.match(l)[1])))
+    (run, st, _), = ke.replay_log(log)
+    by_t = {round(s.t, 2): s for s in st.samples}
+    assert by_t[1.0].live is None and by_t[3.0].live is False
+    assert by_t[5.0].live is True
+    j1 = ke.judge_step(st, 1, control=True)
+    assert "not sampling" in j1.not_judgeable

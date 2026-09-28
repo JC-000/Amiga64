@@ -354,7 +354,7 @@ the **manner** of each step and looks for **defects**:
 | 4 | RSHIFT down when A and / go down; C= down when Q goes down; LEFT SHIFT never down | — |
 | 5-9 | the stick's row (UP r0, DOWN r1, LEFT r2, RIGHT r3, FIRE r4) seen held low in `hle_con_idle` when each of H, O, S and E goes down | any key on that row reading down while the stick holds it |
 | 1, 2 | — | a `COLUMN BLEED?` in this step (in steps 3-9 it is only a note: I and P, neighbours on row 1, going down between two polls is normal rollover typing; fix round 5, decision (a)) |
-| 1, 2 (fixed build) | — | a held key down in the raw samples for 1.5 s that the debounce never committed (the settle "nothing" form) |
+| 1, 2 (fixed build) | — | a held key raw-only (in the raw samples, not the debounced matrix) for 1.5 s and never committed (the settle "nothing" form), or raw-only for 0.2 s or more before it committed (the delayed commit; fix round 6) |
 
 In a control run, only the triggering action is required (the key held,
 or the stick seen). The broken build may garble the typing itself.
@@ -439,15 +439,47 @@ from missed taps, not from the idle signal.
   debounce restarting) is distinguishable from Q never pressed, even at
   `--poll 1.0`. Before, it was not: only the debounced matrix and the
   event count were streamed.
-- **The "nothing" form needs the operator's word (fix round 5).** When a
-  control's hold step ends with an empty line (S) and a held key never
-  reached the debounced matrix, the driver asks on the host terminal
-  whether the key was held at the prompt, and logs the answer
-  (`operator confirms: step 1 …`). Only a confirmed hold scores the
-  signature "never committed while the operator held it", with what raw
-  showed (held 1.5 s or more, briefly, or never). Unconfirmed, the run
-  stays INCOMPLETE. In the fixed build, a held key in raw for 1.5 s that
-  never commits is a defect, with no question asked.
+- **The settle defect without a phantom rests on the instrument (fix
+  round 6, review5 R1 and R2).** Both forms are measured on the held
+  key's **raw-only** samples (in raw, not in the debounced matrix; a
+  release never reads raw-only):
+  - **"nothing" form**: the key never commits and is raw-only for 1.5 s
+    or more;
+  - **delayed commit**: the key commits, but a press of it was raw-only
+    for 0.2 s or more first. A healthy commit follows the press after `CON_STABLE`
+    (about 4 ms) plus switch bounce, so a poll sees a key raw-only at
+    most once. 0.2 s is 50 times `CON_STABLE`, below the shortest poll
+    period (0.24 s), and above the 0.11-0.14 s between one poll's state
+    and screen reads, which a replay splits into two samples.
+
+  Either one is a **defect in the fixed build** (FAIL) and the
+  **signature in `nosettle`** (DEFECT SHOWN).
+- **The operator's answer never scores by itself.** In every `nosettle`
+  run the driver asks, for **each** hold step and whatever it showed,
+  "step N asked you to hold Q for about 2 s at the '>' prompt. Did you?".
+  Keys typed ahead are discarded first. The answer is logged
+  (`operator: step 1 held as asked (Q)? yes|no|no answer`).
+  - "yes", but no raw-only run of 1.5 s: **NOT JUDGEABLE** ("the scanner
+    saw no Q"), with what raw showed (at how many polls), any row-6 idle
+    low, and any "scanner: not sampling". Row 6 low in the idle read is
+    noted but is **not** a signature: both builds read the idle mask
+    before any settle (`hle_con_scan`), so it cannot tell `nosettle`
+    from the fixed build.
+  - "no" against a raw-only run of 1.5 s: NOT JUDGEABLE (the operator and
+    the instrument disagree).
+  - A log without raw (before fix round 5): a "yes" is NOT JUDGEABLE,
+    never DEFECT SHOWN.
+- **Scanner liveness (fix round 6).** The stream also reads `hle_con_ras`,
+  the raster line of the last valid sample. It moves on almost every
+  sample, so the same value at 3 polls in a row logs `scanner: not
+  sampling` (and `scanner: sampling` when it moves again). An empty raw
+  then proves nothing: port 2 active, decoded keys pending, or no `Read`
+  running.
+- **Replay summary.** `--replay` ends each log with one row per run: the
+  replayed verdict, the polling, step 1 classified (phantom, delayed
+  commit, nothing with raw-only Q, nothing with a brief or no Q, clean
+  commit), Q's longest raw-only run, the hold, row-6 idle
+  polls, and the operator's answer.
 - **Replay.** `python3 -m tests.kbd_echo --replay LOG…` re-judges the runs
   of session logs offline. It rebuilds each stream from the logged events.
   - **Each session on its own.** A log may hold several sessions (before
@@ -536,14 +568,85 @@ exactly the same streaming conditions as the fixed build.
 - **INCONCLUSIVE** means that a control's defect was **not seen under
   streaming**. That can be the device (the defect does not occur there, so
   the fix is harmless but not proven) or the stream.
-- **The follow-up, for INCONCLUSIVE only**, is to re-run just that control
-  with sparse polling, holding each key for about 4 s, for example
-  `--runs nosettle@48 --poll 1.0`. That is about 5 times fewer reads
-  during the holds (a poll every 1.15 s instead of 0.25 s). At that poll a
-  hold is measured from the first poll that saw the key to the last, so a
-  4 s hold reads as 2.9-4 s. A non-default plan is never VALIDATED, so its
+- **The follow-up, for INCONCLUSIVE only**, is the settle A/B below
+  ("The settle A/B"). At `--poll 1.0` a poll comes every 1.15 s instead
+  of 0.25 s, about 5 times fewer reads during the holds. A hold is
+  measured from the first poll that saw the key to the last, so a 5 s
+  hold reads as 3.9-5 s. A non-default plan is never VALIDATED, so its
   output is evidence for the supervisor's judgment, not a verdict. A
-  fixed-build run at that poll can only FAIL or be NOT JUDGEABLE.
+  fixed-build run at that poll can only FAIL or be NOT JUDGEABLE /
+  INCOMPLETE.
+- **Known limits (review5, not fixed).**
+  - R4: at `--poll 1.0` "the same sample" spans 1.15 s. A neighbour
+    brushed within about 1 s of the held key (L before ;) reads as the
+    settle signature. The fixed partner in the same session FAILs on the
+    same brush ("also down"), which is why the A/B discards such a pair.
+  - R7: in a replay with a BROKEN heartbeat, raw-only runs are measured on
+    the logged polls only, so a fixed-build "nothing" form the live judge
+    called FAIL can replay as NOT JUDGEABLE. It never validates.
+  - Live compares `--runs` with the plan as typed, replay the header's
+    normalised list. `parse_runs` rejects spaces, so they cannot differ.
+
+### The settle A/B (attended, U64E)
+
+This answers one question: **is the row settle necessary on this U64E?**
+Each pair is one session, `nosettle@48` and `fixed@48`, in alternating
+order.
+
+**Evidence rule.**
+- **Count only what the stream shows**, never the operator's answer.
+  In a nosettle run step 1 or 2 counts when its signature is one of:
+  - the phantom in the same sample (`phantom c6r6 … (settle signature)`);
+  - `raw-only for N s, never debounced` (N ≥ 1.5);
+  - `raw-only for N s before a commit` (N ≥ 0.2).
+- **Every fixed@48 run must commit step 1 cleanly**: SUMMARY row
+  `clean commit`, no DEFECT on steps 1-2, no stray key. A pair whose
+  fixed run fails step 1 for an operator reason (Q not held, a stray key,
+  `also down`) is **discarded and redone**, not counted.
+- **The fix is shown necessary** when at least one counted nosettle run
+  has a signature and every fixed@48 run in the kept pairs committed step
+  1 cleanly. A fixed@48 run with a phantom, a delayed commit or a
+  "nothing" form is a **FAIL of the fix**: stop and report.
+- **No signature in any of the 5 pairs**: the settle defect was not
+  reproduced on this device at 48 MHz (the fix is harmless, not shown
+  necessary). A signature at `--poll 1.0` but none at `--poll 0.1` means
+  polling itself hides the defect: record that as a limit of the default
+  plan.
+
+**Operator script.** The supervisor runs this with the user at the C64.
+Each command is one session (about 3 minutes). Before starting: a joystick
+in port 1 is not needed, nothing in port 2. In **every** run, at the step
+1 prompt, hold **Q for a slow count of 5**, release, RETURN. At step 2,
+hold **; for a count of 5**, release, hold **/ for a count of 5**,
+release, RETURN. In the fixed run, press RETURN alone at steps 3-9 and
+at the free mode prompt (they are not judged at this poll). Answer the
+question after a nosettle run truthfully ("n" when unsure).
+
+```sh
+cd /Users/someone/Documents/Amiga64/.claude/worktrees/w6-kbd  # or the merged tree
+export U64_HOST=10.43.23.81
+PRG=/Users/someone/Documents/Amiga64/build/w6-int/runner.prg
+D=build/evidence/kbd-ab-$(date +%Y%m%d)
+AB() {  # AB <pair> <runs> <poll>
+  python3 -m tests.kbd_echo --prg $PRG --backend u64 --runs "$2"       --poll "$3" --out-dir "$D/pair$1"
+}
+AB 1 nosettle@48,fixed@48 1.0
+AB 2 fixed@48,nosettle@48 1.0
+AB 3 nosettle@48,fixed@48 1.0
+AB 4 fixed@48,nosettle@48 1.0
+AB 5 nosettle@48,fixed@48 1.0
+# optional: the same at the default poll
+AB 6 nosettle@48,fixed@48 0.1
+AB 7 fixed@48,nosettle@48 0.1
+# the table to report: one row per run
+python3 -m tests.kbd_echo --replay $D/pair*/session.log | \
+    sed -n '/^SUMMARY/,/^==/p'
+```
+
+Each `--out-dir` must be new (a non-empty one is refused). A pair to redo
+gets a new name (`AB 3b …`), and the discarded one stays on disk with the
+reason written next to it. Report back: the SUMMARY rows, which pairs were
+discarded and why, and the `session.log` files.
 
 ### What VICE covers (`--backend vice`, automated)
 
@@ -612,8 +715,9 @@ U64_HOST=10.43.23.81 python3 -m tests.kbd_echo --prg build/<pkg>/runner.prg \
      original, with no patch left.
    - The log is `--out-dir/session.log`, and the last line is
      `SESSION VERDICT: …`. Each session needs its own `--out-dir` (the
-     default is a new `build/evidence/kbd_echo-u64-<date>-<time>`); a
-     directory that already holds a `session.log` is refused.
+     default is a new `build/evidence/kbd_echo-u64-<date>-<time>-<pid>-<n>`);
+     a directory that is not empty is refused, and the log is created,
+     never appended to.
 
 **Expected duration: about 35-45 minutes** with the lock held throughout:
 - gate, confirmation, boot and restore: about 2 min;
