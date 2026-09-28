@@ -387,8 +387,13 @@ def test_judge_mods_needs_rshift_and_cbm_and_no_lshift():
 def test_judge_stick_row_per_direction(n):
     row = ke.STEPS[n - 1].row
     idle = 0xFF & ~(1 << row)
-    typed = [(k, n, {ke.K(c)}, idle) for k, c in enumerate("hose")]
+    typed = [(0.2 * k, n, {ke.K(c)}, idle) for k, c in enumerate("hose")]
     assert ke.judge_step(_stream(typed), n).performed
+    # the same polls 1 s apart at the default poll: stalls (fix5 F3), so
+    # not judgeable rather than performed
+    slow = [(k, n, {ke.K(c)}, idle) for k, c in enumerate("hose")]
+    j = ke.judge_step(_stream(slow), n)
+    assert not j.performed and "gap" in j.not_judgeable
     # no stick (Demo A's "typed without the stick"): not performed
     nostick = [(k, n, {ke.K(c)}, 0xFF) for k, c in enumerate("hose")]
     assert not ke.judge_step(_stream(nostick), n).performed

@@ -353,13 +353,18 @@ the **manner** of each step and looks for **defects**:
 | 3 | 3 or more non-modifier keys down at the same time | any key other than Z, I, P or RETURN down while three are held (a ghost) |
 | 4 | RSHIFT down when A and / go down; C= down when Q goes down; LEFT SHIFT never down | — |
 | 5-9 | the stick's row (UP r0, DOWN r1, LEFT r2, RIGHT r3, FIRE r4) seen held low in `hle_con_idle` when each of H, O, S and E goes down | any key on that row reading down while the stick holds it |
-| any | — | a `COLUMN BLEED?` in this step |
+| 1, 2 | — | a `COLUMN BLEED?` in this step (in steps 3-9 it is only a note: I and P, neighbours on row 1, going down between two polls is normal rollover typing; fix round 5, decision (a)) |
+| 1, 2 (fixed build) | — | a held key down in the raw samples for 1.5 s that the debounce never committed (the settle "nothing" form) |
 
 In a control run, only the triggering action is required (the key held,
 or the stick seen). The broken build may garble the typing itself.
 
 **"Typed with X held" (fix round 3, from the attended sessions).** The
-stream polls about every 0.12 s. A letter tapped faster than that is
+stream polls about every 0.25 s at the default `--poll 0.1` (the REST reads
+add about 0.15 s to `--poll`: measured 0.24-0.26 s between polls at
+`--poll 0.1`, 1.14-1.15 s at `--poll 1.0`; the 0.11-0.14 s spacing in the
+logs is between one poll's state read and its screen read). A letter
+tapped faster than that is
 counted by `hle_con_nkey`, but it is never down in the debounced matrix at
 a poll. So a letter counts as typed with the stick (or a modifier) held in
 either of two cases:
@@ -380,7 +385,8 @@ Fix round 4 (the fix3 review) tightened these rules:
   prefix of the base and the polled line. So DEL types nothing, and DEL
   plus a new key between two polls types only that key (G1).
 - **At most 0.4 s between the two polls of an echo credit.** The attended
-  sessions never had a gap over 0.33 s.
+  sessions never had a gap over 0.33 s, so a normal poll has about 0.15 s
+  of margin.
 - **The matrix path uses the key's first down poll.** A key pressed
   without the stick and held until the stick arrives does not count.
 - **The stick must be held at every poll** from the first HOSE letter's
@@ -392,15 +398,30 @@ Fix round 4 (the fix3 review) tightened these rules:
   - Each character's own credit still needs its modifier at both of its
     polls.
 - **Heartbeat.** About once a second the stream writes
-  `hb polls +N max gap Gs` to the session log (not to the terminal).
-  `--replay` reports whether polling was continuous:
-  - "proven", with the largest gap;
-  - "unproven", for logs made before the heartbeat existed;
-  - "BROKEN", for a gap over 0.4 s. The run then counts as INCOMPLETE,
-    because the replay cannot vouch for the state in between.
+  `hb polls +N max gap Gs` to the session log (not to the terminal), and
+  the last, partial window when the run ends.
 
-  `--replay` exits 0 only when every replayed session is VALIDATED, as
-  live.
+Fix round 5 (the fix4 review) made the timing explicit:
+- **The poll is logged.** The session header and each run-start line
+  carry it (`fixed@48 started (--poll 0.1s): …`), and the judge uses the
+  period `--poll` + 0.15 s. A gap over max(0.4 s, period + 0.15 s) is a
+  **stall**; the live judge sees every poll, so it bounds gaps too:
+  - a hold is not credited across a stall;
+  - an echo credit, and the stick's continuity from H to E, need polls
+    at most 0.4 s apart at any poll rate.
+- **NOT JUDGEABLE, not operator error.** A step not proven performed is
+  NOT JUDGEABLE when the stream could not have proven it:
+  - the poll period is unknown (a replayed log with no `--poll` and no
+    heartbeat, or with a broken heartbeat), or
+  - a gap in the step is a stall, or
+  - the step is a tapped one (3-9) of the fixed build and the period is
+    over 0.4 s (decision (b): at `--poll 1.0` letters are tapped between
+    polls, so nothing can prove them "typed with the stick held").
+
+  A run with nothing else wrong is then **NOT JUDGEABLE**. An F or a
+  defect is still FAIL, and a control's signature is still DEFECT SHOWN.
+  The session counts NOT JUDGEABLE as INCOMPLETE. A fixed run at a sparse
+  poll can never PASS.
 
 `hle_con_idle` is refreshed on every sample that is not voided, whatever
 keys are down (`hle_con_scan`), so it is a continuous "stick held" signal.
@@ -412,22 +433,47 @@ from missed taps, not from the idle signal.
   directly above `.` (c5r4), so typing `>` used to be flagged.
 - **Raw diagnostic.** The stream also reads `hle_con_raw`, the latest valid
   raw sample. `raw (not debounced yet): …` shows a key that is held but
-  never committed. So from fix round 3 on, the "nothing" form of the
-  phantom (Q held, the debounce restarting) is distinguishable from Q
-  never pressed, even at `--poll 1.0`. Before, it was not: only the
-  debounced matrix and the event count were streamed.
+  never committed, and `raw (not debounced yet): none` when that clears
+  (fix round 5, so one long raw hold and two taps read differently). So
+  from fix round 3 on, the "nothing" form of the phantom (Q held, the
+  debounce restarting) is distinguishable from Q never pressed, even at
+  `--poll 1.0`. Before, it was not: only the debounced matrix and the
+  event count were streamed.
+- **The "nothing" form needs the operator's word (fix round 5).** When a
+  control's hold step ends with an empty line (S) and a held key never
+  reached the debounced matrix, the driver asks on the host terminal
+  whether the key was held at the prompt, and logs the answer
+  (`operator confirms: step 1 …`). Only a confirmed hold scores the
+  signature "never committed while the operator held it", with what raw
+  showed (held 1.5 s or more, briefly, or never). Unconfirmed, the run
+  stays INCOMPLETE. In the fixed build, a held key in raw for 1.5 s that
+  never commits is a defect, with no question asked.
 - **Replay.** `python3 -m tests.kbd_echo --replay LOG…` re-judges the runs
-  of session logs offline. It rebuilds each stream from the logged events
-  and adds no samples within one live poll period before a change, so it
-  never over-measures a hold. On the pre-fix judge it reproduced all 11
-  run verdicts and all 70 step judgments of the three attended sessions.
-  The logs are in `tests/kbd/replay/`, verbatim except for relative prg
-  paths.
+  of session logs offline. It rebuilds each stream from the logged events.
+  - **Each session on its own.** A log may hold several sessions (before
+    fix round 5, `session.log` was appended to). Each session header
+    starts a new one, each gets its own verdict, and a session not on the
+    full plan is INCOMPLETE, as live. A log's verdict is its **worst**
+    session's, and `--replay` exits 0 only when every log is VALIDATED.
+  - **Timing.** With a known period (the logged `--poll`, else the
+    heartbeat, else `--assume-poll S` for logs from before fix round 5),
+    it adds the polls between two logged changes, one period apart,
+    counted back from the later change, and never denser than 0.25 s. So
+    it never over-measures a hold. With an unknown period, or a BROKEN
+    heartbeat (a gap over the stall bound), it adds nothing: only the
+    logged polls count, and a step they do not prove is NOT JUDGEABLE.
+  - **Proof.** "proven" polling needs a heartbeat. A replay with unproven
+    polling (no heartbeat, or an assumed poll) is never VALIDATED.
+  - On the pre-fix judge it reproduced all 11 run verdicts and all 70
+    step judgments of the three attended sessions. The logs are in
+    `tests/kbd/replay/` (with the 19:31 sparse session,
+    `kbd-hw-sparse2`), verbatim except for relative prg paths.
 
 **Run verdicts** (`judge_run`):
 - **Fixed build:** PASS only when every step is P, was performed, and
-  shows no defect. It is FAIL on any F or any defect. Otherwise it is
-  INCOMPLETE. **A SKIP is never a pass.**
+  shows no defect. It is FAIL on any F or any defect. It is NOT JUDGEABLE
+  when all that is missing is a step the stream could not decide.
+  Otherwise it is INCOMPLETE. **A SKIP is never a pass.**
 - **Control build (fix round 2):** DEFECT SHOWN **only when the stream
   shows that control's own defect signature**:
   - `nosettle`: the key one column lower on the same row goes down in the
@@ -492,9 +538,12 @@ exactly the same streaming conditions as the fixed build.
   the fix is harmless but not proven) or the stream.
 - **The follow-up, for INCONCLUSIVE only**, is to re-run just that control
   with sparse polling, holding each key for about 4 s, for example
-  `--runs nosettle@48 --poll 1.0`. That is about 10 times fewer reads
-  during the holds. A non-default plan is never VALIDATED, so its output
-  is evidence for the supervisor's judgment, not a verdict.
+  `--runs nosettle@48 --poll 1.0`. That is about 5 times fewer reads
+  during the holds (a poll every 1.15 s instead of 0.25 s). At that poll a
+  hold is measured from the first poll that saw the key to the last, so a
+  4 s hold reads as 2.9-4 s. A non-default plan is never VALIDATED, so its
+  output is evidence for the supervisor's judgment, not a verdict. A
+  fixed-build run at that poll can only FAIL or be NOT JUDGEABLE.
 
 ### What VICE covers (`--backend vice`, automated)
 
@@ -562,7 +611,9 @@ U64_HOST=10.43.23.81 python3 -m tests.kbd_echo --prg build/<pkg>/runner.prg \
    - Before each fixed-build run the runner code is re-checked as the
      original, with no patch left.
    - The log is `--out-dir/session.log`, and the last line is
-     `SESSION VERDICT: …`.
+     `SESSION VERDICT: …`. Each session needs its own `--out-dir` (the
+     default is a new `build/evidence/kbd_echo-u64-<date>-<time>`); a
+     directory that already holds a `session.log` is refused.
 
 **Expected duration: about 35-45 minutes** with the lock held throughout:
 - gate, confirmation, boot and restore: about 2 min;
