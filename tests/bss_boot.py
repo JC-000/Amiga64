@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import time
 
 READY_FLAG = 0xCFFF
 SYS_ENTRY = 0x080D
@@ -33,7 +32,7 @@ def main(argv=None) -> int:
     prg = os.path.abspath(args.prg)
 
     from c64_test_harness import (Labels, UnifiedManager, ViceConfig,
-                                  read_bytes, write_bytes)
+                                  read_bytes, wait_for_memory, write_bytes)
     from c64_test_harness.execute import goto
     from tests.harness_util import REU_VICE_ARGS, lookup_label
     from tests.run_vectors import prepare_target
@@ -59,22 +58,14 @@ def main(argv=None) -> int:
             write_bytes(t, want, b"UCI!")
             write_bytes(t, READY_FLAG, b"\x00")
             goto(t, SYS_ENTRY)                     # "reload": re-enter the PRG
-            # On VICE every monitor command (each read_bytes here) halts the
-            # CPU until resume(): a bare read poll after goto() freezes the
-            # boot clear at its first read and never sees READY.  Resume
-            # after every poll read; no settle sleep (it only hid this for
-            # short clears).  c64-test-harness#514.
-            deadline = time.time() + 10
-            while True:
-                ready = read_bytes(t, READY_FLAG, 1)[0] == 0xA5
-                if ready:
-                    break
-                t.resume()
-                if time.time() > deadline:
-                    fails.append("PRG did not come back READY after restart")
-                    break
-                time.sleep(0.05)
-            if ready:
+            # On VICE every monitor command halts the CPU until resume(), so
+            # a bare read_bytes poll after goto() freezes the boot clear at
+            # its first read.  wait_for_memory resumes between reads (and
+            # never on the U64); no settle sleep.  c64-test-harness#514.
+            ready = wait_for_memory(t, READY_FLAG, 0xA5, timeout=10.0)
+            if ready is None:
+                fails.append("PRG did not come back READY after restart")
+            else:
                 got = read_bytes(t, bss, size)
                 dirty = [i for i, b in enumerate(got) if b]
                 if dirty:
