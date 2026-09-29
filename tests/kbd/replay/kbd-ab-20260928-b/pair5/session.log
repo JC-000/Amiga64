@@ -1,0 +1,372 @@
+[08:37:26] kbd_echo MANUAL on 10.43.23.81, runs nosettle@48, fixed@48, poll 1s, prg build/w6-int/runner.prg
+[08:37:26] firmware gate: Ultimate 64 Elite fw 3.15 git c47155b7 fpga 125 core 1.50 = resting build (git c47155b7, core 1.50): proceeding
+
+========================================================================
+MANUAL KEYBOARD SESSION: runs in this order: nosettle@48, fixed@48
+Controls are SUPPOSED to show the defect.
+The runner will now be uploaded (run_prg) and the config changed (restored at the end).
+Press Enter when the operator is at the C64 keyboard (abort in 300s)...
+========================================================================
+[08:37:26] confirmation: operator ready
+[08:37:26] requesting the device (DeviceLock) ...
+[08:37:27] acquired after 0s wait; Ultimate 64 Elite fw 3.15 fpga 125 core 1.50
+[08:37:27] config before: {'turbo_control': 'Manual', 'cpu_speed': '48', 'reu_enabled': 'Enabled', 'reu_size': '16 MB', 'cartridge': '', 'badline_timing': 'Enabled', 'bus_operation_mode': 'Quiet', 'sid_addressing': {'SID Socket 1 Address': '$D400', 'SID Socket 2 Address': '$D400', 'Ext DualSID Range Split': 'Off', 'UltiSID 1 Address': '$D400', 'UltiSID 2 Address': '$D400', 'UltiSID Range Split': 'Off', 'Paddle Override': 'Enabled', 'Auto Address Mirroring': 'Enabled'}, 'cartridge_preference': 'Auto'}
+[08:37:27] device: Ultimate 64 Elite fw 3.15 git c47155b7 fpga 125 core 1.50 (lock wait 0s)
+[08:37:27] CPU speed 1 MHz for the boot; REU enabled 16 MB next (prepare_target: set_reu)
+  u64: dosio_want_uci residue at boot: 00000000
+  u64: hle_dos_magic residue at boot: 00000000
+  u64: hle_dos_magic after the probe init: 444f5321
+[08:37:30] CPU speed set to 48 MHz
+[08:37:30] control patch nosettle applied (readback ok): THIS RUN IS SUPPOSED TO SHOW THE DEFECT
+========================================================================
+CONTROL RUN nosettle@48: THIS BUILD IS SUPPOSED TO SHOW THE DEFECT
+(the 'nosettle' fix is taken out of the runner in RAM; the C64 screen says CONTROL BUILD)
+========================================================================
+Steps 1-2 of 9; each ends with RETURN and shows PASS or FAIL.
+Type ONLY while the '>' prompt shows (keys pressed while the program prints are lost).
+At the run's FIRST '>' prompt: tap LEFT SHIFT once and release it before anything else
+(the keyboard's LED board hides the first key hold after ~2 min idle).
+NO joystick in control port 2 (it locks the keyboard out by design).
+Do each step exactly as described: the driver checks HOW (held time, keys down
+at once, which SHIFT, the stick's row).  A skipped step is never a pass.
+
+STEP 1  HOLD Q
+   do:     tap LEFT SHIFT once and release it (wakes the keyboard), then hold Q to a count of 10 (5 s or more), release it, press RETURN
+   expect (defect): ^q: the UP-ARROW glyph ($5E, c6r6, read in the same sample as Q) then q; or nothing (the phantom keeps restarting the debounce)
+STEP 2  HOLD ; AND /
+   do:     hold ; to a count of 10, release; hold / to a count of 10, release; RETURN
+   expect (defect): l; (c5r2, bleed from ;) or ,/ (c5r7, bleed from /)
+
+This terminal shows what the SCANNER saw ('key DOWN c7r6 Q'); 'COLUMN BLEED?'
+marks the phantom the row settle must prevent.  Letters look the same in both
+cases on screen (upper-case charset); the hex code tells them apart.
+========================================================================
+[kbd_echo] 11552-byte hunk file, args b'CONTROL nosettle 1 2\n'
+  staged 24404 byte(s) in 22 record(s)
+[   0.05] nosettle@48 started (--poll 1s): operator, follow the C64 screen  *** CONTROL: SUPPOSED TO SHOW THE DEFECT ***
+[   0.19]   | KBD-ECHO KEYBOARD CHECK (W6-K)
+[   1.20] hb polls +2 max gap 1.14s
+[   1.33]   | *** CONTROL BUILD: NOSETTLE ***
+[   1.33]   | SUPPOSED TO FAIL: IT LACKS THE FIX,
+[   1.33]   | SO IT SHOULD SHOW THE DEFECT.
+[   1.33]   | EMPTY LINE: SKIP STEP. CTRL+D: QUIT
+[   1.33]   | STEP 1/9: HOLD Q
+[   1.33]   | TAP SHIFT, THEN HOLD Q (COUNT 10),
+[   1.33]   | RELEASE, RETURN
+[   1.33]   | >
+[   2.34] hb polls +1 max gap 1.14s
+[   3.48] hb polls +1 max gap 1.14s
+[   4.62] hb polls +1 max gap 1.14s
+[   5.78] hb polls +1 max gap 1.16s
+[   6.92] hb polls +1 max gap 1.14s
+[   8.06] hb polls +1 max gap 1.15s
+[   9.20] hb polls +1 max gap 1.14s
+[  10.35] hb polls +1 max gap 1.14s
+[  11.48] hb polls +1 max gap 1.14s
+[  12.63] hb polls +1 max gap 1.15s
+[  13.78] hb polls +1 max gap 1.15s
+[  14.91] hb polls +1 max gap 1.14s
+[  16.06] hb polls +1 max gap 1.15s
+[  17.20] hb polls +1 max gap 1.14s
+[  18.34] hb polls +1 max gap 1.14s
+[  19.49] hb polls +1 max gap 1.15s
+[  20.63] hb polls +1 max gap 1.14s
+[  21.77] hb polls +1 max gap 1.14s
+[  22.91] hb polls +1 max gap 1.14s
+[  24.06] hb polls +1 max gap 1.15s
+[  25.21] hb polls +1 max gap 1.15s
+[  26.35] hb polls +1 max gap 1.14s
+[  27.50] hb polls +1 max gap 1.14s
+[  28.64] hb polls +1 max gap 1.14s
+[  29.79] hb polls +1 max gap 1.16s
+[  30.94] hb polls +1 max gap 1.14s
+[  32.08] hb polls +1 max gap 1.14s
+[  33.21] hb polls +1 max gap 1.13s
+[  34.35] hb polls +1 max gap 1.14s
+[  35.48] hb polls +1 max gap 1.13s
+[  36.62] hb polls +1 max gap 1.14s
+[  37.75] hb polls +1 max gap 1.14s
+[  38.90] hb polls +1 max gap 1.15s
+[  40.04] hb polls +1 max gap 1.14s
+[  41.18] hb polls +1 max gap 1.14s
+[  42.32] hb polls +1 max gap 1.14s
+[  43.46] hb polls +1 max gap 1.14s
+[  44.60] hb polls +1 max gap 1.14s
+[  45.74] hb polls +1 max gap 1.14s
+[  46.88] hb polls +1 max gap 1.14s
+[  48.01] hb polls +1 max gap 1.13s
+[  49.17] hb polls +1 max gap 1.15s
+[  50.31] hb polls +1 max gap 1.14s
+[  51.44] hb polls +1 max gap 1.13s
+[  52.58] hb polls +1 max gap 1.14s
+[  53.72] hb polls +1 max gap 1.14s
+[  54.86] hb polls +1 max gap 1.14s
+[  54.87] key DOWN c7r6 Q
+[  54.98]   | > Q
+[  55.99] hb polls +1 max gap 1.13s
+[  57.13] hb polls +1 max gap 1.14s
+[  58.27] hb polls +1 max gap 1.14s
+[  59.41] hb polls +1 max gap 1.14s
+[  60.56] hb polls +1 max gap 1.15s
+[  61.70] hb polls +1 max gap 1.15s
+[  62.86] hb polls +1 max gap 1.15s
+[  64.00] hb polls +1 max gap 1.15s
+[  64.02] key UP   c7r6 Q
+[  64.02] (+1 key event(s) released before this poll saw them)
+[  64.13]   |  'Q' $71 C7R6
+[  64.13]   | STEP 1 PASS
+[  64.13]   | STEP 2/9: HOLD ; AND /
+[  64.13]   | HOLD ; (COUNT 10), RELEASE;
+[  64.13]   | HOLD / (COUNT 10), RELEASE; RETURN
+[  64.13]   | >
+[  65.15] hb polls +1 max gap 1.15s
+[  66.30] hb polls +1 max gap 1.15s
+[  66.32] key DOWN c6r2 ;
+[  66.43]   | > ;
+[  67.45] hb polls +1 max gap 1.14s
+[  68.59] hb polls +1 max gap 1.14s
+[  69.73] hb polls +1 max gap 1.15s
+[  70.88] hb polls +1 max gap 1.14s
+[  72.03] hb polls +1 max gap 1.15s
+[  73.18] hb polls +1 max gap 1.15s
+[  74.31] hb polls +1 max gap 1.14s
+[  75.46] hb polls +1 max gap 1.14s
+[  75.47] key UP   c6r2 ;
+[  76.60] hb polls +1 max gap 1.14s
+[  77.76] hb polls +1 max gap 1.16s
+[  78.90] hb polls +1 max gap 1.15s
+[  78.91] key DOWN c6r7 /
+[  79.03]   | > ;/
+[  80.05] hb polls +1 max gap 1.15s
+[  81.20] hb polls +1 max gap 1.15s
+[  82.34] hb polls +1 max gap 1.15s
+[  83.48] hb polls +1 max gap 1.14s
+[  84.63] hb polls +1 max gap 1.15s
+[  85.77] hb polls +1 max gap 1.14s
+[  86.92] hb polls +1 max gap 1.15s
+[  88.06] hb polls +1 max gap 1.14s
+[  89.20] hb polls +1 max gap 1.14s
+[  90.33] hb polls +1 max gap 1.13s
+[  91.47] hb polls +1 max gap 1.14s
+[  91.48] key DOWN c0r1 RETURN
+[  91.49] key UP   c6r7 /
+[  91.59]   |  ';' $3B C6R2
+[  91.59]   |  '/' $2F C6R7
+[  91.59]   | STEP 2 PASS
+[  91.59]   | STEPS PP-------
+[  91.59]   | RESULT PASS=2 FAIL=0 SKIP=0
+[  92.61] hb polls +1 max gap 1.14s
+  D0=00000000  D1=00000000  D2=00000000  D3=00000000  D4=00001000  D5=00000018  D6=00000000  D7=00000000
+  A0=00100058  A1=00100010  A2=00000000  A3=00012ABC  A4=0001A95E  A5=00100010  A6=000F0400  A7=0000F004
+  PC=00000442  SR=0004  instructions=27899  [halt reason=00]
+nosettle@48 step 1: did you hold Q at the '>' prompt as the checklist asked?  (y = yes; n = no, or not sure; the answer is logged only, it does not change the verdict) [y/n] [  93.27] operator: step 1 held as asked (Q)? no answer
+nosettle@48 step 2: did you hold ; and / at the '>' prompt as the checklist asked?  (y = yes; n = no, or not sure; the answer is logged only, it does not change the verdict) [y/n] [  93.77] operator: step 2 held as asked (; and /)? no answer
+[  93.77] step 1 HOLD Q: program P; performed yes; Q held 8.0s
+[  93.77] step 2 HOLD ; AND /: program P; performed yes; ; held 8.0s; / held 11.4s
+[  93.77] nosettle@48: INCONCLUSIVE (want DEFECT SHOWN), STEPS PP-------
+  CHECK FAILED  manual/nosettle@48: DEFECT SHOWN  INCONCLUSIVE
+[08:39:17] control patch removed (readback ok)
+[08:39:18] CPU speed set to 48 MHz
+========================================================================
+FIXED BUILD at 48 MHz: every step must PASS
+========================================================================
+Steps 1-9 of 9; each ends with RETURN and shows PASS or FAIL.
+Type ONLY while the '>' prompt shows (keys pressed while the program prints are lost).
+At the run's FIRST '>' prompt: tap LEFT SHIFT once and release it before anything else
+(the keyboard's LED board hides the first key hold after ~2 min idle).
+NO joystick in control port 2 (it locks the keyboard out by design).
+Do each step exactly as described: the driver checks HOW (held time, keys down
+at once, which SHIFT, the stick's row).  A skipped step is never a pass.
+
+STEP 1  HOLD Q
+   do:     tap LEFT SHIFT once and release it (wakes the keyboard), then hold Q to a count of 10 (5 s or more), release it, press RETURN
+   expect: the line 'q', then STEP 1 PASS
+   defect: ^q: the UP-ARROW glyph ($5E, c6r6, read in the same sample as Q) then q; or nothing (the phantom keeps restarting the debounce)
+STEP 2  HOLD ; AND /
+   do:     hold ; to a count of 10, release; hold / to a count of 10, release; RETURN
+   expect: the line ';/', then STEP 2 PASS
+   defect: l; (c5r2, bleed from ;) or ,/ (c5r7, bleed from /)
+STEP 3  ROLLOVER
+   do:     press Z and keep it down, add I, add P (all three held), release all, RETURN
+   expect: the line 'zip', then STEP 3 PASS
+   defect: a missing or doubled letter, or a letter nobody pressed
+STEP 4  RSHIFT, C=
+   do:     hold RIGHT SHIFT: type A and /, release; hold C=: type Q, release; RETURN (do not touch LEFT SHIFT)
+   expect: the line 'A?q', then STEP 4 PASS
+   defect: a/ (RSHIFT not decoded), or an extra character from C=
+STEP 5  PORT-1 STICK UP
+   do:     hold the stick in CONTROL PORT 1 UP and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 5 PASS
+   defect: 1 3 5 7 9 + \ appear (row 0), DEL rubs characters out
+STEP 6  PORT-1 STICK DOWN
+   do:     hold the stick in CONTROL PORT 1 DOWN and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 6 PASS
+   defect: the step ends at once with an empty line (RETURN is on row 1): SKIP, then w r y i p * _ land in the next line
+STEP 7  PORT-1 STICK LEFT
+   do:     hold the stick in CONTROL PORT 1 LEFT and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 7 PASS
+   defect: CTRL reads as held (row 2): letters turn into control codes, CTRL+D ends the program, CTRL+J ends the line; a d g j l ;
+STEP 8  PORT-1 STICK RIGHT
+   do:     hold the stick in CONTROL PORT 1 RIGHT and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 8 PASS
+   defect: 4 6 8 0 - 2 appear (row 3)
+STEP 9  PORT-1 FIRE
+   do:     hold the stick in CONTROL PORT 1 FIRE and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 9 PASS
+   defect: RSHIFT reads as held (row 4): HOSE comes out upper case, with Z C B M > and spaces
+
+At --poll 1 steps 3-9 cannot be judged: only steps 1-2 are evidence.
+RETURN alone at steps 3-9 is fine (docs/HLE_CON.md, 'The settle A/B').
+
+Then FREE mode: type any lines (every key once, with and without SHIFT);
+an empty line ends the program.
+
+This terminal shows what the SCANNER saw ('key DOWN c7r6 Q'); 'COLUMN BLEED?'
+marks the phantom the row settle must prevent.  Letters look the same in both
+cases on screen (upper-case charset); the hex code tells them apart.
+========================================================================
+[kbd_echo] 11552-byte hunk file, args b'\n'
+  staged 24404 byte(s) in 22 record(s)
+[   0.04] fixed@48 started (--poll 1s): operator, follow the C64 screen
+[   0.19]   | KBD-ECHO KEYBOARD CHECK (W6-K)
+[   1.21] hb polls +2 max gap 1.15s
+[   1.33]   | EMPTY LINE: SKIP STEP. CTRL+D: QUIT
+[   1.33]   | STEP 1/9: HOLD Q
+[   1.33]   | TAP SHIFT, THEN HOLD Q (COUNT 10),
+[   1.33]   | RELEASE, RETURN
+[   1.33]   | >
+[   2.35] hb polls +1 max gap 1.14s
+[   3.50] hb polls +1 max gap 1.14s
+[   4.64] hb polls +1 max gap 1.14s
+[   5.78] hb polls +1 max gap 1.14s
+[   6.92] hb polls +1 max gap 1.14s
+[   8.06] hb polls +1 max gap 1.14s
+[   9.20] hb polls +1 max gap 1.14s
+[  10.34] hb polls +1 max gap 1.14s
+[  11.48] hb polls +1 max gap 1.14s
+[  12.62] hb polls +1 max gap 1.14s
+[  13.76] hb polls +1 max gap 1.14s
+[  14.90] hb polls +1 max gap 1.14s
+[  16.03] hb polls +1 max gap 1.14s
+[  17.18] hb polls +1 max gap 1.14s
+[  18.32] hb polls +1 max gap 1.14s
+[  19.46] hb polls +1 max gap 1.15s
+[  20.61] hb polls +1 max gap 1.14s
+[  21.74] hb polls +1 max gap 1.14s
+[  22.88] hb polls +1 max gap 1.14s
+[  24.02] hb polls +1 max gap 1.14s
+[  25.16] hb polls +1 max gap 1.14s
+[  26.30] hb polls +1 max gap 1.14s
+[  27.44] hb polls +1 max gap 1.14s
+[  28.58] hb polls +1 max gap 1.14s
+[  28.59] key DOWN c7r6 Q
+[  28.70]   | > Q
+[  29.72] hb polls +1 max gap 1.14s
+[  30.86] hb polls +1 max gap 1.14s
+[  32.01] hb polls +1 max gap 1.15s
+[  33.15] hb polls +1 max gap 1.15s
+[  34.30] hb polls +1 max gap 1.14s
+[  35.45] hb polls +1 max gap 1.15s
+[  36.59] hb polls +1 max gap 1.14s
+[  37.73] hb polls +1 max gap 1.14s
+[  37.74] key UP   c7r6 Q
+[  38.87] hb polls +1 max gap 1.14s
+[  38.88] (+1 key event(s) released before this poll saw them)
+[  38.99]   |  'Q' $71 C7R6
+[  38.99]   | STEP 1 PASS
+[  38.99]   | STEP 2/9: HOLD ; AND /
+[  38.99]   | HOLD ; (COUNT 10), RELEASE;
+[  38.99]   | HOLD / (COUNT 10), RELEASE; RETURN
+[  38.99]   | >
+[  40.02] hb polls +1 max gap 1.15s
+[  40.03] key DOWN c6r2 ;
+[  40.14]   | > ;
+[  41.16] hb polls +1 max gap 1.14s
+[  42.33] hb polls +1 max gap 1.17s
+[  43.48] hb polls +1 max gap 1.15s
+[  44.62] hb polls +1 max gap 1.14s
+[  45.77] hb polls +1 max gap 1.15s
+[  46.92] hb polls +1 max gap 1.15s
+[  48.07] hb polls +1 max gap 1.15s
+[  49.22] hb polls +1 max gap 1.14s
+[  49.23] key DOWN c6r7 /
+[  49.23] key UP   c6r2 ;
+[  49.34]   | > ;/
+[  50.36] hb polls +1 max gap 1.14s
+[  51.51] hb polls +1 max gap 1.14s
+[  52.65] hb polls +1 max gap 1.14s
+[  53.79] hb polls +1 max gap 1.14s
+[  54.93] hb polls +1 max gap 1.14s
+[  56.08] hb polls +1 max gap 1.14s
+[  57.21] hb polls +1 max gap 1.14s
+[  58.36] hb polls +1 max gap 1.14s
+[  58.38] key UP   c6r7 /
+[  59.50] hb polls +1 max gap 1.14s
+[  59.52] (+1 key event(s) released before this poll saw them)
+[  59.63]   |  ';' $3B C6R2
+[  59.63]   |  '/' $2F C6R7
+[  59.63]   | STEP 2 PASS
+[  59.63]   | STEP 3/9: ROLLOVER
+[  59.63]   | PRESS Z, KEEP IT; ADD I, KEEP IT;
+[  59.63]   | ADD P; RELEASE ALL; RETURN
+[  59.63]   | >
+[  60.65] hb polls +1 max gap 1.15s
+[  60.66] key DOWN c0r1 RETURN
+[  60.77]   | STEP 3 SKIP
+[  60.77]   | STEP 4/9: RSHIFT, C=
+[  60.77]   | RSHIFT+A, RSHIFT+/, THEN C=+Q;
+[  60.77]   | NO LEFT SHIFT; RETURN
+[  60.77]   | >
+[  61.79] hb polls +1 max gap 1.14s
+[  61.80] (+6 key event(s) released before this poll saw them)
+[  61.91]   | RELEASE THE STICK; RETURN
+[  61.91]   | >
+[  61.91]   | STEP 5 SKIP
+[  61.91]   | STEP 6/9: PORT-1 STICK DOWN
+[  61.91]   | HOLD THE STICK DOWN, TYPE HOSE,
+[  61.91]   | RELEASE THE STICK; RETURN
+[  61.91]   | >
+[  61.91]   | STEP 6 SKIP
+[  61.91]   | STEP 7/9: PORT-1 STICK LEFT
+[  61.91]   | HOLD THE STICK LEFT, TYPE HOSE,
+[  61.91]   | RELEASE THE STICK; RETURN
+[  61.91]   | >
+[  61.91]   | STEP 7 SKIP
+[  61.91]   | STEP 8/9: PORT-1 STICK RIGHT
+[  61.91]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[  61.91]   | RELEASE THE STICK; RETURN
+[  61.91]   | STEP 8 SKIP
+[  61.91]   | STEP 9/9: PORT-1 FIRE
+[  61.91]   | HOLD FIRE, TYPE HOSE,
+[  61.91]   | RELEASE FIRE; RETURN
+[  61.91]   | STEP 9 SKIP
+[  61.91]   | FREE: TYPE LINES, EMPTY LINE ENDS
+[  61.91]   | >
+[  62.93] hb polls +1 max gap 1.14s
+[  62.94] (+1 key event(s) released before this poll saw them)
+[  63.06]   | STEPS PPSSSSSSS
+[  63.06]   | RESULT PASS=2 FAIL=0 SKIP=7
+  D0=00000000  D1=00000000  D2=00000000  D3=00000000  D4=00001000  D5=0000000C  D6=00000000  D7=00000000
+  A0=00100038  A1=00100010  A2=00000000  A3=00012ABC  A4=0001A95E  A5=00100010  A6=000F0400  A7=0000F004
+  PC=00000442  SR=0004  instructions=57516  [halt reason=00]
+[  63.09] step 1 HOLD Q: program P; performed yes; Q held 8.0s
+[  63.09] step 2 HOLD ; AND /: program P; performed yes; ; held 8.1s; / held 8.0s
+[  63.09] step 3 ROLLOVER: program S; performed NO; at most 1 keys down at once; NOT JUDGEABLE: --poll period 1.15s > 0.4s: a tapped step cannot be proven at this poll rate
+[  63.09] step 4 RSHIFT, C=: program S; performed NO; A with RSHIFT: NO; / with RSHIFT: NO; Q with C=: NO; NOT JUDGEABLE: --poll period 1.15s > 0.4s: a tapped step cannot be proven at this poll rate
+[  63.09] step 5 PORT-1 STICK UP: program S; performed NO; stick row r0 seen held in 0 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[  63.09] step 6 PORT-1 STICK DOWN: program S; performed NO; stick row r1 seen held in 0 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[  63.09] step 7 PORT-1 STICK LEFT: program S; performed NO; stick row r2 seen held in 0 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[  63.09] step 8 PORT-1 STICK RIGHT: program S; performed NO; stick row r3 seen held in 0 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[  63.09] step 9 PORT-1 FIRE: program S; performed NO; stick row r4 seen held in 0 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[  63.09] fixed@48: INCOMPLETE (want PASS), STEPS PPSSSSSSS
+  CHECK FAILED  manual/fixed@48: PASS  INCOMPLETE
+[08:40:35] restoring config ...
+[08:40:39] config after (full, all categories): IDENTICAL
+[08:40:39] nosettle@48: INCONCLUSIVE
+[08:40:39] fixed@48: INCOMPLETE
+[08:40:39] SESSION VERDICT: INCOMPLETE (not the full plan): a step was skipped or not done as asked, a control had no defect signature and an operator error (redo that leg), or a run is missing: not validated
+  CHECK FAILED  session verdict VALIDATED  INCOMPLETE (not the full plan)
+13/16 checks passed
+FAIL  manual/nosettle@48: DEFECT SHOWN: INCONCLUSIVE
+FAIL  manual/fixed@48: PASS: INCOMPLETE
+FAIL  session verdict VALIDATED: INCOMPLETE (not the full plan)

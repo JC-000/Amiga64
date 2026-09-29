@@ -471,6 +471,12 @@ POLL_OVERHEAD = 0.15       # s the REST reads of one poll add to --poll: the
                            # 0.1 and 1.14-1.15 s at --poll 1.0 (fix5 D1)
 GAP_SLACK = 0.15           # s of jitter over the period before a gap is a
                            # stall
+HB_TOL = 1.5               # a replay's heartbeat is BROKEN only at a gap over
+                           # HB_TOL x the measured median period (fix10: one
+                           # 1.31 s gap at --poll 1.0, normal 1.14-1.23 s,
+                           # broke a whole attended run); a 2 s stall at
+                           # --poll 1.0 (1.5 x 1.15 = 1.72) and 2.1 s at 0.1
+                           # stay BROKEN
 
 
 def poll_period(poll: float) -> float:
@@ -761,42 +767,61 @@ def read_sessions(path: str) -> list[LoggedSession]:
 
 
 def _timing(lr: LoggedRun, assume_poll: float | None
-            ) -> tuple[float | None, str, float | None]:
-    """-> (period, continuity text, worst logged gap) for one logged run.
-    The period comes from the logged --poll, else from the heartbeat, else
-    from --assume-poll; else it is unknown (None) and the replay adds no
-    samples: only the logged polls count (fix5 F2).  A heartbeat gap over
-    gap_max(period) is BROKEN, and the run is judged on the logged polls
-    only as well: a synthetic sample could hide the stall."""
+            ) -> tuple[float | None, str, float | None, list]:
+    """-> (period, continuity text, worst logged gap, irregular windows)
+    for one logged run.  The period comes from the logged --poll, else
+    from the heartbeat, else from --assume-poll; else it is unknown (None)
+    and the replay adds no samples: only the logged polls count (fix5 F2).
+    A heartbeat gap over max(gap_max(period), HB_TOL x the smaller of the
+    measured median and the nominal period; HB_TOL only with a logged
+    --poll) is BROKEN, and the run is judged on the logged polls only as
+    well: a synthetic sample could hide the stall.  A heartbeat window
+    whose gap is over gap_max(period) but under that bound is IRREGULAR
+    (fix10): the run stays proven, but no synthetic poll is placed inside
+    that window (a fill one period back from a late poll would land in the
+    real gap and could stretch a raw-only sighting past DELAY_MIN)."""
     hb = [(t, int(m[1]), float(m[2])) for t, msg in lr.lines
           if (m := HB_LINE.match(msg))]
+    per, prev = [], lr.t0
+    for t, n, _ in hb:
+        if n:
+            per.append((t - prev) / n)
+        prev = t
+    measured = sorted(per)[len(per) // 2] if per else None
     if lr.poll is not None:
         period, src = poll_period(lr.poll), f"--poll {lr.poll:g}s logged"
     elif hb:
-        prev, per = lr.t0, []
-        for t, n, _ in hb:
-            if n:
-                per.append((t - prev) / n)
-            prev = t
-        period = sorted(per)[len(per) // 2] if per else None
-        src = "measured from the heartbeat"
+        period, src = measured, "measured from the heartbeat"
     elif assume_poll is not None:
         period = poll_period(assume_poll)
         src = f"--assume-poll {assume_poll:g}s, NOT in the log"
     else:
         return None, ("unproven, poll period unknown (no --poll and no "
                       "heartbeat in this log): judged on the logged polls "
-                      "only"), None
+                      "only"), None, []
     if not hb:
         return period, (f"unproven (no heartbeat in this log); period "
-                        f"{period:.2f}s from {src}"), None
+                        f"{period:.2f}s from {src}"), None, []
     worst = max(g for *_, g in hb)
-    if period is None or worst > gap_max(period):
+    # HB_TOL only with a logged --poll, and on the smaller of the measured
+    # and the nominal period: without --poll the period IS the measured
+    # one, and a stall inside a window would inflate its own bound
+    bound = gap_max(period or 0) if lr.poll is None else \
+        max(gap_max(period), HB_TOL * min(measured or period, period))
+    if period is None or worst > bound:
         return None, (f"BROKEN (a poll gap of {worst:.2f}s > "
-                      f"{gap_max(period or 0):.2f}s): judged on the logged "
-                      "polls only"), worst
-    return period, (f"proven ({len(hb)} heartbeat(s), max gap {worst:.2f}s; "
-                    f"period {period:.2f}s from {src})"), worst
+                      f"{bound:.2f}s): judged on the logged polls only"), \
+            worst, []
+    irregular, prev = [], lr.t0
+    for t, n, g in hb:
+        if g > gap_max(period):
+            irregular.append((prev, t))
+        prev = t
+    note = (f"; {len(irregular)} irregular window(s), not filled"
+            if irregular else "")
+    return period, (f"proven ({len(hb)} heartbeat(s), max gap {worst:.2f}s "
+                    f"<= {bound:.2f}s; period {period:.2f}s from {src}"
+                    f"{note})"), worst, irregular
 
 
 def _replay_run(lr: LoggedRun, assume_poll: float | None) -> "Stream":
@@ -809,7 +834,8 @@ def _replay_run(lr: LoggedRun, assume_poll: float | None) -> "Stream":
     before a change is one period earlier, so a hold is not
     over-measured).  With an unknown period nothing is added."""
     st = replay_stream()
-    period, st.continuity, st.gap_worst = _timing(lr, assume_poll)
+    period, st.continuity, st.gap_worst, irregular = _timing(lr,
+                                                             assume_poll)
     st.period, st.poll_s, st.raw_known = period, lr.poll, lr.fix5
     keys, idle, nkey, line, extra, live = set(), 0xFF, 0, None, set(), None
     t_last = lr.t0
@@ -839,7 +865,8 @@ def _replay_run(lr: LoggedRun, assume_poll: float | None) -> "Stream":
                     fill.append(k)
                     k -= step
                 for k in reversed(fill):
-                    sample(k)
+                    if not any(a < k <= b for a, b in irregular):
+                        sample(k)
             t_last = t
             sample(t)
         if msg.startswith("  | "):
@@ -999,12 +1026,15 @@ def _ab_discard(p: ABPair) -> str:
     ns = [p.nosettle[n] for n in (1, 2)]
     if not p.proven:
         return "polling not proven by a heartbeat"
-    asleep = [f"{b} step {n}" for b, js in (("fixed@48", p.fixed),
-                                           ("nosettle@48", p.nosettle))
-              for n in (1, 2) if any(WAKE_REASON in x for x in js[n].notes)]
-    if asleep:          # a signature elsewhere stays visible (N1 below)
+    def asleep(build, js):
+        return [f"{build} step {n}" for n in (1, 2)
+                if any(WAKE_REASON in x for x in js[n].notes)]
+    # a sleeping fixed step 1 discards the pair (it was not held); a
+    # sleeping nosettle step 1 does so only when no nosettle step shows a
+    # signature (review9 F2: step-2 signatures still count)
+    if asleep("fixed@48", p.fixed):
         return (f"{WAKE_REASON}: no Q seen at all (raw too) in "
-                + ", ".join(asleep))
+                + ", ".join(asleep("fixed@48", p.fixed)))
     if not all(j.performed for j in fx):
         return "fixed@48 steps 1-2 not held as asked (a tap is no hold)"
     if any(j.defects for j in fx):
@@ -1012,6 +1042,9 @@ def _ab_discard(p: ABPair) -> str:
             d for j in fx for d in j.defects)
     if any(j.settle for j in ns):
         return ""
+    if asleep("nosettle@48", p.nosettle):
+        return (f"{WAKE_REASON}: no Q seen at all (raw too) in "
+                + ", ".join(asleep("nosettle@48", p.nosettle)))
     if any(j.defects for j in ns):
         # fix8 F2: a nosettle defect that is not the settle's is no clean
         # zero
@@ -1081,7 +1114,8 @@ def ab_verdict(pairs: list[ABPair]) -> str:
         n_slow = sum(p.poll == 1.0 for p, _ in kept)
         return (f"REDO: {n_slow} of {AB_PAIRS} kept pairs at --poll 1.0; a "
                 "settle-specific signature in a discarded pair: redo that "
-                "pair under a new name; " + "; ".join(lost) + discards)
+                "pair under a new name" + more + "; " + "; ".join(lost)
+                + discards)
     # fix8 F3: NOT REPRODUCED never with a signature or a defect-like run
     # anywhere: a single step-2 signature (R4) or a debounce that kept
     # restarting without settle evidence asks for more pairs
@@ -1464,7 +1498,9 @@ def judge_step(stream: Stream, n: int, control: bool = False) -> StepJudge:
                                    + line)
             elif never and ss:
                 dead = sum(s.live is False for s in ss)
-                if n == 1 and raw_known and not raw_n and dead < 2:
+                masked = any(k % 8 in joy_rows(s.idle) for s in ss)
+                if n == 1 and raw_known and not raw_n and dead < 2 and \
+                        not masked:     # review9 F4: masked is not asleep
                     # fix9: the rig's keyboard LED board (Blingboard) hides
                     # the whole first hold after ~2 min idle, in either
                     # build (docs/HARDWARE.md); nothing is no evidence

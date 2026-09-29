@@ -1784,3 +1784,116 @@ def test_wake_line_is_general_in_every_checklist():
         lines = ke.checklist(ke.parse_runs(run)[0])
         assert any(l.startswith("At the run's FIRST '>' prompt: tap LEFT "
                                 "SHIFT") for l in lines), run
+
+
+# --- fix10 (review9 F1-F4; heartbeat tolerance; the A/B result) --------------
+
+AB_B = LOGS / "kbd-ab-20260928-b"
+S2_SIG = [abl.state()] + [abl.state({abl.SEMI, abl.L}, 2)] * 5 + \
+    [abl.state(set(), 2)] + [abl.state({abl.SLASH}, 3)] * 5 + \
+    [abl.state(set(), 3)]
+
+
+def _ab_line(paths):
+    out = []
+    ke.replay_report([str(p) for p in paths], out=out.append)
+    return [l for l in out if l.startswith("A/B")][0].split("'): ", 1)[1], out
+
+
+def test_F2_X2_asleep_nosettle_step1_keeps_step2_signatures(tmp_path):
+    """review9 X2, inverted: nosettle step 1 asleep, step 2 with the ; ->
+    L phantom, in 2 pairs: the signatures count (NECESSARY), as before
+    the wake discard existed."""
+    v, _ = abl.ab(tmp_path, [(1.0, {"nosettle": (NOTHING1, S2_SIG)})] * 2 +
+                  [abl.CLEAN] * 3)
+    assert v.startswith("NECESSARY"), v
+
+
+def test_F3_the_lost_signature_redo_has_the_stop_rule(tmp_path):
+    """review9 X3: a signature in a discarded pair: REDO with the same
+    3-pair cap and 'REDO (unresolved)' end state as N2."""
+    v, _ = abl.ab(tmp_path, [(1.0, {"nosettle": (abl.PHANTOM1, abl.CLEAN2),
+                                    "fixed": (abl.TAP1, abl.CLEAN2)})] +
+                  [abl.CLEAN] * 5)
+    assert v.startswith("REDO") and "at most 3 extra pairs" in v and \
+        "REDO (unresolved)" in v, v
+
+
+def test_F4_X4_a_q_masked_at_every_poll_is_not_asleep(tmp_path):
+    """review9 X4, inverted: Q's row low at the idle read at every poll
+    hides Q in raw and matrix: not the Blingboard, so no wake label."""
+    R6 = 0xFF & ~(1 << 6)
+    s1 = [abl.state()] + [abl.state(idle=R6)] * 5 + [abl.state()]
+    j = ke.judge_step(abl.live(s1, 1), 1, control=True)
+    assert not any(WAKE in x for x in j.notes), j.notes
+    v, _ = abl.ab(tmp_path, [(1.0, {"nosettle": (s1, abl.CLEAN2)})] +
+                  [abl.CLEAN] * 4)
+    assert v.startswith("REDO") and WAKE not in v, v
+
+
+def test_hb_one_gap_just_over_period_plus_slack_is_still_proven(tmp_path):
+    """The attended pair2 (2026-09-28-b): one gap of 1.31 s at --poll 1.0
+    (normal 1.14-1.23 s) turned the whole run BROKEN.  The bound is now
+    relative to the measured median period (x HB_TOL)."""
+    runs = ke.replay_log(str(AB_B / "pair2" / "session.log"))
+    assert [str(r) for r, _, _ in runs] == ["fixed@48", "nosettle@48"]
+    for _, st, _ in runs:
+        assert st.continuity.startswith("proven"), st.continuity
+
+
+def test_hb_a_real_stall_is_still_broken(tmp_path):
+    """review4 F3 / H1: a 2 s stall at --poll 1.0, and 2.1 s at --poll 0.1,
+    stay BROKEN."""
+    for poll, gap in (("1", "2.00"), ("0.1", "2.10")):
+        lines = [f"[   0.04] fixed@48 started (--poll {poll}s): operator, "
+                 "follow the C64 screen", "[   1.00]   | STEP 1/9: HOLD Q"]
+        per = ke.poll_period(float(poll))
+        lines += [f"[{1.0 + per * k:8.2f}] hb polls +1 max gap {per:.2f}s"
+                  for k in range(1, 8)]
+        lines += [f"[  20.00] hb polls +1 max gap {gap}s",
+                  "[  21.00] fixed@48: INCOMPLETE (want PASS), STEPS None"]
+        (_, st, _), = ke.replay_log(write_log(tmp_path, lines, f"{poll}.log"))
+        assert st.continuity.startswith("BROKEN"), (poll, st.continuity)
+
+
+def test_hb_guard_no_fill_inside_a_wide_gap(tmp_path):
+    """guard (review6 G2's margin): a raw-only sighting, then the commit
+    1.60 s later at --poll 1.0 (a heartbeat window with a 1.60 s gap, now
+    proven): no synthetic poll lands in that window, so the raw-only run
+    stays the sighting's own (< DELAY_MIN), no false delayed commit."""
+    lines = ["[   0.04] fixed@48 started (--poll 1s): operator, follow the "
+             "C64 screen",
+             "[   1.00]   | STEP 1/9: HOLD Q", "[   1.00]   | >",
+             "[   2.00] raw (not debounced yet): c7r6 Q",
+             "[   2.14]   | > q",
+             "[   3.60] key DOWN c7r6 Q", "[   3.60] raw (not debounced yet): "
+             "none", "[   9.35] key UP   c7r6 Q",
+             "[  10.00]   | STEP 1 PASS",
+             "[  10.10] fixed@48: INCOMPLETE (want PASS), STEPS None"]
+    hb = [f"[{t:8.2f}] hb polls +1 max gap {g}s" for t, g in (
+        (1.15, "1.15"), (2.00, "1.15"), (3.60, "1.60"), (4.75, "1.15"),
+        (5.90, "1.15"), (7.05, "1.15"), (8.20, "1.15"), (9.35, "1.15"))]
+    (run, st, _), = ke.replay_log(write_log(tmp_path, sorted(
+        lines + hb, key=lambda l: float(ke.LOG_LINE.match(l)[1]))))
+    assert st.continuity.startswith("proven"), st.continuity
+    ss = [s for s in st.samples if s.step == 1]
+    raw_s, _ = ke._raw_only(ss, Q_, ke.gap_max(st.period))
+    assert raw_s < ke.DELAY_MIN, raw_s
+    j = ke.judge_step(st, 1)
+    assert j.performed and not j.defects, (j.notes, j.defects)
+
+
+def test_the_attended_a_b_b_reads_not_reproduced_with_pair2_kept():
+    """The attended A/B (2026-09-28-b, pairs 1-5, 2b, 5b): NOT REPRODUCED,
+    and with the heartbeat tolerance pair2 is kept too: 0 of 6."""
+    v, out = _ab_line(sorted(AB_B.glob("pair*/session.log")))
+    assert v.startswith("NOT REPRODUCED: 0 of 6 kept pairs"), v
+
+
+def test_F1_and_the_history_in_the_doc():
+    doc = (Path(ke.PROJECT_ROOT) / "docs" / "HLE_CON.md").read_text()
+    assert "$(date +%Y%m%d-%H%M%S)" in doc
+    assert "D=build/evidence/kbd-ab-$(date +%Y%m%d)\n" not in doc
+    for must in ("kbd-ab-20260928-b", "NOT REPRODUCED", "0 of 6",
+                 "confirmation: operator ready", "pty"):
+        assert must in doc, must

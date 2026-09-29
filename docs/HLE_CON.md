@@ -535,6 +535,16 @@ from missed taps, not from the idle signal.
     it never over-measures a hold. With an unknown period, or a BROKEN
     heartbeat (a gap over the stall bound), it adds nothing: only the
     logged polls count, and a step they do not prove is NOT JUDGEABLE.
+  - **Heartbeat tolerance (fix round 10).** With `--poll` logged, a run
+    is BROKEN only at a gap over max(`gap_max`, 1.5 x the smaller of the
+    measured median and the nominal period): 1.72 s at `--poll 1.0`,
+    0.4 s at 0.1. (It was `gap_max`, 1.30 s at 1.0: one 1.31 s gap, in
+    normal gaps of 1.14-1.23 s, broke a whole attended run.) A heartbeat
+    window with a gap over `gap_max` but under that bound stays proven,
+    but gets no synthetic polls, so a fill cannot land in the real gap and
+    stretch a raw-only sighting past `DELAY_MIN` (review6 G2's margin).
+    The live judge's own gap bounds are unchanged; a 2 s stall at 1.0
+    (review4 F3) stays BROKEN.
   - **Proof.** "proven" polling needs a heartbeat. A replay with unproven
     polling (no heartbeat, or an assumed poll) is never VALIDATED.
   - On the pre-fix judge it reproduced all 11 run verdicts and all 70
@@ -724,7 +734,7 @@ Tell the operator before the first session:
 cd /Users/someone/Documents/Amiga64/.claude/worktrees/w6-kbd  # or the merged tree
 export U64_HOST=10.43.23.81
 PRG=/Users/someone/Documents/Amiga64/build/w6-int/runner.prg
-D=build/evidence/kbd-ab-$(date +%Y%m%d)
+D=build/evidence/kbd-ab-$(date +%Y%m%d-%H%M%S)   # new per A/B (review9 F1)
 AB() {  # AB <pair> <runs> <poll>
   python3 -m tests.kbd_echo --prg $PRG --backend u64 --runs "$2" \
       --poll "$3" --out-dir "$D/pair$1"
@@ -749,7 +759,12 @@ discarded pair and why:
   no Q at all, raw included. That is the keyboard, not the scan: redo the
   pair and tap SHIFT first. It is never a signature.
 - a signature in a discarded pair (fix round 9, N1): redo that pair; the
-  line never reads NOT REPRODUCED beside it.
+  line never reads NOT REPRODUCED beside it. The discarded pair stays in
+  the glob, so the redo cannot clear it: the same stop rule applies (at
+  most 3 extra pairs, then report **REDO (unresolved)** with the
+  signature; review9 F3). A sleeping nosettle step 1 no longer discards a
+  pair whose step 2 shows a signature (review9 F2), and a Q masked by its
+  row at the idle read is not labelled "not awake" (F4).
 - `not yet repeated` (one step-2 signature) or `defect-like`: run **at
   most 3 extra pairs** at `--poll 1.0`, named `AB 8`, `AB 9`, `AB 10`.
   If the line still says REDO, stop and report **REDO (unresolved)**
@@ -794,6 +809,32 @@ of their sessions or came after a 30-minute idle. They are explained by
 the Blingboard, and they are **no evidence for the settle defect**. (They
 predate the raw diagnostic, so the logs themselves could never show it
 either way; review4 section 3(c).)
+
+**W6-K result: the settle A/B of 2026-09-28 (`kbd-ab-20260928-b`).**
+Run by the supervisor with the user at the C64, after the Blingboard was
+found, with the SHIFT tap at every run's first prompt: pairs 1-5 at
+`--poll 1.0`, plus 2b (redoing pair 2, whose heartbeat then read BROKEN
+on one 1.31 s gap) and 5b (redoing pair 5, whose nosettle run had RETURN
+down with /). The logs are in `tests/kbd/replay/kbd-ab-20260928-b`.
+- **Replayed (fix round 10): NOT REPRODUCED, 0 of 6 kept pairs at
+  `--poll 1.0`** (with the fix-round-10 heartbeat tolerance pair 2 is
+  kept too; before, 0 of 5). Only pair 5 is discarded (the RETURN
+  overlap).
+- **7 nosettle runs with the keyboard awake, no phantom in any**: every
+  step 1 a clean commit of Q (held about 8 s), no ↑, L or `,` in raw or
+  committed, no row low at the idle read, no debounce restarting. Add the
+  earlier dense-poll run: kbd-hw-2 nosettle@48 at `--poll 0.1`
+  (2026-09-25) was clean too (INCONCLUSIVE).
+- **What may be claimed**: the settle defect was **not reproduced** on
+  this U64E at 48 MHz. If it occurs, its per-run rate under this detector
+  is below about 39% (95%, one-sided, 6 kept pairs), and delayed commits
+  under about 1.15 s are invisible at `--poll 1.0`. It is **not** "the
+  settle is unnecessary": the fix stays, harmless and unproven.
+- **Operator input**: the session confirmations appear in the logs as
+  `confirmation: operator ready`. The supervisor sent that Enter through a
+  pty, at the user's request, while the user sat at the C64; the y/n hold
+  questions after each nosettle run were left unanswered (`no answer`),
+  which does not change any verdict (K5).
 
 ### What VICE covers (`--backend vice`, automated)
 
