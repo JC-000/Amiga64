@@ -24,6 +24,19 @@ Turbo Control `"Manual"`, RAM Expansion Unit `Enabled`, REU Size `512 KB`,
 Cartridge preset `"REU"`; machine reset to clean BASIC at the end. No
 firmware or persistent-storage changes of any kind.
 
+### Test-rig note: the keyboard's LED board hides the first hold after idle
+
+This C64's keyboard carries a **Blingboard** (an RGB LED board). After
+about 2 minutes idle, the whole first key hold is invisible at the
+keyboard matrix: a key held to a count of 10 produces nothing. A SHIFT tap
+first wakes it; after a few seconds idle it is fine. **Verified on stock
+BASIC, with none of this project's code running, 2026-09-28.**
+
+Any attended keyboard test on this rig must start each run with a SHIFT
+tap (the W6-K driver's checklist and the program's step-1 prompt say so),
+and a "no key seen at all" in a run's first step is the rig, not the code
+under test (docs/HLE_CON.md, "The Blingboard").
+
 ## Backend fixes (tests/*.py — host-side only, no `.s` changes)
 
 1. **The stock U64 `run_subroutine` cannot drive our runner**

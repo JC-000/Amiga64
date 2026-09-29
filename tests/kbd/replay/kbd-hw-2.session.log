@@ -1,0 +1,3004 @@
+[19:02:44] kbd_echo MANUAL on 10.43.23.81, runs fixed@48, nosettle@48, nojoymask@48, fixed@1, prg build/w6-int/runner.prg
+[19:02:44] firmware gate: Ultimate 64 Elite fw 3.15 git c47155b7 fpga 125 core 1.50 = resting build (git c47155b7, core 1.50): proceeding
+
+========================================================================
+MANUAL KEYBOARD SESSION: runs in this order: fixed@48, nosettle@48, nojoymask@48, fixed@1
+Controls are SUPPOSED to show the defect.
+The runner will now be uploaded (run_prg) and the config changed (restored at the end).
+Press Enter when the operator is at the C64 keyboard (abort in 300s)...
+========================================================================
+[19:02:47] confirmation: operator ready
+[19:02:47] requesting the device (DeviceLock) ...
+[19:02:47] acquired after 0s wait; Ultimate 64 Elite fw 3.15 fpga 125 core 1.50
+[19:02:47] config before: {'turbo_control': 'Off', 'cpu_speed': ' 1', 'reu_enabled': 'Disabled', 'reu_size': '2 MB', 'cartridge': '', 'badline_timing': 'Enabled', 'bus_operation_mode': 'Quiet', 'sid_addressing': {'SID Socket 1 Address': '$D400', 'SID Socket 2 Address': '$D400', 'Ext DualSID Range Split': 'Off', 'UltiSID 1 Address': '$D400', 'UltiSID 2 Address': '$D400', 'UltiSID Range Split': 'Off', 'Paddle Override': 'Enabled', 'Auto Address Mirroring': 'Enabled'}, 'cartridge_preference': 'Auto'}
+[19:02:47] device: Ultimate 64 Elite fw 3.15 git c47155b7 fpga 125 core 1.50 (lock wait 0s)
+[19:02:47] CPU speed 1 MHz for the boot; REU enabled 16 MB next (prepare_target: set_reu)
+  u64: dosio_want_uci residue at boot: 00000000
+  u64: hle_dos_magic residue at boot: 00000000
+  u64: hle_dos_magic after the probe init: 444f5321
+[19:02:50] CPU speed set to 48 MHz
+========================================================================
+FIXED BUILD at 48 MHz: every step must PASS
+========================================================================
+Steps 1-9 of 9; each ends with RETURN and shows PASS or FAIL.
+Type ONLY while the '>' prompt shows (keys pressed while the program prints are lost).
+NO joystick in control port 2 (it locks the keyboard out by design).
+Do each step exactly as described: the driver checks HOW (held time, keys down
+at once, which SHIFT, the stick's row).  A skipped step is never a pass.
+
+STEP 1  HOLD Q
+   do:     hold Q for 2 s, release it, press RETURN
+   expect: the line 'q', then STEP 1 PASS
+   defect: ^q: the UP-ARROW glyph ($5E, c6r6, read in the same sample as Q) then q; or nothing (the phantom keeps restarting the debounce)
+STEP 2  HOLD ; AND /
+   do:     hold ; for 2 s, release; hold / for 2 s, release; RETURN
+   expect: the line ';/', then STEP 2 PASS
+   defect: l; (c5r2, bleed from ;) or ,/ (c5r7, bleed from /)
+STEP 3  ROLLOVER
+   do:     press Z and keep it down, add I, add P (all three held), release all, RETURN
+   expect: the line 'zip', then STEP 3 PASS
+   defect: a missing or doubled letter, or a letter nobody pressed
+STEP 4  RSHIFT, C=
+   do:     hold RIGHT SHIFT: type A and /, release; hold C=: type Q, release; RETURN (do not touch LEFT SHIFT)
+   expect: the line 'A?q', then STEP 4 PASS
+   defect: a/ (RSHIFT not decoded), or an extra character from C=
+STEP 5  PORT-1 STICK UP
+   do:     hold the stick in CONTROL PORT 1 UP and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 5 PASS
+   defect: 1 3 5 7 9 + \ appear (row 0), DEL rubs characters out
+STEP 6  PORT-1 STICK DOWN
+   do:     hold the stick in CONTROL PORT 1 DOWN and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 6 PASS
+   defect: the step ends at once with an empty line (RETURN is on row 1): SKIP, then w r y i p * _ land in the next line
+STEP 7  PORT-1 STICK LEFT
+   do:     hold the stick in CONTROL PORT 1 LEFT and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 7 PASS
+   defect: CTRL reads as held (row 2): letters turn into control codes, CTRL+D ends the program, CTRL+J ends the line; a d g j l ;
+STEP 8  PORT-1 STICK RIGHT
+   do:     hold the stick in CONTROL PORT 1 RIGHT and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 8 PASS
+   defect: 4 6 8 0 - 2 appear (row 3)
+STEP 9  PORT-1 FIRE
+   do:     hold the stick in CONTROL PORT 1 FIRE and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 9 PASS
+   defect: RSHIFT reads as held (row 4): HOSE comes out upper case, with Z C B M > and spaces
+
+Then FREE mode: type any lines (every key once, with and without SHIFT);
+an empty line ends the program.
+
+This terminal shows what the SCANNER saw ('key DOWN c7r6 Q'); 'COLUMN BLEED?'
+marks the phantom the row settle must prevent.  Letters look the same in both
+cases on screen (upper-case charset); the hex code tells them apart.
+========================================================================
+[kbd_echo] 11516-byte hunk file, args b'\n'
+  staged 24368 byte(s) in 22 record(s)
+[   0.05] fixed@48 started: operator, follow the C64 screen
+[   0.19]   | KBD-ECHO KEYBOARD CHECK (W6-K)
+[   0.43]   | EMPTY LINE: SKIP STEP. CTRL+D: QUIT
+[   0.43]   | STEP 1/9: HOLD Q
+[   0.43]   | HOLD Q 2S, RELEASE, RETURN
+[   0.43]   | >
+[   3.03] key DOWN c7r6 Q
+[   3.14]   | > Q
+[   6.22] key UP   c7r6 Q
+[   6.48] key DOWN c0r1 RETURN
+[   6.72] key UP   c0r1 RETURN
+[   6.83]   |  'Q' $71 C7R6
+[   6.83]   | STEP 1 PASS
+[   6.83]   | STEP 2/9: HOLD ; AND /
+[   6.83]   | HOLD ; 2S, RELEASE;
+[   6.83]   | HOLD / 2S, RELEASE; RETURN
+[   6.83]   | >
+[   8.94] key DOWN c6r2 ;
+[   9.05]   | > ;
+[  12.18] key UP   c6r2 ;
+[  12.77]   | > ;/
+[  12.91] key DOWN c6r7 /
+[  15.37] key UP   c6r7 /
+[  15.86] key DOWN c0r1 RETURN
+[  15.97]   |  ';' $3B C6R2
+[  15.97]   |  '/' $2F C6R7
+[  15.97]   | STEP 2 PASS
+[  15.97]   | STEP 3/9: ROLLOVER
+[  15.97]   | PRESS Z, KEEP IT; ADD I, KEEP IT;
+[  15.97]   | ADD P; RELEASE ALL; RETURN
+[  15.97]   | >
+[  16.11] key UP   c0r1 RETURN
+[  20.15]   | > Z
+[  20.29] key DOWN c1r4 Z
+[  22.26] key DOWN c4r1 I
+[  22.37]   | > ZI
+[  24.23] key DOWN c5r1 P
+[  24.34]   | > ZIP
+[  25.95] key UP   c1r4 Z
+[  25.95] key UP   c4r1 I
+[  25.95] key UP   c5r1 P
+[  27.05]   |  'Z' $7A C1R4
+[  27.18] key DOWN c0r1 RETURN
+[  27.29]   | HOLD / 2S, RELEASE; RETU
+[  27.29]   |  ';' $3B C6R2
+[  27.29]   |  '/' $2F C6R7
+[  27.29]   | STEP 2 PASS
+[  27.29]   | STEP 3/9: ROLLOVER
+[  27.29]   | PRESS Z, KEEP IT; ADD I, KEEP IT;
+[  27.29]   | ADD P; RELEASE ALL; RETURN
+[  27.29]   | > ZIP
+[  27.29]   |  'Z' $7A C1R4
+[  27.29]   |  'I' $69 C4R1
+[  27.29]   |  'P' $70 C5R1
+[  27.29]   | STEP 3 PASS
+[  27.29]   | STEP 4/9: RSHIFT, C=
+[  27.29]   | RSHIFT+A, RSHIFT+/, THEN C=+Q;
+[  27.29]   | NO LEFT SHIFT; RETURN
+[  27.29]   | >
+[  27.43] key UP   c0r1 RETURN
+[  27.54]   | EMPTY LINE: SKIP STEP. CTRL+D: QUIT
+[  27.55]   | STEP 1/9: HOLD Q
+[  27.55]   | HOLD Q 2S, RELEASE, RETURN
+[  27.55]   | > Q
+[  27.55]   |  'Q' $71 C7R6
+[  27.55]   | STEP 1 PASS
+[  27.55]   | STEP 2/9: HOLD ; AND /
+[  27.55]   | HOLD ; 2S, RELEASE;
+[  27.55]   | HOLD / 2S, RELEASE; RETURN
+[  27.55]   | > ;/
+[  42.02] mod DOWN c6r4 RSHIFT
+[  46.80]   | > A
+[  46.93] (+1 key event(s) released before this poll saw them)
+[  49.40] key DOWN c6r7 /
+[  49.51]   | > A?
+[  49.64] key UP   c6r7 /
+[  51.11] mod UP   c6r4 RSHIFT
+[  52.59] mod DOWN c7r5 C=
+[  55.91]   | > A?Q
+[  56.04] (+1 key event(s) released before this poll saw them)
+[  57.04] mod UP   c7r5 C=
+[  58.02] key DOWN c0r1 RETURN
+[  58.13]   | STEP 1/9: HOLD Q
+[  58.13]   | HOLD Q 2S, RELEASE, RETURN
+[  58.13]   | > Q
+[  58.13]   |  'Q' $71 C7R6
+[  58.13]   | STEP 1 PASS
+[  58.13]   | STEP 2/9: HOLD ; AND /
+[  58.13]   | HOLD ; 2S, RELEASE;
+[  58.13]   | HOLD / 2S, RELEASE; RETURN
+[  58.13]   | > ;/
+[  58.13]   |  ';' $3B C6R2
+[  58.13]   |  '?' $3F C6R7+SH
+[  58.13]   |  'Q' $71 C7R6
+[  58.26] key UP   c0r1 RETURN
+[  58.38]   | HOLD / 2S, RELEASE; RETURN
+[  58.38]   | > ;/
+[  58.38]   |  ';' $3B C6R2
+[  58.38]   |  '/' $2F C6R7
+[  58.38]   |  'A' $41 C1R2+SH
+[  58.38]   |  '?' $3F C6R7+SH
+[  58.38]   |  'Q' $71 C7R6
+[  58.38]   | STEP 4 PASS
+[  58.38]   | STEP 5/9: PORT-1 STICK UP
+[  58.38]   | HOLD THE STICK UP, TYPE HOSE,
+[  58.38]   | RELEASE THE STICK; RETURN
+[  58.38]   | >
+[  61.21] port-1 joystick: rows r0 held low (masked)
+[  62.18] port-1 joystick: released (no row held)
+[  62.42] key DOWN c3r5 H
+[  62.42] port-1 joystick: rows r0 held low (masked)
+[  62.54]   | > H
+[  62.67] key UP   c3r5 H
+[  62.92] (+1 key event(s) released before this poll saw them)
+[  63.03]   | > HO
+[  63.51]   | > HOS
+[  63.65] (+1 key event(s) released before this poll saw them)
+[  63.75]   | > HOSE
+[  63.89] (+1 key event(s) released before this poll saw them)
+[  65.11] port-1 joystick: released (no row held)
+[  65.61] key DOWN c0r1 RETURN
+[  65.72]   |  '?' $3F C6R7+SH
+[  65.72]   |  'Q' $71 C7R6
+[  65.72]   | STEP 4 PASS
+[  65.72]   | STEP 5/9: PORT-1 STICK UP
+[  65.72]   | HOLD THE STICK UP, TYPE HOSE,
+[  65.72]   | RELEASE THE STICK; RETURN
+[  65.72]   | > HOSE
+[  65.72]   |  'H' $68 C3R5
+[  65.72]   |  'O' $6F C4R6
+[  65.96]   | PRESS Z, KEEP IT; ADD I, KEEP IT;
+[  65.96]   | ADD P; RELEASE ALL; RETURN
+[  65.96]   | > ZIP
+[  65.96]   |  'Z' $7A C1R4
+[  65.96]   |  'I' $69 C4R1
+[  65.96]   |  'P' $70 C5R1
+[  65.96]   | STEP 3 PASS     +/, THEN C=+Q;
+[  65.96]   |  'A' $41 C1R2+SH
+[  65.96]   |  'S' $73 C1R5
+[  65.96]   |  'E' $65 C1R6
+[  65.96]   | STEP 5 PASS
+[  65.96]   | STEP 6/9: PORT-1 STICK DOWN
+[  65.96]   | HOLD THE STICK DOWN, TYPE HOSE,
+[  65.96]   | RELEASE THE STICK; RETURN
+[  65.96]   | >
+[  66.10] key UP   c0r1 RETURN
+[  66.21]   |  'Z' $7A C1R4
+[  66.21]   |  'I' $69 C4R1
+[  66.21]   |  'P' $70 C5R1
+[  66.21]   | STEP 3 PASS
+[  66.21]   | STEP 4/9: RSHIFT, C=
+[  66.21]   | RSHIFT+A, RSHIFT+/, THEN C=+Q;
+[  66.21]   | NO LEFT SHIFT; RETURN
+[  66.21]   | > A?Q
+[  66.21]   |  'A' $41 C1R2+SH
+[  66.21]   |  '?' $3F C6R7+SH
+[  67.58] port-1 joystick: rows r1 held low (masked)
+[  69.65]   | > H
+[  69.79] (+1 key event(s) released before this poll saw them)
+[  70.03] key DOWN c4r6 O
+[  70.17]   | > HO
+[  70.30] key UP   c4r6 O
+[  70.80] key DOWN c1r5 S
+[  70.91]   | > HOS
+[  71.04] key UP   c1r5 S
+[  71.15]   | > HOSE
+[  71.28] (+1 key event(s) released before this poll saw them)
+[  72.27] port-1 joystick: released (no row held)
+[  72.78] key DOWN c0r1 RETURN
+[  72.91]   | STEP 5/9: PORT-1 STICK UHOSE,
+[  72.91]   | RELEASE THE STICK; RETURN
+[  72.91]   | > HOSE
+[  72.91]   |  'H' $68 C3R5
+[  72.91]   |  'S' $73 C1R5
+[  72.91]   |  'E' $65 C1R6
+[  72.91]   | STEP 5 PASS
+[  72.91]   | STEP 6/9: PORT-1 STICK DOWN
+[  72.91]   | HOLD THE STICK DOWN, TYPE HOSE,
+[  72.91]   | RELEASE THE STICK; RETURN
+[  72.91]   | > HOSE
+[  72.91]   |  'H' $68 C3R5
+[  72.91]   |  'O' $6F C4R6
+[  72.91]   |  'S' $73 C1R5
+[  72.91]   | STEP 6 PASS
+[  72.91]   | STEP 7/9: PORT-1 STICK LEFT
+[  73.04] key UP   c0r1 RETURN
+[  73.17]   |  '?' $3F C6R7+SH
+[  73.17]   |  'Q' $71 C7R6
+[  73.17]   | STEP 4 PASS
+[  73.17]   | STEP 5/9: PORT-1 STICK UP
+[  73.17]   | HOLD THE STICK UP, TYPE HOSE,
+[  73.17]   | RELEASE THE STICK; RETURN
+[  73.17]   | > HOSE
+[  73.17]   |  'H' $68 C3R5
+[  73.17]   |  'O' $6F C4R6
+[  73.17]   |  'E' $65 C1R6
+[  73.17]   | STEP 6 PASS
+[  73.17]   | STEP 7/9: PORT-1 STICK LEFT
+[  73.17]   | HOLD THE STICK LEFT, TYPE HOSE,
+[  73.17]   | RELEASE THE STICK; RETURN
+[  73.17]   | >
+[  74.53] port-1 joystick: rows r2 held low (masked)
+[  75.77] key DOWN c3r5 H
+[  75.88]   | > H
+[  76.01] key UP   c3r5 H
+[  76.25] (+1 key event(s) released before this poll saw them)
+[  76.37]   | > HO
+[  76.87]   | > HOS
+[  77.00] (+1 key event(s) released before this poll saw them)
+[  77.11]   | > HOSE
+[  77.24] (+1 key event(s) released before this poll saw them)
+[  77.98] port-1 joystick: released (no row held)
+[  78.48] key DOWN c0r1 RETURN
+[  78.60]   | > HOSE
+[  78.60]   |  'H' $68 C3R5
+[  78.60]   |  'O' $6F C4R6
+[  78.60]   |  'S' $73 C1R5
+[  78.60]   |  'E' $65 C1R6
+[  78.60]   | STEP 6 PASS
+[  78.60]   | STEP 7/9: PORT-1 STICK LEFT
+[  78.60]   | HOLD THE STICK LEFT, TYPE HOSE,
+[  78.60]   | RELEASE THE STICK; RETURN
+[  78.60]   | > HOSE
+[  78.60]   |  'H' $68 C3R5
+[  78.60]   |  'O' $6F C4R6
+[  78.84]   | > HOSE
+[  78.84]   |  'H' $68 C3R5
+[  78.84]   |  'O' $6F C4R6
+[  78.84]   |  'S' $73 C1R6
+[  78.84]   | STEP 5 PASS
+[  78.84]   | STEP 6/9: PORT-1 STICK DOWN
+[  78.84]   | HOLD THE STICK D
+[  78.84]   |  'S' $73 C1R5
+[  78.84]   |  'E' $65 C1R6
+[  78.84]   | STEP 7 PASS
+[  78.84]   | STEP 8/9: PORT-1 STICK RIGHT
+[  78.84]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[  78.84]   | RELEASE THE STICK; RETURN
+[  78.84]   | >
+[  78.98] key UP   c0r1 RETURN
+[  79.09]   |  'S' $73 C1R5
+[  79.09]   |  'E' $65 C1R6
+[  79.09]   | STEP 5 PASS
+[  79.09]   | STEP 6/9: PORT-1 STICK DOWN
+[  79.09]   | HOLD THE STICK DOWN, TYPE HOSE,
+[  79.09]   | RELEASE THE STICK; RETURN
+[  79.09]   | > HOSE
+[  79.96] port-1 joystick: rows r3 held low (masked)
+[  81.57]   | > H
+[  81.70] (+1 key event(s) released before this poll saw them)
+[  82.07]   | > HO
+[  82.21] (+1 key event(s) released before this poll saw them)
+[  82.70] key DOWN c1r5 S
+[  82.82]   | > HOS
+[  82.95] key DOWN c1r6 E
+[  82.95] key UP   c1r5 S
+[  83.07]   | > HOSE
+[  83.20] key UP   c1r6 E
+[  84.18] port-1 joystick: released (no row held)
+[  84.67] key DOWN c0r1 RETURN
+[  84.78]   |  'S' $73 C1R5
+[  84.78]   |  'E' $65 C1R6
+[  84.78]   | STEP 5 PASS
+[  84.78]   | STEP 6/9: PORT-1 STICK DOWN
+[  84.78]   | HOLD THE STICK DOWN, TYPE HOSE,
+[  84.78]   | RELEASE THE STICK; RETURN
+[  84.78]   | > HOSE
+[  84.78]   | STEP 7 P: PORT-1 STICK RIGHT
+[  84.78]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[  84.78]   | RELEASE THE STICK; RETURN
+[  84.78]   | > HOSE
+[  84.78]   |  'H' $68 C3R5
+[  84.78]   |  'O' $6F C4R6
+[  85.03]   | RELEASE THE STICK; RETURN
+[  85.03]   | > HOSE
+[  85.03]   |  'H' $68 C3R5
+[  85.03]   |  'O' $6F C1R5
+[  85.03]   |  'E' $65 C1R6
+[  85.03]   | STEP 6 PASS
+[  85.03]   | STEP 7/9: PORT-1EFT, TYPE HOSE,
+[  85.03]   | RELEASE THE STICK; RETURN
+[  85.03]   | > HOSE
+[  85.03]   |  'H' $68 C3R5
+[  85.03]   |  'E' $65 C1R6
+[  85.03]   | STEP 7 PASS
+[  85.03]   | STEP 8/9: PORT-1 STICK RIGHT
+[  85.03]   |  'S' $73 C1R5
+[  85.03]   |  'E' $65 C1R6
+[  85.03]   | STEP 8 PASS
+[  85.03]   | STEP 9/9: PORT-1 FIRE
+[  85.03]   | HOLD FIRE, TYPE HOSE,
+[  85.03]   | RELEASE FIRE; RETURN
+[  85.03]   | >
+[  85.17] key UP   c0r1 RETURN
+[  85.28]   |  'S' $73 C1R5
+[  85.28]   |  'E' $65 C1R6
+[  85.28]   | STEP 6 PASS
+[  85.28]   | STEP 7/9: PORT-1 STICK LEFT
+[  85.28]   | HOLD THE STICK LEFT, TYPE HOSE,
+[  85.28]   | RELEASE THE STICK; RETURN
+[  85.28]   | > HOSE
+[  85.28]   |  'H' $68 C3R5
+[  85.28]   |  'O' $6F C4R6
+[  85.28]   |  'S' $73 C1R5
+[  86.65] port-1 joystick: rows r4 held low (masked)
+[  87.50]   | > H
+[  87.63] (+1 key event(s) released before this poll saw them)
+[  88.00]   | > HO
+[  88.13] (+1 key event(s) released before this poll saw them)
+[  88.75]   | > HOS
+[  88.88] (+1 key event(s) released before this poll saw them)
+[  89.12] (+1 key event(s) released before this poll saw them)
+[  89.24]   | > HOSE
+[  89.86] port-1 joystick: released (no row held)
+[  90.72]   |  'E' $65ASS
+[  90.72]   | STEP 9/9: PORT-1 FIRE
+[  90.72]   | HOLD FIRE, TYPE HOSE,
+[  90.72]   | RELEASE FIRE; RETURN
+[  90.72]   | > HOSE
+[  90.72]   |  'H' $68 C3R5
+[  90.85] key DOWN c0r1 RETURN
+[  90.97]   | STEP 7/9: PORT-1 STICK LEFT
+[  90.97]   | HOLD THE STICK LEFT, TYPE HOSE,
+[  90.97]   | RELEASE THE STICK; RETURN
+[  90.97]   | > HOSE   C3R5
+[  90.97]   | HOLD THE STICK RIGHT, TYN
+[  90.97]   | > HOSE
+[  90.97]   |  'H' $68 C3R5
+[  90.97]   |  'O' $6F C4R6
+[  90.97]   |  'E' $65 C1R6
+[  90.97]   | STEP 8 PASS
+[  90.97]   | STEP 9/9: PORT-1 FIRE
+[  90.97]   | RELEASE FIRE; RETURN
+[  90.97]   | > HOSE
+[  90.97]   |  'H' $68 C3R5
+[  90.97]   |  'O' $6F C4R6
+[  90.97]   |  'S' $73 C1R5
+[  90.97]   |  'E' $65 C1R6
+[  90.97]   | STEP 9 PASS
+[  90.97]   | FREE: TYPE LINES, EMPTY LINE ENDS
+[  90.97]   | >
+[  91.11] key UP   c0r1 RETURN
+[  91.22]   |  'H' $68 C3R5
+[  91.22]   |  'O' $6F C4R6
+[  91.22]   |  'S' $73 C1R5
+[  91.22]   |  'E' $65 C1R6
+[  91.22]   | STEP 7 PASS
+[  91.22]   | STEP 8/9: PORT-1 STICK RIGHT
+[  91.22]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[  91.22]   | RELEASE THE STICK; RETURN
+[  91.22]   | > HOSE
+[  91.22]   |  'H' $68 C3R5
+[  91.22]   |  'O' $6F C4R6
+[  91.22]   |  'S' $73 C1R5
+[  91.22]   |  'E' $65 C1R6
+[  91.22]   | STEP 8 PASS
+[  91.22]   | STEP 9/9: PORT-1 FIRE
+[  91.22]   | HOLD FIRE, TYPE HOSE,
+[ 103.03] key DOWN c7r1 LEFTARROW
+[ 103.14]   | > _
+[ 103.28] key UP   c7r1 LEFTARROW
+[ 104.75] key DOWN c7r0 1
+[ 104.89]   | > _1
+[ 105.02] key UP   c7r0 1
+[ 105.15]   | > _12
+[ 105.28] (+1 key event(s) released before this poll saw them)
+[ 105.40]   | > _123
+[ 105.53] (+1 key event(s) released before this poll saw them)
+[ 105.78] key DOWN c1r3 4
+[ 105.89]   | > _1234
+[ 106.02] key UP   c1r3 4
+[ 106.13]   | > _12345
+[ 106.26] (+1 key event(s) released before this poll saw them)
+[ 106.51] key DOWN c2r3 6
+[ 106.62]   | > _123456
+[ 106.75] key UP   c2r3 6
+[ 106.86]   | > _1234567
+[ 107.00] (+1 key event(s) released before this poll saw them)
+[ 107.24] key DOWN c3r3 8
+[ 107.35]   | > _12345678
+[ 107.49] key UP   c3r3 8
+[ 107.60]   | > _123456789
+[ 107.74] (+1 key event(s) released before this poll saw them)
+[ 107.99] key DOWN c4r3 0
+[ 108.10]   | > _1234567890
+[ 108.24] key UP   c4r3 0
+[ 108.35]   | > _1234567890+
+[ 108.48] (+1 key event(s) released before this poll saw them)
+[ 108.72] key DOWN c5r3 -
+[ 108.84]   | > _1234567890+-
+[ 108.97] key UP   c5r3 -
+[ 109.09]   | > _1234567890+-\
+[ 109.22] (+1 key event(s) released before this poll saw them)
+[ 111.47] mod DOWN c1r7 LSHIFT
+[ 112.07]   | > _1234567890+-\!
+[ 112.21] (+1 key event(s) released before this poll saw them)
+[ 112.46] key DOWN c7r3 2
+[ 112.58]   | > _1234567890+-\!"
+[ 112.71] key UP   c7r3 2
+[ 112.83]   | > _1234567890+-\!"#
+[ 112.97] (+1 key event(s) released before this poll saw them)
+[ 113.23] key DOWN c1r3 4
+[ 113.34]   | > _1234567890+-\!"#$
+[ 113.48] key UP   c1r3 4
+[ 113.72] key DOWN c2r0 5
+[ 113.82]   | > _1234567890+-\!"#$%
+[ 113.95] key UP   c2r0 5
+[ 114.07]   | > _1234567890+-\!"#$%&
+[ 114.20] (+1 key event(s) released before this poll saw them)
+[ 114.45] key DOWN c3r0 7
+[ 114.56]   | > _1234567890+-\!"#$%&'
+[ 114.70] key UP   c3r0 7
+[ 114.94] (+1 key event(s) released before this poll saw them)
+[ 115.06]   | > _1234567890+-\!"#$%&'(
+[ 115.31]   | > _1234567890+-\!"#$%&'()
+[ 115.44] (+1 key event(s) released before this poll saw them)
+[ 115.69] key DOWN c4r3 0
+[ 115.80]   | > _1234567890+-\!"#$%&'()0
+[ 115.93] key UP   c4r3 0
+[ 116.04]   | > _1234567890+-\!"#$%&'()0[
+[ 116.17] (+1 key event(s) released before this poll saw them)
+[ 116.42] key DOWN c5r3 -
+[ 116.54]   | > _1234567890+-\!"#$%&'()0[]
+[ 116.68] key UP   c5r3 -
+[ 116.79]   | > _1234567890+-\!"#$%&'()0[]\
+[ 116.93] (+1 key event(s) released before this poll saw them)
+[ 118.71] mod UP   c1r7 LSHIFT
+[ 126.85] key DOWN c7r6 Q
+[ 126.96]   | > _1234567890+-\!"#$%&'()0[]\Q
+[ 127.09] key DOWN c1r1 W
+[ 127.09] key UP   c7r6 Q
+[ 127.21]   | > _1234567890+-\!"#$%&'()0[]\QW
+[ 127.34] key UP   c1r1 W
+[ 127.45]   | > _1234567890+-\!"#$%&'()0[]\QWE
+[ 127.58] (+1 key event(s) released before this poll saw them)
+[ 127.70]   | > _1234567890+-\!"#$%&'()0[]\QWER
+[ 127.84] (+1 key event(s) released before this poll saw them)
+[ 128.08] key DOWN c2r6 T
+[ 128.20]   | > _1234567890+-\!"#$%&'()0[]\QWERT
+[ 128.34] key DOWN c3r1 Y
+[ 128.34] key UP   c2r6 T
+[ 128.45]   | > _1234567890+-\!"#$%&'()0[]\QWERTY
+[ 128.59] key UP   c3r1 Y
+[ 128.70]   | > _1234567890+-\!"#$%&'()0[]\QWERTYU
+[ 128.84] (+1 key event(s) released before this poll saw them)
+[ 129.09] (+1 key event(s) released before this poll saw them)
+[ 129.20]   | > _1234567890+-\!"#$%&'()0[]\QWERTYUI
+[ 129.34] key DOWN c4r6 O
+[ 129.45]   | > _1234567890+-\!"#$%&'()0[]\QWERTYUIO
+[ 129.58] key UP   c4r6 O
+[ 129.70]   | > _1234567890+-\!"#$%&'()0[]\QWERTYUIOP
+[ 129.83] (+1 key event(s) released before this poll saw them)
+[ 130.08] key DOWN c5r6 @
+[ 130.19]   | > _1234567890+-\!"#$%&'()0[]\QWERTYUIOP@
+[ 130.32] key UP   c5r6 @
+[ 130.43]   |  'H' $68 C3R5
+[ 130.43]   |  'O' $6F C4R6
+[ 130.43]   |  'S' $73 C1R5
+[ 130.43]   |  'E' $65 C1R6
+[ 130.43]   | STEP 7 PASS
+[ 130.43]   | STEP 8/9: PORT-1 STICK RIGHT
+[ 130.43]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 130.43]   | RELEASE THE STICK; RETURN
+[ 130.43]   | > HOSE
+[ 130.43]   |  'H' $68 C3R5
+[ 130.43]   | *
+[ 130.56] (+1 key event(s) released before this poll saw them)
+[ 130.67]   |  'O' $6F C4R6
+[ 130.67]   |  'S' $73 C1R5
+[ 130.67]   |  'E' $65 C1R6
+[ 130.67]   | STEP 7 PASS
+[ 130.67]   | STEP 8/9: PORT-1 STICK RIGHT
+[ 130.67]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 130.67]   | RELEASE THE STICK; RETURN
+[ 130.67]   | > HOSE
+[ 130.67]   |  'H' $68 C3R5
+[ 130.67]   |  'O' $6F C4R6
+[ 130.92]   | *^
+[ 131.05] (+1 key event(s) released before this poll saw them)
+[ 132.51] mod DOWN c1r7 LSHIFT
+[ 133.74] (+1 key event(s) released before this poll saw them)
+[ 133.85]   | *^Q
+[ 133.99] key DOWN c1r1 W
+[ 134.10]   | *^QW
+[ 134.23] key UP   c1r1 W
+[ 134.34]   | *^QWE
+[ 134.48] (+1 key event(s) released before this poll saw them)
+[ 134.59]   | *^QWER
+[ 134.73] (+1 key event(s) released before this poll saw them)
+[ 134.98] key DOWN c2r6 T
+[ 135.09]   | *^QWERT
+[ 135.23] key UP   c2r6 T
+[ 135.34]   | *^QWERTY
+[ 135.47] (+1 key event(s) released before this poll saw them)
+[ 135.59]   | *^QWERTYU
+[ 135.72] (+1 key event(s) released before this poll saw them)
+[ 135.97] key DOWN c4r1 I
+[ 136.08]   | *^QWERTYUI
+[ 136.22] key UP   c4r1 I
+[ 136.33]   | *^QWERTYUIO
+[ 136.47] (+1 key event(s) released before this poll saw them)
+[ 136.72] key DOWN c5r1 P
+[ 136.84]   | *^QWERTYUIOP
+[ 136.97] key UP   c5r1 P
+[ 137.09]   | *^QWERTYUIOP@
+[ 137.23] (+1 key event(s) released before this poll saw them)
+[ 137.48] key DOWN c6r1 *
+[ 137.59]   | *^QWERTYUIOP@*
+[ 137.72] key UP   c6r1 *
+[ 137.83]   | *^QWERTYUIOP@*^
+[ 137.97] (+1 key event(s) released before this poll saw them)
+[ 139.22] mod UP   c1r7 LSHIFT
+[ 140.07]   | *^QWERTYUIOP@*^A
+[ 140.21] (+1 key event(s) released before this poll saw them)
+[ 140.32]   | *^QWERTYUIOP@*^AS
+[ 140.45] (+1 key event(s) released before this poll saw them)
+[ 140.70] key DOWN c2r2 D
+[ 140.82]   | *^QWERTYUIOP@*^ASD
+[ 140.96] key DOWN c2r5 F
+[ 140.96] key UP   c2r2 D
+[ 141.07]   | *^QWERTYUIOP@*^ASDF
+[ 141.20] key UP   c2r5 F
+[ 141.31]   | *^QWERTYUIOP@*^ASDFG
+[ 141.44] (+1 key event(s) released before this poll saw them)
+[ 141.69] key DOWN c3r5 H
+[ 141.80]   | *^QWERTYUIOP@*^ASDFGH
+[ 141.94] key UP   c3r5 H
+[ 142.06]   | *^QWERTYUIOP@*^ASDFGHJ
+[ 142.19] (+1 key event(s) released before this poll saw them)
+[ 142.44] key DOWN c4r5 K
+[ 142.55]   | *^QWERTYUIOP@*^ASDFGHJK
+[ 142.68] key UP   c4r5 K
+[ 142.80]   | *^QWERTYUIOP@*^ASDFGHJKL
+[ 142.93] (+1 key event(s) released before this poll saw them)
+[ 143.17] (+1 key event(s) released before this poll saw them)
+[ 143.28]   | *^QWERTYUIOP@*^ASDFGHJKL:
+[ 143.53]   | *^QWERTYUIOP@*^ASDFGHJKL:;
+[ 143.67] (+1 key event(s) released before this poll saw them)
+[ 143.91] key DOWN c6r5 =
+[ 144.03]   | *^QWERTYUIOP@*^ASDFGHJKL:;=
+[ 144.16] key UP   c6r5 =
+[ 145.16] mod DOWN c1r7 LSHIFT
+[ 145.41] key DOWN c1r2 A
+[ 145.52]   | *^QWERTYUIOP@*^ASDFGHJKL:;=A
+[ 145.66] key UP   c1r2 A
+[ 145.77]   | *^QWERTYUIOP@*^ASDFGHJKL:;=AS
+[ 145.90] (+1 key event(s) released before this poll saw them)
+[ 146.15] (+1 key event(s) released before this poll saw them)
+[ 146.26]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASD
+[ 146.40] key DOWN c2r5 F
+[ 146.51]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDF
+[ 146.64] key UP   c2r5 F
+[ 146.75]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFG
+[ 146.88] (+1 key event(s) released before this poll saw them)
+[ 147.13] key DOWN c3r5 H
+[ 147.25]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGH
+[ 147.38] key UP   c3r5 H
+[ 147.51]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGHJ
+[ 147.64] (+1 key event(s) released before this poll saw them)
+[ 147.89] key DOWN c4r5 K
+[ 148.01]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGHJK
+[ 148.14] key UP   c4r5 K
+[ 148.25]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGHJKL
+[ 148.39] (+1 key event(s) released before this poll saw them)
+[ 148.64] key DOWN c5r5 :
+[ 148.75]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGHJKL[
+[ 148.89] key UP   c5r5 :
+[ 149.00]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGHJKL[]
+[ 149.13] (+1 key event(s) released before this poll saw them)
+[ 149.38] key DOWN c6r5 =
+[ 149.49]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGHJKL[]=
+[ 149.63] key UP   c6r5 =
+[ 150.37] mod UP   c1r7 LSHIFT
+[ 150.99]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGHJKL[]=Z
+[ 151.12] (+1 key event(s) released before this poll saw them)
+[ 151.37] key DOWN c2r7 X
+[ 151.49]   | X
+[ 151.62] key UP   c2r7 X
+[ 151.73]   | XC
+[ 151.86] (+1 key event(s) released before this poll saw them)
+[ 152.11] (+1 key event(s) released before this poll saw them)
+[ 152.23]   | XCV
+[ 152.48]   | XCVB
+[ 152.62] (+1 key event(s) released before this poll saw them)
+[ 152.86] key DOWN c4r7 N
+[ 152.97]   | XCVBN
+[ 153.11] key UP   c4r7 N
+[ 153.22]   | XCVBNM
+[ 153.36] (+1 key event(s) released before this poll saw them)
+[ 153.61] key DOWN c5r7 ,
+[ 153.72]   | XCVBNM,
+[ 153.86] key UP   c5r7 ,
+[ 153.97]   | XCVBNM,.
+[ 154.10] (+1 key event(s) released before this poll saw them)
+[ 154.35] key DOWN c6r7 /
+[ 154.46]   | XCVBNM,./
+[ 154.60] key UP   c6r7 /
+[ 155.83] mod DOWN c1r7 LSHIFT
+[ 156.56] (+1 key event(s) released before this poll saw them)
+[ 156.67]   | XCVBNM,./Z
+[ 156.80] key DOWN c2r7 X
+[ 156.91]   | XCVBNM,./ZX
+[ 157.04] key UP   c2r7 X
+[ 157.15]   | XCVBNM,./ZXC
+[ 157.29] (+1 key event(s) released before this poll saw them)
+[ 157.55] key DOWN c3r7 V
+[ 157.67]   | XCVBNM,./ZXCV
+[ 157.80] key UP   c3r7 V
+[ 157.91]   | XCVBNM,./ZXCVB
+[ 158.04] (+1 key event(s) released before this poll saw them)
+[ 158.28] key DOWN c4r7 N
+[ 158.39]   | XCVBNM,./ZXCVBN
+[ 158.53] key UP   c4r7 N
+[ 158.64]   | XCVBNM,./ZXCVBNM
+[ 158.78] (+1 key event(s) released before this poll saw them)
+[ 159.03] key DOWN c5r7 ,
+[ 159.14]   | XCVBNM,./ZXCVBNM<
+[ 159.27] key UP   c5r7 ,
+[ 159.39]   | XCVBNM,./ZXCVBNM<>
+[ 159.52] (+1 key event(s) released before this poll saw them)
+[ 159.76] key DOWN c6r7 /
+[ 159.87]   | XCVBNM,./ZXCVBNM<>?
+[ 160.00] key UP   c6r7 /
+[ 161.23] mod UP   c1r7 LSHIFT
+[ 178.06] mod DOWN c6r4 RSHIFT
+[ 179.04] key DOWN c7r1 LEFTARROW
+[ 179.15]   | XCVBNM,./ZXCVBNM<>?_
+[ 179.29] key DOWN c7r0 1
+[ 179.29] key UP   c7r1 LEFTARROW
+[ 179.40]   | XCVBNM,./ZXCVBNM<>?_!
+[ 179.54] key DOWN c7r3 2
+[ 179.54] key UP   c7r0 1
+[ 179.65]   | XCVBNM,./ZXCVBNM<>?_!"
+[ 179.79] key DOWN c1r0 3
+[ 179.79] key UP   c7r3 2
+[ 179.90]   | XCVBNM,./ZXCVBNM<>?_!"#
+[ 180.04] key UP   c1r0 3
+[ 180.15]   | XCVBNM,./ZXCVBNM<>?_!"#$
+[ 180.28] (+1 key event(s) released before this poll saw them)
+[ 180.39]   | XCVBNM,./ZXCVBNM<>?_!"#$%
+[ 180.52] (+1 key event(s) released before this poll saw them)
+[ 180.63]   | XCVBNM,./ZXCVBNM<>?_!"#$%&
+[ 180.76] (+1 key event(s) released before this poll saw them)
+[ 181.01] key DOWN c3r0 7
+[ 181.12]   | XCVBNM,./ZXCVBNM<>?_!"#$%&'
+[ 181.25] key DOWN c3r3 8
+[ 181.25] key UP   c3r0 7
+[ 181.36]   | XCVBNM,./ZXCVBNM<>?_!"#$%&'(
+[ 181.50] key DOWN c4r0 9
+[ 181.50] key UP   c3r3 8
+[ 181.61]   | XCVBNM,./ZXCVBNM<>?_!"#$%&'()
+[ 181.75] key UP   c4r0 9
+[ 181.86]   | XCVBNM,./ZXCVBNM<>?_!"#$%&'()0
+[ 181.99] (+1 key event(s) released before this poll saw them)
+[ 182.10]   | XCVBNM,./ZXCVBNM<>?_!"#$%&'()0[
+[ 182.24] (+1 key event(s) released before this poll saw them)
+[ 182.48] (+1 key event(s) released before this poll saw them)
+[ 182.59]   | XCVBNM,./ZXCVBNM<>?_!"#$%&'()0[]
+[ 182.73] (+1 key event(s) released before this poll saw them)
+[ 182.85]   | XCVBNM,./ZXCVBNM<>?_!"#$%&'()0[]\
+[ 184.82]   | XCVBNM,./ZXCVBNM<>?_!"#$%&'()0[]\Q
+[ 184.95] (+1 key event(s) released before this poll saw them)
+[ 185.07]   | XCVBNM,./ZXCVBNM<>?_!"#$%&'()0[]\QW
+[ 185.20] (+1 key event(s) released before this poll saw them)
+[ 185.31]   | XCVBNM,./ZXCVBNM<>?_!"#$%&'()0[]\QWE
+[ 185.45] (+1 key event(s) released before this poll saw them)
+[ 185.56]   | XCVBNM,./ZXCVBNM<>?_!"#$%&'()0[]\QWER
+[ 185.69] (+1 key event(s) released before this poll saw them)
+[ 185.94] key DOWN c2r6 T
+[ 186.05]   | XCVBNM,./ZXCVBNM<>?_!"#$%&'()0[]\QWERT
+[ 186.18] key DOWN c3r1 Y
+[ 186.18] key UP   c2r6 T
+[ 186.29]   | XCVBNM,./ZXCVBNM<>?_!"#$%&'()0[]\QWERTY
+[ 186.43] key DOWN c3r6 U
+[ 186.43] key UP   c3r1 Y
+[ 186.54]   | XCVBNM,./ZXCVBNM<>?_!"#$%&'()0[]\QWERTYU
+[ 186.67] key UP   c3r6 U
+[ 186.78]   |  'S' $73 C1R5
+[ 186.78]   |  'E' $65 C1R6
+[ 186.78]   | STEP 7 PASS
+[ 186.78]   | STEP 8/9: PORT-1 STICK RIGHT
+[ 186.78]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 186.78]   | RELEASE THE STICK; RETURN
+[ 186.78]   | > HOSE
+[ 186.78]   | I
+[ 186.91] (+1 key event(s) released before this poll saw them)
+[ 187.03]   |  'E' $65 C1R6
+[ 187.03]   | STEP 7 PASS
+[ 187.03]   | STEP 8/9: PORT-1 STICK RIGHT
+[ 187.03]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 187.03]   | RELEASE THE STICK; RETURN
+[ 187.03]   | > HOSE
+[ 187.03]   |  'H' $68 C3R5
+[ 187.03]   | IO
+[ 187.16] (+1 key event(s) released before this poll saw them)
+[ 187.42] (+1 key event(s) released before this poll saw them)
+[ 187.54]   | IOP
+[ 187.67] (+1 key event(s) released before this poll saw them)
+[ 187.79]   | IOP@
+[ 187.92] key DOWN c6r1 *
+[ 188.04]   | IOP@*
+[ 188.17] key UP   c6r1 *
+[ 188.17] (+1 key event(s) released before this poll saw them)
+[ 188.28]   | IOP@*^
+[ 188.91] key DOWN c1r2 A
+[ 189.02]   | IOP@*^A
+[ 189.16] key UP   c1r2 A
+[ 189.27]   | IOP@*^AS
+[ 189.40] (+1 key event(s) released before this poll saw them)
+[ 189.51]   | IOP@*^ASD
+[ 189.65] (+1 key event(s) released before this poll saw them)
+[ 189.90] (+1 key event(s) released before this poll saw them)
+[ 190.14] key DOWN c3r2 G
+[ 190.39] key DOWN c3r5 H
+[ 190.39] key UP   c3r2 G
+[ 190.66] key UP   c3r5 H
+[ 190.91] (+1 key event(s) released before this poll saw them)
+[ 191.16] (+1 key event(s) released before this poll saw them)
+[ 191.41] (+1 key event(s) released before this poll saw them)
+[ 191.65] (+1 key event(s) released before this poll saw them)
+[ 191.91] (+1 key event(s) released before this poll saw them)
+[ 192.15] (+1 key event(s) released before this poll saw them)
+[ 192.90] key DOWN c1r4 Z
+[ 193.16] key UP   c1r4 Z
+[ 193.40] (+1 key event(s) released before this poll saw them)
+[ 193.65] (+1 key event(s) released before this poll saw them)
+[ 193.89] key DOWN c3r7 V
+[ 194.14] key DOWN c3r4 B
+[ 194.14] key UP   c3r7 V
+[ 194.39] key UP   c3r4 B
+[ 194.64] (+1 key event(s) released before this poll saw them)
+[ 194.88] (+1 key event(s) released before this poll saw them)
+[ 195.13] (+1 key event(s) released before this poll saw them)
+[ 195.38] key DOWN c5r4 .   <- COLUMN BLEED? c6r4 RSHIFT is held
+[ 195.63] key DOWN c6r7 /
+[ 195.63] key UP   c5r4 .
+[ 195.87] key UP   c6r7 /
+[ 196.61] mod UP   c6r4 RSHIFT
+[ 202.01] key DOWN c0r1 RETURN
+[ 202.37]   |  'S' $73 C1R5
+[ 202.37]   |  'E' $65 C1R6
+[ 202.37]   | STEP 9 PASS
+[ 202.37]   | FREE: TYPE LINES, EMPTY LINE ENDS
+[ 202.37]   | > _1234567890+-\!"#$%&'()0[]\QWERTYUIOP@
+[ 202.37]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGHJKL[]=Z
+[ 202.37]   | XCVBNM,./ZXCVBNM<>?_!"#$%&'()0[]\QWERTYU
+[ 202.37]   | IOP@*^ASD
+[ 202.37]   |  '_' $5F C7R1
+[ 202.61]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 202.61]   | RELEASE THE STICK; RETURN
+[ 202.61]   | > HOSE
+[ 202.61]   |  'H' $68 C4R6
+[ 202.61]   |  'O' $6F C4R6
+[ 202.61]   |  'S' $73 C1R5
+[ 202.61]   |  'E' $65 C1R6
+[ 202.61]   | STEP 9 PASS
+[ 202.61]   |  '1' $31 C7R0
+[ 202.61]   |  '2' $32 C7R3
+[ 202.61]   |  '3' $33 C1R0
+[ 202.61]   |  '4' $34 C1R3
+[ 202.85]   | FREE: TYPE LINES, EMPTY LINE ENDRTYUIOP@
+[ 202.85]   |  '5' $35 C2R0
+[ 202.85]   |  '6' $36 C2R3
+[ 202.85]   |  '7' $37 C3R0
+[ 202.85]   |  '8' $38 C3R3
+[ 203.10]   | FREE: TYPE LINES, EMPTY LINE ENDS
+[ 203.10]   | > _1234567890+-\!"#$%&'()0[]\QWERTYUIOP@
+[ 203.10]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGHJKL[]=Z
+[ 203.10]   | XCVBNM,./ZXCVBNM<>?_!"#$%&'()0[]\QWERTYU
+[ 203.10]   | IOP@*^ASD
+[ 203.10]   |  '9' $39 C4R0
+[ 203.10]   |  '0' $30 C4R3
+[ 203.10]   |  '+' $2B C5R0
+[ 203.10]   |  '-' $2D C5R3
+[ 203.35]   | > _1234567890+-\SDFGHJKL:;=ASDFGHJKL[]=Z
+[ 203.35]   | XCVBNM,./ZXCVBNM<>?_!"#$%&'()0[]\QWERTYU
+[ 203.35]   | IOP@*^ASD
+[ 203.35]   |  '_' $5F C7R1
+[ 203.35]   |  '\' $5C C6R0
+[ 203.35]   |  '"' $22 C7R3+SH
+[ 203.35]   |  '#' $23 C1R0+SH
+[ 203.60]   | STEP 9 PASS
+[ 203.60]   | FREE: TYPE LINES, EMPTY LINE ENDS
+[ 203.60]   | > _1234567890+-\!"#$%&'()0[]\QWERTYUIOP@
+[ 203.60]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGHJKL[]=Z
+[ 203.60]   |  '8' $38 C3R3
+[ 203.60]   |  '9' $39 C4R0
+[ 203.60]   |  '0' $30 C4R3
+[ 203.60]   |  '+' $2B C5R0
+[ 203.60]   |  '-' $2D C5R3
+[ 203.60]   |  '\' $5C C6R0
+[ 203.60]   |  '!' $21 C7R0+SH
+[ 203.60]   |  '$' $24 C1R3+SH
+[ 203.60]   |  '%' $25 C2R0+SH
+[ 203.60]   |  '&' $26 C2R3+SH
+[ 203.84]   |  '5' $35 C2R0
+[ 203.84]   |  '6' $36 C2R3
+[ 203.84]   |  '7' $37 C3R0
+[ 203.84]   |  '$' $24 C2R0+SH
+[ 203.84]   |  '&' $26 C2R3+SH
+[ 203.84]   |  ''' $27 C3R0+SH
+[ 203.84]   |  '(' $28 C3R3+SH
+[ 203.84]   |  ')' $29 C4R0+SH
+[ 203.84]   |  '0' $30 C4R3
+[ 204.08]   |  '1' $31 C7R0
+[ 204.08]   |  '2' $32 C7R3
+[ 204.08]   |  '3' $33 C1R0
+[ 204.08]   |  '4' $34 C1R3
+[ 204.08]   |  '%' $25 C2R0+SH
+[ 204.08]   |  '[' $7B C5R0+SH
+[ 204.08]   |  ']' $7D C5R3+SH
+[ 204.08]   |  '\' $7C C6R0+SH
+[ 204.33]   |  '$' $24 C1R3+SH
+[ 204.33]   |  'Q' $71 C7R6
+[ 204.33]   |  'W' $77 C1R1
+[ 204.33]   |  'E' $65 C1R6
+[ 204.33]   |  'R' $72 C2R1
+[ 204.58]   |  '%' $25 C2R0+SH
+[ 204.58]   |  'T' $74 C2R6
+[ 204.58]   |  'Y' $79 C3R1
+[ 204.58]   |  'U' $75 C3R6
+[ 204.58]   |  'I' $69 C4R1
+[ 204.82]   |  '&' $26 C2R3+SH
+[ 204.82]   |  ''' $27 C3R0+SH
+[ 204.82]   |  '(' $28 C3R3+SH
+[ 204.82]   |  ')' $29 C4R0+SH
+[ 204.82]   |  '0' $30 C4R3
+[ 204.82]   |  '[' $7B C5R0+SH
+[ 204.82]   |  ']' $7D C5R3+SH
+[ 204.82]   |  'O' $6F C4R6
+[ 204.82]   |  'P' $70 C5R1
+[ 204.82]   |  '@' $40 C5R6
+[ 204.82]   |  '*' $2A C6R1
+[ 205.06]   |  '&' $26 C3R0+SH
+[ 205.06]   |  '(' $28 C3R3+SH
+[ 205.06]   |  ')' $29 C4R0+SH
+[ 205.06]   |  '0' $30 C4R3
+[ 205.06]   |  '[' $7B C5R0+SH
+[ 205.06]   |  ']' $7D C5R3+SH
+[ 205.06]   |  '\' $7C C6R0+SH
+[ 205.06]   |  'P' $70 C5R6
+[ 205.06]   |  '*' $2A C6R1
+[ 205.06]   |  '^' $5E C6R6
+[ 205.06]   |  'Q' $51 C7R6+SH
+[ 205.06]   |  'W' $57 C1R1+SH
+[ 205.06]   |  'E' $45 C1R6+SH
+[ 205.32]   |  ''' $27 C3R0+SH
+[ 205.32]   |  'I' $69 C4R1
+[ 205.32]   |  'O' $6F C4R6
+[ 205.32]   |  'P' $70 C5R1
+[ 205.32]   |  '@' $40 C5R6
+[ 205.32]   |  'R' $52 C2R1+SH
+[ 205.32]   |  'T' $54 C2R6+SH
+[ 205.32]   |  'Y' $59 C3R1+SH
+[ 205.56]   |  '\' $7C C7R6
+[ 205.56]   |  'W' $77 C1R1
+[ 205.56]   |  'E' $65 C1R6
+[ 205.56]   |  'R' $72 C2R1
+[ 205.56]   |  'T' $74 C2R6
+[ 205.56]   |  'Y' $79 C3R1
+[ 205.56]   |  'U' $75 C3R6
+[ 205.56]   |  'R' $52 C2R6+SH
+[ 205.56]   |  'Y' $59 C3R1+SH
+[ 205.56]   |  'U' $55 C3R6+SH
+[ 205.56]   |  'I' $49 C4R1+SH
+[ 205.56]   |  'O' $4F C4R6+SH
+[ 205.56]   |  'P' $50 C5R1+SH
+[ 205.81]   |  'Q' $71 C7R6
+[ 205.81]   |  'W' $57 C1R1+SH
+[ 205.81]   |  'E' $45 C1R6+SH
+[ 205.81]   |  'R' $52 C2R1+SH
+[ 205.81]   |  'T' $54 C2R6+SH
+[ 205.81]   |  '@' $60 C5R6+SH
+[ 205.81]   |  '*' $2A C6R1
+[ 205.81]   |  '^' $7E C6R6+SH
+[ 206.06]   |  'Q' $51 C7R6+SH
+[ 206.06]   |  'A' $61 C1R2
+[ 206.06]   |  'S' $73 C1R5
+[ 206.06]   |  'F' $66 C2R5
+[ 206.06]   |  'G' $67 C3R2
+[ 206.31]   |  'W' $57 C1R1+SH
+[ 206.31]   |  'D' $64 C2R2
+[ 206.31]   |  'F' $66 C2R5
+[ 206.31]   |  'G' $67 C3R2
+[ 206.31]   |  'H' $68 C3R5
+[ 206.31]   |  'K' $6B C4R5
+[ 206.31]   |  'L' $6C C5R2
+[ 206.56]   |  'E' $45 C1R6+SH
+[ 206.56]   |  'R' $52 C2R1+SH
+[ 206.56]   |  'T' $54 C2R6+SH
+[ 206.56]   |  'Y' $59 C3R1+SH
+[ 206.56]   |  'J' $6A C4R2
+[ 206.56]   |  'K' $6B C4R5
+[ 206.56]   |  'L' $6C C5R2
+[ 206.56]   |  ':' $3A C5R5
+[ 206.56]   |  '=' $3D C6R5
+[ 206.56]   |  'A' $41 C1R2+SH
+[ 206.80]   |  'R' $52 C2R1+SH
+[ 206.80]   |  'T' $54 C2R6+SH
+[ 206.80]   |  'Y' $59 C3R1+SH
+[ 206.80]   |  'U' $55 C3R6+SH
+[ 206.80]   |  'K' $6B C4R5
+[ 206.80]   |  'L' $6C C5R2
+[ 206.80]   |  ':' $3A C5R5
+[ 206.80]   |  ';' $3B C6R2
+[ 206.80]   |  'S' $53 C1R5+SH
+[ 206.80]   |  'D' $44 C2R2+SH
+[ 206.80]   |  'F' $46 C2R5+SH
+[ 207.05]   |  'G' $67 C3R2
+[ 207.05]   |  'H' $68 C3R5
+[ 207.05]   |  'J' $6A C4R2
+[ 207.05]   |  'G' $47 C3R2+SH
+[ 207.05]   |  'H' $48 C3R5+SH
+[ 207.05]   |  'J' $4A C4R2+SH
+[ 207.29]   |  '^' $7E C1R2
+[ 207.29]   |  'S' $73 C1R5
+[ 207.29]   |  'D' $64 C2R2
+[ 207.29]   |  'F' $66 C2R5
+[ 207.29]   |  'G' $47 C3R5+SH
+[ 207.29]   |  'J' $4A C4R2+SH
+[ 207.29]   |  'K' $4B C4R5+SH
+[ 207.29]   |  'L' $4C C5R2+SH
+[ 207.29]   |  '[' $5B C5R5+SH
+[ 207.29]   |  ']' $5D C6R2+SH
+[ 207.54]   |  'A' $61 C1R2
+[ 207.54]   |  'S' $73 C1R5
+[ 207.54]   |  'D' $64 C2R2
+[ 207.54]   |  'F' $66 C2R5
+[ 207.54]   |  'G' $67 C3R2
+[ 207.54]   |  'H' $68 C3R5
+[ 207.54]   |  'J' $6A C4R2
+[ 207.54]   |  'G' $47 C3R2+SH
+[ 207.54]   |  'H' $48 C3R5+SH
+[ 207.54]   |  'J' $4A C4R2+SH
+[ 207.54]   |  'K' $4B C4R5+SH
+[ 207.54]   |  'L' $4C C5R5+SH
+[ 207.54]   |  '=' $3D C6R5
+[ 207.54]   |  'Z' $7A C1R4
+[ 207.54]   |  'X' $78 C2R7
+[ 207.54]   |  'C' $63 C2R4
+[ 207.78]   |  'K' $6B C5R2
+[ 207.78]   |  'L' $4C C5R2+SH
+[ 207.78]   |  'V' $76 C3R7
+[ 207.78]   |  'B' $62 C3R4
+[ 207.78]   |  'N' $6E C4R7
+[ 207.78]   |  'M' $6D C4R4
+[ 208.03]   |  'L' $6C C5R2
+[ 208.03]   |  ':' $3A C5R5
+[ 208.03]   |  ';' $3B C6R2
+[ 208.03]   |  '=' $3D C1R2+SH
+[ 208.03]   |  '[' $5B C5R5+SH
+[ 208.03]   |  ']' $5D C6R2+SH
+[ 208.03]   |  '=' $3D C6R5
+[ 208.03]   |  'Z' $7A C1R4
+[ 208.03]   |  'X' $78 C2R7
+[ 208.03]   |  'C' $63 C2R4
+[ 208.03]   |  'V' $76 C3R7
+[ 208.03]   |  'B' $62 C4R7
+[ 208.03]   |  ',' $2C C5R7
+[ 208.03]   |  '.' $2E C5R4
+[ 208.03]   |  '/' $2F C6R7
+[ 208.03]   |  'Z' $5A C1R4+SH
+[ 208.28]   |  'A' $41 C1R2+SH
+[ 208.28]   |  '=' $3D C6R5
+[ 208.28]   |  'Z' $7A C1R4
+[ 208.28]   |  'X' $78 C2R7
+[ 208.28]   |  'C' $63 C2R4
+[ 208.28]   |  'V' $76 C3R7
+[ 208.28]   |  'B' $62 C3R4
+[ 208.28]   |  'N' $6E C4R7
+[ 208.28]   |  'X' $58 C2R7+SH
+[ 208.28]   |  'C' $43 C2R4+SH
+[ 208.28]   |  'V' $56 C3R7+SH
+[ 208.53]   |  'J' $4A C4R5+SH
+[ 208.53]   |  'L' $4C C5R2+SH
+[ 208.53]   |  '[' $5B C5R5+SH
+[ 208.53]   |  ']' $5D C6R2+SH
+[ 208.53]   |  'B' $42 C3R4+SH
+[ 208.53]   |  'M' $4D C4R4+SH
+[ 208.53]   |  '<' $3C C5R7+SH
+[ 208.77]   |  'K' $4B C4R5+SH
+[ 208.77]   |  'C' $43 C2R4+SH
+[ 208.77]   |  'V' $56 C3R7+SH
+[ 208.77]   |  'B' $42 C3R4+SH
+[ 208.77]   |  'N' $4E C4R7+SH
+[ 208.77]   |  '>' $3E C5R4+SH
+[ 208.77]   |  '?' $3F C6R7+SH
+[ 208.77]   |  '_' $5F C7R1
+[ 209.01]   |  '/' $2F C6R7
+[ 209.01]   |  'Z' $5A C1R4+SH
+[ 209.01]   |  'X' $58 C2R7+SH
+[ 209.01]   |  '!' $21 C7R0+SH
+[ 209.01]   |  '"' $22 C7R3+SH
+[ 209.01]   |  '#' $23 C1R0+SH
+[ 209.26]   |  'B' $62 C4R7
+[ 209.26]   |  'M' $6D C4R4
+[ 209.26]   |  ',' $2C C5R7
+[ 209.26]   |  '.' $2E C5R4
+[ 209.26]   |  '!' $21 C7R3+SH
+[ 209.26]   |  '#' $23 C1R0+SH
+[ 209.26]   |  '$' $24 C1R3+SH
+[ 209.26]   |  '%' $25 C2R0+SH
+[ 209.26]   |  '&' $26 C2R3+SH
+[ 209.26]   |  ''' $27 C3R0+SH
+[ 209.51]   |  'N' $6E C4R7
+[ 209.51]   |  'V' $56 C3R7+SH
+[ 209.51]   |  'B' $42 C3R4+SH
+[ 209.51]   |  'N' $4E C4R7+SH
+[ 209.51]   |  'M' $4D C4R4+SH
+[ 209.51]   |  '<' $3C C5R7+SH
+[ 209.51]   |  '>' $3E C5R4+SH
+[ 209.51]   |  '?' $3F C6R7+SH
+[ 209.51]   |  '_' $5F C7R1
+[ 209.51]   |  '!' $21 C7R0+SH
+[ 209.51]   |  '"' $22 C7R3+SH
+[ 209.51]   |  '(' $28 C3R3+SH
+[ 209.51]   |  ')' $29 C4R0+SH
+[ 209.51]   |  '0' $30 C4R3
+[ 209.75]   |  'X' $58 C2R4+SH
+[ 209.75]   |  '(' $28 C4R0+SH
+[ 209.75]   |  '0' $30 C4R3
+[ 209.75]   |  '[' $7B C5R0+SH
+[ 209.75]   |  ']' $7D C5R3+SH
+[ 209.75]   |  '\' $7C C6R0+SH
+[ 209.75]   |  'Q' $51 C7R6+SH
+[ 210.00]   |  'C' $43 C2R4+SH
+[ 210.00]   |  '&' $26 C2R3+SH
+[ 210.00]   |  ''' $27 C3R0+SH
+[ 210.00]   |  '(' $28 C3R3+SH
+[ 210.00]   |  ')' $29 C4R0+SH
+[ 210.00]   |  'W' $57 C1R1+SH
+[ 210.00]   |  'E' $45 C1R6+SH
+[ 210.00]   |  'R' $52 C2R1+SH
+[ 210.24]   |  '>' $3E C6R7+SH
+[ 210.24]   |  '_' $5F C7R1
+[ 210.24]   |  '!' $21 C7R0+SH
+[ 210.24]   |  '"' $22 C7R3+SH
+[ 210.24]   |  '#' $23 C1R0+SH
+[ 210.24]   |  '$' $24 C1R3+SH
+[ 210.24]   |  '%' $25 C2R0+SH
+[ 210.24]   |  'T' $54 C2R6+SH
+[ 210.24]   |  'U' $55 C3R6+SH
+[ 210.24]   |  'I' $49 C4R1+SH
+[ 210.49]   |  '?' $3F C6R7+SH
+[ 210.49]   |  'E' $45 C1R6+SH
+[ 210.49]   |  'R' $52 C2R1+SH
+[ 210.49]   |  'T' $54 C2R6+SH
+[ 210.49]   |  'Y' $59 C3R1+SH
+[ 210.49]   |  'O' $4F C4R6+SH
+[ 210.49]   |  'P' $50 C5R1+SH
+[ 210.49]   |  '@' $60 C5R6+SH
+[ 210.73]   |  '0' $30 C4R3
+[ 210.73]   |  '[' $7B C5R0+SH
+[ 210.73]   |  ']' $7D C5R3+SH
+[ 210.73]   |  '\' $7C C6R0+SH
+[ 210.73]   |  'Q' $51 C7R6+SH
+[ 210.73]   |  'W' $57 C1R1+SH
+[ 210.73]   |  '*' $2A C6R1
+[ 210.73]   |  'A' $41 C1R2+SH
+[ 210.73]   |  'S' $53 C1R5+SH
+[ 210.98]   |  ''' $27 C3R0+SH
+[ 210.98]   |  '(' $28 C3R3+SH
+[ 210.98]   |  ')' $29 C4R0+SH
+[ 210.98]   |  '^' $7E C6R6+SH
+[ 210.98]   |  'A' $41 C1R2+SH
+[ 210.98]   |  'S' $53 C1R5+SH
+[ 210.98]   |  'D' $44 C2R2+SH
+[ 210.98]   | > STEPS PPPPPPPPP
+[ 210.98]   | RESULT PASS=9 FAIL=0 SKIP=0
+  D0=00000000  D1=00000000  D2=00000000  D3=00000000  D4=00001000  D5=0000000C  D6=00000000  D7=00000000
+  A0=00100038  A1=00100010  A2=00000000  A3=00012A98  A4=0001A93A  A5=00100010  A6=000F0400  A7=0000F004
+  PC=00000442  SR=0004  instructions=567011  [halt reason=00]
+[ 211.25] step 1 HOLD Q: program ?; performed yes; Q held 3.0s
+[ 211.25] step 2 HOLD ; AND /: program ?; performed yes; ; held 3.0s; / held 2.2s
+[ 211.25] step 3 ROLLOVER: program ?; performed yes; at most 3 keys down at once
+[ 211.25] step 4 RSHIFT, C=: program ?; performed NO; A with RSHIFT: NO; / with RSHIFT: yes; Q with C=: NO
+[ 211.25] step 5 PORT-1 STICK UP: program ?; performed NO; stick row r0 seen held in 15 poll(s); O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[ 211.25] step 6 PORT-1 STICK DOWN: program ?; performed NO; stick row r1 seen held in 19 poll(s); H not typed with the stick held; E not typed with the stick held
+[ 211.25] step 7 PORT-1 STICK LEFT: program ?; performed NO; stick row r2 seen held in 14 poll(s); O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[ 211.25] step 8 PORT-1 STICK RIGHT: program ?; performed NO; stick row r3 seen held in 17 poll(s); H not typed with the stick held; O not typed with the stick held
+[ 211.25] step 9 PORT-1 FIRE: program ?; performed NO; stick row r4 seen held in 13 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[ 211.25] fixed@48: INCOMPLETE (want PASS), STEPS None
+  CHECK FAILED  manual/fixed@48: PASS  INCOMPLETE
+[19:06:36] CPU speed set to 48 MHz
+[19:06:36] control patch nosettle applied (readback ok): THIS RUN IS SUPPOSED TO SHOW THE DEFECT
+========================================================================
+CONTROL RUN nosettle@48: THIS BUILD IS SUPPOSED TO SHOW THE DEFECT
+(the 'nosettle' fix is taken out of the runner in RAM; the C64 screen says CONTROL BUILD)
+========================================================================
+Steps 1-2 of 9; each ends with RETURN and shows PASS or FAIL.
+Type ONLY while the '>' prompt shows (keys pressed while the program prints are lost).
+NO joystick in control port 2 (it locks the keyboard out by design).
+Do each step exactly as described: the driver checks HOW (held time, keys down
+at once, which SHIFT, the stick's row).  A skipped step is never a pass.
+
+STEP 1  HOLD Q
+   do:     hold Q for 2 s, release it, press RETURN
+   expect (defect): ^q: the UP-ARROW glyph ($5E, c6r6, read in the same sample as Q) then q; or nothing (the phantom keeps restarting the debounce)
+STEP 2  HOLD ; AND /
+   do:     hold ; for 2 s, release; hold / for 2 s, release; RETURN
+   expect (defect): l; (c5r2, bleed from ;) or ,/ (c5r7, bleed from /)
+
+This terminal shows what the SCANNER saw ('key DOWN c7r6 Q'); 'COLUMN BLEED?'
+marks the phantom the row settle must prevent.  Letters look the same in both
+cases on screen (upper-case charset); the hex code tells them apart.
+========================================================================
+[kbd_echo] 11516-byte hunk file, args b'CONTROL nosettle 1 2\n'
+  staged 24368 byte(s) in 22 record(s)
+[   0.05] nosettle@48 started: operator, follow the C64 screen  *** CONTROL: SUPPOSED TO SHOW THE DEFECT ***
+[   0.19]   | KBD-ECHO KEYBOARD CHECK (W6-K)
+[   0.43]   | *** CONTROL BUILD: NOSETTLE ***
+[   0.43]   | SUPPOSED TO FAIL: IT LACKS THE FIX,
+[   0.43]   | SO IT SHOULD SHOW THE DEFECT.
+[   0.43]   | EMPTY LINE: SKIP STEP. CTRL+D: QUIT
+[   0.43]   | STEP 1/9: HOLD Q
+[   0.43]   | HOLD Q 2S, RELEASE, RETURN
+[   0.43]   | >
+[  27.27] key DOWN c7r6 Q
+[  27.38]   | > Q
+[  30.75] key UP   c7r6 Q
+[  31.26] key DOWN c0r1 RETURN
+[  31.37]   |  'Q' $71 C7R6
+[  31.37]   | STEP 1 PASS
+[  31.37]   | STEP 2/9: HOLD ; AND /
+[  31.37]   | HOLD ; 2S, RELEASE;
+[  31.37]   | HOLD / 2S, RELEASE; RETURN
+[  31.37]   | >
+[  31.51] key UP   c0r1 RETURN
+[  33.97] key DOWN c6r2 ;
+[  34.09]   | > ;
+[  36.95] key UP   c6r2 ;
+[  37.44] key DOWN c6r7 /
+[  37.55]   | > ;/
+[  41.43] key UP   c6r7 /
+[  41.93] key DOWN c0r1 RETURN
+[  42.04]   |  ';' $3B C6R2
+[  42.04]   |  '/' $2F C6R7
+[  42.04]   | STEP 2 PASS
+[  42.04]   | STEPS PP-------
+[  42.04]   | RESULT PASS=2 FAIL=0 SKIP=0
+  D0=00000000  D1=00000000  D2=00000000  D3=00000000  D4=00001000  D5=00000018  D6=00000000  D7=00000000
+  A0=00100058  A1=00100010  A2=00000000  A3=00012A98  A4=0001A93A  A5=00100010  A6=000F0400  A7=0000F004
+  PC=00000442  SR=0004  instructions=26900  [halt reason=00]
+[  42.32] step 1 HOLD Q: program P; performed yes; Q held 3.2s
+[  42.32] step 2 HOLD ; AND /: program P; performed yes; ; held 2.7s; / held 3.7s
+[  42.32] nosettle@48: INCONCLUSIVE (want DEFECT SHOWN), STEPS PP-------
+  CHECK FAILED  manual/nosettle@48: DEFECT SHOWN  INCONCLUSIVE
+[19:07:32] control patch removed (readback ok)
+[19:07:32] CPU speed set to 48 MHz
+[19:07:32] control patch nojoymask applied (readback ok): THIS RUN IS SUPPOSED TO SHOW THE DEFECT
+========================================================================
+CONTROL RUN nojoymask@48: THIS BUILD IS SUPPOSED TO SHOW THE DEFECT
+(the 'nojoymask' fix is taken out of the runner in RAM; the C64 screen says CONTROL BUILD)
+========================================================================
+Steps 5-9 of 9; each ends with RETURN and shows PASS or FAIL.
+Type ONLY while the '>' prompt shows (keys pressed while the program prints are lost).
+NO joystick in control port 2 (it locks the keyboard out by design).
+Do each step exactly as described: the driver checks HOW (held time, keys down
+at once, which SHIFT, the stick's row).  A skipped step is never a pass.
+
+STEP 5  PORT-1 STICK UP
+   do:     hold the stick in CONTROL PORT 1 UP and type HOSE; release the stick; RETURN
+   expect (defect): 1 3 5 7 9 + \ appear (row 0), DEL rubs characters out
+STEP 6  PORT-1 STICK DOWN
+   do:     hold the stick in CONTROL PORT 1 DOWN and type HOSE; release the stick; RETURN
+   expect (defect): the step ends at once with an empty line (RETURN is on row 1): SKIP, then w r y i p * _ land in the next line
+STEP 7  PORT-1 STICK LEFT
+   do:     hold the stick in CONTROL PORT 1 LEFT and type HOSE; release the stick; RETURN
+   expect (defect): CTRL reads as held (row 2): letters turn into control codes, CTRL+D ends the program, CTRL+J ends the line; a d g j l ;
+STEP 8  PORT-1 STICK RIGHT
+   do:     hold the stick in CONTROL PORT 1 RIGHT and type HOSE; release the stick; RETURN
+   expect (defect): 4 6 8 0 - 2 appear (row 3)
+STEP 9  PORT-1 FIRE
+   do:     hold the stick in CONTROL PORT 1 FIRE and type HOSE; release the stick; RETURN
+   expect (defect): RSHIFT reads as held (row 4): HOSE comes out upper case, with Z C B M > and spaces
+
+This terminal shows what the SCANNER saw ('key DOWN c7r6 Q'); 'COLUMN BLEED?'
+marks the phantom the row settle must prevent.  Letters look the same in both
+cases on screen (upper-case charset); the hex code tells them apart.
+========================================================================
+[kbd_echo] 11516-byte hunk file, args b'CONTROL nojoymask 5 9\n'
+  staged 24368 byte(s) in 22 record(s)
+[   0.04] nojoymask@48 started: operator, follow the C64 screen  *** CONTROL: SUPPOSED TO SHOW THE DEFECT ***
+[   0.19]   | KBD-ECHO KEYBOARD CHECK (W6-K)
+[   0.44]   | *** CONTROL BUILD: NOJOYMASK ***
+[   0.44]   | SUPPOSED TO FAIL: IT LACKS THE FIX,
+[   0.44]   | SO IT SHOULD SHOW THE DEFECT.
+[   0.44]   | EMPTY LINE: SKIP STEP. CTRL+D: QUIT
+[   0.44]   | STEP 5/9: PORT-1 STICK UP
+[   0.44]   | HOLD THE STICK UP, TYPE HOSE,
+[   0.44]   | RELEASE THE STICK; RETURN
+[   0.44]   | >
+[   7.97] key DOWN c0r0 DEL   <- COLUMN BLEED? c1r0 3 is held
+[   7.97] key DOWN c1r0 3   <- COLUMN BLEED? c2r0 5 is held
+[   7.97] key DOWN c2r0 5   <- COLUMN BLEED? c3r0 7 is held
+[   7.97] key DOWN c3r0 7   <- COLUMN BLEED? c4r0 9 is held
+[   7.97] key DOWN c4r0 9   <- COLUMN BLEED? c5r0 + is held
+[   7.97] key DOWN c5r0 +   <- COLUMN BLEED? c6r0 POUND is held
+[   7.97] key DOWN c6r0 POUND   <- COLUMN BLEED? c7r0 1 is held
+[   7.97] key DOWN c7r0 1
+[   7.97] port-1 joystick: rows r0 held low (masked)
+[   8.08]   | > 3579+\1
+[   9.21] key DOWN c3r5 H
+[   9.32]   | > 3579+\1H
+[   9.46] key UP   c3r5 H
+[   9.71] (+1 key event(s) released before this poll saw them)
+[   9.82]   | > 3579+\1HO
+[  10.31]   | > 3579+\1HOS
+[  10.44] (+1 key event(s) released before this poll saw them)
+[  10.69] (+1 key event(s) released before this poll saw them)
+[  10.81]   | > 3579+\1HOSE
+[  12.43] key UP   c0r0 DEL
+[  12.43] key UP   c1r0 3
+[  12.43] key UP   c2r0 5
+[  12.43] key UP   c3r0 7
+[  12.43] key UP   c4r0 9
+[  12.43] key UP   c5r0 +
+[  12.43] key UP   c6r0 POUND
+[  12.43] key UP   c7r0 1
+[  12.68] port-1 joystick: released (no row held)
+[  13.42] key DOWN c0r1 RETURN
+[  13.54]   |  '3' $33 C1R0
+[  13.79]   |  '5' $35 C2R0
+[  13.79]   |  '7' $37 C3R0
+[  13.79]   |  '9' $39 C4R0
+[  13.79]   |  '+' $2B C5R0
+[  14.04]   |  '\' $5C C6R0
+[  14.04]   |  '1' $31 C7R0
+[  14.04]   |  'H' $68 C3R5
+[  14.04]   |  'O' $6F C4R6
+[  14.04]   |  'S' $73 C1R5
+[  14.17] key UP   c0r1 RETURN
+[  14.30]   |  'E' $65 C1R6
+[  14.30]   | STEP 5 FAIL, WANT "HOSE"
+[  14.30]   | STEP 6/9: PORT-1 STICK DOWN
+[  14.30]   | HOLD THE STICK DOWN, TYPE HOSE,
+[  14.30]   | RELEASE THE STICK; RETURN
+[  14.30]   | >
+[  16.41] key DOWN c0r1 RETURN   <- COLUMN BLEED? c1r1 W is held
+[  16.41] key DOWN c1r1 W   <- COLUMN BLEED? c2r1 R is held
+[  16.41] key DOWN c2r1 R   <- COLUMN BLEED? c3r1 Y is held
+[  16.41] key DOWN c3r1 Y   <- COLUMN BLEED? c4r1 I is held
+[  16.41] key DOWN c4r1 I   <- COLUMN BLEED? c5r1 P is held
+[  16.41] key DOWN c5r1 P   <- COLUMN BLEED? c6r1 * is held
+[  16.41] key DOWN c6r1 *   <- COLUMN BLEED? c7r1 LEFTARROW is held
+[  16.41] key DOWN c7r1 LEFTARROW
+[  16.41] port-1 joystick: rows r1 held low (masked)
+[  16.52]   | *** CONTROL BUILD: NOJOYMASK ***
+[  16.52]   | SUPPOSED TO FAIL: IT LACKS THE FIX,
+[  16.52]   | SO IT SHOULD SHOW THE DEFECT.
+[  16.52]   | EMPTY LINE: SKIP STEP. CTRL+D: QUIT
+[  16.52]   | STEP 5/9: PORT-1 STICK UP
+[  16.52]   | HOLD THE STICK UP, TYPE HOSE,
+[  16.52]   | RELEASE THE STIC
+[  16.52]   |  '3' $33 C1R0
+[  16.52]   |  '5' $35 C2R0
+[  16.52]   |  '7' $37 C3R0
+[  16.52]   |  '+' $2B C5R0
+[  16.52]   |  '\' $5C C6R0
+[  16.52]   |  '1' $31 C7R0
+[  16.52]   | STEP 6 SKIP
+[  16.52]   | STEP 7/9: PORT-1 STICK LEFT
+[  16.52]   | HOLD THE STICK LEFT, TYPE HOSE,
+[  16.52]   | RELEASE THE STICK; RETURN
+[  16.52]   | > WRYIP*_
+[  16.76]   | STEP 5/9: PORT-1 STICK UP
+[  16.76]   | HOLD THE STICK UP, TYPE HOSE,
+[  16.76]   | RELEASE THE STICK; RETURN
+[  16.76]   | > 3579+\1HOSE
+[  16.76]   |  '3' $33 C1R0
+[  16.76]   |  '5' $35 C2R0
+[  16.76]   |  '7' $37 C3R0
+[  16.76]   |  '9' $39 C4R0
+[  16.76]   |  '+' $2B C5R0
+[  16.76]   |  '\' $5C C6R0
+[  16.76]   |  '1' $31 C7R0
+[  16.76]   |  'H' $68 C3R5
+[  16.76]   |  'O' $6F C4R6
+[  21.58] key UP   c0r1 RETURN
+[  21.58] key UP   c1r1 W
+[  21.58] key UP   c2r1 R
+[  21.58] key UP   c3r1 Y
+[  21.58] key UP   c4r1 I
+[  21.58] key UP   c5r1 P
+[  21.58] key UP   c6r1 *
+[  21.58] key UP   c7r1 LEFTARROW
+[  21.58] port-1 joystick: released (no row held)
+[ 154.34] key DOWN c0r2 CRSR-R   <- COLUMN BLEED? c1r2 A is held
+[ 154.34] key DOWN c1r2 A   <- COLUMN BLEED? c2r2 D is held
+[ 154.34] key DOWN c2r2 D   <- COLUMN BLEED? c3r2 G is held
+[ 154.34] key DOWN c3r2 G   <- COLUMN BLEED? c4r2 J is held
+[ 154.34] key DOWN c4r2 J   <- COLUMN BLEED? c5r2 L is held
+[ 154.34] key DOWN c5r2 L   <- COLUMN BLEED? c6r2 ; is held
+[ 154.34] key DOWN c6r2 ;   <- COLUMN BLEED? c7r2 CTRL is held
+[ 154.34] mod DOWN c7r2 CTRL
+[ 154.34] port-1 joystick: rows r2 held low (masked)
+[ 154.45]   | STEP 5/9: PORT-1 STICK UP
+[ 154.45]   | HOLD THE STICK UP, TYPE HOSE,
+[ 154.45]   | RELEASE THE STICK; RETURN
+[ 154.45]   | > 3579+\ C1R0
+[ 154.45]   | RELEASE THE STICK; RETURN
+[ 154.45]   | >
+[ 154.45]   | STEP 6 SKIP
+[ 154.45]   | STEP 7/9: PORT-1 STICK LEFT
+[ 154.45]   | HOLD THE STICK LEFT, TYPE HOSE,
+[ 154.45]   | RELEASE THE STICK; RETURN
+[ 154.45]   | > WRYIP*_
+[ 154.45]   |  'W' $77 C1R1
+[ 154.45]   |  'R' $72 C2R1
+[ 154.70]   |  '3' $33 C1R0
+[ 154.70]   |  '5' $35 C2R0
+[ 154.70]   |  '7' $37 C3R0
+[ 154.70]   |  '9' $39 C5R0
+[ 154.70]   | HOLD THE STICK DOWN, TYPE HOSE,
+[ 154.70]   | RELEASE THE STICK; RETURN
+[ 154.70]   | >
+[ 154.70]   | STEP 6 SKIP
+[ 154.70]   |  'Y' $79 C3R1
+[ 154.70]   |  'I' $69 C4R1
+[ 154.70]   |  'P' $70 C5R1
+[ 154.70]   |  '*' $2A C6R1
+[ 154.94]   |  'E' $65AIL, WANT "HOSE"
+[ 154.94]   | STEP 6/9: PORT-1 STICK DOWN
+[ 154.94]   | HOLD THE STICK DOWN, TYPE HOSE,
+[ 154.95]   | RELEASE THE STICK; RETURN
+[ 154.95]   | >
+[ 154.95]   | STEP 6 SKIP
+[ 154.95]   | STEP 7/9: PORT-1 STICK LEFT
+[ 154.95]   |  '_' $5F C7R1
+[ 154.95]   | STEP 7 FAIL, WANT "HOSE"
+[ 154.95]   | STEP 8/9: PORT-1 STICK RIGHT
+[ 154.95]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 154.95]   | RELEASE THE STICK; RETURN
+[ 154.95]   | >
+[ 155.19]   |  'O' $6F C4R6
+[ 155.19]   |  'S' $73 C1R5
+[ 155.19]   |  'E' $65 C1R6
+[ 155.19]   | STEP 5 FAIL, WANT "HOSE"
+[ 157.54] key UP   c0r2 CRSR-R
+[ 157.54] key UP   c1r2 A
+[ 157.54] key UP   c2r2 D
+[ 157.54] key UP   c3r2 G
+[ 157.54] key UP   c4r2 J
+[ 157.54] key UP   c5r2 L
+[ 157.54] key UP   c6r2 ;
+[ 157.54] mod UP   c7r2 CTRL
+[ 157.54] port-1 joystick: released (no row held)
+[ 160.36]   | > 4680-2
+[ 160.50] key DOWN c0r3 F7   <- COLUMN BLEED? c1r3 4 is held
+[ 160.50] key DOWN c1r3 4   <- COLUMN BLEED? c2r3 6 is held
+[ 160.50] key DOWN c2r3 6   <- COLUMN BLEED? c3r3 8 is held
+[ 160.50] key DOWN c3r3 8   <- COLUMN BLEED? c4r3 0 is held
+[ 160.50] key DOWN c4r3 0   <- COLUMN BLEED? c5r3 - is held
+[ 160.50] key DOWN c5r3 -   <- COLUMN BLEED? c6r3 HOME is held
+[ 160.50] key DOWN c6r3 HOME   <- COLUMN BLEED? c7r3 2 is held
+[ 160.50] key DOWN c7r3 2
+[ 160.50] port-1 joystick: rows r3 held low (masked)
+[ 162.75] key DOWN c4r6 O
+[ 162.86]   | > 4680-2O
+[ 162.99] key UP   c4r6 O
+[ 163.35]   | > 4680-2OS
+[ 163.48] (+1 key event(s) released before this poll saw them)
+[ 163.59]   | > 4680-2OSE
+[ 163.72] (+1 key event(s) released before this poll saw them)
+[ 165.94] key UP   c0r3 F7
+[ 165.94] key UP   c1r3 4
+[ 165.94] key UP   c2r3 6
+[ 165.94] key UP   c3r3 8
+[ 165.94] key UP   c4r3 0
+[ 165.94] key UP   c5r3 -
+[ 165.94] key UP   c6r3 HOME
+[ 165.94] key UP   c7r3 2
+[ 165.94] port-1 joystick: released (no row held)
+[ 166.68] key DOWN c0r1 RETURN
+[ 166.79]   |  'S' $73 C1R5
+[ 166.79]   |  'E' $65 C1R6
+[ 166.79]   | STEP 5 FAIL, WANT "HOSE"
+[ 166.79]   | STEP 6/9 STICK DOWN, TYPE HOSE,
+[ 166.79]   | STEP 8/9 STICK RIGHT, TYPE HOSE,
+[ 166.79]   | RELEASE THE STICK; RETURN
+[ 166.79]   | > 4680-2OSE
+[ 166.79]   |  '4' $34 C1R3
+[ 166.79]   |  '6' $36 C2R3
+[ 166.79]   |  '8' $38 C3R3
+[ 167.04]   | HOLD THE STICK DOWN, TYPE HOSE,
+[ 167.04]   | RELEASE THE STICK; RETURN
+[ 167.04]   | >
+[ 167.04]   | STEP 6 S: PORT-1 STICK LEFT
+[ 167.04]   | STEP 8/9: PORT-1 STICK RIGHT
+[ 167.04]   |  '0' $30 C4R3
+[ 167.04]   |  '-' $2D C5R3
+[ 167.04]   |  '2' $32 C7R3
+[ 167.04]   |  'O' $6F C4R6
+[ 167.29]   | HOLD THE STICK LEFT, TYPE HOSE,
+[ 167.29]   | RELEASE THE STICK; RETURN
+[ 167.29]   | > WRYIP*_
+[ 167.29]   |  'W' $77 C1R1
+[ 167.29]   |  'R' $72 C2R1
+[ 167.29]   |  'Y' $79 C3R1
+[ 167.29]   |  'I' $69 C4R1
+[ 167.29]   |  '_' $5F C7R1
+[ 167.29]   | STEP 7 FAIL, WANT "HOSE"
+[ 167.29]   | STEP 8/9: PORT-1 STICK RN
+[ 167.29]   |  'S' $73 C1R5
+[ 167.29]   |  'E' $65 C1R6
+[ 167.29]   | STEP 8 FAIL, WANT "HOSE"
+[ 167.29]   | STEP 9/9: PORT-1 FIRE
+[ 167.29]   | HOLD FIRE, TYPE HOSE,
+[ 167.29]   | RELEASE FIRE; RETURN
+[ 167.29]   | >
+[ 167.43] key UP   c0r1 RETURN
+[ 167.54]   |  'R' $72 C2R1
+[ 167.54]   |  'Y' $79 C3R1
+[ 167.54]   |  'I' $69 C4R1
+[ 167.54]   |  'P' $70 C5R1
+[ 167.54]   |  '*' $2A C6R1
+[ 167.54]   |  '_' $5F C7R1
+[ 167.54]   | STEP 7 FAIL, WANT "HOSE"
+[ 167.54]   | STEP 8/9: PORT-1 STICK RIGHT
+[ 167.54]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 167.54]   | RELEASE THE STICK; RETURN
+[ 168.67] key DOWN c0r4 F1   <- COLUMN BLEED? c1r4 Z is held
+[ 168.67] key DOWN c1r4 Z   <- COLUMN BLEED? c2r4 C is held
+[ 168.67] key DOWN c2r4 C   <- COLUMN BLEED? c3r4 B is held
+[ 168.67] key DOWN c3r4 B   <- COLUMN BLEED? c4r4 M is held
+[ 168.67] key DOWN c4r4 M   <- COLUMN BLEED? c5r4 . is held
+[ 168.67] key DOWN c5r4 .   <- COLUMN BLEED? c6r4 RSHIFT is held
+[ 168.67] mod DOWN c6r4 RSHIFT
+[ 168.67] key DOWN c7r4 SPACE
+[ 168.67] port-1 joystick: rows r4 held low (masked)
+[ 168.79]   | > ZCBM>
+[ 169.78]   | > ZCBM> H
+[ 169.91] (+1 key event(s) released before this poll saw them)
+[ 170.27]   | > ZCBM> HO
+[ 170.41] (+1 key event(s) released before this poll saw them)
+[ 170.65] key DOWN c1r5 S
+[ 170.76]   | > ZCBM> HOS
+[ 170.90] key UP   c1r5 S
+[ 171.01]   | > ZCBM> HOSE
+[ 171.14] (+1 key event(s) released before this poll saw them)
+[ 172.14] key UP   c0r4 F1
+[ 172.14] key UP   c1r4 Z
+[ 172.14] key UP   c2r4 C
+[ 172.14] key UP   c3r4 B
+[ 172.14] key UP   c4r4 M
+[ 172.14] key UP   c5r4 .
+[ 172.14] mod UP   c6r4 RSHIFT
+[ 172.14] key UP   c7r4 SPACE
+[ 172.14] port-1 joystick: released (no row held)
+[ 172.88] key DOWN c0r1 RETURN
+[ 173.00]   |  'Y' $79 C3R1
+[ 173.00]   |  'I' $69 C4R1
+[ 173.00]   |  'P' $70 C5R1
+[ 173.00]   |  '*' $2A C6R1
+[ 173.00]   |  '_' $5F C7R1
+[ 173.00]   | STEP 7 FAIL, WANT "HOSE"
+[ 173.00]   | STEP 8/9: PORT-1IGHT, TYPE HOSE,
+[ 173.00]   |  'C' $43 C2R4+SH
+[ 173.00]   |  'B' $42 C3R4+SH
+[ 173.25]   |  '_' $5F C7R1
+[ 173.25]   | STEP 7 FAIL, WANT "HOSE"
+[ 173.25]   | STEP 8/9: PORT-1 STICK RIGHT
+[ 173.25]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 173.25]   | HOLD FIRE, TYPE HOSE,
+[ 173.25]   | RELEASE FIRE; RETURN
+[ 173.25]   | > ZCBM> HOSE
+[ 173.25]   |  'Z' $5A C1R4+SH
+[ 173.25]   |  'M' $4D C4R4+SH
+[ 173.25]   |  '>' $3E C5R4+SH
+[ 173.25]   |  ' ' $20 C7R4
+[ 173.49]   |  '2' $32 C7R3
+[ 173.49]   |  'O' $6F C4R6
+[ 173.49]   |  'S' $73 C1R5
+[ 173.50]   |  'E' $65 C1R6
+[ 173.50]   | STEP 8 FAIL, WANT "HOSE"
+[ 173.50]   | STEP 9/9: PORT-1 FIRE
+[ 173.50]   |  'H' $48 C3R5+SH
+[ 173.50]   |  'S' $53 C1R5+SH
+[ 173.50]   |  'E' $45 C1R6+SH
+[ 173.75]   |  '8' $38 C3R3
+[ 173.75]   |  '0' $30 C4R3
+[ 173.75]   |  '-' $2D C5R3
+[ 173.75]   |  'O' $4F C4R6+SH
+[ 173.75]   |  'S' $53 C1R5+SH
+[ 173.75]   |  'E' $45 C1R6+SH
+[ 173.75]   | STEP 9 FAIL, WANT "HOSE"
+[ 173.75]   | STEPS ----FSFFF
+[ 173.75]   | RESULT PASS=0 FAIL=4 SKIP=1
+  D0=00000004  D1=00000000  D2=00000004  D3=00000000  D4=00001000  D5=00000018  D6=00000000  D7=00000000
+  A0=00100058  A1=00100010  A2=00000000  A3=00012A98  A4=0001A93A  A5=00100010  A6=000F0400  A7=0000F004
+  PC=00000442  SR=0000  instructions=150601  [halt reason=00]
+[ 173.78] step 5 PORT-1 STICK UP: program F; performed yes; stick row r0 seen held in 19 poll(s); DEFECT: stick on r0: keys on that row read down: c0r0 DEL, c1r0 3, c2r0 5, c3r0 7, c4r0 9, c5r0 +, c6r0 POUND, c7r0 1 | key DOWN c0r0 DEL   <- COLUMN BLEED? c1r0 3 is held | key DOWN c1r0 3   <- COLUMN BLEED? c2r0 5 is held | key DOWN c2r0 5   <- COLUMN BLEED? c3r0 7 is held | key DOWN c3r0 7   <- COLUMN BLEED? c4r0 9 is held | key DOWN c4r0 9   <- COLUMN BLEED? c5r0 + is held | key DOWN c5r0 +   <- COLUMN BLEED? c6r0 POUND is held | key DOWN c6r0 POUND   <- COLUMN BLEED? c7r0 1 is held
+[ 173.78] step 6 PORT-1 STICK DOWN: program S; performed yes; stick row r1 seen held in 1 poll(s); DEFECT: stick on r1: keys on that row read down: c0r1 RETURN, c1r1 W, c2r1 R, c3r1 Y, c4r1 I, c5r1 P, c6r1 *, c7r1 LEFTARROW | key DOWN c0r1 RETURN   <- COLUMN BLEED? c1r1 W is held | key DOWN c1r1 W   <- COLUMN BLEED? c2r1 R is held | key DOWN c2r1 R   <- COLUMN BLEED? c3r1 Y is held | key DOWN c3r1 Y   <- COLUMN BLEED? c4r1 I is held | key DOWN c4r1 I   <- COLUMN BLEED? c5r1 P is held | key DOWN c5r1 P   <- COLUMN BLEED? c6r1 * is held | key DOWN c6r1 *   <- COLUMN BLEED? c7r1 LEFTARROW is held
+[ 173.78] step 7 PORT-1 STICK LEFT: program F; performed yes; stick row r2 seen held in 3 poll(s); DEFECT: stick on r2: keys on that row read down: c0r2 CRSR-R, c1r2 A, c2r2 D, c3r2 G, c4r2 J, c5r2 L, c6r2 ;, c7r2 CTRL | key DOWN c0r2 CRSR-R   <- COLUMN BLEED? c1r2 A is held | key DOWN c1r2 A   <- COLUMN BLEED? c2r2 D is held | key DOWN c2r2 D   <- COLUMN BLEED? c3r2 G is held | key DOWN c3r2 G   <- COLUMN BLEED? c4r2 J is held | key DOWN c4r2 J   <- COLUMN BLEED? c5r2 L is held | key DOWN c5r2 L   <- COLUMN BLEED? c6r2 ; is held | key DOWN c6r2 ;   <- COLUMN BLEED? c7r2 CTRL is held
+[ 173.78] step 8 PORT-1 STICK RIGHT: program F; performed yes; stick row r3 seen held in 22 poll(s); DEFECT: stick on r3: keys on that row read down: c0r3 F7, c1r3 4, c2r3 6, c3r3 8, c4r3 0, c5r3 -, c6r3 HOME, c7r3 2 | key DOWN c0r3 F7   <- COLUMN BLEED? c1r3 4 is held | key DOWN c1r3 4   <- COLUMN BLEED? c2r3 6 is held | key DOWN c2r3 6   <- COLUMN BLEED? c3r3 8 is held | key DOWN c3r3 8   <- COLUMN BLEED? c4r3 0 is held | key DOWN c4r3 0   <- COLUMN BLEED? c5r3 - is held | key DOWN c5r3 -   <- COLUMN BLEED? c6r3 HOME is held | key DOWN c6r3 HOME   <- COLUMN BLEED? c7r3 2 is held
+[ 173.78] step 9 PORT-1 FIRE: program F; performed yes; stick row r4 seen held in 14 poll(s); DEFECT: stick on r4: keys on that row read down: c0r4 F1, c1r4 Z, c2r4 C, c3r4 B, c4r4 M, c5r4 ., c6r4 RSHIFT, c7r4 SPACE | key DOWN c0r4 F1   <- COLUMN BLEED? c1r4 Z is held | key DOWN c1r4 Z   <- COLUMN BLEED? c2r4 C is held | key DOWN c2r4 C   <- COLUMN BLEED? c3r4 B is held | key DOWN c3r4 B   <- COLUMN BLEED? c4r4 M is held | key DOWN c4r4 M   <- COLUMN BLEED? c5r4 . is held | key DOWN c5r4 .   <- COLUMN BLEED? c6r4 RSHIFT is held
+[ 173.78] nojoymask@48: DEFECT SHOWN (want DEFECT SHOWN), STEPS ----FSFFF
+[19:10:40] control patch removed (readback ok)
+[19:10:40] CPU speed set to 1 MHz
+========================================================================
+FIXED BUILD at 1 MHz: every step must PASS
+========================================================================
+Steps 1-9 of 9; each ends with RETURN and shows PASS or FAIL.
+Type ONLY while the '>' prompt shows (keys pressed while the program prints are lost).
+NO joystick in control port 2 (it locks the keyboard out by design).
+Do each step exactly as described: the driver checks HOW (held time, keys down
+at once, which SHIFT, the stick's row).  A skipped step is never a pass.
+
+STEP 1  HOLD Q
+   do:     hold Q for 2 s, release it, press RETURN
+   expect: the line 'q', then STEP 1 PASS
+   defect: ^q: the UP-ARROW glyph ($5E, c6r6, read in the same sample as Q) then q; or nothing (the phantom keeps restarting the debounce)
+STEP 2  HOLD ; AND /
+   do:     hold ; for 2 s, release; hold / for 2 s, release; RETURN
+   expect: the line ';/', then STEP 2 PASS
+   defect: l; (c5r2, bleed from ;) or ,/ (c5r7, bleed from /)
+STEP 3  ROLLOVER
+   do:     press Z and keep it down, add I, add P (all three held), release all, RETURN
+   expect: the line 'zip', then STEP 3 PASS
+   defect: a missing or doubled letter, or a letter nobody pressed
+STEP 4  RSHIFT, C=
+   do:     hold RIGHT SHIFT: type A and /, release; hold C=: type Q, release; RETURN (do not touch LEFT SHIFT)
+   expect: the line 'A?q', then STEP 4 PASS
+   defect: a/ (RSHIFT not decoded), or an extra character from C=
+STEP 5  PORT-1 STICK UP
+   do:     hold the stick in CONTROL PORT 1 UP and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 5 PASS
+   defect: 1 3 5 7 9 + \ appear (row 0), DEL rubs characters out
+STEP 6  PORT-1 STICK DOWN
+   do:     hold the stick in CONTROL PORT 1 DOWN and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 6 PASS
+   defect: the step ends at once with an empty line (RETURN is on row 1): SKIP, then w r y i p * _ land in the next line
+STEP 7  PORT-1 STICK LEFT
+   do:     hold the stick in CONTROL PORT 1 LEFT and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 7 PASS
+   defect: CTRL reads as held (row 2): letters turn into control codes, CTRL+D ends the program, CTRL+J ends the line; a d g j l ;
+STEP 8  PORT-1 STICK RIGHT
+   do:     hold the stick in CONTROL PORT 1 RIGHT and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 8 PASS
+   defect: 4 6 8 0 - 2 appear (row 3)
+STEP 9  PORT-1 FIRE
+   do:     hold the stick in CONTROL PORT 1 FIRE and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 9 PASS
+   defect: RSHIFT reads as held (row 4): HOSE comes out upper case, with Z C B M > and spaces
+
+Then FREE mode: type any lines (every key once, with and without SHIFT);
+an empty line ends the program.
+
+This terminal shows what the SCANNER saw ('key DOWN c7r6 Q'); 'COLUMN BLEED?'
+marks the phantom the row settle must prevent.  Letters look the same in both
+cases on screen (upper-case charset); the hex code tells them apart.
+========================================================================
+[kbd_echo] 11516-byte hunk file, args b'\n'
+  staged 24368 byte(s) in 22 record(s)
+[   0.04] fixed@1 started: operator, follow the C64 screen
+[   0.93]   | KBD-ECHO KEYBOARD CHECK (W6-K)
+[   1.45]   | EMPTY LINE: SKIP STEP. CTRL+D: QUIT
+[   2.68]   | STEP 1/9: HOLD Q
+[   2.93]   | HOLD Q 2S, RELEASE, RETURN
+[   3.17]   | >
+[  10.23] key DOWN c7r6 Q
+[  10.34]   | > Q
+[  13.67] key UP   c7r6 Q
+[  14.16] key DOWN c0r1 RETURN
+[  16.24]   |  'Q' $71 C7R6
+[  16.73]   | STEP 1 PASS
+[  17.96]   | STEP 2/9: HOLD ; AND /
+[  18.21]   | H
+[  18.45]   | HOLD ; 2S, RELEASE;
+[  18.70]   | HOLD / 2S, RELEASE; RETURN
+[  18.83] key UP   c0r1 RETURN
+[  18.95]   | >
+[  20.93]   | > ;
+[  21.06] key DOWN c6r2 ;
+[  24.74] key UP   c6r2 ;
+[  25.48] key DOWN c6r7 /
+[  25.60]   | > ;/
+[  29.88] key UP   c6r7 /
+[  30.86] key DOWN c0r1 RETURN
+[  32.93]   |  ';' $3B C6R2
+[  34.88]   |  '/' $2F C6R7
+[  35.36]   | STEP 2 PASS
+[  36.59]   | STEP 3/9: ROLLOVER
+[  37.07]   | PRESS Z, KEEP IT; ADD I, KEEP IT;
+[  37.31]   | ADD P; RELEASE ALL; RETURN
+[  37.45] key UP   c0r1 RETURN
+[  37.56]   | >
+[  39.41] key DOWN c1r4 Z
+[  39.52]   | > Z
+[  40.50]   | > ZI
+[  40.63] key DOWN c4r1 I
+[  41.49]   | > ZIP
+[  41.62] key DOWN c5r1 P
+[  43.09] key UP   c1r4 Z
+[  43.09] key UP   c4r1 I
+[  43.09] key UP   c5r1 P
+[  44.56] key DOWN c0r1 RETURN
+[  46.63]   |  'Z' $7A C1R4
+[  48.34]   |  'I' $69 C4R1
+[  50.08]   |  'P' $70 C5R1
+[  50.58]   | STEP 3 PASS
+[  51.81]   | STEP 4/9: RSHIFT, C=
+[  52.29]   | RSHIFT+A, RSHIFT+/, THEN C=+Q;
+[  52.54]   | NO LEFT SHIFT; RETURN
+[  52.78]   | >
+[  52.92] key UP   c0r1 RETURN
+[  57.81] mod DOWN c6r4 RSHIFT
+[  59.78] key DOWN c1r2 A
+[  59.90]   | > A
+[  60.03] key UP   c1r2 A
+[  61.51] mod UP   c6r4 RSHIFT
+[  63.46] mod DOWN c6r4 RSHIFT
+[  64.44] key DOWN c6r7 /
+[  64.56]   | > A?
+[  64.68] key UP   c6r7 /
+[  65.66] mod UP   c6r4 RSHIFT
+[  67.87] mod DOWN c7r5 C=
+[  70.82] key DOWN c7r6 Q
+[  70.94]   | > A?Q
+[  71.07] key UP   c7r6 Q
+[  71.84] mod UP   c7r5 C=
+[  74.11] key DOWN c0r1 RETURN
+[  76.24]   |  'Z' $7A C1R4
+[  76.24]   |  'I' $6A C1R4
+[  76.24]   |  'P' $70ASS
+[  76.24]   | STEP 4/9: RSHIFT, C=
+[  76.24]   | RSHIFT+A, RSHIFT+/, THEN C=+Q;
+[  76.24]   | NO LEFT SHIFT; RETURN
+[  76.24]   | > A?Q
+[  76.24]   |  'A' $41 C1R2+SH
+[  76.49]   | > ZIP
+[  76.49]   |  'Z' $7A C1R4
+[  76.49]   |  'P' $70 C5R1
+[  76.49]   | STEP 3 PASS
+[  76.49]   | STEP 4/9: RSHIFT, C=
+[  76.49]   | RSHIFT+A, RSHIFT+/, THEN C=+Q;
+[  76.49]   | NO LEFT SHIFT; RETURN
+[  76.49]   | > A?Q
+[  76.49]   |  'A' $41 C1R2+SH
+[  78.71]   |  '?' $3F C6R7+SH
+[  80.68]   |  'Q' $71 C7R6
+[  81.18]   | STEP 4 PASS
+[  82.40]   | NO LEFT
+[  82.41]   |  'A' $41 C1R2+SH
+[  82.41]   |  '?' $3F C6R7+SH
+[  82.41]   |  'Q' $71 C7R6
+[  82.41]   | STEP 4 PASS
+[  82.41]   | STEP 5/9: PORT-1 STICK UP
+[  82.66]   | NO LEFT SHIFT; RETURN
+[  82.66]   | > A?Q
+[  82.66]   |  'A' $41 C1R2+SH
+[  82.66]   |  '?' $3F C6R7+SH
+[  82.66]   |  'Q' $71 C7R6
+[  82.66]   | STEP 4 PASS
+[  82.66]   | STEP 5/9: PORT-1 STICK UP
+[  82.90]   | STEP 1 PASS
+[  82.90]   | STEP 2/9: HOLD ; AND /
+[  82.90]   | HOLD ; 2S, RELEASE;
+[  82.90]   | HOLD / 2S, RELEASE; RETURN
+[  82.90]   | > ;/
+[  82.90]   |  ';' $3B C6R2
+[  82.90]   |  '/' $2F C6R7
+[  82.90]   | HOLD THE STICK UP, TYPE HOSE,
+[  83.15]   | STEP 2/9: HOLD ; AND /
+[  83.15]   | HOLD ; 2S, RELEASE;
+[  83.15]   | HOLD / 2S, RELEASE; RETURN
+[  83.15]   | > ;/
+[  83.15]   |  ';' $3B C6R2
+[  83.15]   |  '/' $2F C6R7
+[  83.15]   | STEP 2 PASS
+[  83.40]   | RELEASE THE STICK; RETURN
+[  83.52] key UP   c0r1 RETURN
+[  83.64]   | >
+[  85.97] port-1 joystick: rows r0 held low (masked)
+[  87.33]   | > H
+[  87.46] key DOWN c3r5 H
+[  87.70] key UP   c3r5 H
+[  87.82]   | > HO
+[  87.96] (+1 key event(s) released before this poll saw them)
+[  88.45] key DOWN c1r5 S
+[  88.56]   | > HOS
+[  88.70] key UP   c1r5 S
+[  88.81]   | > HOSE
+[  88.94] (+1 key event(s) released before this poll saw them)
+[  89.43] port-1 joystick: released (no row held)
+[  89.93] key DOWN c0r1 RETURN
+[  92.03]   |  'H' $68 C3R5
+[  93.75]   | > ;/
+[  93.75]   |  ';' $3B C6R2
+[  93.75]   |  '/' $2F C6R7
+[  93.75]   | STEP 2 PASS
+[  93.75]   | STEP 3/9: ROLLOVER
+[  93.75]   | PRESS Z, KEEP IT; ADD I, KEEP IT;
+[  93.75]   | ADD P; RELEASE A
+[  93.75]   |  'O' $6F C4R6
+[  94.00]   |  ';' $3B C6R2
+[  94.00]   |  '/' $2F C6R7
+[  94.00]   | STEP 2 PASS
+[  94.00]   | STEP 3/9: ROLLOVER
+[  94.00]   | PRESS Z, KEEP IT; ADD I, KEEP IT;
+[  94.00]   | ADD P; RELEASE ALL; RETURN
+[  94.00]   | > ZIP
+[  95.48]   |  'S' $73 C1R5
+[  97.22]   |  'E' $65 C1R6
+[  97.72]   | STEP 2 PASS
+[  97.72]   | STEP 3/9: ROLLOVER
+[  97.72]   | PRESS Z, KEEP IT; ADD I, KEEP IT;
+[  97.72]   | ADD P; R
+[  97.72]   | STEP 5 PASS
+[  97.97]   | STEP 3/9: ROLLOVER
+[  97.97]   | PRESS Z, KEEP IT; ADD I, KEEP IT;
+[  97.97]   | ADD P; RELEASE ALL; RETURN
+[  97.97]   | > ZIP
+[  99.24]   | STEP 6/9: PORT-1 STICK DOWN
+[  99.49]   | STEP 6/9: PORT-1 STICK DOWN
+[  99.49]   | HOLD THE STICK DOWN, TYP
+[  99.74]   | STEP 5 PASS
+[  99.74]   | STEP 6/9: PORT-1 STICK DOWN
+[  99.74]   | HOLD THE STICK DOWN, TYPE HOSE,
+[  99.99]   | RELEASE THE STICK; RETURN
+[ 100.13] key UP   c0r1 RETURN
+[ 100.25]   | >
+[ 116.98] port-1 joystick: rows r1 held low (masked)
+[ 118.21] key DOWN c3r5 H
+[ 118.32]   | > H
+[ 118.45] key UP   c3r5 H
+[ 118.58]   | > HO
+[ 118.71] (+1 key event(s) released before this poll saw them)
+[ 119.07]   | > HOS
+[ 119.20] (+1 key event(s) released before this poll saw them)
+[ 119.31]   | > HOSE
+[ 119.44] (+1 key event(s) released before this poll saw them)
+[ 120.43] port-1 joystick: released (no row held)
+[ 121.42] key DOWN c0r1 RETURN
+[ 123.54]   |  'H' $68 C3R5
+[ 125.26]   |  'O' $6F C4R6
+[ 127.01]   |  'S' $73 C1R5
+[ 128.49]   | STEP 5 PASS
+[ 128.49]   | STEP 6/9: PORT-1 STICK DOWN
+[ 128.49]   | HOLD THE STICK DOWN, TYPE HOSE,
+[ 128.49]   | RELEASE THE STICK; RETURN
+[ 128.49]   | > HOSE
+[ 128.49]   |  'H' $68 C3R5
+[ 128.49]   |  'O' $6F C4R6
+[ 128.49]   |  'S' $73 C1R5
+[ 128.49]   |  'E' $65 C1R6
+[ 128.74]   |  'E' $65 C1R6
+[ 128.74]   | STEP 5 PASS
+[ 128.74]   | STEP 6/9: PORT-1 STICK DOWN
+[ 128.74]   | HOLD THE STICK DOWN, TYPE HOSE,
+[ 128.74]   | RELEASE THE STICK; RETURN
+[ 128.74]   | > HOSE
+[ 128.74]   |  'H' $68 C3R5
+[ 128.74]   |  'O' $6F C4R6
+[ 128.74]   |  'S' $73 C1R5
+[ 128.74]   |  'E' $65 C1R6
+[ 129.24]   | STEP 6 PASS
+[ 130.48]   | > HOSE   C3R5
+[ 130.48]   |  'O' $6F C4R6
+[ 130.48]   |  'S' $73 C1R5
+[ 130.48]   |  'E' $65 C1R6
+[ 130.48]   | STEP 6 PASS
+[ 130.48]   | STEP 7/9: PORT-1 STICK LEFT
+[ 130.73]   | > HOSE
+[ 130.73]   |  'H' $68 C3R5
+[ 130.73]   |  'O' $6F C4R6
+[ 130.73]   |  'S' $73 C1R5
+[ 130.73]   |  'E' $65 C1R6
+[ 130.73]   | STEP 6 PASS
+[ 130.73]   | STEP 7/9: PORT-1 STICK LEFT
+[ 130.98]   | STEP 5 PASS
+[ 130.98]   | STEP 6/9: PORT-1 STICK DOWN
+[ 130.98]   | HOLD THE STICK DOWN, TYPE HOSE,
+[ 130.98]   | RELEASE THE STICK; RETURN
+[ 130.98]   | > HOSE
+[ 130.98]   |  'H' $68 C3R5
+[ 130.98]   |  'O' $6F C4R6
+[ 130.98]   |  'S' $73 C1R5
+[ 130.98]   |  'E' $65 C1R6
+[ 130.98]   | STEP 6 PASS
+[ 130.98]   | STEP 7/9: PORT-1 STICK LEFT
+[ 130.98]   | HOLD THE STICK LEFT, TYPE HOSE,
+[ 131.23]   | > A?Q
+[ 131.23]   |  'A' $41 C1R2+SH
+[ 131.23]   |  '?' $3F C6R7+SH
+[ 131.23]   |  'Q' $71 C7R6
+[ 131.23]   | STEP 4 PASS
+[ 131.23]   | STEP 5/9: PORT-1 STICK UP
+[ 131.23]   | HOLD THE STICK UP, TYPE HOSE,
+[ 131.23]   | RELEASE THE STICK; RETURN
+[ 131.23]   | > HOSE
+[ 131.23]   |  'H' $68 C3R5
+[ 131.23]   |  'O' $6F C4R6
+[ 131.23]   |  'S' $73 C1R5
+[ 131.23]   |  'E' $65 C1R6
+[ 131.48]   | RELEASE THE STICK; RETURN
+[ 131.61] key UP   c0r1 RETURN
+[ 131.73]   | >
+[ 135.81] port-1 joystick: rows r2 held low (masked)
+[ 136.91]   | > H
+[ 137.04] (+1 key event(s) released before this poll saw them)
+[ 137.28] key DOWN c4r6 O
+[ 137.40]   | > HO
+[ 137.53] key UP   c4r6 O
+[ 137.78] key DOWN c1r5 S
+[ 137.89]   | > HOS
+[ 138.02] key DOWN c1r6 E
+[ 138.02] key UP   c1r5 S
+[ 138.14]   | > HOSE
+[ 138.27] key UP   c1r6 E
+[ 138.76] port-1 joystick: released (no row held)
+[ 139.00] key DOWN c0r1 RETURN
+[ 141.11]   |  '?' $3F C6R7+SH
+[ 141.11]   |  'Q' $71 C7R6
+[ 141.11]   | STEP 4 PASS
+[ 141.11]   | STEP 5/9: PORT-1 STICK UP
+[ 141.11]   | HOLD THE STICK UP, TYPE HOSE,
+[ 141.11]   | RELEASE THE STICK; RETURN
+[ 141.11]   | > HOSE
+[ 141.11]   |  'H' $68 C3R5
+[ 141.35]   |  'Q' $71 C7R6
+[ 141.35]   | STEP 4 PASS
+[ 141.35]   | STEP 5/9: PORT-1 STICK UP
+[ 141.35]   | HOLD THE STICK UP, TYPE HOSE,
+[ 141.35]   | RELEASE THE STICK; RETURN
+[ 141.35]   | > HOSE
+[ 141.35]   |  'H' $68 C3R5
+[ 142.90]   |  'Q' $71 C7R6
+[ 142.90]   | STEP 4 PASS
+[ 142.90]   | STEP 5/9: PORT-1 STICK UP
+[ 142.90]   | HOLD THETHE STICK; RETURN
+[ 142.90]   |  'O' $6F C4R6
+[ 143.16]   | STEP 4 PASS
+[ 143.16]   | STEP 5/9: PORT-1 STICK UP
+[ 143.16]   | HOLD THE STICK UP, TYPE HOSE,
+[ 143.16]   | RELEASE THE STICK; RETURN
+[ 144.65]   |  'S' $73 C1R5
+[ 146.39]   |  'E' $65 C1R6
+[ 146.88]   | STEP 7 PASS
+[ 148.37]   | STEP 8/9: PORT-1 STICK RIGHT
+[ 148.87]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 149.12]   | STEP 7/9: PORT-1 STICK LEFT
+[ 149.12]   | HOLD THE STICK LEFT, TYPE HOSE,
+[ 149.12]   | RELEASE THE STICK; RETURN
+[ 149.12]   | > HOSE
+[ 149.12]   |  'H' $68 C3R5
+[ 149.12]   |  'O' $6F C4R6
+[ 149.12]   |  'S' $73 C1R5
+[ 149.12]   |  'E' $65 C1R6
+[ 149.12]   | STEP 7 PASS
+[ 149.12]   | STEP 8/9: PORT-1 STICK RIGHT
+[ 149.12]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 149.12]   | RELEASE THE STICK; RETURN
+[ 149.37]   |  'S' $73 C1R5
+[ 149.37]   |  'E' $65 C1R6
+[ 149.37]   | STEP 5 PASS
+[ 149.37]   | STEP 6/9: PORT-1 STICK DOWN
+[ 149.37]   | HOLD THE STICK DOWN, TYPE HOSE,
+[ 149.37]   | RELEASE THE STICK; RETURN
+[ 149.37]   | > HOSE
+[ 149.37]   |  'H' $68 C3R5
+[ 149.37]   |  'O' $6F C4R6
+[ 149.37]   |  'S' $73 C1R5
+[ 149.37]   |  'E' $65 C1R6
+[ 149.37]   | STEP 6 PASS
+[ 149.37]   | >
+[ 149.50] key UP   c0r1 RETURN
+[ 151.95] port-1 joystick: rows r3 held low (masked)
+[ 152.55]   | > H
+[ 152.69] (+1 key event(s) released before this poll saw them)
+[ 152.93] key DOWN c4r6 O
+[ 153.05]   | > HO
+[ 153.19] key UP   c4r6 O
+[ 153.54]   | > HOS
+[ 153.67] (+1 key event(s) released before this poll saw them)
+[ 153.92] (+1 key event(s) released before this poll saw them)
+[ 154.03]   | > HOSE
+[ 155.42] port-1 joystick: released (no row held)
+[ 156.16] key DOWN c0r1 RETURN
+[ 158.23]   |  'H' $68 C3R5
+[ 159.96]   |  'E' $65 C1R6
+[ 159.96]   | STEP 5 PASS
+[ 159.96]   | STEP 6/9: PORT-1 STICK DOWN
+[ 159.96]   | HOLD THETHE STICK; RETURN
+[ 159.96]   |  'O' $6F C4R6
+[ 160.21]   | STEP 5 PASS
+[ 160.21]   | STEP 6/9: PORT-1 STICK DOWN
+[ 160.21]   | HOLD THE STICK DOWN, TYPE HOSE,
+[ 160.21]   | RELEASE THE STICK; RETURN
+[ 161.69]   |  'S' $73 C1R5
+[ 163.41]   |  'E' $65 C1R6
+[ 163.90]   | HOLD THE STICK DOWN, TYPE HOSE,
+[ 163.90]   | RELEASE THE STICK; RETURN
+[ 163.90]   | > HOSE
+[ 163.90]   |  'H' $68 C3R5
+[ 163.90]   |  'O' $6F C4R6
+[ 163.90]   |  'S' $73 C1R5
+[ 163.90]   |  'E' $65 C1R6
+[ 163.90]   | HOLD THE STICK LEFT, K LEFT
+[ 163.90]   | HOLD THE STICK LEFT, TYPN
+[ 163.90]   | STEP 8 PASS
+[ 164.15]   | RELEASE THE STICK; RETURN
+[ 164.15]   | > HOSE
+[ 164.15]   |  'H' $68 C3R5
+[ 164.15]   |  'O' $6F C4R6
+[ 164.15]   |  'S' $73 C1R5
+[ 164.15]   |  'E' $65 C1R6
+[ 164.15]   | STEP 6 PASS
+[ 164.15]   | HOLD THE STICK LEFT, TYPE HOSE,
+[ 164.15]   | RELEASE THE STICK; RETURN
+[ 165.12]   | RELEASE THE STICK; RETURN
+[ 165.12]   | > HOSE
+[ 165.12]   |  'H' $68 C3R5
+[ 165.12]   |  'O' $6F C1R5
+[ 165.12]   | STEP 9/9: PORT-1 FIRE
+[ 165.37]   | > HOSE
+[ 165.37]   |  'H' $68 C3R5
+[ 165.37]   |  'O' $6F C4R6
+[ 165.37]   |  'S' $73 C1R5
+[ 165.62]   | HOLD FIRE, TYPE HOSE,
+[ 165.86]   | RELEASE FIRE; RETURN
+[ 166.00] key UP   c0r1 RETURN
+[ 166.11]   | >
+[ 167.47] port-1 joystick: rows r4 held low (masked)
+[ 171.01]   | > H
+[ 171.14] (+1 key event(s) released before this poll saw them)
+[ 171.99]   | > HO
+[ 172.12] (+1 key event(s) released before this poll saw them)
+[ 172.72]   | > HOS
+[ 172.85] (+1 key event(s) released before this poll saw them)
+[ 173.21]   | > HOSE
+[ 173.34] (+1 key event(s) released before this poll saw them)
+[ 173.83] port-1 joystick: released (no row held)
+[ 175.05] key DOWN c0r1 RETURN
+[ 177.15]   |  'H' $68 C3R5
+[ 178.87]   |  'O' $6F C4R6
+[ 180.60]   |  'S' $73 C1R5
+[ 182.12]   |  'O' $6F C4R6
+[ 182.12]   |  'S' $73 C1R5
+[ 182.12]   |  'E' $65 C1R6
+[ 182.12]   | STEP 8 PASS
+[ 182.12]   | STEP 9/9: PORT-1 FIRE
+[ 182.12]   | HOLD FIRE, TYPE HOSE,
+[ 182.12]   | RELEASE FIRE; RETURN
+[ 182.12]   | > HOSE
+[ 182.12]   |  'H' $68 C3R5
+[ 182.12]   |  'O' $6F C4R6
+[ 182.12]   |  'S' $73 C1R5
+[ 182.12]   |  'E' $65 C1R6
+[ 182.37]   | HOLD THE STICK LEFT, TYPE HOSE,
+[ 182.37]   | RELEASE THE STICK; RETURN
+[ 182.37]   | > HOSE
+[ 182.37]   |  'H' $68 C3R5
+[ 182.37]   |  'O' $6F C4R6
+[ 182.37]   |  'S' $73 C1R5
+[ 182.37]   |  'E' $65 C1R6
+[ 182.37]   | STEP 7 PASS
+[ 182.37]   | STEP 8/9: PORT-1 STICK RIGHT
+[ 182.37]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 182.37]   | RELEASE THE STICK; RETURN
+[ 182.37]   | > HOSE
+[ 182.37]   |  'H' $68 C3R5
+[ 182.87]   | STEP 9 PASS
+[ 183.36]   |  'H' $68 C4R6
+[ 183.36]   |  'S' $73 C1R5
+[ 183.36]   |  'E' $65 C1R6
+[ 183.36]   | STEP 9 5 C1R6
+[ 183.36]   | FREE: TYPE LINES, EMPTY LINE ENDS
+[ 183.36]   | >
+[ 183.50] key UP   c0r1 RETURN
+[ 183.62]   |  'H' $68 C3R5
+[ 183.62]   |  'O' $6F C4R6
+[ 183.62]   |  'S' $73 C1R5
+[ 183.62]   |  'E' $65 C1R6
+[ 183.62]   | STEP 9 PASS
+[ 183.62]   | FREE: TYPE LINES, EMPTY LINE ENDS
+[ 183.62]   | >
+[ 188.46] key DOWN c7r1 LEFTARROW
+[ 188.59]   | > _
+[ 188.72] key DOWN c7r0 1
+[ 188.72] key UP   c7r1 LEFTARROW
+[ 188.83]   | > _1
+[ 188.96] key UP   c7r0 1
+[ 189.07]   | > _12
+[ 189.20] (+1 key event(s) released before this poll saw them)
+[ 191.92] (+1 key event(s) released before this poll saw them)
+[ 192.03]   | > _123
+[ 192.17] key DOWN c1r3 4
+[ 192.28]   | > _1234
+[ 192.42] key DOWN c2r0 5
+[ 192.42] key UP   c1r3 4
+[ 192.54]   | > _12345
+[ 192.67] key UP   c2r0 5
+[ 192.78]   | > _123456
+[ 192.91] (+1 key event(s) released before this poll saw them)
+[ 193.16] key DOWN c3r0 7
+[ 193.27]   | > _1234567
+[ 193.41] key UP   c3r0 7
+[ 193.53]   | > _12345678
+[ 193.66] (+1 key event(s) released before this poll saw them)
+[ 193.92] (+1 key event(s) released before this poll saw them)
+[ 194.03]   | > _123456789
+[ 194.28]   | > _1234567890
+[ 194.41] (+1 key event(s) released before this poll saw them)
+[ 194.67] (+1 key event(s) released before this poll saw them)
+[ 194.78]   | > _1234567890+
+[ 195.02]   | > _1234567890+-
+[ 195.16] (+1 key event(s) released before this poll saw them)
+[ 195.41] key DOWN c6r0 POUND
+[ 195.52]   | > _1234567890+-\
+[ 195.66] key UP   c6r0 POUND
+[ 199.85] mod DOWN c6r4 RSHIFT
+[ 200.45]   | > _1234567890+-\!
+[ 200.58] (+1 key event(s) released before this poll saw them)
+[ 200.70]   | > _1234567890+-\!"
+[ 200.84] (+1 key event(s) released before this poll saw them)
+[ 200.95]   | > _1234567890+-\!"#
+[ 201.08] (+1 key event(s) released before this poll saw them)
+[ 201.33] key DOWN c1r3 4
+[ 201.44]   | > _1234567890+-\!"#$
+[ 201.58] key DOWN c2r0 5
+[ 201.58] key UP   c1r3 4
+[ 201.69]   | > _1234567890+-\!"#$%
+[ 201.83] key DOWN c2r3 6
+[ 201.83] key UP   c2r0 5
+[ 201.94]   | > _1234567890+-\!"#$%&
+[ 202.07] key UP   c2r3 6
+[ 202.18]   | > _1234567890+-\!"#$%&'
+[ 202.32] (+1 key event(s) released before this poll saw them)
+[ 202.43]   | > _1234567890+-\!"#$%&'(
+[ 202.57] (+1 key event(s) released before this poll saw them)
+[ 202.82] (+1 key event(s) released before this poll saw them)
+[ 202.93]   | > _1234567890+-\!"#$%&'()
+[ 203.06] key DOWN c4r3 0
+[ 203.17]   | > _1234567890+-\!"#$%&'()0
+[ 203.31] key DOWN c5r0 +
+[ 203.31] key UP   c4r3 0
+[ 203.42]   | > _1234567890+-\!"#$%&'()0[
+[ 203.55] key UP   c5r0 +
+[ 203.67]   | > _1234567890+-\!"#$%&'()0[]
+[ 203.80] (+1 key event(s) released before this poll saw them)
+[ 203.91]   | > _1234567890+-\!"#$%&'()0[]\
+[ 204.04] (+1 key event(s) released before this poll saw them)
+[ 204.78] mod UP   c6r4 RSHIFT
+[ 206.27] key DOWN c7r6 Q
+[ 206.40]   | > _1234567890+-\!"#$%&'()0[]\Q
+[ 206.53] key DOWN c1r1 W
+[ 206.53] key UP   c7r6 Q
+[ 206.66]   | > _1234567890+-\!"#$%&'()0[]\QW
+[ 206.80] key DOWN c1r6 E
+[ 206.80] key UP   c1r1 W
+[ 206.91]   | > _1234567890+-\!"#$%&'()0[]\QWE
+[ 207.04] key UP   c1r6 E
+[ 207.15]   | > _1234567890+-\!"#$%&'()0[]\QWER
+[ 207.29] (+1 key event(s) released before this poll saw them)
+[ 207.40]   | > _1234567890+-\!"#$%&'()0[]\QWERT
+[ 207.53] (+1 key event(s) released before this poll saw them)
+[ 207.78] (+1 key event(s) released before this poll saw them)
+[ 207.90]   | > _1234567890+-\!"#$%&'()0[]\QWERTY
+[ 208.04] key DOWN c3r6 U
+[ 208.15]   | > _1234567890+-\!"#$%&'()0[]\QWERTYU
+[ 208.28] key UP   c3r6 U
+[ 208.40]   | > _1234567890+-\!"#$%&'()0[]\QWERTYUI
+[ 208.53] (+1 key event(s) released before this poll saw them)
+[ 208.78] (+1 key event(s) released before this poll saw them)
+[ 208.90]   | > _1234567890+-\!"#$%&'()0[]\QWERTYUIO
+[ 209.04] key DOWN c5r1 P
+[ 209.15]   | > _1234567890+-\!"#$%&'()0[]\QWERTYUIOP
+[ 209.28] key UP   c5r1 P
+[ 209.40]   | > _1234567890+-\!"#$%&'()0[]\QWERTYUIOP@
+[ 209.53] (+1 key event(s) released before this poll saw them)
+[ 209.78] (+1 key event(s) released before this poll saw them)
+[ 209.89]   | *
+[ 210.03] key DOWN c6r6 UPARROW
+[ 210.15]   | *^
+[ 210.28] key UP   c6r6 UPARROW
+[ 210.78] mod DOWN c6r4 RSHIFT
+[ 211.39]   | *^Q
+[ 211.52] (+1 key event(s) released before this poll saw them)
+[ 211.64]   | *^QW
+[ 211.77] (+1 key event(s) released before this poll saw them)
+[ 211.88]   | *^QWE
+[ 212.02] (+1 key event(s) released before this poll saw them)
+[ 212.27] key DOWN c2r1 R
+[ 212.38]   | *^QWER
+[ 212.51] key DOWN c2r6 T
+[ 212.51] key UP   c2r1 R
+[ 212.63]   | *^QWERT
+[ 212.76] key DOWN c3r1 Y
+[ 212.76] key UP   c2r6 T
+[ 212.88]   | *^QWERTY
+[ 213.01] key UP   c3r1 Y
+[ 213.13]   | *^QWERTYU
+[ 213.26] (+1 key event(s) released before this poll saw them)
+[ 213.37]   | *^QWERTYUI
+[ 213.51] (+1 key event(s) released before this poll saw them)
+[ 213.63]   | *^QWERTYUIO
+[ 213.76] (+1 key event(s) released before this poll saw them)
+[ 214.01] (+1 key event(s) released before this poll saw them)
+[ 214.12]   | *^QWERTYUIOP
+[ 214.25] key DOWN c5r6 @
+[ 214.37]   | *^QWERTYUIOP@
+[ 214.51] key DOWN c6r1 *
+[ 214.51] key UP   c5r6 @
+[ 214.62]   | *^QWERTYUIOP@*
+[ 214.75] key DOWN c6r6 UPARROW
+[ 214.75] key UP   c6r1 *
+[ 214.87]   | *^QWERTYUIOP@*^
+[ 215.00] key UP   c6r6 UPARROW
+[ 215.49] mod UP   c6r4 RSHIFT
+[ 215.74] key DOWN c1r2 A
+[ 215.85]   | *^QWERTYUIOP@*^A
+[ 215.99] key DOWN c1r5 S
+[ 215.99] key UP   c1r2 A
+[ 216.11]   | *^QWERTYUIOP@*^AS
+[ 216.24] key UP   c1r5 S
+[ 216.36]   | *^QWERTYUIOP@*^ASD
+[ 216.49] (+1 key event(s) released before this poll saw them)
+[ 216.60]   | *^QWERTYUIOP@*^ASDF
+[ 216.74] (+1 key event(s) released before this poll saw them)
+[ 216.99] key DOWN c3r2 G
+[ 217.11]   | *^QWERTYUIOP@*^ASDFG
+[ 217.24] key DOWN c3r5 H
+[ 217.24] key UP   c3r2 G
+[ 217.35]   | *^QWERTYUIOP@*^ASDFGH
+[ 217.49] key DOWN c4r2 J
+[ 217.49] key UP   c3r5 H
+[ 217.60]   | *^QWERTYUIOP@*^ASDFGHJ
+[ 217.73] key UP   c4r2 J
+[ 217.85]   | *^QWERTYUIOP@*^ASDFGHJK
+[ 217.98] (+1 key event(s) released before this poll saw them)
+[ 218.10]   | *^QWERTYUIOP@*^ASDFGHJKL
+[ 218.24] (+1 key event(s) released before this poll saw them)
+[ 218.36]   | *^QWERTYUIOP@*^ASDFGHJKL:
+[ 218.49] (+1 key event(s) released before this poll saw them)
+[ 218.73] key DOWN c6r2 ;
+[ 218.84]   | *^QWERTYUIOP@*^ASDFGHJKL:;
+[ 218.97] key DOWN c6r5 =
+[ 218.97] key UP   c6r2 ;
+[ 219.08]   | *^QWERTYUIOP@*^ASDFGHJKL:;=
+[ 219.21] key UP   c6r5 =
+[ 219.47] mod DOWN c6r4 RSHIFT
+[ 219.82]   | *^QWERTYUIOP@*^ASDFGHJKL:;=A
+[ 219.95] (+1 key event(s) released before this poll saw them)
+[ 220.20] (+1 key event(s) released before this poll saw them)
+[ 220.31]   | *^QWERTYUIOP@*^ASDFGHJKL:;=AS
+[ 220.44] key DOWN c2r2 D
+[ 220.55]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASD
+[ 220.68] key DOWN c2r5 F
+[ 220.68] key UP   c2r2 D
+[ 220.80]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDF
+[ 220.94] key UP   c2r5 F
+[ 221.05]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFG
+[ 221.18] (+1 key event(s) released before this poll saw them)
+[ 221.29]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGH
+[ 221.43] (+1 key event(s) released before this poll saw them)
+[ 221.67] key DOWN c4r2 J
+[ 221.80]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGHJ
+[ 221.93] key DOWN c4r5 K
+[ 221.93] key UP   c4r2 J
+[ 222.04]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGHJK
+[ 222.18] key DOWN c5r2 L
+[ 222.18] key UP   c4r5 K
+[ 222.29]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGHJKL
+[ 222.42] key UP   c5r2 L
+[ 222.53]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGHJKL[
+[ 222.67] (+1 key event(s) released before this poll saw them)
+[ 222.78]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGHJKL[]
+[ 222.91] (+1 key event(s) released before this poll saw them)
+[ 223.16] (+1 key event(s) released before this poll saw them)
+[ 223.27]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGHJKL[]=
+[ 224.16] mod UP   c6r4 RSHIFT
+[ 224.52]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGHJKL[]=Z
+[ 224.65] (+1 key event(s) released before this poll saw them)
+[ 224.77]   |  'O' $6F C4R6
+[ 224.77]   |  'S' $73 C1R5
+[ 224.77]   |  'E' $65 C1R6
+[ 224.77]   | STEP 7 PASS
+[ 224.77]   | STEP 8/9: PORT-1 STICK RIGHT
+[ 224.77]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 224.77]   | RELEASE THE STIC
+[ 224.77]   | X
+[ 224.90] (+1 key event(s) released before this poll saw them)
+[ 225.01]   |  'S' $73 C1R5
+[ 225.01]   |  'E' $65 C1R6
+[ 225.01]   | STEP 7 PASS
+[ 225.01]   | STEP 8/9: PORT-1 STICK RIGHT
+[ 225.01]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 225.01]   | RELEASE THE STICK; RETURN
+[ 225.01]   | > HOSE
+[ 225.01]   | XC
+[ 225.14] (+1 key event(s) released before this poll saw them)
+[ 225.26]   | XCV
+[ 225.40] (+1 key event(s) released before this poll saw them)
+[ 225.64] key DOWN c3r4 B
+[ 225.76]   | XCVB
+[ 225.89] key UP   c3r4 B
+[ 226.01]   | XCVBN
+[ 226.14] (+1 key event(s) released before this poll saw them)
+[ 226.26]   | XCVBNM
+[ 226.39] (+1 key event(s) released before this poll saw them)
+[ 226.64] (+1 key event(s) released before this poll saw them)
+[ 226.76]   | XCVBNM,
+[ 226.90] key DOWN c5r4 .
+[ 227.01]   | XCVBNM,.
+[ 227.15] key UP   c5r4 .
+[ 227.41] key DOWN c6r7 /
+[ 227.52]   | XCVBNM,./
+[ 227.66] key UP   c6r7 /
+[ 231.85] mod DOWN c6r4 RSHIFT
+[ 232.35] (+1 key event(s) released before this poll saw them)
+[ 232.46]   | XCVBNM,./Z
+[ 232.60] key DOWN c2r7 X
+[ 232.71]   | XCVBNM,./ZX
+[ 232.85] key DOWN c2r4 C
+[ 232.85] key UP   c2r7 X
+[ 232.96]   | XCVBNM,./ZXC
+[ 233.09] key UP   c2r4 C
+[ 233.21]   | XCVBNM,./ZXCV
+[ 233.34] (+1 key event(s) released before this poll saw them)
+[ 233.45]   | XCVBNM,./ZXCVB
+[ 233.58] (+1 key event(s) released before this poll saw them)
+[ 233.83] (+1 key event(s) released before this poll saw them)
+[ 233.94]   | XCVBNM,./ZXCVBN
+[ 234.07] key DOWN c4r4 M
+[ 234.19]   | XCVBNM,./ZXCVBNM
+[ 234.33] key UP   c4r4 M
+[ 234.44]   | XCVBNM,./ZXCVBNM<
+[ 234.57] (+1 key event(s) released before this poll saw them)
+[ 234.69]   | XCVBNM,./ZXCVBNM<>
+[ 234.82] (+1 key event(s) released before this poll saw them)
+[ 234.94]   | XCVBNM,./ZXCVBNM<>?
+[ 235.07] (+1 key event(s) released before this poll saw them)
+[ 236.06] mod UP   c6r4 RSHIFT
+[ 238.29] key DOWN c0r1 RETURN
+[ 246.91]   |  '_' $5F C7R1
+[ 248.90]   |  '1' $31 C7R0
+[ 250.65]   | STEP 7 PASS
+[ 250.65]   | STEP 8/9: PORT-1 STICK RIGHT
+[ 250.65]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 250.65]   | RELEASE
+[ 250.65]   |  '2' $32 C7R3
+[ 250.90]   | STEP 8/9: PORT-1 STICK RIGHT
+[ 250.90]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 250.90]   | RELEASE THE STICK; RETURN
+[ 250.90]   | > HOSE
+[ 252.38]   |  '3' $33 C1R0
+[ 253.87]   | *^QWERTY/ZXCVBNM<>?
+[ 253.87]   |  '_' $5F C7R1
+[ 253.87]   |  '1' $31 C7R0
+[ 253.87]   |  '2' $32 C7R3
+[ 253.87]   |  '3' $33 C1R0
+[ 253.87]   |  '4' $34 C1R3
+[ 254.12]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGHJKL[]=Z
+[ 254.12]   | XCVBNM,./ZXCVBNM<>?
+[ 254.12]   |  '_' $5F C7R1
+[ 254.12]   |  '1' $31 C7R0
+[ 254.12]   |  '2' $32 C7R3
+[ 254.12]   |  '3' $33 C1R0
+[ 254.12]   |  '4' $34 C1R3
+[ 255.61]   | RELEASE THE STICK; RETURN
+[ 255.61]   | > HOSE
+[ 255.61]   |  'H' $68 C3R5
+[ 255.61]   |  'O' $6F C1R5
+[ 255.61]   |  '5' $35 C2R0
+[ 255.85]   | > HOSE
+[ 255.85]   |  'H' $68 C3R5
+[ 255.85]   |  'O' $6F C4R6
+[ 255.85]   |  'S' $73 C1R5
+[ 257.35]   |  '6' $36 C2R3
+[ 259.08]   |  '7' $37 C3R0
+[ 260.80]   |  '8' $38 C3R3
+[ 262.54]   |  '9' $39 C4R0
+[ 264.27]   |  'E' $65 C1R6
+[ 264.27]   | STEP 8 PASS
+[ 264.27]   | STEP 9/9: PORT-1 FIRE
+[ 264.27]   | HOLD FIRE, TYPE HOSE,
+[ 264.27]   | RELEASE FIRE; RETURN
+[ 264.27]   | > HOSE
+[ 264.27]   |  'H' $68 C3R5
+[ 264.27]   |  '0' $30 C4R3
+[ 264.51]   | STEP 8 PASS
+[ 264.51]   | STEP 9/9: PORT-1 FIRE
+[ 264.51]   | HOLD FIRE, TYPE HOSE,
+[ 264.51]   | RELEASE FIRE; RETURN
+[ 264.51]   | > HOSE
+[ 264.51]   |  'H' $68 C3R5
+[ 264.51]   |  'O' $6F C4R6
+[ 266.25]   |  '+' $2B C5R0
+[ 267.99]   |  '-' $2D C5R3
+[ 269.75]   |  '\' $5C C6R0
+[ 272.00]   |  '8' $38 C4R0
+[ 272.00]   |  '0' $30 C4R3
+[ 272.00]   |  '+' $2B C5R0
+[ 272.00]   |  '-' $2D C5R3
+[ 272.00]   |  '\' $5C C6R0
+[ 272.00]   |  '!' $21 C7R0+SH
+[ 272.24]   |  '8' $38 C3R3
+[ 272.24]   |  '9' $39 C4R0
+[ 272.24]   |  '0' $30 C4R3
+[ 272.24]   |  '+' $2B C5R0
+[ 272.24]   |  '-' $2D C5R3
+[ 272.24]   |  '\' $5C C6R0
+[ 272.24]   |  '!' $21 C7R0+SH
+[ 274.49]   |  '"' $22 C7R3+SH
+[ 276.48]   |  'H' $68 C3R5
+[ 276.48]   |  'O' $6F C4R6
+[ 276.48]   |  'S' $73 C1R5
+[ 276.48]   |  'E' $65 C1R6
+[ 276.48]   | STEP 9 PASS
+[ 276.48]   | FREE: TYPE LINES, EMPTY LINE ENDS
+[ 276.48]   | > _1234567890+-\!"#$%&'()0[]\QWERTYUIOP@
+[ 276.48]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGHJKL[]=Z
+[ 276.48]   | XCVBNM,./ZXCVBNM<>?
+[ 276.48]   |  '_' $5F C7R1
+[ 276.48]   |  '#' $23 C1R0+SH
+[ 276.73]   |  'O' $6F C4R6
+[ 276.73]   |  'S' $73 C1R5
+[ 276.73]   |  'E' $65 C1R6
+[ 276.73]   | STEP 9 PASS
+[ 276.73]   | FREE: TYPE LINES, EMPTY LINE ENDS
+[ 276.73]   | > _1234567890+-\!"#$%&'()0[]\QWERTYUIOP@
+[ 276.73]   | *^QWERTYUIOP@*^ASDFGHJKL:;=ASDFGHJKL[]=Z
+[ 276.73]   | XCVBNM,./ZXCVBNM<>?
+[ 276.73]   |  '_' $5F C7R1
+[ 276.73]   |  '1' $31 C7R0
+[ 278.70]   |  '$' $24 C1R3+SH
+[ 280.69]   |  '0' $30 C4R3
+[ 280.69]   |  '+' $2B C5R0
+[ 280.69]   |  '-' $2D C5R3
+[ 280.69]   |  '\' $5C C6R0
+[ 280.69]   |  '!' $21 C7R0+SH
+[ 280.69]   |  '"' $22 C7R3+SH
+[ 280.69]   |  '#' $23 C1R0+SH
+[ 280.69]   |  '$' $24 C1R3+SH
+[ 280.69]   |  '%' $25 C2R0+SH
+[ 280.94]   |  '9' $39 C4R0
+[ 280.94]   |  '0' $30 C4R3
+[ 280.94]   |  '+' $2B C5R0
+[ 280.94]   |  '-' $2D C5R3
+[ 280.94]   |  '\' $5C C6R0
+[ 280.94]   |  '!' $21 C7R0+SH
+[ 280.94]   |  '"' $22 C7R3+SH
+[ 280.94]   |  '#' $23 C1R0+SH
+[ 280.94]   |  '$' $24 C1R3+SH
+[ 280.94]   |  '%' $25 C2R0+SH
+[ 282.95]   |  '&' $26 C2R3+SH
+[ 285.17]   |  ''' $27 C3R0+SH
+[ 287.41]   |  '(' $28 C3R3+SH
+[ 289.41]   |  '#' $23 C1R3+SH
+[ 289.41]   |  '%' $25 C2R0+SH
+[ 289.41]   |  '&' $26 C2R3+SH
+[ 289.41]   |  ''' $27 C3R0+SH
+[ 289.41]   |  '(' $28 C3R3+SH
+[ 289.41]   |  ')' $29 C4R0+SH
+[ 289.65]   |  '#' $23 C1R0+SH
+[ 289.65]   |  '$' $24 C1R3+SH
+[ 289.65]   |  '%' $25 C2R0+SH
+[ 289.65]   |  '&' $26 C2R3+SH
+[ 289.65]   |  ''' $27 C3R0+SH
+[ 289.65]   |  '(' $28 C3R3+SH
+[ 289.65]   |  ')' $29 C4R0+SH
+[ 291.39]   |  '0' $30 C4R3
+[ 293.62]   |  '[' $7B C5R0+SH
+[ 295.87]   |  ']' $7D C5R3+SH
+[ 298.09]   |  '\' $7C C6R0+SH
+[ 300.07]   |  'Q' $71 C7R6
+[ 301.56]   |  '$' $24 C1R3+SH
+[ 301.56]   |  '%' $25 C2R0+SH
+[ 301.56]   |  '&' $26 C2R3+SH
+[ 301.56]   |  ''' $27 C3R0+SH
+[ 301.56]   |  '(' $28 C3R3+SH
+[ 301.56]   |  ')' $29 C4R0+SH
+[ 301.56]   |  '0' $30 C4R3
+[ 301.56]   |  '[' $7B C5R0+SH
+[ 301.56]   |  ']' $7D C5R3+SH
+[ 301.56]   |  '\' $7C C6R0+SH
+[ 301.56]   |  'Q' $71 C7R6
+[ 301.56]   |  'W' $77 C1R1
+[ 301.81]   |  '4' $34 C1R3
+[ 301.81]   |  '5' $35 C2R0
+[ 301.81]   |  '6' $36 C2R3
+[ 301.81]   |  '7' $37 C3R0
+[ 301.81]   |  '8' $38 C3R3
+[ 301.81]   |  '9' $39 C4R0
+[ 301.81]   |  '0' $30 C4R3
+[ 301.81]   |  '+' $2B C5R0
+[ 301.81]   |  '-' $2D C5R3
+[ 301.81]   |  '\' $5C C6R0
+[ 301.81]   |  '!' $21 C7R0+SH
+[ 301.81]   |  '"' $22 C7R3+SH
+[ 301.81]   |  '#' $23 C1R0+SH
+[ 303.29]   |  'E' $65 C1R6
+[ 305.02]   |  'R' $72 C2R1
+[ 306.76]   |  'T' $74 C2R6
+[ 308.53]   |  'Y' $79 C3R1
+[ 310.27]   |  'U' $75 C3R6
+[ 312.03]   |  'I' $69 C4R1
+[ 313.77]   |  'O' $6F C4R6
+[ 315.50]   |  'P' $70 C5R1
+[ 317.26]   |  'E' $65 C1R6
+[ 317.26]   |  'R' $72 C2R1
+[ 317.26]   |  'T' $74 C3R1
+[ 317.26]   |  'U' $75 C3R6
+[ 317.26]   |  'I' $69 C4R1
+[ 317.26]   |  'O' $6F C4R6
+[ 317.26]   |  'P' $70 C5R1
+[ 317.26]   |  '@' $40 C5R6
+[ 317.51]   |  'W' $77 C1R1
+[ 317.51]   |  'E' $65 C1R6
+[ 317.51]   |  'T' $74 C2R6
+[ 317.51]   |  'Y' $79 C3R1
+[ 317.51]   |  'U' $75 C3R6
+[ 317.51]   |  'I' $69 C4R1
+[ 317.51]   |  'O' $6F C4R6
+[ 317.51]   |  'P' $70 C5R1
+[ 317.51]   |  '@' $40 C5R6
+[ 319.26]   |  '*' $2A C6R1
+[ 321.01]   |  '!' $21 C7R0+SH
+[ 321.01]   |  '"' $22 C7R3+SH
+[ 321.01]   |  '#' $23 C1R0+SH
+[ 321.01]   |  '$' $24 C2R0+SH
+[ 321.01]   |  '%' $25 C2R0+SH
+[ 321.01]   |  '&' $26 C2R3+SH
+[ 321.01]   |  ''' $27 C3R0+SH
+[ 321.01]   |  '^' $5E C6R6
+[ 321.28]   |  '"' $22 C7R3+SH
+[ 321.28]   |  '#' $23 C1R0+SH
+[ 321.28]   |  '$' $24 C1R3+SH
+[ 321.28]   |  '%' $25 C2R0+SH
+[ 321.28]   |  '&' $26 C2R3+SH
+[ 321.28]   |  ''' $27 C3R0+SH
+[ 321.28]   |  '(' $28 C3R3+SH
+[ 323.33]   |  'E' $65 C1R6
+[ 323.33]   |  'R' $72 C2R1
+[ 323.33]   |  'Y' $79 C3R1
+[ 323.33]   |  'U' $75 C3R6
+[ 323.33]   |  'I' $69 C4R1
+[ 323.33]   |  'O' $6F C4R6
+[ 323.33]   |  'P' $70 C5R1
+[ 323.33]   |  '@' $40 C5R6
+[ 323.33]   |  '*' $2A C6R1
+[ 323.33]   |  '^' $5E C6R6
+[ 323.33]   |  'Q' $51 C7R6+SH
+[ 323.58]   |  'W' $77 C1R1
+[ 323.58]   |  'E' $65 C1R6
+[ 323.58]   |  'T' $74 C2R6
+[ 323.58]   |  'Y' $79 C3R1
+[ 323.58]   |  'U' $75 C3R6
+[ 323.58]   |  'I' $69 C4R1
+[ 323.58]   |  'O' $6F C4R6
+[ 323.58]   |  'P' $70 C5R1
+[ 323.58]   |  '@' $40 C5R6
+[ 323.58]   |  '*' $2A C6R1
+[ 323.58]   |  '^' $5E C6R6
+[ 323.58]   |  'Q' $51 C7R6+SH
+[ 325.59]   |  'W' $57 C1R1+SH
+[ 327.60]   |  '$' $24 C1R3+SH
+[ 327.60]   |  '%' $25 C2R0+SH
+[ 327.60]   |  '&' $26 C2R3+SH
+[ 327.60]   |  ''' $27 C3R3+SH
+[ 327.60]   |  'E' $45 C1R6+SH
+[ 327.85]   |  '%' $25 C2R0+SH
+[ 327.85]   |  '&' $26 C2R3+SH
+[ 327.85]   |  ''' $27 C3R0+SH
+[ 327.85]   |  '(' $28 C3R3+SH
+[ 329.87]   |  'R' $52 C2R1+SH
+[ 331.87]   |  '&' $26 C2R3+SH
+[ 331.87]   |  ''' $27 C3R0+SH
+[ 331.87]   |  '(' $28 C3R3+SH
+[ 331.87]   |  ')' $29 C4R0+SH
+[ 331.87]   |  '0' $30 C4R3
+[ 331.87]   |  '[' $7B C5R0+SH
+[ 331.87]   |  ']' $7D C5R3+SH
+[ 331.87]   |  '\' $7C C6R0+SH
+[ 331.87]   |  'Q' $71 C7R6
+[ 331.87]   |  'W' $77 C1R1
+[ 331.87]   |  'T' $54 C2R6+SH
+[ 332.12]   |  ''' $27 C3R0+SH
+[ 332.12]   |  '(' $28 C3R3+SH
+[ 332.12]   |  ')' $29 C4R0+SH
+[ 332.12]   |  '0' $30 C4R3
+[ 332.12]   |  '[' $7B C5R0+SH
+[ 332.12]   |  ']' $7D C5R3+SH
+[ 332.12]   |  '\' $7C C6R0+SH
+[ 332.12]   |  'Q' $71 C7R6
+[ 332.12]   |  'W' $77 C1R1
+[ 332.12]   |  'E' $65 C1R6
+[ 334.12]   |  'Y' $59 C3R1+SH
+[ 336.40]   |  'U' $55 C3R6+SH
+[ 338.45]   |  'P' $70 C5R1
+[ 338.45]   |  '@' $40 C5R6
+[ 338.45]   |  '*' $40 C5R6
+[ 338.45]   |  '^' $5E C6R6
+[ 338.45]   |  'Q' $51 C7R6+SH
+[ 338.45]   |  'W' $57 C1R1+SH
+[ 338.45]   |  'E' $45 C1R6+SH
+[ 338.45]   |  'R' $52 C2R1+SH
+[ 338.45]   |  'T' $54 C2R6+SH
+[ 338.45]   |  'Y' $59 C3R1+SH
+[ 338.45]   |  'U' $55 C3R6+SH
+[ 338.45]   |  'I' $49 C4R1+SH
+[ 338.70]   |  'O' $6F C4R6
+[ 338.70]   |  'P' $70 C5R1
+[ 338.70]   |  '@' $40 C5R6
+[ 338.70]   |  '*' $2A C6R1
+[ 338.70]   |  '^' $5E C6R6
+[ 338.70]   |  'Q' $51 C7R6+SH
+[ 338.70]   |  'W' $57 C1R1+SH
+[ 338.70]   |  'E' $45 C1R6+SH
+[ 338.70]   |  'R' $52 C2R1+SH
+[ 338.70]   |  'T' $54 C2R6+SH
+[ 338.70]   |  'Y' $59 C3R1+SH
+[ 338.70]   |  'U' $55 C3R6+SH
+[ 338.70]   |  'I' $49 C4R1+SH
+[ 340.72]   |  '0' $30 C4R3
+[ 340.72]   |  '[' $7B C5R0+SH
+[ 340.72]   |  ']' $7D C5R3+SH
+[ 340.72]   |  '\' $7C C6R0+SH
+[ 340.72]   |  'Q' $71 C7R6
+[ 340.72]   |  'W' $77 C1R1
+[ 340.72]   |  'E' $65 C1R6
+[ 340.72]   |  'O' $4F C4R6+SH
+[ 340.98]   |  '[' $7B C5R0+SH
+[ 340.98]   |  ']' $7D C5R3+SH
+[ 340.98]   |  '\' $7C C6R0+SH
+[ 340.98]   |  'Q' $71 C7R6
+[ 340.98]   |  'W' $77 C1R1
+[ 340.98]   |  'E' $65 C1R6
+[ 340.98]   |  'R' $72 C2R1
+[ 342.97]   |  '[' $7B C5R0+SH
+[ 342.97]   |  ']' $7D C5R3+SH
+[ 342.97]   |  '\' $7C C6R0+SH
+[ 342.97]   |  'Q' $71 C7R6
+[ 342.97]   |  'W' $77 C1R1
+[ 342.97]   |  'E' $65 C1R6
+[ 342.97]   |  'R' $72 C2R1
+[ 342.97]   |  'T' $74 C2R6
+[ 342.97]   |  'Y' $79 C3R1
+[ 342.97]   |  'U' $75 C3R6
+[ 342.97]   |  'P' $50 C5R1+SH
+[ 343.21]   |  ']' $7D C5R3+SH
+[ 343.21]   |  '\' $7C C6R0+SH
+[ 343.21]   |  'Q' $71 C7R6
+[ 343.21]   |  'W' $77 C1R1
+[ 343.21]   |  'E' $65 C1R6
+[ 343.21]   |  'R' $72 C2R1
+[ 343.21]   |  'T' $74 C2R6
+[ 343.21]   |  'Y' $79 C3R1
+[ 343.21]   |  'U' $75 C3R6
+[ 343.21]   |  'I' $69 C4R1
+[ 345.25]   |  '^' $5E C6R6
+[ 345.25]   |  'Q' $51 C7R6+SH
+[ 345.25]   |  'W' $57 C1R1+SH
+[ 345.25]   |  'E' $45 C1R6+SH
+[ 345.25]   |  'R' $52 C2R1+SH
+[ 345.25]   |  'T' $54 C2R6+SH
+[ 345.25]   |  'Y' $59 C3R1+SH
+[ 345.25]   |  'U' $55 C3R6+SH
+[ 345.25]   |  'I' $49 C4R1+SH
+[ 345.25]   |  'O' $4F C4R6+SH
+[ 345.25]   |  'P' $50 C5R1+SH
+[ 345.25]   |  '@' $60 C5R6+SH
+[ 345.52]   |  '\' $7C C6R0+SH
+[ 345.52]   |  'Q' $71 C7R6
+[ 345.52]   |  'W' $77 C1R1
+[ 345.52]   |  'E' $65 C1R6
+[ 345.52]   |  'R' $72 C2R1
+[ 345.52]   |  'T' $74 C2R6
+[ 345.52]   |  'Y' $79 C3R1
+[ 345.52]   |  'U' $75 C3R6
+[ 345.52]   |  'I' $69 C4R1
+[ 345.52]   |  'O' $6F C4R6
+[ 345.52]   |  'P' $70 C5R1
+[ 345.52]   |  '@' $40 C5R6
+[ 345.52]   |  '*' $2A C6R1
+[ 347.04]   |  '@' $60 C5R6+SH
+[ 347.29]   |  'P' $50 C5R1+SH
+[ 347.29]   |  '*' $2A C6R1
+[ 349.56]   |  '^' $7E C6R6+SH
+[ 351.07]   |  'W' $77 C1R1
+[ 351.07]   |  'E' $65 C1R6
+[ 351.07]   |  'R' $72 C2R1
+[ 351.07]   |  'T' $74 C2R6
+[ 351.07]   |  'Y' $79 C3R1
+[ 351.07]   |  'U' $75 C3R6
+[ 351.07]   |  'I' $69 C4R1
+[ 351.07]   |  'A' $61 C1R2
+[ 351.33]   |  'E' $65 C1R6
+[ 351.33]   |  'R' $72 C2R1
+[ 351.33]   |  'T' $74 C2R6
+[ 351.33]   |  'Y' $79 C3R1
+[ 351.33]   |  'U' $75 C3R6
+[ 351.33]   |  'I' $69 C4R1
+[ 351.33]   |  'O' $6F C4R6
+[ 352.84]   |  'S' $73 C1R5
+[ 354.59]   |  'D' $64 C2R2
+[ 356.10]   |  'Y' $59 C3R6+SH
+[ 356.10]   |  'O' $4F C4R6+SH
+[ 356.10]   |  'P' $50 C5R1+SH
+[ 356.10]   |  '@' $60 C5R6+SH
+[ 356.10]   |  '*' $2A C6R1
+[ 356.10]   |  '^' $7E C6R6+SH
+[ 356.10]   |  'A' $61 C1R2
+[ 356.10]   |  'S' $73 C1R5
+[ 356.10]   |  'D' $64 C2R2
+[ 356.10]   |  'F' $66 C2R5
+[ 356.35]   |  'T' $54 C2R6+SH
+[ 356.35]   |  'I' $49 C4R1+SH
+[ 356.35]   |  'O' $4F C4R6+SH
+[ 356.35]   |  'P' $50 C5R1+SH
+[ 356.35]   |  '@' $60 C5R6+SH
+[ 356.35]   |  '*' $2A C6R1
+[ 356.35]   |  '^' $7E C6R6+SH
+[ 356.35]   |  'A' $61 C1R2
+[ 356.35]   |  'S' $73 C1R5
+[ 356.35]   |  'D' $64 C2R2
+[ 356.35]   |  'F' $66 C2R5
+[ 357.84]   |  'Y' $79 C3R1
+[ 357.84]   |  'U' $75 C3R6
+[ 357.84]   |  'I' $69 C4R1
+[ 357.84]   |  'O' $6F C4R6
+[ 357.84]   |  'P' $70 C5R1
+[ 357.84]   |  '@' $40 C5R6
+[ 357.84]   |  '*' $2A C6R1
+[ 357.84]   |  '^' $5E C6R6
+[ 357.84]   |  'Q' $51 C7R6+SH
+[ 357.84]   |  'W' $57 C1R1+SH
+[ 357.84]   |  'G' $67 C3R2
+[ 358.08]   |  'U' $75 C3R6
+[ 358.08]   |  'I' $69 C4R1
+[ 358.08]   |  'O' $6F C4R6
+[ 358.08]   |  'P' $70 C5R1
+[ 358.08]   |  '@' $40 C5R6
+[ 358.08]   |  '*' $2A C6R1
+[ 358.08]   |  '^' $5E C6R6
+[ 358.08]   |  'Q' $51 C7R6+SH
+[ 358.08]   |  'W' $57 C1R1+SH
+[ 358.08]   |  'E' $45 C1R6+SH
+[ 359.57]   |  'I' $49 C4R1+SH
+[ 359.57]   |  'O' $4F C4R6+SH
+[ 359.57]   |  'P' $50 C5R1+SH
+[ 359.57]   |  '@' $60 C5R6+SH
+[ 359.57]   |  '*' $2A C6R1
+[ 359.57]   |  '^' $7E C6R6+SH
+[ 359.57]   |  'A' $61 C1R2
+[ 359.57]   |  'S' $73 C1R5
+[ 359.57]   |  'D' $64 C2R2
+[ 359.57]   |  'F' $66 C2R5
+[ 359.57]   |  'G' $67 C3R2
+[ 359.57]   |  'H' $68 C3R5
+[ 359.82]   |  'I' $69 C4R1
+[ 359.82]   |  'O' $6F C4R6
+[ 359.82]   |  'P' $70 C5R1
+[ 359.82]   |  '@' $40 C5R6
+[ 359.82]   |  '*' $2A C6R1
+[ 359.82]   |  '^' $5E C6R6
+[ 359.82]   |  'Q' $51 C7R6+SH
+[ 359.82]   |  'W' $57 C1R1+SH
+[ 359.82]   |  'E' $45 C1R6+SH
+[ 359.82]   |  'R' $52 C2R1+SH
+[ 359.82]   |  'T' $54 C2R6+SH
+[ 359.82]   |  'Y' $59 C3R1+SH
+[ 359.82]   |  'U' $55 C3R6+SH
+[ 361.55]   |  'J' $6A C4R2
+[ 363.30]   |  'K' $6B C4R5
+[ 365.07]   |  'L' $6C C5R2
+[ 366.83]   |  ':' $3A C5R5
+[ 368.62]   |  '*' $2A C6R1
+[ 368.62]   |  '^' $5E C6R6
+[ 368.62]   |  'Q' $51 C7R6+SH
+[ 368.62]   |  'W' $57 C1R1+SH
+[ 368.62]   |  'E' $45 C1R6+SH
+[ 368.62]   |  'R' $52 C2R1+SH
+[ 368.62]   |  'T' $54 C2R6+SH
+[ 368.62]   |  'Y' $59 C3R1+SH
+[ 368.62]   |  'U' $55 C3R6+SH
+[ 368.62]   |  'I' $49 C4R1+SH
+[ 368.62]   |  '@' $60 C5R6+SH
+[ 368.62]   |  ';' $3B C6R2
+[ 368.86]   |  '^' $5E C6R6
+[ 368.86]   |  'Q' $51 C7R6+SH
+[ 368.86]   |  'W' $57 C1R1+SH
+[ 368.87]   |  'E' $45 C1R6+SH
+[ 368.87]   |  'R' $52 C2R1+SH
+[ 368.87]   |  'T' $54 C2R6+SH
+[ 368.87]   |  'Y' $59 C3R1+SH
+[ 368.87]   |  'U' $55 C3R6+SH
+[ 368.87]   |  'I' $49 C4R1+SH
+[ 368.87]   |  'O' $4F C4R6+SH
+[ 368.87]   |  '*' $2A C6R1
+[ 370.61]   |  '=' $3D C6R5
+[ 372.63]   |  'A' $41 C1R2+SH
+[ 374.90]   |  'S' $53 C1R5+SH
+[ 376.88]   |  'Y' $59 C3R6+SH
+[ 376.88]   |  'D' $44 C2R2+SH
+[ 377.12]   |  'U' $55 C3R6+SH
+[ 379.11]   |  'F' $46 C2R5+SH
+[ 381.37]   |  'G' $47 C3R2+SH
+[ 383.39]   |  'Y' $59 C3R1+SH
+[ 383.39]   |  'U' $55 C3R6+SH
+[ 383.39]   |  'I' $49 C4R1+SH
+[ 383.39]   |  'O' $4F C4R6+SH
+[ 383.39]   |  'P' $50 C5R1+SH
+[ 383.39]   |  '@' $60 C5R6+SH
+[ 383.40]   |  '*' $2A C6R1
+[ 383.40]   |  'H' $48 C3R5+SH
+[ 383.64]   |  'U' $55 C3R6+SH
+[ 383.64]   |  'I' $49 C4R1+SH
+[ 383.64]   |  'O' $4F C4R6+SH
+[ 383.64]   |  'P' $50 C5R1+SH
+[ 383.64]   |  '@' $60 C5R6+SH
+[ 383.64]   |  '*' $2A C6R1
+[ 383.64]   |  '^' $7E C6R6+SH
+[ 385.64]   |  'J' $4A C4R2+SH
+[ 387.93]   |  'K' $4B C4R5+SH
+[ 390.19]   |  'L' $4C C5R2+SH
+[ 392.46]   |  '[' $5B C5R5+SH
+[ 394.74]   |  ']' $5D C6R2+SH
+[ 396.50]   |  ']' $5D C6R2+SH
+[ 396.50]   |  '=' $3D C6R5
+[ 396.75]   |  '[' $5B C5R5+SH
+[ 396.75]   |  ']' $5D C6R2+SH
+[ 396.75]   |  '=' $3D C6R5
+[ 398.25]   |  'Z' $7A C1R4
+[ 400.00]   |  'X' $78 C2R7
+[ 401.75]   |  'C' $63 C2R4
+[ 403.49]   |  'V' $76 C3R7
+[ 405.23]   |  'B' $62 C3R4
+[ 407.00]   |  'N' $6E C4R7
+[ 408.76]   |  'M' $6D C4R4
+[ 410.51]   |  'J' $6A C4R2
+[ 410.51]   |  'K' $6B C4R5
+[ 410.51]   |  'L' $6C C5R2
+[ 410.51]   |  ':' $3A C5R5
+[ 410.51]   |  ';' $3B C6R2
+[ 410.51]   |  '=' $3D C6R5
+[ 410.51]   |  'A' $41 C1R2+SH
+[ 410.51]   |  'S' $53 C1R5+SH
+[ 410.51]   |  'D' $44 C2R2+SH
+[ 410.51]   |  'F' $46 C2R5+SH
+[ 410.51]   |  'J' $4A C4R2+SH
+[ 410.51]   |  ',' $2C C5R7
+[ 410.76]   |  'K' $6B C4R5
+[ 410.76]   |  'L' $6C C5R2
+[ 410.76]   |  ':' $3A C5R5
+[ 410.76]   |  ';' $3B C6R2
+[ 410.76]   |  '=' $3D C6R5
+[ 410.76]   |  'A' $41 C1R2+SH
+[ 410.76]   |  'S' $53 C1R5+SH
+[ 410.76]   |  'D' $44 C2R2+SH
+[ 410.76]   |  'F' $46 C2R5+SH
+[ 410.76]   |  'G' $47 C3R2+SH
+[ 410.76]   |  'K' $4B C4R5+SH
+[ 412.53]   |  '.' $2E C5R4
+[ 414.30]   |  '/' $2F C6R7
+[ 416.31]   |  ':' $3A C5R5
+[ 416.31]   |  ';' $3B C6R2
+[ 416.31]   |  '=' $3D C6R5
+[ 416.31]   |  'A' $41 C1R2+SH
+[ 416.31]   |  'S' $53 C1R5+SH
+[ 416.31]   |  'D' $44 C2R2+SH
+[ 416.31]   |  'F' $46 C2R5+SH
+[ 416.31]   |  'G' $47 C3R2+SH
+[ 416.31]   |  'H' $48 C3R5+SH
+[ 416.31]   |  'J' $4A C4R2+SH
+[ 416.31]   |  'Z' $5A C1R4+SH
+[ 416.57]   |  ';' $3B C6R2
+[ 416.57]   |  '=' $3D C6R5
+[ 416.57]   |  'A' $41 C1R2+SH
+[ 416.57]   |  'S' $53 C1R5+SH
+[ 416.57]   |  'D' $44 C2R2+SH
+[ 416.57]   |  'F' $46 C2R5+SH
+[ 416.57]   |  'G' $47 C3R2+SH
+[ 416.57]   |  'H' $48 C3R5+SH
+[ 416.57]   |  'J' $4A C4R2+SH
+[ 416.57]   |  'K' $4B C4R5+SH
+[ 418.56]   |  'X' $58 C2R7+SH
+[ 420.80]   |  'C' $43 C2R4+SH
+[ 422.79]   |  'C' $43 C2R4+SH
+[ 422.79]   |  'V' $56
+[ 423.04]   |  'X' $58 C2R7+SH
+[ 423.04]   |  'C' $43 C2R4+SH
+[ 423.04]   |  'V' $56 C3R7+SH
+[ 425.04]   |  'S' $53 C1R5+SH
+[ 425.04]   |  'D' $44 C2R2+SH
+[ 425.04]   |  'F' $46 C2R5+SH
+[ 425.04]   |  'G' $47 C3R2+SH
+[ 425.04]   |  'H' $48 C3R5+SH
+[ 425.04]   |  'J' $4A C4R2+SH
+[ 425.04]   |  'K' $4B C4R5+SH
+[ 425.04]   |  'B' $42 C3R4+SH
+[ 425.29]   |  'D' $44 C2R2+SH
+[ 425.29]   |  'F' $46 C2R5+SH
+[ 425.29]   |  'G' $47 C3R2+SH
+[ 425.29]   |  'H' $48 C3R5+SH
+[ 425.29]   |  'J' $4A C4R2+SH
+[ 425.29]   |  'K' $4B C4R5+SH
+[ 425.29]   |  'L' $4C C5R2+SH
+[ 427.29]   |  'D' $44 C2R2+SH
+[ 427.29]   |  'F' $46 C2R5+SH
+[ 427.29]   |  'G' $47 C3R2+SH
+[ 427.29]   |  'H' $48 C3R5+SH
+[ 427.29]   |  'J' $4A C4R2+SH
+[ 427.29]   |  'K' $4B C4R5+SH
+[ 427.29]   |  'L' $4C C5R2+SH
+[ 427.29]   |  'N' $4E C4R7+SH
+[ 427.55]   |  'F' $46 C2R5+SH
+[ 427.55]   |  'G' $47 C3R2+SH
+[ 427.55]   |  'H' $48 C3R5+SH
+[ 427.55]   |  'J' $4A C4R2+SH
+[ 427.55]   |  'K' $4B C4R5+SH
+[ 427.55]   |  'L' $4C C5R2+SH
+[ 427.55]   |  '[' $5B C5R5+SH
+[ 429.54]   |  'F' $46 C2R5+SH
+[ 429.54]   |  'G' $47 C3R2+SH
+[ 429.54]   |  'H' $48 C3R5+SH
+[ 429.54]   |  'J' $4A C4R2+SH
+[ 429.54]   |  'K' $4B C4R5+SH
+[ 429.54]   |  'L' $4C C5R2+SH
+[ 429.54]   |  '[' $5B C5R5+SH
+[ 429.54]   |  'M' $4D C4R4+SH
+[ 429.79]   |  'G' $47 C3R2+SH
+[ 429.79]   |  'H' $48 C3R5+SH
+[ 429.79]   |  'J' $4A C4R2+SH
+[ 429.79]   |  'K' $4B C4R5+SH
+[ 429.79]   |  'L' $4C C5R2+SH
+[ 429.79]   |  '[' $5B C5R5+SH
+[ 429.79]   |  ']' $5D C6R2+SH
+[ 431.80]   |  'G' $47 C3R2+SH
+[ 431.80]   |  'H' $48 C3R5+SH
+[ 431.80]   |  'J' $4A C4R2+SH
+[ 431.80]   |  'K' $4B C4R5+SH
+[ 431.80]   |  'L' $4C C5R2+SH
+[ 431.80]   |  '[' $5B C5R5+SH
+[ 431.80]   |  ']' $5D C6R2+SH
+[ 431.80]   |  '=' $3D C6R5
+[ 431.80]   |  'Z' $7A C1R4
+[ 431.80]   |  'X' $78 C2R7
+[ 431.80]   |  'B' $76 C3R7
+[ 431.80]   |  'B' $62 C3R4
+[ 431.80]   |  '<' $3C C5R7+SH
+[ 432.05]   |  'H' $48 C3R5+SH
+[ 432.05]   |  'J' $4A C4R2+SH
+[ 432.05]   |  'K' $4B C4R5+SH
+[ 432.05]   |  'L' $4C C5R2+SH
+[ 432.05]   |  '[' $5B C5R5+SH
+[ 432.05]   |  ']' $5D C6R2+SH
+[ 432.05]   |  '=' $3D C6R5
+[ 432.05]   |  'Z' $7A C1R4
+[ 432.05]   |  'X' $78 C2R7
+[ 432.05]   |  'C' $63 C2R4
+[ 432.05]   |  'B' $62 C3R4
+[ 432.05]   |  'N' $6E C4R7
+[ 434.07]   |  'Z' $5A C1R4+SH
+[ 434.07]   |  'X' $58 C2R7+SH
+[ 434.07]   |  'C' $43 C2R4+SH
+[ 434.07]   |  'V' $56 C3R7+SH
+[ 434.07]   |  'B' $42 C3R4+SH
+[ 434.07]   |  'N' $4E C4R7+SH
+[ 434.07]   |  'M' $4D C4R4+SH
+[ 434.07]   |  '<' $3C C5R7+SH
+[ 434.07]   |  '>' $3E C5R4+SH
+[ 434.31]   |  '/' $2F C6R7
+[ 434.31]   |  'Z' $5A C1R4+SH
+[ 434.31]   |  'X' $58 C2R7+SH
+[ 434.31]   |  'C' $43 C2R4+SH
+[ 434.31]   |  'V' $56 C3R7+SH
+[ 434.31]   |  'B' $42 C3R4+SH
+[ 434.31]   |  'N' $4E C4R7+SH
+[ 434.31]   |  'M' $4D C4R4+SH
+[ 434.31]   |  '<' $3C C5R7+SH
+[ 434.31]   |  '>' $3E C5R4+SH
+[ 436.58]   |  'K' $4B C4R5+SH
+[ 436.58]   |  'L' $4C C5R2+SH
+[ 436.58]   |  '[' $5B C5R5+SH
+[ 436.58]   |  ']' $5D C6R2+SH
+[ 436.58]   |  '=' $3D C6R5
+[ 436.58]   |  'Z' $7A C1R4
+[ 436.58]   |  'X' $78 C2R7
+[ 436.58]   |  '?' $3F C6R7+SH
+[ 436.58]   | >
+[ 436.71] key UP   c0r1 RETURN
+[ 436.82]   |  'L' $4C C5R2+SH
+[ 436.82]   |  '[' $5B C5R5+SH
+[ 436.82]   |  ']' $5D C6R2+SH
+[ 436.82]   |  '=' $3D C6R5
+[ 436.82]   |  'Z' $7A C1R4
+[ 436.82]   |  'X' $78 C2R7
+[ 436.82]   |  'C' $63 C2R4
+[ 880.34] key DOWN c0r1 RETURN
+[ 880.95]   |  'L' $4C C5R2+SH
+[ 880.95]   |  '[' $5B C5R5+SH
+[ 880.95]   |  ']' $5D C6R2+SH
+[ 880.95]   |  '=' $3D C1R4
+[ 880.95]   |  'C' $63 C2R4
+[ 880.95]   | STEPS PPPPPPPPP
+[ 881.20]   |  '[' $5B C5R5+SH
+[ 881.20]   |  ']' $5D C6R2+SH
+[ 881.20]   |  '=' $3D C6R5
+[ 881.20]   |  'Z' $7A C1R4
+[ 881.20]   |  'V' $76 C3R7
+[ 882.43]   | RESULT PASS=9 FAIL=0 SKIP=0
+  D0=00000000  D1=00000000  D2=00000000  D3=00000000  D4=00001000  D5=0000000C  D6=00000000  D7=00000000
+  A0=00100038  A1=00100010  A2=00000000  A3=00012A98  A4=0001A93A  A5=00100010  A6=000F0400  A7=0000F004
+  PC=00000442  SR=0004  instructions=455753  [halt reason=00]
+[ 882.71] step 1 HOLD Q: program P; performed yes; Q held 3.2s
+[ 882.71] step 2 HOLD ; AND /: program P; performed yes; ; held 3.4s; / held 4.2s
+[ 882.71] step 3 ROLLOVER: program P; performed yes; at most 3 keys down at once
+[ 882.71] step 4 RSHIFT, C=: program P; performed yes; A with RSHIFT: yes; / with RSHIFT: yes; Q with C=: yes
+[ 882.71] step 5 PORT-1 STICK UP: program P; performed NO; stick row r0 seen held in 14 poll(s); O not typed with the stick held; E not typed with the stick held
+[ 882.71] step 6 PORT-1 STICK DOWN: program P; performed NO; stick row r1 seen held in 14 poll(s); O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[ 882.71] step 7 PORT-1 STICK LEFT: program P; performed NO; stick row r2 seen held in 12 poll(s); H not typed with the stick held
+[ 882.71] step 8 PORT-1 STICK RIGHT: program P; performed NO; stick row r3 seen held in 14 poll(s); H not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[ 882.71] step 9 PORT-1 FIRE: program P; performed NO; stick row r4 seen held in 26 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[ 882.71] fixed@1: INCOMPLETE (want PASS), STEPS PPPPPPPPP
+  CHECK FAILED  manual/fixed@1: PASS  INCOMPLETE
+[19:25:40] restoring config ...
+[19:25:44] config after (full, all categories): IDENTICAL
+[19:25:44] fixed@48: INCOMPLETE
+[19:25:44] nosettle@48: INCONCLUSIVE
+[19:25:44] nojoymask@48: DEFECT SHOWN
+[19:25:44] fixed@1: INCOMPLETE
+[19:25:44] SESSION VERDICT: INCOMPLETE: a step was skipped or not done as asked, a control had no defect signature and an operator error (redo that leg), or a run is missing: not validated
+  CHECK FAILED  session verdict VALIDATED  INCOMPLETE
+20/24 checks passed
+FAIL  manual/fixed@48: PASS: INCOMPLETE
+FAIL  manual/nosettle@48: DEFECT SHOWN: INCONCLUSIVE
+FAIL  manual/fixed@1: PASS: INCOMPLETE
+FAIL  session verdict VALIDATED: INCOMPLETE
