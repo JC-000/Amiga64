@@ -59,20 +59,22 @@ def main(argv=None) -> int:
             write_bytes(t, want, b"UCI!")
             write_bytes(t, READY_FLAG, b"\x00")
             goto(t, SYS_ENTRY)                     # "reload": re-enter the PRG
-            # Let the boot clear run before the first monitor read: polling
-            # memory immediately after goto() was seen to leave VICE halted
-            # inside the clear loop (PC $0820) once BSS grew to 7 pages
-            # (harness/VICE interaction, not a runtime hang: without the
-            # early read the PRG always comes back READY).  The clear is a
-            # few ms of emulated time; 1 s of wall time is ample in warp.
-            time.sleep(1.0)
+            # On VICE every monitor command (each read_bytes here) halts the
+            # CPU until resume(): a bare read poll after goto() freezes the
+            # boot clear at its first read and never sees READY.  Resume
+            # after every poll read; no settle sleep (it only hid this for
+            # short clears).  c64-test-harness#514.
             deadline = time.time() + 10
-            while read_bytes(t, READY_FLAG, 1)[0] != 0xA5:
+            while True:
+                ready = read_bytes(t, READY_FLAG, 1)[0] == 0xA5
+                if ready:
+                    break
+                t.resume()
                 if time.time() > deadline:
                     fails.append("PRG did not come back READY after restart")
                     break
                 time.sleep(0.05)
-            else:
+            if ready:
                 got = read_bytes(t, bss, size)
                 dirty = [i for i, b in enumerate(got) if b]
                 if dirty:
