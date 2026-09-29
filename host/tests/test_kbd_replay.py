@@ -1650,3 +1650,137 @@ def test_K5_no_vetoes_nothing_with_idle_evidence_only():
             st.denied.add(1)
         got.add(ctl7(ke.judge_step(st, 1, control=True)))
     assert got == {"DEFECT SHOWN"}
+
+
+# --- fix9 (review8 N1-N3; the Blingboard wake, attended A/B 2026-09-28) ------
+
+import re  # noqa: E402
+
+AB_LOGS = LOGS / "kbd-ab-20260928"
+NOTHING1 = [abl.state()] * 7          # step 1: Q never in raw nor matrix
+WAKE = "keyboard not awake? (Blingboard idle; tap SHIFT first)"
+
+
+def test_N1_X1_a_signature_in_a_discarded_pair_blocks_not_reproduced(
+        tmp_path):
+    """review8 X1, inverted: a phantom with a tapped fixed partner, then 5
+    clean pairs: REDO naming the discarded signature, never NOT
+    REPRODUCED."""
+    v, _ = abl.ab(tmp_path, [(1.0, {"nosettle": (abl.PHANTOM1, abl.CLEAN2),
+                                    "fixed": (abl.TAP1, abl.CLEAN2)})] +
+                  [abl.CLEAN] * 5)
+    assert v.startswith("REDO") and "pair1#1" in v and "phantom" in v, v
+
+
+def test_N1_X2_the_same_in_an_unproven_pair(tmp_path):
+    """review8 X2, inverted."""
+    p = [abl.Log().session(abl.plan(0), 1.0,
+                           nosettle=(abl.UPLATE1, abl.CLEAN2))
+         .write(tmp_path / "pair1" / "session.log")]
+    txt = open(p[0]).read()
+    open(p[0], "w").write(re.sub(r"(?m)^.*hb polls.*\n", "", txt))
+    for i in range(1, 6):
+        p.append(abl.Log().session(abl.plan(i), 1.0)
+                 .write(tmp_path / f"pair{i + 1}" / "session.log"))
+    out = []
+    ke.replay_report(p, out=out.append)
+    line = [l for l in out if l.startswith("A/B")][0]
+    assert "NOT REPRODUCED" not in line and "pair1#1" in line, line
+
+
+def test_N2_redo_names_its_stop_rule(tmp_path):
+    """review8 X3: a single step-2 signature never resolves by itself;
+    the line says how far to go (3 extra pairs, then REDO unresolved)."""
+    s2 = [abl.state()] + abl.hold_states(abl.SEMI) + \
+        [abl.state({abl.SLASH, abl.COMMA}, 2)] * 5 + [abl.state(set(), 2)]
+    v, _ = abl.ab(tmp_path, [(1.0, {"nosettle": (abl.CLEAN1, s2)})] +
+                  [abl.CLEAN] * 4)
+    assert v.startswith("REDO") and "at most 3 extra pairs" in v, v
+    doc = (Path(ke.PROJECT_ROOT) / "docs" / "HLE_CON.md").read_text()
+    assert "REDO (unresolved)" in doc
+
+
+def test_N3_the_c_minus_1_form_has_its_own_summary_class(tmp_path):
+    v, out = abl.ab(tmp_path, [(1.0, {"nosettle": (abl.UPRAW1,
+                                                   abl.CLEAN2)})] * 5)
+    rows = [l for l in out if re.match(r"^ +[0-9]+ nosettle@48 ", l)]
+    assert rows and all("settle: ^ while Q held" in r for r in rows), rows
+
+
+def test_wake_no_q_seen_at_all_is_its_own_discard(tmp_path):
+    """Q never in raw nor in the matrix in a run's step 1 (the Blingboard
+    after idle): REDO with the wake reason, never a signature, in either
+    build; the SUMMARY names it too."""
+    for build in ("nosettle", "fixed"):
+        v, out = abl.ab(tmp_path / build,
+                        [(1.0, {build: (NOTHING1, abl.CLEAN2)})] +
+                        [abl.CLEAN] * 4)
+        assert v.startswith("REDO") and WAKE in v and "pair1#1" in v, v
+        assert not v.startswith(("NECESSARY", "STOP"))
+        assert any(re.match(rf"^ +1 {build}@48 .*no Q at all: not awake\?", l)
+                   for l in out), out
+
+
+def test_wake_the_attended_a_b_replays_as_redo_not_awake():
+    """The attended A/B (2026-09-28): every session's FIRST run had step 1
+    with no Q at all, in both builds; all four pairs are wake discards."""
+    logs = sorted(str(p) for p in AB_LOGS.glob("pair*/session.log"))
+    assert len(logs) == 4
+    out = []
+    ke.replay_report(logs, out=out.append)
+    line = [l for l in out if l.startswith("A/B")][0]
+    assert line.split("'): ", 1)[1].startswith("REDO"), line
+    for p in ("pair1#1", "pair2#1", "pair4#1", "pair5#1"):
+        assert f"discarded {p}: {WAKE}" in line, (p, line)
+
+
+def test_wake_a_lone_shift_tap_is_harmless_in_both_builds(tmp_path):
+    """guard: the wake step, a LEFT SHIFT tap at step 1's prompt, then Q
+    held: neither a stray key, nor a bleed, nor a hold problem, in either
+    build; 5 such pairs read NOT REPRODUCED like clean ones."""
+    LS = ke.LSHIFT
+    tap = [abl.state(), abl.state({LS}), abl.state(set())] + \
+        abl.hold_states(abl.Q)
+    for control in (True, False):
+        st = abl.live(tap, step=1)
+        j = ke.judge_step(st, 1, control=control)
+        assert j.performed and not j.defects and not j.signature, j
+        assert not j.not_judgeable
+    v, out = abl.ab(tmp_path, [(1.0, {"nosettle": (tap, abl.CLEAN2),
+                                      "fixed": (tap, abl.CLEAN2)})] * 5)
+    assert v.startswith("NOT REPRODUCED"), v
+
+
+def test_wake_step_in_the_checklist_c64_prompt_and_docs():
+    lines = ke.checklist(ke.parse_runs("fixed@48")[0])
+    assert any("tap LEFT SHIFT" in l for l in lines)
+    c = (Path(ke.PROJECT_ROOT) / "fixtures" / "c" / "kbd_echo.c").read_text()
+    assert "tap SHIFT" in c
+    doc = (Path(ke.PROJECT_ROOT) / "docs" / "HLE_CON.md").read_text()
+    ab = doc[doc.index("### The settle A/B"):]
+    assert "Blingboard" in ab and "tap LEFT SHIFT" in ab
+    assert "no evidence for the settle defect" in doc
+    hw = (Path(ke.PROJECT_ROOT) / "docs" / "HARDWARE.md").read_text()
+    assert "Blingboard" in hw and "2026-09-28" in hw
+
+
+def test_wake_is_only_step_1_with_nothing_at_all(tmp_path):
+    """fix9 mutant kills: a key missing in step 2, or Q seen raw-only at
+    one poll in step 1, is not the wake: other discard reasons."""
+    s2_none = [abl.state()] * 6 + [abl.state({abl.SLASH}, 1)] * 5 + \
+        [abl.state(set(), 1)]
+    raw_brief = [abl.state(), abl.state(set(), 0, raw={abl.Q})] + \
+        [abl.state()] * 5
+    for name, runs in (("s2", (abl.CLEAN1, s2_none)),
+                       ("brief", (raw_brief, abl.CLEAN2))):
+        v, out = abl.ab(tmp_path / name, [(1.0, {"nosettle": runs})] +
+                        [abl.CLEAN] * 4)
+        assert v.startswith("REDO") and "pair1#1" in v, v
+        assert WAKE not in v, (name, v)
+
+
+def test_wake_line_is_general_in_every_checklist():
+    for run in ("nojoymask@48", "nosettle@48", "fixed@1"):
+        lines = ke.checklist(ke.parse_runs(run)[0])
+        assert any(l.startswith("At the run's FIRST '>' prompt: tap LEFT "
+                                "SHIFT") for l in lines), run

@@ -146,8 +146,9 @@ def _stick(n: int, name: str, row: int, fails_as: str) -> Step:
 
 
 STEPS = [
-    Step("HOLD Q", "hold Q to a count of 10 (5 s or more), release it, "
-         "press RETURN", "q",
+    Step("HOLD Q", "tap LEFT SHIFT once and release it (wakes the "
+         "keyboard), then hold Q to a count of 10 (5 s or more), release "
+         "it, press RETURN", "q",
          "^q: the UP-ARROW glyph ($5E, c6r6, read in the same sample as Q) "
          "then q; or nothing (the phantom keeps restarting the debounce)",
          "hold", keys="q"),
@@ -946,6 +947,8 @@ def step1_row(st, run: Run, got: str, session: int, logged: str = "-") -> str:
     form = "nothing" if never else "delayed commit"
     if any("phantom" in x for x in j.settle):
         cls = "phantom (^ with Q)"
+    elif any("in raw or committed" in x for x in j.settle):
+        cls = "settle: ^ while Q held"            # fix9 N3 (fix8 F1/F2)
     elif j.settle:
         cls = f"settle: {form}"
     elif any("not settle-specific" in x
@@ -957,6 +960,8 @@ def step1_row(st, run: Run, got: str, session: int, logged: str = "-") -> str:
         cls = "nothing: scanner dead"
     elif raw_n:
         cls = "nothing: raw brief"
+    elif any(WAKE_REASON in x for x in j.notes):
+        cls = "no Q at all: not awake?"
     else:
         cls = "nothing: no Q seen"
     if not st.raw_known:
@@ -994,6 +999,12 @@ def _ab_discard(p: ABPair) -> str:
     ns = [p.nosettle[n] for n in (1, 2)]
     if not p.proven:
         return "polling not proven by a heartbeat"
+    asleep = [f"{b} step {n}" for b, js in (("fixed@48", p.fixed),
+                                           ("nosettle@48", p.nosettle))
+              for n in (1, 2) if any(WAKE_REASON in x for x in js[n].notes)]
+    if asleep:          # a signature elsewhere stays visible (N1 below)
+        return (f"{WAKE_REASON}: no Q seen at all (raw too) in "
+                + ", ".join(asleep))
     if not all(j.performed for j in fx):
         return "fixed@48 steps 1-2 not held as asked (a tap is no hold)"
     if any(j.defects for j in fx):
@@ -1026,12 +1037,14 @@ def ab_verdict(pairs: list[ABPair]) -> str:
       signature, or step 2 has one in 2 kept pairs or more (the ; and /
       phantoms carry R4);
     - REDO when a single step-2 signature or a defect-like nosettle run
-      was seen (fix8 F3: never NOT REPRODUCED next to a signature);
+      was seen (fix8 F3: never NOT REPRODUCED next to a signature), or a
+      nosettle signature sits in a discarded pair (fix9 N1);
     - NOT REPRODUCED: AB_PAIRS kept pairs at --poll 1.0 and none of that,
       with its limits;
     - REDO otherwise, with the reasons.
     A nosettle stray key that is not the settle's discards its pair
-    (fix8 F2)."""
+    (fix8 F2).  Step 1 with no Q at all, raw included, is its own discard
+    reason, WAKE_REASON (fix9)."""
     stop, kept, gone, nonspec = [], [], [], []
     for p in pairs:
         fx = [p.fixed[n] for n in (1, 2)]
@@ -1057,18 +1070,30 @@ def ab_verdict(pairs: list[ABPair]) -> str:
             s1 + (s2 if len(s2) >= 2 else [])) + f"; {len(kept)} kept "
             "pair(s), every kept fixed@48 run clean")
     discards = "".join(f"; discarded {p.label}: {w}" for p, w in gone)
+    more = ("; at most 3 extra pairs at --poll 1.0 (AB 8-10), then report "
+            "REDO (unresolved)")
+    # fix9 N1: a nosettle signature in a DISCARDED pair (its partner
+    # tapped, a stray key, unproven polling) is still a signature: the
+    # line never reads NOT REPRODUCED beside it
+    lost = [f"{p.label} step {n}: {p.nosettle[n].settle[0]}"
+            for p, _ in gone for n in (1, 2) if p.nosettle[n].settle]
+    if lost:
+        n_slow = sum(p.poll == 1.0 for p, _ in kept)
+        return (f"REDO: {n_slow} of {AB_PAIRS} kept pairs at --poll 1.0; a "
+                "settle-specific signature in a discarded pair: redo that "
+                "pair under a new name; " + "; ".join(lost) + discards)
     # fix8 F3: NOT REPRODUCED never with a signature or a defect-like run
     # anywhere: a single step-2 signature (R4) or a debounce that kept
     # restarting without settle evidence asks for more pairs
     slow = [p for p, _ in kept if p.poll == 1.0]
     if s2:
         return (f"REDO: {len(s2)} step-2 settle-specific signature, not yet "
-                "repeated in another pair (R4): run more pairs; "
+                "repeated in another pair (R4): run more pairs" + more + "; "
                 + "; ".join(s2) + discards)
     if nonspec:
         return ("REDO: defect-like, not settle-specific (the debounce kept "
-                "restarting with no settle evidence): run more pairs; "
-                + "; ".join(nonspec) + discards)
+                "restarting with no settle evidence): run more pairs" + more
+                + "; " + "; ".join(nonspec) + discards)
     tail = ""
     if len(slow) >= AB_PAIRS:
         bound = 1 - 0.05 ** (1 / len(slow))
@@ -1292,6 +1317,7 @@ def typed_with(samples: list[Sample], key: int, echo: str, cond) -> bool:
     return credit(samples, key, echo, cond) is not None
 
 
+WAKE_REASON = "keyboard not awake? (Blingboard idle; tap SHIFT first)"
 DELAY_MIN = 0.2            # s a held key may read raw-only before its commit
                            # (fix6 R2).  A healthy commit follows the press
                            # after CON_STABLE = 64 raster lines (~4 ms) plus
@@ -1438,6 +1464,12 @@ def judge_step(stream: Stream, n: int, control: bool = False) -> StepJudge:
                                    + line)
             elif never and ss:
                 dead = sum(s.live is False for s in ss)
+                if n == 1 and raw_known and not raw_n and dead < 2:
+                    # fix9: the rig's keyboard LED board (Blingboard) hides
+                    # the whole first hold after ~2 min idle, in either
+                    # build (docs/HARDWARE.md); nothing is no evidence
+                    notes.append(f"no {name} seen at all (raw too): "
+                                 + WAKE_REASON)
                 seen = (f"raw showed {name} at {raw_n} poll(s)" if raw_n
                         else "raw never showed it" if raw_known
                         else "raw is not in this log")
@@ -2322,6 +2354,9 @@ def checklist(run: Run, poll: float = POLL_DEFAULT) -> list[str]:
             "ends with RETURN and shows PASS or FAIL.",
             "Type ONLY while the '>' prompt shows (keys pressed while the "
             "program prints are lost).",
+            "At the run's FIRST '>' prompt: tap LEFT SHIFT once and release "
+            "it before anything else", "(the keyboard's LED board hides the "
+            "first key hold after ~2 min idle).",
             "NO joystick in control port 2 (it locks the keyboard out by "
             "design).", "Do each step exactly as described: the driver "
             "checks HOW (held time, keys down",

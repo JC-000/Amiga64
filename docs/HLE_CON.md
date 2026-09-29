@@ -696,13 +696,22 @@ then two runs), so 5 pairs take about 25 minutes before any redo.
 
 Tell the operator before the first session:
 - **No joystick in either port. SHIFT LOCK up.**
+- **Wake the keyboard first, in every run.** This C64's keyboard carries
+  a Blingboard (an RGB LED board) that hides the whole first key hold
+  after about 2 minutes idle (see "The Blingboard" below). At the run's
+  first `>` prompt (step 1; the screen says
+  `TAP SHIFT, THEN HOLD Q (COUNT 10),`), **tap LEFT SHIFT once and
+  release it**, then hold Q.
+  Release SHIFT before pressing Q, or Q comes out upper case. A lone
+  SHIFT tap is neither a stray key nor a hold problem in either build.
 - Each session first waits for **Enter on the host terminal** (the
   operator confirmation): press Enter when you sit at the C64.
-- In **every** run, at step 1 the screen says `HOLD Q (COUNT 10)`: hold
+- In **every** run, at step 1, after the SHIFT tap, hold
   **Q to a count of 10** (at least 5 s by the clock, so the stream sees it
   at 4-5 polls), release, RETURN. At step 2 hold **; to a count of 10**,
   release, hold **/ to a count of 10**, release, RETURN. (A driver older
-  than fix round 8 printed `HOLD Q 2S`: ignore that, count to 10.)
+  than fix round 8 printed `HOLD Q 2S`: ignore that, tap SHIFT and count
+  to 10.)
 - **While holding Q, ; or /, touch no other key.**
 - In the fixed run, press **RETURN alone** at steps 3-9 and at the free
   mode prompt. At `--poll 1.0` the checklist says so; at `--poll 0.1`
@@ -734,6 +743,19 @@ python3 -m tests.kbd_echo --replay $D/pair*/session.log | \
     grep -E '^(SUMMARY| ses|  +[0-9]+ |A/B)'
 ```
 
+**Reading the A/B line.** NECESSARY and STOP are final. REDO names every
+discarded pair and why:
+- `keyboard not awake? (Blingboard idle; tap SHIFT first)`: step 1 saw
+  no Q at all, raw included. That is the keyboard, not the scan: redo the
+  pair and tap SHIFT first. It is never a signature.
+- a signature in a discarded pair (fix round 9, N1): redo that pair; the
+  line never reads NOT REPRODUCED beside it.
+- `not yet repeated` (one step-2 signature) or `defect-like`: run **at
+  most 3 extra pairs** at `--poll 1.0`, named `AB 8`, `AB 9`, `AB 10`.
+  If the line still says REDO, stop and report **REDO (unresolved)**
+  with the signatures it lists: the detector cannot decide, and more
+  pairs will not change that (review8 N2).
+
 Each `--out-dir` must be new (a non-empty one is refused). Pass each pair
 directory to `--replay` **once** (a log passed twice is skipped, but a
 copy under another name would count twice). When the A/B line says REDO
@@ -741,6 +763,37 @@ for a pair, run it again under a new name (`AB 3b …`); the discarded one
 stays on disk and its reason is in the A/B line. On STOP, stop and
 report. Report back: the SUMMARY rows (logged and replayed), the A/B
 line, and the `session.log` files.
+
+### The Blingboard (the rig's keyboard, found 2026-09-28)
+
+This C64's keyboard carries a **Blingboard**, an RGB LED board. After
+about 2 minutes idle, **the whole first key hold is invisible at the
+matrix**: the user held Q to a count of 10 on stock BASIC (none of this
+project's code running) and nothing appeared. A SHIFT tap first wakes it,
+and Q then types normally; after only a few seconds idle it is fine.
+(docs/HARDWARE.md, "Test-rig note".)
+
+- **In the attended A/B of 2026-09-28** (`tests/kbd/replay/kbd-ab-20260928`,
+  pairs 1, 2, 4 and 5), every session's **first** run had step 1 "no Q
+  seen" with raw empty too, in **both** builds (nosettle first in pairs 1
+  and 5, fixed first in 2 and 4), and every second run was clean. That is
+  the wake artefact, not the settle. Replayed, all four pairs are REDO
+  with the reason `keyboard not awake? (Blingboard idle; tap SHIFT
+  first)`.
+- **The judge (fix round 9):** step 1 with the held key never seen, in
+  raw or the matrix, raw logged and the scanner sampling, gets the note
+  `no Q seen at all (raw too): keyboard not awake? …`, its own SUMMARY
+  class (`no Q at all: not awake?`) and its own A/B discard reason. It is
+  never a signature and never STOP: the Blingboard behaves the same in
+  both builds.
+
+**W6-K history: the 2026-09-26 "nothing form" sessions.** The sparse
+sessions (`kbd-hw-sparse`, 19:01, and `kbd-hw-sparse2`, 19:31), where Q
+"vanished" in nosettle step 1 (no key DOWN, program S), were first runs
+of their sessions or came after a 30-minute idle. They are explained by
+the Blingboard, and they are **no evidence for the settle defect**. (They
+predate the raw diagnostic, so the logs themselves could never show it
+either way; review4 section 3(c).)
 
 ### What VICE covers (`--backend vice`, automated)
 
