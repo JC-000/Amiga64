@@ -34,12 +34,15 @@ MANNER: Q (and ; and /) held >= 1.5 s, three keys down at once in the
 rollover, RSHIFT / C= down when their keys go down and LEFT SHIFT never,
 the port-1 stick's row seen held low while H O S E go down.  It also looks
 for DEFECTS in the stream: another key down together with a held key, a
-column bleed, a key on the stick's row reading down.
+column bleed in a hold step, a key on the stick's row reading down.  A step
+the stream cannot decide (poll period unknown, a stall, or a poll too
+sparse for a tapped step) is NOT JUDGEABLE, never operator error.
 
 Verdicts (:func:`judge_run`):
   fixed build   PASS only when every step is P, performed as asked, with no
                 defect; FAIL on any F or defect; else INCOMPLETE (a SKIP is
-                never a pass).
+                never a pass), or NOT JUDGEABLE when all that is missing is
+                a step the stream could not decide.
   control build (a runner with the fix taken out, ``CONTROLS``): DEFECT
                 SHOWN only when the stream shows that control's own defect
                 SIGNATURE (nosettle: the c-1 phantom going down in the same
@@ -93,7 +96,10 @@ with the exact full-config snapshot/restore of
 firmware re-checked, every setting the run depends on set explicitly, the
 runner uploaded once, no storage writes (``dosio_want_uci`` zeroed and
 RAMDISK proven; the program opens no files).  Session log:
-``--out-dir``/session.log, written as it goes.
+``--out-dir``/session.log, written as it goes, one session per directory
+(the default --out-dir is new per session; an existing session.log is
+refused).  ``--replay LOG...`` re-judges logs offline, each session on its
+own; a log's verdict is its worst session's.
 
 Exit code 0 = all checks passed (manual: session VALIDATED).
 """
@@ -140,12 +146,15 @@ def _stick(n: int, name: str, row: int, fails_as: str) -> Step:
 
 
 STEPS = [
-    Step("HOLD Q", "hold Q for 2 s, release it, press RETURN", "q",
+    Step("HOLD Q", "tap LEFT SHIFT once and release it (wakes the "
+         "keyboard), then hold Q to a count of 10 (5 s or more), release "
+         "it, press RETURN", "q",
          "^q: the UP-ARROW glyph ($5E, c6r6, read in the same sample as Q) "
          "then q; or nothing (the phantom keeps restarting the debounce)",
          "hold", keys="q"),
     Step("HOLD ; AND /",
-         "hold ; for 2 s, release; hold / for 2 s, release; RETURN", ";/",
+         "hold ; to a count of 10, release; hold / to a count of 10, "
+         "release; RETURN", ";/",
          "l; (c5r2, bleed from ;) or ,/ (c5r7, bleed from /)", "hold",
          keys=";/"),
     Step("ROLLOVER",
@@ -247,7 +256,10 @@ def bleed_suspect(idx: int, held: set[int]) -> int | None:
     a key in column c.  -> the held key at c+1 on the same row, or None."""
     c, r = divmod(idx, 8)
     src = (c + 1) * 8 + r
-    return src if c < 7 and src in held and src != idx else None
+    # a held modifier (RSHIFT is c6r4 above '.' c5r4) is not a source: a
+    # modifier held while its neighbour is typed is the normal case (fix3)
+    return src if c < 7 and src in held and src != idx and \
+        src not in MODS else None
 
 
 def key_events(prev: set[int], now: set[int], dn: int) -> list[str]:
@@ -378,7 +390,8 @@ def queue_keys(sess, data: bytes) -> None:
 
 # --- console labels ---------------------------------------------------------------
 
-STREAM_LABELS = ("hle_con_nkey", "hle_con_idle", "hle_con_mat")
+STREAM_LABELS = ("hle_con_nkey", "hle_con_idle", "hle_con_mat",
+                 "hle_con_raw", "hle_con_ras")
 HLE_CON_SRC = os.path.join(PROJECT_ROOT, "runtime", "ops", "hle_con.s")
 
 
@@ -427,15 +440,73 @@ class Sample:
     step: int | None           # the step on screen when this poll was taken
     keys: frozenset            # debounced matrix (indices)
     idle: int                  # hle_con_idle
+    nkey: int | None = None    # hle_con_nkey (key-down events decoded)
+    line: str | None = None    # the echo line on screen ("> ..." row)
+    raw: frozenset | None = None   # hle_con_raw: last valid raw sample
+    live: bool | None = None   # hle_con_ras moved within the last 3 polls
+                               # (the scanner is sampling); None: unknown
 
 
-STEP_HDR = re.compile(r"STEP (\d+)/\d+")
-STEP_END = re.compile(r"STEP (\d+) (PASS|FAIL|SKIP)")
+# A program row can land after prompt residue ("> STEPS ..." when the free
+# mode ends on a prompt row, fix3 BUG 1): tolerate "> " before these rows.
+def echo_line(rows: list[str]) -> str | None:
+    """The console line being typed: the text after "> " on the lowest
+    prompt row on screen (None: no prompt row)."""
+    for r in reversed(rows):
+        if r.startswith(">"):
+            return r[2:]
+    return None
+
+
+STEP_HDR = re.compile(r"(?:> )?STEP (\d+)/\d+")
+STEP_END = re.compile(r"(?:> )?STEP (\d+) (PASS|FAIL|SKIP)")
+STEPS_ROW = re.compile(rf"STEPS ([PFS-]{{{len(STEPS)}}})(?![PFS-])")
+
+
+HB_EVERY = 1.0             # s between two heartbeat lines in the log
+HB_LINE = re.compile(r"^hb polls \+(\d+) max gap ([\d.]+)s")
+POLL_DEFAULT = 0.1         # s: --poll's default
+POLL_OVERHEAD = 0.15       # s the REST reads of one poll add to --poll: the
+                           # measured poll period is 0.24-0.26 s at --poll
+                           # 0.1 and 1.14-1.15 s at --poll 1.0 (fix5 D1)
+GAP_SLACK = 0.15           # s of jitter over the period before a gap is a
+                           # stall
+HB_TOL = 1.5               # a replay's heartbeat is BROKEN only at a gap over
+                           # HB_TOL x the measured median period (fix10: one
+                           # 1.31 s gap at --poll 1.0, normal 1.14-1.23 s,
+                           # broke a whole attended run); a 2 s stall at
+                           # --poll 1.0 (1.5 x 1.15 = 1.72) and 2.1 s at 0.1
+                           # stay BROKEN
+
+
+def poll_period(poll: float) -> float:
+    """The real poll period of a stream run with --poll *poll*."""
+    return poll + POLL_OVERHEAD
+
+
+def gap_max(period: float) -> float:
+    """The longest gap between two polls that is not a stall, at *period*:
+    0.4 s at the default --poll (ECHO_GAP_MAX), more at a sparse poll."""
+    return max(ECHO_GAP_MAX, period + GAP_SLACK)
+
+
+def _log_only(line: str) -> None:
+    """Write *line* to the session log only (not the operator's terminal):
+    the Tee that run_u64 installs has the log file as .f."""
+    f = getattr(sys.stdout, "f", None)
+    if f is not None:
+        f.write(line + "\n")
 
 
 class Stream:
     """Poll the scanner state and the screen; print what changed; keep a
-    step-tagged timeline for :func:`judge_step`."""
+    step-tagged timeline for :func:`judge_step`.  Every HB_EVERY s a
+    heartbeat "hb polls +N max gap Gs" goes to the session log (fix4), so
+    a replay can prove that polling was continuous; :meth:`hb_flush` logs
+    the last, partial window.  *period* is the poll period the judge
+    assumes (leg_manual sets it from --poll); *confirmed* the steps whose
+    hold the operator said yes / no to (fix6, :func:`hold_question_steps`).
+    """
 
     def __init__(self, sess, out=print):
         self.sess = sess
@@ -446,7 +517,13 @@ class Stream:
             raise RuntimeError(f"PRG lacks console labels {missing}")
         self.lo = min(self.at.values())
         self.span = max(self.at.values()) + 8 - self.lo
-        self.t0 = time.monotonic()
+        self.t0 = self.hb_t = time.monotonic()
+        self.last_poll = None             # the first gap is from poll 1
+        self.hb_n, self.hb_gap, self.gap_worst = 0, 0.0, 0.0
+        self.poll_s, self.period = POLL_DEFAULT, poll_period(POLL_DEFAULT)
+        self.raw_known, self.confirmed, self.denied = True, set(), set()
+        self.ras_seen: list[int] = []
+        self.live: bool | None = None
         self.nkey = self.mat = self.idle = None
         self.rows = [""] * ROWS
         self.log: list[str] = []          # every line printed
@@ -455,6 +532,7 @@ class Stream:
         self.samples: list[Sample] = []
         self.step: int | None = None
         self.last_hdr = 0                 # steps only move forward
+        self.raw_extra: set[int] = set()
 
     def emit(self, line: str) -> None:
         line = f"[{time.monotonic() - self.t0:7.2f}] {line}"
@@ -466,7 +544,8 @@ class Stream:
         blk = read_bytes(self.sess.target.transport, self.lo, self.span)
         g = lambda n, k=1: blk[self.at[n] - self.lo:self.at[n] - self.lo + k]
         return {"nkey": g("hle_con_nkey")[0],
-                "idle": g("hle_con_idle")[0], "mat": g("hle_con_mat", 8)}
+                "idle": g("hle_con_idle")[0], "mat": g("hle_con_mat", 8),
+                "raw": g("hle_con_raw", 8), "ras": g("hle_con_ras")[0]}
 
     def screen_step(self, row: str) -> None:
         m = STEP_HDR.match(row)
@@ -479,7 +558,16 @@ class Stream:
     def poll(self, screen: bool = True) -> dict:
         from c64_test_harness import read_bytes
         from tests.run_vbcc import SCREEN
+        now = time.monotonic()
+        self.hb_n += 1
+        if self.last_poll is not None:
+            self.hb_gap = max(self.hb_gap, now - self.last_poll)
+            self.gap_worst = max(self.gap_worst, now - self.last_poll)
+        self.last_poll = now
+        if now - self.hb_t >= HB_EVERY:
+            self._hb(now)
         s = self.read_state()
+        self._liveness(s.get("ras"))
         if self.nkey is None or self.mat == b"\xff" * 8:
             # first poll, or hle_con_init's "every key down": baseline only
             self.nkey, self.mat = s["nkey"], s["mat"]
@@ -495,9 +583,24 @@ class Stream:
         # hle_con_idle is only meaningful once the scanner has sampled
         # (hle_con_init's all-down matrix has been committed away)
         if s["mat"] != b"\xff" * 8:
-            self.samples.append(Sample(time.monotonic(), self.step,
+            self.samples.append(Sample(now, self.step,
                                        frozenset(mat_bits(s["mat"])),
-                                       s["idle"]))
+                                       s["idle"], s["nkey"],
+                                       raw=frozenset(mat_bits(s["raw"])),
+                                       live=self.live))
+            # diagnostic (fix3): keys in the latest raw sample that the
+            # debounce has not committed -- a key held but never settled
+            # (the "nothing" form of a phantom) shows here, a key never
+            # pressed does not
+            extra = {i for i in mat_bits(s["raw"]) if i not in MODS} - \
+                mat_bits(s["mat"])
+            if extra != self.raw_extra:
+                # "none" when it clears (fix5 F5): one long raw-only hold
+                # and two taps then read differently in the log
+                self.emit("raw (not debounced yet): " +
+                          (", ".join(pos(i) for i in sorted(extra))
+                           if extra else "none"))
+                self.raw_extra = extra
             if s["idle"] != self.idle:
                 rows = joy_rows(s["idle"])
                 if rows or self.idle is not None:
@@ -514,12 +617,606 @@ class Stream:
                 self.screen_step(r)
                 self.emit(f"  | {r}")
             self.rows = rows
+            if self.samples and self.samples[-1].line is None:
+                self.samples[-1].line = echo_line(rows)
         return s
 
+    def _liveness(self, ras: int | None) -> None:
+        """hle_con_ras (VIC raster at the last valid sample) changes on
+        almost every sample, so the same value at 3 polls in a row means
+        no valid sample in between (fix6: port 2 active, the ring pending,
+        or no Read running): a raw that shows nothing then proves nothing.
+        Logged on each change of state."""
+        if ras is None:
+            return
+        self.ras_seen = (self.ras_seen + [ras])[-3:]
+        if len(self.ras_seen) < 3:
+            return
+        live = len(set(self.ras_seen)) > 1
+        if live != self.live and not (live and self.live is None):
+            self.emit("scanner: sampling" if live else "scanner: not "
+                      "sampling (hle_con_ras unchanged over 3 polls)")
+        self.live = live
+
+    def _hb(self, now: float) -> None:
+        _log_only(f"[{now - self.t0:7.2f}] hb polls +{self.hb_n} max "
+                  f"gap {self.hb_gap:.2f}s")
+        self.hb_t, self.hb_n, self.hb_gap = now, 0, 0.0
+
+    def hb_flush(self) -> None:
+        """Log the last heartbeat window, however short (fix5 H1)."""
+        if self.hb_n:
+            self._hb(time.monotonic())
+
     def verdicts(self) -> str | None:
-        """The program's own STEPS line, if it printed one."""
-        return next((r.split()[1] for r in reversed(self.screen_log)
-                     if r.startswith("STEPS ")), None)
+        """The program's own STEPS summary (nine P/F/S/- letters), wherever
+        it landed on its row (after prompt residue too), else None."""
+        for r in reversed(self.screen_log):
+            m = STEPS_ROW.search(r)
+            if m:
+                return m[1]
+        return None
+
+
+# --- replaying a session log ----------------------------------------------------
+
+LOG_LINE = re.compile(r"^\[\s*([\d.]+)\] (.*)$")
+# a session's first line (run_u64; wall-clock stamp): one log may hold
+# several sessions, each judged on its own (fix5 F7)
+SESSION_HDR = re.compile(r"^\[\d\d:\d\d:\d\d\] kbd_echo (?:MANUAL|smoke)\b")
+HDR_RUNS = re.compile(r", runs (\S+@\d+(?:, \S+@\d+)*)")
+HDR_POLL = re.compile(r", poll ([\d.]+)s\b")
+RUN_START = re.compile(r"^(\S+@\d+) started(?: \(--poll ([\d.]+)s\))?: ")
+RUN_END = re.compile(r"^(\S+@\d+): (PASS|FAIL|INCOMPLETE|DEFECT SHOWN|"
+                     r"INCONCLUSIVE|NOT JUDGEABLE) \(want")
+KEY_LINE = re.compile(r"^(key|mod) (DOWN|UP)\s+c(\d)r(\d) ")
+REL_LINE = re.compile(r"^\(\+(\d+) key event")
+MASK_LINE = re.compile(r"^\((\d+) key\(s\) down without an event")
+JOY_LINE = re.compile(r"^port-1 joystick: (?:rows ((?:r\d ?)+) held low|"
+                      r"released)")
+RAW_LINE = re.compile(r"^raw \(not debounced yet\): (.*)$")
+FILL_MIN = 0.25            # s: synthetic samples are never denser than the
+                           # default poll's period, so none lands between
+                           # one poll's state and screen reads (0.11-0.14 s
+                           # apart in the logs)
+CONFIRM_LINE = re.compile(r"^operator confirms: step (\d+)\b")   # fix5
+ANSWER_LINE = re.compile(r"^operator: step (\d+) held as asked .*\? "
+                         r"(yes|no|no answer)$")
+LIVE_LINE = re.compile(r"^scanner: (sampling|not sampling)")
+
+
+def replay_stream() -> "Stream":
+    """A Stream with no session: fed from a log by replay_log()."""
+    st = Stream.__new__(Stream)
+    st.samples, st.bleeds, st.screen_log, st.log = [], [], [], []
+    st.step, st.last_hdr = None, 0
+    st.rows = [""] * ROWS
+    st.t0 = st.hb_t = time.monotonic()
+    st.last_poll = None
+    st.hb_n, st.hb_gap, st.gap_worst = 0, 0.0, 0.0
+    st.poll_s, st.period = None, poll_period(POLL_DEFAULT)
+    st.raw_known, st.confirmed, st.denied = True, set(), set()
+    st.ras_seen, st.live = [], None
+    st.nkey = st.mat = st.idle = None
+    st.raw_extra = set()
+    st.out = print
+    st.session = 0
+    st.continuity = "unproven (no heartbeat in this log)"
+    return st
+
+
+@dataclass
+class LoggedRun:
+    run: Run
+    poll: float | None         # --poll from the run-start line or header
+    fix5: bool                 # the run-start line carries --poll (fix5+)
+    t0: float
+    lines: list                # [(t, message)] between start and end
+    logged: str                # the verdict the live driver logged
+
+
+@dataclass
+class LoggedSession:
+    header: str | None         # None: the log has no session header
+    plan: str | None           # its --runs ("fixed@48,nosettle@48")
+    runs: list                 # [LoggedRun]
+
+
+def read_sessions(path: str) -> list[LoggedSession]:
+    """Split a session log into its sessions and each session's finished
+    runs.  A run with no end line (the driver died) is dropped."""
+    out: list[LoggedSession] = []
+    hdr_poll, cur = None, None
+
+    def new(header):
+        nonlocal hdr_poll
+        m = HDR_RUNS.search(header or "")
+        hp = HDR_POLL.search(header or "")
+        hdr_poll = float(hp[1]) if hp else None
+        out.append(LoggedSession(header, m[1].replace(", ", ",") if m
+                                 else None, []))
+    with open(path, errors="replace") as f:
+        for raw in f:
+            text = raw.rstrip("\n")
+            if SESSION_HDR.match(text):
+                new(text)
+                cur = None
+                continue
+            m = LOG_LINE.match(text)
+            if not m:
+                continue
+            t, msg = float(m[1]), m[2]
+            if not out:
+                new(None)
+            ms = RUN_START.match(msg)
+            if ms:
+                cur = LoggedRun(parse_runs(ms[1])[0],
+                                float(ms[2]) if ms[2] else hdr_poll,
+                                ms[2] is not None, t, [], "")
+                continue
+            if cur is None:
+                continue
+            me = RUN_END.match(msg)
+            if me:
+                cur.logged = me[2]
+                out[-1].runs.append(cur)
+                cur = None
+                continue
+            cur.lines.append((t, msg))
+    return out
+
+
+def _timing(lr: LoggedRun, assume_poll: float | None
+            ) -> tuple[float | None, str, float | None, list]:
+    """-> (period, continuity text, worst logged gap, irregular windows)
+    for one logged run.  The period comes from the logged --poll, else
+    from the heartbeat, else from --assume-poll; else it is unknown (None)
+    and the replay adds no samples: only the logged polls count (fix5 F2).
+    A heartbeat gap over max(gap_max(period), HB_TOL x the smaller of the
+    measured median and the nominal period; HB_TOL only with a logged
+    --poll) is BROKEN, and the run is judged on the logged polls only as
+    well: a synthetic sample could hide the stall.  A heartbeat window
+    whose gap is over gap_max(period) but under that bound is IRREGULAR
+    (fix10): the run stays proven, but no synthetic poll is placed inside
+    that window (a fill one period back from a late poll would land in the
+    real gap and could stretch a raw-only sighting past DELAY_MIN)."""
+    hb = [(t, int(m[1]), float(m[2])) for t, msg in lr.lines
+          if (m := HB_LINE.match(msg))]
+    per, prev = [], lr.t0
+    for t, n, _ in hb:
+        if n:
+            per.append((t - prev) / n)
+        prev = t
+    measured = sorted(per)[len(per) // 2] if per else None
+    if lr.poll is not None:
+        period, src = poll_period(lr.poll), f"--poll {lr.poll:g}s logged"
+    elif hb:
+        period, src = measured, "measured from the heartbeat"
+    elif assume_poll is not None:
+        period = poll_period(assume_poll)
+        src = f"--assume-poll {assume_poll:g}s, NOT in the log"
+    else:
+        return None, ("unproven, poll period unknown (no --poll and no "
+                      "heartbeat in this log): judged on the logged polls "
+                      "only"), None, []
+    if not hb:
+        return period, (f"unproven (no heartbeat in this log); period "
+                        f"{period:.2f}s from {src}"), None, []
+    worst = max(g for *_, g in hb)
+    # HB_TOL only with a logged --poll, and on the smaller of the measured
+    # and the nominal period: without --poll the period IS the measured
+    # one, and a stall inside a window would inflate its own bound
+    bound = gap_max(period or 0) if lr.poll is None else \
+        max(gap_max(period), HB_TOL * min(measured or period, period))
+    if period is None or worst > bound:
+        return None, (f"BROKEN (a poll gap of {worst:.2f}s > "
+                      f"{bound:.2f}s): judged on the logged polls only"), \
+            worst, []
+    irregular, prev = [], lr.t0
+    for t, n, g in hb:
+        if g > gap_max(period):
+            irregular.append((prev, t))
+        prev = t
+    note = (f"; {len(irregular)} irregular window(s), not filled"
+            if irregular else "")
+    return period, (f"proven ({len(hb)} heartbeat(s), max gap {worst:.2f}s "
+                    f"<= {bound:.2f}s; period {period:.2f}s from {src}"
+                    f"{note})"), worst, irregular
+
+
+def _replay_run(lr: LoggedRun, assume_poll: float | None) -> "Stream":
+    """Rebuild one run's stream: every state change the live stream printed
+    (key DOWN/UP with the scanned position, +n events a poll missed, the
+    port-1 rows, the raw diagnostic, the mirrored screen rows) at its
+    timestamp.  With a known poll period, the polls between two logged
+    changes are added too, one period apart counted back from the later
+    change (the state is constant there, and the live stream's last poll
+    before a change is one period earlier, so a hold is not
+    over-measured).  With an unknown period nothing is added."""
+    st = replay_stream()
+    period, st.continuity, st.gap_worst, irregular = _timing(lr,
+                                                             assume_poll)
+    st.period, st.poll_s, st.raw_known = period, lr.poll, lr.fix5
+    keys, idle, nkey, line, extra, live = set(), 0xFF, 0, None, set(), None
+    t_last = lr.t0
+
+    def sample(t):
+        st.samples.append(Sample(t, st.step, frozenset(keys), idle, nkey,
+                                 line, frozenset(keys | extra), live))
+    for t, msg in lr.lines:
+        if HB_LINE.match(msg):
+            continue
+        mc = CONFIRM_LINE.match(msg)
+        if mc:
+            st.confirmed.add(int(mc[1]))
+            continue
+        ma = ANSWER_LINE.match(msg)
+        if ma:
+            if ma[2] == "yes":
+                st.confirmed.add(int(ma[1]))
+            elif ma[2] == "no":
+                st.denied.add(int(ma[1]))
+            continue
+        if t > t_last:                           # a new poll
+            if period is not None:
+                step = max(period, FILL_MIN)
+                fill, k = [], t - step
+                while k > t_last + 1e-6:
+                    fill.append(k)
+                    k -= step
+                for k in reversed(fill):
+                    if not any(a < k <= b for a, b in irregular):
+                        sample(k)
+            t_last = t
+            sample(t)
+        if msg.startswith("  | "):
+            row = msg[4:]
+            st.screen_log.append(row)
+            st.screen_step(row)
+            if row.startswith(">"):
+                line = row[2:] if len(row) > 1 else ""
+            if st.samples:
+                st.samples[-1].line = line
+            continue
+        mk = KEY_LINE.match(msg)
+        if mk:
+            idx = int(mk[3]) * 8 + int(mk[4])
+            if mk[2] == "DOWN":
+                keys.add(idx)
+                nkey += mk[1] == "key"
+                if "COLUMN BLEED" in msg:
+                    st.bleeds.append((st.step, msg))
+            else:
+                keys.discard(idx)
+        elif REL_LINE.match(msg):
+            nkey += int(REL_LINE.match(msg)[1])
+        elif MASK_LINE.match(msg):
+            nkey -= int(MASK_LINE.match(msg)[1])
+        elif JOY_LINE.match(msg):
+            rows = JOY_LINE.match(msg)[1]
+            idle = 0xFF
+            for r in (rows or "").split():
+                idle &= ~(1 << int(r[1:]))
+        elif RAW_LINE.match(msg):
+            txt = RAW_LINE.match(msg)[1]
+            extra = set() if txt == "none" else \
+                {int(c) * 8 + int(r) for c, r in re.findall(r"c(\d)r(\d)", txt)}
+        elif LIVE_LINE.match(msg):
+            live = LIVE_LINE.match(msg)[1] == "sampling"
+        if st.samples:
+            s0 = st.samples[-1]
+            st.samples[-1] = Sample(s0.t, s0.step, frozenset(keys), idle,
+                                    nkey, s0.line, frozenset(keys | extra),
+                                    live)
+    return st
+
+
+def replay_log(path: str, assume_poll: float | None = None
+               ) -> list[tuple[Run, "Stream", str]]:
+    """Every finished run of a session log, rebuilt (_replay_run), in log
+    order; st.session is the index of its session in the file.
+    -> [(run, stream, verdict the live driver logged)]."""
+    out = []
+    for i, ls in enumerate(read_sessions(path)):
+        for lr in ls.runs:
+            st = _replay_run(lr, assume_poll)
+            st.session = i
+            out.append((lr.run, st, lr.logged))
+    return out
+
+
+@dataclass
+class ReplaySession:
+    header: str | None
+    plan: str | None
+    results: dict[str, str]    # run -> replayed result (last of each name)
+    proven: bool               # every run's polling proven by a heartbeat
+    verdict: str
+
+
+VERDICT_RANK = {"FAIL": 0, "INCOMPLETE": 1, "INCONCLUSIVE": 2,
+                "VALIDATED": 3}
+
+
+def replay_session_verdict(results: dict[str, str], plan: str | None,
+                           proven: bool) -> str:
+    """session_verdict, as live: a session not on the full plan (or whose
+    plan is unknown: no header) is INCOMPLETE; and a replay VALIDATES only
+    when every run's polling was proven (fix5 F2)."""
+    v = session_verdict(results)
+    if v != "FAIL" and plan != MANUAL_PLAN:
+        return "INCOMPLETE"
+    if v == "VALIDATED" and not proven:
+        return "INCOMPLETE"
+    return v
+
+
+def file_verdict(verdicts: list[str]) -> str:
+    """One log's verdict: its WORST session's (fix5 F7), never better than
+    any single session; no session at all is INCOMPLETE."""
+    return min(verdicts, key=VERDICT_RANK.__getitem__, default="INCOMPLETE")
+
+
+def step1_row(st, run: Run, got: str, session: int, logged: str = "-") -> str:
+    """One --replay SUMMARY row: the run's logged and replayed verdicts and
+    its step 1 (HOLD Q) as the A/B reads it (docs/HLE_CON.md)."""
+    pol = st.continuity.split()[0].rstrip(",")
+    head = f"{session:4d} {str(run):14s} {logged:14s} {got:14s} {pol:9s}"
+    if 1 not in run.steps:
+        return f"{head} {'-':30s} {'-':>6s} {'-':>6s} {'-':>5s} {'-':>4s} -"
+    ss = [s for s in st.samples if s.step == 1]
+    q = K("q")
+    gmax = gap_max(st.period) if st.period is not None else ECHO_GAP_MAX
+    j = judge_step(st, 1, control=run.kind == CONTROL)
+    never = not any(q in s.keys for s in ss)
+    raw_s, raw_n = _raw_only(ss, q, gmax) if st.raw_known else (0.0, 0)
+    dead = sum(s.live is False for s in ss)
+    form = "nothing" if never else "delayed commit"
+    if any("phantom" in x for x in j.settle):
+        cls = "phantom (^ with Q)"
+    elif any("in raw or committed" in x for x in j.settle):
+        cls = "settle: ^ while Q held"            # fix9 N3 (fix8 F1/F2)
+    elif j.settle:
+        cls = f"settle: {form}"
+    elif any("not settle-specific" in x
+             for x in j.defects + [j.not_judgeable]):
+        cls = f"defect-like: {form}"
+    elif not never:
+        cls = "clean commit"
+    elif dead >= 2:
+        cls = "nothing: scanner dead"
+    elif raw_n:
+        cls = "nothing: raw brief"
+    elif any(WAKE_REASON in x for x in j.notes):
+        cls = "no Q at all: not awake?"
+    else:
+        cls = "nothing: no Q seen"
+    if not st.raw_known:
+        cls += " (no raw)"
+    low = sum(6 in joy_rows(s.idle) for s in ss)
+    ans = "yes" if 1 in st.confirmed else "no" if 1 in st.denied else "-"
+    return (f"{head} {cls:30s} "
+            f"{(f'{raw_s:.1f}s' if st.raw_known else 'n/a'):>6s} "
+            f"{_runs(ss, q, gmax):5.1f}s {low:5d} {dead:4d} {ans}")
+
+
+SUMMARY_HDR = (" ses run            logged         replayed       polling   "
+               "step 1 (HOLD Q)                raw-only   held r6low dead "
+               "operator")
+
+
+@dataclass
+class ABPair:
+    """One A/B session (docs/HLE_CON.md "The settle A/B"): nosettle@48 and
+    fixed@48, each {step: StepJudge} for steps 1-2."""
+    label: str
+    poll: float | None
+    proven: bool
+    fixed: dict
+    nosettle: dict
+
+
+AB_PLANS = ("nosettle@48,fixed@48", "fixed@48,nosettle@48")
+AB_PAIRS = 5                  # kept pairs at --poll 1.0 for NOT REPRODUCED
+
+
+def _ab_discard(p: ABPair) -> str:
+    """Why an A/B pair is discarded ("" = kept)."""
+    fx = [p.fixed[n] for n in (1, 2)]
+    ns = [p.nosettle[n] for n in (1, 2)]
+    if not p.proven:
+        return "polling not proven by a heartbeat"
+    def asleep(build, js):
+        return [f"{build} step {n}" for n in (1, 2)
+                if any(WAKE_REASON in x for x in js[n].notes)]
+    # a sleeping fixed step 1 discards the pair (it was not held); a
+    # sleeping nosettle step 1 does so only when no nosettle step shows a
+    # signature (review9 F2: step-2 signatures still count)
+    if asleep("fixed@48", p.fixed):
+        return (f"{WAKE_REASON}: no Q seen at all (raw too) in "
+                + ", ".join(asleep("fixed@48", p.fixed)))
+    if not all(j.performed for j in fx):
+        return "fixed@48 steps 1-2 not held as asked (a tap is no hold)"
+    if any(j.defects for j in fx):
+        return "fixed@48 stray key: " + " | ".join(
+            d for j in fx for d in j.defects)
+    if any(j.settle for j in ns):
+        return ""
+    if asleep("nosettle@48", p.nosettle):
+        return (f"{WAKE_REASON}: no Q seen at all (raw too) in "
+                + ", ".join(asleep("nosettle@48", p.nosettle)))
+    if any(j.defects for j in ns):
+        # fix8 F2: a nosettle defect that is not the settle's is no clean
+        # zero
+        return "nosettle@48 stray key: " + " | ".join(
+            d for j in ns for d in j.defects)
+    nj = [j.not_judgeable for j in ns if j.not_judgeable]
+    if nj:
+        return "nosettle@48 not judgeable: " + " | ".join(nj)
+    if not all(j.performed for j in ns):
+        return "nosettle@48 steps 1-2 not held as asked"
+    return ""
+
+
+def ab_verdict(pairs: list[ABPair]) -> str:
+    """The A/B reading rule (fix7, review6 section 5), automated:
+    - STOP: a fixed@48 run shows a settle signature, the debounce
+      restarting, or a dead scanner in steps 1-2 (a failure of the fix);
+    - a pair is discarded (:func:`_ab_discard`) when its polling is not
+      proven, its fixed run did not hold Q, ; and / or had a stray key, or
+      its nosettle run, without a signature, was not done as asked or is
+      NOT JUDGEABLE (e.g. defect-like, not settle-specific);
+    - NECESSARY: a kept pair's nosettle step 1 has a settle-specific
+      signature, or step 2 has one in 2 kept pairs or more (the ; and /
+      phantoms carry R4);
+    - REDO when a single step-2 signature or a defect-like nosettle run
+      was seen (fix8 F3: never NOT REPRODUCED next to a signature), or a
+      nosettle signature sits in a discarded pair (fix9 N1);
+    - NOT REPRODUCED: AB_PAIRS kept pairs at --poll 1.0 and none of that,
+      with its limits;
+    - REDO otherwise, with the reasons.
+    A nosettle stray key that is not the settle's discards its pair
+    (fix8 F2).  Step 1 with no Q at all, raw included, is its own discard
+    reason, WAKE_REASON (fix9)."""
+    stop, kept, gone, nonspec = [], [], [], []
+    for p in pairs:
+        fx = [p.fixed[n] for n in (1, 2)]
+        bad = [x for j in fx for x in j.settle] + \
+            [d for j in fx for d in j.defects if "debounce" in d] + \
+            [j.not_judgeable for j in fx if "not sampling" in j.not_judgeable]
+        if bad:
+            stop.append(f"{p.label}: fixed@48: " + " | ".join(bad))
+            continue
+        nonspec += [f"{p.label}: {p.nosettle[n].not_judgeable}"
+                    for n in (1, 2)
+                    if "not settle-specific" in p.nosettle[n].not_judgeable]
+        why = _ab_discard(p)
+        (gone if why else kept).append((p, why))
+    if stop:
+        return "STOP: " + "; ".join(stop) + " (report: the fix failed)"
+    s1 = [f"{p.label} step 1: {p.nosettle[1].settle[0]}" for p, _ in kept
+          if p.nosettle[1].settle]
+    s2 = [f"{p.label} step 2: {p.nosettle[2].settle[0]}" for p, _ in kept
+          if p.nosettle[2].settle]
+    if s1 or len(s2) >= 2:
+        return ("NECESSARY: settle-specific signature(s) " + "; ".join(
+            s1 + (s2 if len(s2) >= 2 else [])) + f"; {len(kept)} kept "
+            "pair(s), every kept fixed@48 run clean")
+    discards = "".join(f"; discarded {p.label}: {w}" for p, w in gone)
+    more = ("; at most 3 extra pairs at --poll 1.0 (AB 8-10), then report "
+            "REDO (unresolved)")
+    # fix9 N1: a nosettle signature in a DISCARDED pair (its partner
+    # tapped, a stray key, unproven polling) is still a signature: the
+    # line never reads NOT REPRODUCED beside it
+    lost = [f"{p.label} step {n}: {p.nosettle[n].settle[0]}"
+            for p, _ in gone for n in (1, 2) if p.nosettle[n].settle]
+    if lost:
+        n_slow = sum(p.poll == 1.0 for p, _ in kept)
+        return (f"REDO: {n_slow} of {AB_PAIRS} kept pairs at --poll 1.0; a "
+                "settle-specific signature in a discarded pair: redo that "
+                "pair under a new name" + more + "; " + "; ".join(lost)
+                + discards)
+    # fix8 F3: NOT REPRODUCED never with a signature or a defect-like run
+    # anywhere: a single step-2 signature (R4) or a debounce that kept
+    # restarting without settle evidence asks for more pairs
+    slow = [p for p, _ in kept if p.poll == 1.0]
+    if s2:
+        return (f"REDO: {len(s2)} step-2 settle-specific signature, not yet "
+                "repeated in another pair (R4): run more pairs" + more + "; "
+                + "; ".join(s2) + discards)
+    if nonspec:
+        return ("REDO: defect-like, not settle-specific (the debounce kept "
+                "restarting with no settle evidence): run more pairs" + more
+                + "; " + "; ".join(nonspec) + discards)
+    tail = ""
+    if len(slow) >= AB_PAIRS:
+        bound = 1 - 0.05 ** (1 / len(slow))
+        return (f"NOT REPRODUCED: 0 of {len(slow)} kept pairs at --poll 1.0 "
+                "showed a settle-specific signature: if the defect occurs, "
+                f"its per-run rate under this detector is below "
+                f"{bound:.0%} (95%), and delays under about 1.15 s are "
+                "invisible at this poll; this is not 'the settle is "
+                f"unnecessary'{tail}")
+    return f"REDO: {len(slow)} of {AB_PAIRS} kept pairs at --poll 1.0" + \
+        discards
+
+
+def _ab_pair(path: str, i: int, ab: dict, proven: bool) -> ABPair:
+    missing = {n: StepJudge(False, [], [], [], "run missing") for n in (1, 2)}
+    fx, ns = ab.get("fixed@48"), ab.get("nosettle@48")
+    label = os.path.basename(os.path.dirname(os.path.abspath(path)))
+    return ABPair(f"{label}#{i + 1}", fx[0].poll_s if fx else None, proven,
+                  fx[1] if fx else missing, ns[1] if ns else missing)
+
+
+def replay_report(paths: list[str], out=print,
+                  assume_poll: float | None = None
+                  ) -> dict[str, list[ReplaySession]]:
+    """Re-judge every run of each log, session by session."""
+    res, pairs, seen = {}, [], set()
+    for path in paths:
+        real = os.path.realpath(path)
+        if real in seen:
+            # fix8 F5: a log passed twice would count its pairs twice
+            out(f"== {path}: passed twice, skipped")
+            continue
+        seen.add(real)
+        out(f"== {path}")
+        res[path] = []
+        rows = []
+        for i, ls in enumerate(read_sessions(path)):
+            out(f"-- session {i + 1}: {ls.header or '(no session header)'}")
+            results, proven, ab = {}, bool(ls.runs), {}
+            for lr in ls.runs:
+                st = _replay_run(lr, assume_poll)
+                run = lr.run
+                judges = {n: judge_step(st, n, control=run.kind == CONTROL)
+                          for n in run.steps}
+                v = st.verdicts()
+                got = judge_run(run.kind, v, judges, run.steps)
+                results[str(run)] = got
+                rows.append(step1_row(st, run, got, i + 1, lr.logged))
+                ab[str(run)] = (st, judges)
+                proven &= st.continuity.startswith("proven")
+                out(f"{run}: logged {lr.logged}; replayed {got}; STEPS {v}; "
+                    f"polling {st.continuity}")
+                for n, j in judges.items():
+                    out(f"   step {n} {STEPS[n - 1].title}: performed "
+                        f"{'yes' if j.performed else 'NO'}; "
+                        f"{'; '.join(j.notes)}"
+                        + (f"; NOT JUDGEABLE: {j.not_judgeable}"
+                           if j.not_judgeable else "")
+                        + (f"; DEFECT {' | '.join(j.defects)}" if j.defects
+                           else "")
+                        + (f"; SIGNATURE {' | '.join(j.signature)}"
+                           if j.signature else ""))
+            if ls.plan in AB_PLANS:
+                pr = _ab_pair(path, i, ab, proven)
+                if any(q.label == pr.label for q in pairs):
+                    out(f"A/B pair {pr.label} passed twice: counted once")
+                else:
+                    pairs.append(pr)
+            sv = replay_session_verdict(results, ls.plan, proven)
+            res[path].append(ReplaySession(ls.header, ls.plan, results,
+                                           proven, sv))
+            why = SESSION_MEANING.get(sv, "")
+            if sv != session_verdict(results):
+                why = ("not the full plan" if ls.plan != MANUAL_PLAN else
+                       "polling not proven by a heartbeat") + \
+                    f" (the runs alone: {session_verdict(results)})"
+            out(f"SESSION VERDICT (replayed; the last run of each name "
+                f"counts): {sv}: {why}")
+        if len(res[path]) > 1:
+            out(f"FILE VERDICT (the worst of {len(res[path])} sessions): "
+                f"{file_verdict([s.verdict for s in res[path]])}")
+        out(f"SUMMARY {path}: one row per run (raw-only = Q's longest "
+            "raw-only run in step 1)")
+        out(SUMMARY_HDR)
+        for r in rows:
+            out(r)
+    if pairs:
+        out(f"A/B (docs/HLE_CON.md 'The settle A/B'): {ab_verdict(pairs)}")
+    return res
 
 
 # --- judging the manner -----------------------------------------------------------
@@ -534,17 +1231,39 @@ class StepJudge:
     # the held key; nojoymask: keys on the stick's row reading down).  A
     # program F or S without it is operator error, not the defect.
     signature: list[str] = field(default_factory=list)
+    # why the stream cannot decide whether the step was performed (fix5:
+    # the poll period is unknown, too sparse for a tapped step, or a poll
+    # gap is a stall).  Only set on a step not proven performed; such a
+    # step is NOT JUDGEABLE, not operator error.
+    not_judgeable: str = ""
+    # settle-specific evidence (fix7 K1): the phantom, or a debounce that
+    # kept restarting with the column c-1 key in raw or the held key's row
+    # low at idle.  Only this may count as "the settle fix is necessary";
+    # in the fixed build it is a failure of the fix.
+    settle: list[str] = field(default_factory=list)
 
 
-def _runs(samples: list[Sample], key: int) -> float:
-    """Longest time *key* stayed down over consecutive samples."""
-    best, start = 0.0, None
+NOT_JUDGEABLE = "NOT JUDGEABLE"
+
+
+def _runs(samples: list[Sample], key: int, gmax: float | None = None,
+          raw: bool = False) -> float:
+    """Longest time *key* stayed down over consecutive samples, a run
+    broken by a gap over *gmax* between two polls (fix5 F3: a hold is not
+    credited across a stall).  *raw*: down in the raw sample only, never
+    debounced (the settle "nothing" form)."""
+    best, start, prev = 0.0, None, None
     for s in samples:
-        if key in s.keys:
+        on = key in ((s.raw or frozenset()) - s.keys if raw else s.keys)
+        if on and start is not None and gmax is not None and \
+                s.t - prev > gmax:
+            start = None
+        if on:
             start = s.t if start is None else start
             best = max(best, s.t - start)
         else:
             start = None
+        prev = s.t
     return best
 
 
@@ -552,35 +1271,282 @@ def _first_down(samples: list[Sample], key: int) -> Sample | None:
     return next((s for s in samples if key in s.keys), None)
 
 
+ECHO_GAP_MAX = 0.4         # s: longest poll gap an echo credit may span
+                           # (real sessions at --poll 0.1: period 0.25 s,
+                           # 0.33 s at most; fix4)
+
+
+def _echo_idx(samples: list[Sample]) -> list[tuple[str, int, int]]:
+    """(character, index of the poll before, index of the poll after) for
+    every character the echo line gained between two consecutive polls.
+
+    - The line is tracked against a BASE: the last line accepted as real.
+      A step's samples start at an empty prompt, so the base starts "".
+      The new text is what follows the longest common prefix of the base
+      and the polled line: DEL shrinks the line and types nothing (fix4
+      G1; the base shrinks with it); DEL plus a new key between two polls
+      types just that key.
+    - The two polls may be at most ECHO_GAP_MAX apart (a stalled poll must
+      not widen what "held at both polls" covers).
+    - Every gain must be backed by decoded key events: hle_con_nkey must
+      have grown by at least as many over the gain's interval widened by
+      one poll on each side (the count and the echo are read at different
+      moments of a poll, so either can lead by one; a replayed log also
+      splits one poll's state and screen reads into two samples).  A row
+      the screen mirror re-emitted from before (a scroll read mid-copy) has
+      no events behind it and is not a keystroke.
+    - A gain is tested only where the line changed between the two polls
+      (fix5 F6): a rejected gain is not re-tested at later polls, where a
+      burst of events that left the line as it was would back it."""
+    out, base = [], ""
+    for i in range(1, len(samples)):
+        a, b = samples[i - 1], samples[i]
+        if b.line is None or b.line == base or b.line == a.line:
+            continue
+        n = 0
+        while n < min(len(base), len(b.line)) and base[n] == b.line[n]:
+            n += 1
+        new = b.line[n:]
+        if not new:                       # DEL: nothing typed
+            base = b.line
+            continue
+        z = samples[i - 2] if i >= 2 else a
+        c = samples[i + 1] if i + 1 < len(samples) else b
+        if None not in (z.nkey, c.nkey) and \
+                (c.nkey - z.nkey) & 0xFF < len(new):
+            continue                      # no events: not a keystroke
+        base = b.line
+        if b.t - a.t > ECHO_GAP_MAX:
+            continue                      # typed, but not provably when
+        out += [(ch, i - 1, i) for ch in new]
+    return out
+
+
+def echo_typed(samples: list[Sample]) -> list[tuple[str, Sample, Sample]]:
+    """(character, poll before, poll after) for every character the echo
+    line gained between two polls (fix3 BUG 2; rules in _echo_idx).  A key
+    tapped between two polls never shows in the debounced matrix at a poll,
+    but its echo does; what was held during the tap is what both polls
+    show."""
+    return [(ch, samples[ia], samples[ib])
+            for ch, ia, ib in _echo_idx(samples)]
+
+
+def credit(samples: list[Sample], key: int, echo: str,
+           cond) -> tuple[int, int] | None:
+    """The polls (first, last) that prove *key* went down while *cond*
+    held: its FIRST poll in the matrix, if that satisfies cond; else an
+    echo gain of *echo* between two polls that both satisfy cond.  None:
+    not proven."""
+    f = next((i for i, s in enumerate(samples) if key in s.keys), None)
+    if f is not None and cond(samples[f]):
+        return f, f
+    for ch, ia, ib in _echo_idx(samples):
+        if ch == echo and cond(samples[ia]) and cond(samples[ib]):
+            return ia, ib
+    return None
+
+
+def typed_with(samples: list[Sample], key: int, echo: str, cond) -> bool:
+    return credit(samples, key, echo, cond) is not None
+
+
+WAKE_REASON = "keyboard not awake? (Blingboard idle; tap SHIFT first)"
+DELAY_MIN = 0.2            # s a held key may read raw-only before its commit
+                           # (fix6 R2).  A healthy commit follows the press
+                           # after CON_STABLE = 64 raster lines (~4 ms) plus
+                           # switch bounce (a few ms, each bounce restarting
+                           # the window), so a poll sees a key raw-only at
+                           # most once.  0.2 s is 50x CON_STABLE, below the
+                           # shortest poll period (0.24 s at --poll 0.1), and
+                           # above the 0.11-0.14 s between one poll's state
+                           # and screen reads that a replay splits in two.
+
+
+def _raw_only(samples: list[Sample], key: int, gmax: float
+              ) -> tuple[float, int]:
+    """(longest raw-only run of *key* in s, polls it was raw-only): how
+    long the debounce kept a press of it out of the matrix.  Any press of
+    the step counts (a release never reads raw-only: raw drops the key
+    before the matrix does)."""
+    return (_runs(samples, key, gmax, raw=True),
+            sum(key in (s.raw or frozenset()) - s.keys for s in samples))
+
+
+def _settle_evidence(samples: list[Sample], key: int, ph: int | None
+                     ) -> list[str]:
+    """What only the missing row settle produces while *key* is held
+    (fix7 K1, K3):
+    - the column c-1 key on the same row in raw together with *key* (a
+      row still low from *key*'s column read as the next column's);
+    - *key*'s row low at the idle read, for rows 5-7 (r0-r4 are port-1
+      joystick lines).  hle_con_scan settles before every column, so in
+      the fixed build the settle before column c-1 already waited for the
+      row after *key*'s column; only after column 0 is there no settle
+      before the next sample's idle read.  In nosettle nothing waits, and
+      a row still low at the idle read masks *key* out of that sample.
+    A chattering switch gives neither.  The idle rows count only while
+    the key is held (fix8 F6)."""
+    out = []
+    if ph is not None:
+        n = sum(key in (s.raw or ()) and ph in (s.raw or ()) for s in samples)
+        if n:
+            out.append(f"{pos(ph)} in raw with {KEY_NAMES[key]} at {n} "
+                       "poll(s)")
+    # the idle read only while the key is held (fix8 F6): from its first
+    # poll in raw or the matrix to the poll after its last (a masked
+    # sample has it in neither)
+    on = [i for i, s in enumerate(samples)
+          if key in s.keys or key in (s.raw or ())]
+    held = samples[on[0]:on[-1] + 2] if on else []
+    r = key % 8
+    if r >= 5:
+        n = sum(r in joy_rows(s.idle) for s in held)
+        if n:
+            out.append(f"r{r} low at the idle read at {n} poll(s)")
+    return out
+
+
+def held_throughout(samples: list[Sample], spans, cond) -> float | None:
+    """None when every poll from the first span's start to the last span's
+    end satisfies cond, at most ECHO_GAP_MAX apart, else the time of the
+    first poll that does not (fix4 continuity: letting go between two
+    letters is not a hold; fix5: nor is a gap the stick could be let go
+    in)."""
+    lo, hi = min(a for a, _ in spans), max(b for _, b in spans)
+    return next((samples[i].t for i in range(lo, hi + 1)
+                 if not cond(samples[i]) or
+                 (i > lo and samples[i].t - samples[i - 1].t > ECHO_GAP_MAX)),
+                None)
+
+
 def judge_step(stream: Stream, n: int, control: bool = False) -> StepJudge:
     """How step *n* was done, from the stream's samples tagged *n*.  A
     control run needs only the triggering action (e.g. the stick held):
-    the broken build may garble the typing itself."""
+    the broken build may garble the typing itself.
+
+    Timing (fix5): stream.period is the poll period (None: unknown, e.g. a
+    replayed log with no --poll and no heartbeat; then only the logged
+    polls count).  A hold is not credited across a gap over gap_max, an
+    echo or stick credit not across one over ECHO_GAP_MAX.  A step not
+    proven performed is NOT JUDGEABLE (StepJudge.not_judgeable) instead
+    of operator error when the period is unknown, a gap in the step is a
+    stall, or, for a tapped step (3-9) of the fixed build, the period is
+    over ECHO_GAP_MAX (decision (b)).
+
+    The debounce restarting (fix6 R1/R2, fix7 K1-K3), measured on the
+    held key's raw-only samples (:func:`_raw_only`): raw-only for
+    DELAY_MIN or more, committed later ("delayed commit") or never ("the
+    nothing form"), or at 2 polls or more when never committed.  With
+    settle-specific evidence (:func:`_settle_evidence`) it is the signature
+    in a control and a defect in the fixed build (StepJudge.settle);
+    without, a control step is NOT JUDGEABLE ("defect-like, not
+    settle-specific") and the fixed build FAILs "keyboard/debounce".
+    The operator's answer (asked in every nosettle hold step) never
+    changes a verdict the instrument supports (K5); only where the scanner
+    saw no raw-only key does a "yes" make the step NOT JUDGEABLE, never a
+    signature.  A frozen hle_con_ras (2 polls or more) with the key never
+    seen is NOT JUDGEABLE too (K6)."""
     step = STEPS[n - 1]
     ss = [s for s in stream.samples if s.step == n]
-    notes, defects, sig = [], [], []
+    notes, defects, sig, settle = [], [], [], []
     ok = True
+    period = getattr(stream, "period", poll_period(POLL_DEFAULT))
+    gmax = gap_max(period) if period is not None else ECHO_GAP_MAX
+    raw_known = getattr(stream, "raw_known", True)
+    confirmed = getattr(stream, "confirmed", set())
+    nj_hold = ""
     nonmod = lambda s: {i for i in s.keys if i not in MODS}
     if step.kind == "hold":
         for ch in step.keys:
             k = K(ch)
-            held = _runs(ss, k)
+            held = _runs(ss, k, gmax)
             notes.append(f"{KEY_NAMES[k]} held {held:.1f}s")
-            ok &= held >= HOLD_MIN
+            good = held >= HOLD_MIN
+            name = KEY_NAMES[k]
+            c, r = divmod(k, 8)
+            ph = (c - 1) * 8 + r if c > 0 and (c - 1) * 8 + r not in MODS \
+                else None
+            never = not any(k in s.keys for s in ss)
+            raw_s, raw_n = _raw_only(ss, k, gmax) if raw_known else (0.0, 0)
+            if raw_n:
+                notes.append(f"{name} raw-only (not debounced) at {raw_n} "
+                             f"poll(s), longest {raw_s:.1f}s" +
+                             (", never committed" if never else ""))
+            # a healthy press is raw-only at one poll at most: the same
+            # raw-only span counts committed or not (K2), and for a key
+            # never committed so do raw-only polls that are not
+            # consecutive (K3: the idle-mask flicker masks every other one)
+            if raw_s >= DELAY_MIN or (never and raw_n >= 2):
+                form = ("never committed (the 'nothing' form)" if never
+                        else "then committed (delayed commit)")
+                line = (f"{name} raw-only at {raw_n} poll(s), longest "
+                        f"{raw_s:.1f}s, {form}: the debounce kept restarting")
+                ev = _settle_evidence(ss, k, ph)
+                if ev:
+                    line += "; settle-specific: " + "; ".join(ev)
+                    (sig if control else defects).append(line)
+                    settle.append(line)
+                    good = good or control     # raw proves the press
+                elif control:
+                    nj_hold = (line + "; defect-like, not settle-specific "
+                               "(no column c-1 key in raw, no row low at "
+                               "idle: a chattering switch looks the same)")
+                    good = False
+                else:
+                    defects.append("keyboard/debounce, not settle-specific: "
+                                   + line)
+            elif never and ss:
+                dead = sum(s.live is False for s in ss)
+                masked = any(k % 8 in joy_rows(s.idle) for s in ss)
+                if n == 1 and raw_known and not raw_n and dead < 2 and \
+                        not masked:     # review9 F4: masked is not asleep
+                    # fix9: the rig's keyboard LED board (Blingboard) hides
+                    # the whole first hold after ~2 min idle, in either
+                    # build (docs/HARDWARE.md); nothing is no evidence
+                    notes.append(f"no {name} seen at all (raw too): "
+                                 + WAKE_REASON)
+                seen = (f"raw showed {name} at {raw_n} poll(s)" if raw_n
+                        else "raw never showed it" if raw_known
+                        else "raw is not in this log")
+                if dead >= 2:
+                    # K6: nothing seen proves nothing when nothing was sampled
+                    nj_hold = (f"the scanner was not sampling at {dead} "
+                               f"poll(s) (hle_con_ras frozen): {name} never "
+                               f"seen proves nothing; {seen}")
+                elif n in confirmed:
+                    nj_hold = (f"the operator says {name} was held, but the "
+                               f"scanner saw no {name} raw-only at 2 polls: "
+                               f"{seen}")
+            ok &= good
+            n_settle = len(settle)
             extra = {i for s in ss if k in s.keys for i in nonmod(s)} - {k}
             if extra:
                 defects.append(f"with {KEY_NAMES[k]} held, also down: "
                                + ", ".join(pos(i) for i in sorted(extra)))
             # nosettle signature: the key one column lower on the same row
             # goes down in the SAME sample as the held key
-            c, r = divmod(k, 8)
-            ph = (c - 1) * 8 + r if c > 0 else None
             first = next((i for i, s in enumerate(ss) if k in s.keys), None)
-            if ph is not None and ph not in MODS and first is not None and \
+            if ph is not None and first is not None and \
                     ph in ss[first].keys and \
                     (first == 0 or ph not in ss[first - 1].keys):
                 sig.append(f"phantom {pos(ph)} went down with "
                            f"{KEY_NAMES[k]} (settle signature)")
+                settle.append(sig[-1])
+            # fix8 F1/F2: the c-1 key at any poll while the key is held,
+            # in raw (flickering, never committed) or committed later
+            # (COLUMN BLEED?), even when the key itself committed cleanly:
+            # the row still low from the key's column, read as column c-1
+            both = lambda s: s.keys | (s.raw or frozenset())
+            late = sum(k in both(s) and ph in both(s) for s in ss) \
+                if ph is not None else 0
+            if late and len(settle) == n_settle and not any(
+                    pos(ph) in x for x in settle):
+                line = (f"{pos(ph)} with {name} held at {late} poll(s), in "
+                        "raw or committed (the row still low from "
+                        f"{name}'s column: settle signature)")
+                (sig if control else defects).append(line)
+                settle.append(line)
     elif step.kind == "rollover":
         most = max((len(nonmod(s)) for s in ss), default=0)
         notes.append(f"at most {most} keys down at once")
@@ -592,12 +1558,19 @@ def judge_step(stream: Stream, n: int, control: bool = False) -> StepJudge:
             defects.append("with Z I P held, also down (ghost?): "
                            + ", ".join(pos(i) for i in sorted(extra)))
     elif step.kind == "mods":
-        for ch, mod in (("a", RSHIFT), ("/", RSHIFT), ("q", CBM)):
-            s = _first_down(ss, K(ch))
-            good = s is not None and mod in s.keys
+        spans = {}
+        for ch, echo, mod in (("a", "A", RSHIFT), ("/", "?", RSHIFT),
+                              ("q", "Q", CBM)):
+            spans[ch] = credit(ss, K(ch), echo,
+                               lambda s, mod=mod: mod in s.keys)
+            good = spans[ch] is not None
             notes.append(f"{KEY_NAMES[K(ch)]} with {KEY_NAMES[mod]}: "
                          f"{'yes' if good else 'NO'}")
             ok &= good
+        # no continuity across A and /: the C64 screen says "RSHIFT+A,
+        # RSHIFT+/", so letting RSHIFT go in between is doing it right
+        # (both attended fixed@1 runs did); each character's own credit
+        # needs RSHIFT at both of its polls
         if any(LSHIFT in s.keys for s in ss):
             notes.append("LEFT SHIFT was used")
             ok = False
@@ -608,20 +1581,58 @@ def judge_step(stream: Stream, n: int, control: bool = False) -> StepJudge:
         if control:
             ok = bool(held)
         else:
+            held_r = lambda s: r in joy_rows(s.idle)
+            spans = []
             for ch in "hose":
-                s = _first_down(ss, K(ch))
-                good = s is not None and r in joy_rows(s.idle)
-                ok &= good
-                if not good:
+                sp = credit(ss, K(ch), ch.upper(), held_r)
+                ok &= sp is not None
+                if sp is None:
                     notes.append(f"{ch.upper()} not typed with the stick held")
+                else:
+                    spans.append(sp)
+            if len(spans) == 4:
+                gap = held_throughout(ss, spans, held_r)
+                if gap is not None:
+                    notes.append("stick not held continuously from H to E "
+                                 f"(not seen held, or a poll gap over "
+                                 f"{ECHO_GAP_MAX}s, at t={gap:.2f})")
+                    ok = False
         rowkeys = {i for s in held for i in s.keys if i % 8 == r}
         if rowkeys:
             line = (f"stick on r{r}: keys on that row read down: "
                     + ", ".join(pos(i) for i in sorted(rowkeys)))
             defects.append(line)
             sig.append(line + " (mask signature)")
-    defects += [line for st, line in stream.bleeds if st == n]
-    return StepJudge(ok and bool(ss), defects, notes, sig)
+    # a COLUMN BLEED? hint is a defect only in the hold steps (decision
+    # (a)): elsewhere two neighbours going down between two polls (I and P
+    # in the rollover) is normal typing
+    for st, line in stream.bleeds:
+        if st == n and step.kind == "hold":
+            defects.append(line)
+        elif st == n:
+            notes.append(f"hint, not a defect outside hold steps: {line}")
+    performed = ok and bool(ss)
+    nj = ""
+    if not performed and ss:
+        stall = max((b.t - a.t for a, b in zip(ss, ss[1:])), default=0.0)
+        if nj_hold:
+            nj = nj_hold
+        elif period is None:
+            nj = ("poll period unknown (no --poll and no heartbeat in the "
+                  "log, or a broken heartbeat): the logged polls alone do "
+                  "not prove this step")
+        elif stall > gmax:
+            nj = (f"a poll gap of {stall:.2f}s > {gmax:.2f}s in this step: "
+                  "the driver cannot vouch for what happened in it")
+        elif not control and step.kind != "hold" and period > ECHO_GAP_MAX:
+            nj = (f"--poll period {period:.2f}s > {ECHO_GAP_MAX}s: a tapped "
+                  "step cannot be proven at this poll rate")
+        elif not control and step.kind != "hold" and stall > ECHO_GAP_MAX:
+            # fix6 R3: an echo credit needs polls <= ECHO_GAP_MAX apart,
+            # whatever gap_max allows at this --poll
+            nj = (f"a poll gap of {stall:.2f}s > {ECHO_GAP_MAX}s: a tapped "
+                  "step cannot be proven across it")
+    return StepJudge(performed, defects, notes, sig, nj, settle)
 
 
 FIXED, CONTROL = "fixed", "control"
@@ -629,29 +1640,48 @@ FIXED, CONTROL = "fixed", "control"
 
 def judge_run(kind: str, verdicts: str | None, judges: dict[int, StepJudge],
               steps: range) -> str:
-    """-> PASS / FAIL / INCOMPLETE (fixed build) or DEFECT SHOWN /
-    INCONCLUSIVE / INCOMPLETE (control).  *verdicts*: the program's STEPS
-    string (None: it never printed one)."""
+    """-> PASS / FAIL / INCOMPLETE / NOT JUDGEABLE (fixed build) or DEFECT
+    SHOWN / INCONCLUSIVE / INCOMPLETE / NOT JUDGEABLE (control).
+    *verdicts*: the program's STEPS string (None: it never printed one).
+    NOT JUDGEABLE (fix5): nothing else is wrong, but a step's manner could
+    not be decided (StepJudge.not_judgeable); an F or a defect is still
+    FAIL, and a control's signature is still DEFECT SHOWN (a signature seen
+    is a fact whatever the polling, F4)."""
     if verdicts is None or len(verdicts) != NSTEP:
         return "INCOMPLETE"
     v = {n: verdicts[n - 1] for n in steps}
+    nj = [n for n in steps if judges[n].not_judgeable]
+    undone = any(not judges[n].performed and not judges[n].not_judgeable
+                 for n in steps)
     if kind == FIXED:
         if any(x == "F" for x in v.values()) or \
                 any(judges[n].defects for n in steps):
             return "FAIL"
-        if all(x == "P" for x in v.values()) and \
-                all(judges[n].performed for n in steps):
-            return "PASS"
-        return "INCOMPLETE"
+        if undone or any(x != "P" for x in v.values()):
+            return "INCOMPLETE"
+        return NOT_JUDGEABLE if nj else "PASS"
     # control: only the control's own signature counts as its defect; any
-    # other F, S or stray key is operator error (redo the leg)
-    if not all(judges[n].performed for n in steps):
-        return "INCOMPLETE"
+    # other F, S or stray key is operator error (redo the leg).  A
+    # signature is an observed fact: another step undone never hides it
+    # (fix7 K4)
     if any(judges[n].signature for n in steps):
         return "DEFECT SHOWN"
-    if any(v[n] != "P" or judges[n].defects for n in steps):
+    if undone:
         return "INCOMPLETE"
-    return "INCONCLUSIVE"
+    # a NOT JUDGEABLE step's own S or F may be the defect it could not
+    # decide (fix6: the "nothing" form ends in S), so only the others count
+    if any((v[n] != "P" and not judges[n].not_judgeable) or judges[n].defects
+           for n in steps):
+        return "INCOMPLETE"
+    return NOT_JUDGEABLE if nj else "INCONCLUSIVE"
+
+
+def hold_question_steps(run: Run) -> list[int]:
+    """The steps whose hold the operator is asked about: every hold step
+    of a nosettle run, whatever it showed (fix6 R6: not only after an
+    empty line, so the answer is not primed by the outcome)."""
+    return [n for n in run.steps
+            if run.build == "nosettle" and STEPS[n - 1].kind == "hold"]
 
 
 # --- control builds: the fix NOP-ed out in C64 RAM ---------------------------------
@@ -1318,13 +2348,15 @@ def parse_runs(text: str) -> list[Run]:
 
 def session_verdict(results: dict[str, str]) -> str:
     """VALIDATED only with the fixed build PASS at 48 and at 1 MHz and each
-    control DEFECT SHOWN at 48 MHz; a clean control -> INCONCLUSIVE."""
+    control DEFECT SHOWN at 48 MHz; a clean control -> INCONCLUSIVE; a run
+    NOT JUDGEABLE counts as INCOMPLETE."""
     need_fixed = ("fixed@48", "fixed@1")
     need_ctl = tuple(f"{c}@48" for c in CONTROLS)
     if any(v == "FAIL" for k, v in results.items() if k.startswith("fixed")):
         return "FAIL"
     if any(results.get(k) != "PASS" for k in need_fixed) or \
-            any(results.get(k) in (None, "INCOMPLETE") for k in need_ctl):
+            any(results.get(k) in (None, "INCOMPLETE", NOT_JUDGEABLE)
+                for k in need_ctl):
         return "INCOMPLETE"
     if all(results[k] == "DEFECT SHOWN" for k in need_ctl):
         return "VALIDATED"
@@ -1344,7 +2376,7 @@ SESSION_MEANING = {
 }
 
 
-def checklist(run: Run) -> list[str]:
+def checklist(run: Run, poll: float = POLL_DEFAULT) -> list[str]:
     ctl = run.kind == CONTROL
     out = ["=" * 72]
     if ctl:
@@ -1358,6 +2390,9 @@ def checklist(run: Run) -> list[str]:
             "ends with RETURN and shows PASS or FAIL.",
             "Type ONLY while the '>' prompt shows (keys pressed while the "
             "program prints are lost).",
+            "At the run's FIRST '>' prompt: tap LEFT SHIFT once and release "
+            "it before anything else", "(the keyboard's LED board hides the "
+            "first key hold after ~2 min idle).",
             "NO joystick in control port 2 (it locks the keyboard out by "
             "design).", "Do each step exactly as described: the driver "
             "checks HOW (held time, keys down",
@@ -1371,6 +2406,10 @@ def checklist(run: Run) -> list[str]:
         else:
             out += [f"   expect: the line {s.want!r}, then STEP {n} PASS",
                     f"   defect: {s.fails_as}"]
+    if not ctl and poll_period(poll) > ECHO_GAP_MAX:
+        out += ["", f"At --poll {poll:g} steps 3-9 cannot be judged: only "
+                "steps 1-2 are evidence.", "RETURN alone at steps 3-9 is "
+                "fine (docs/HLE_CON.md, 'The settle A/B')."]
     if not ctl:
         out += ["", "Then FREE mode: type any lines (every key once, with "
                 "and without SHIFT);", "an empty line ends the program."]
@@ -1386,18 +2425,46 @@ class ProgramStuck(RuntimeError):
     busy inside Read, so nothing more can run in this boot."""
 
 
+def ask_operator(question: str) -> bool | None:
+    """A yes/no question on the host terminal (CONFIRM_S to answer), keys
+    typed ahead discarded first.  -> True / False; None: no terminal or no
+    answer."""
+    import select
+    print(f"{question} [y/n] ", end="")
+    sys.stdout.flush()
+    if not sys.stdin or not sys.stdin.isatty():
+        print("(stdin is not a terminal: no answer)")
+        return None
+    try:
+        import termios
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except (ImportError, OSError):
+        pass
+    r, _, _ = select.select([sys.stdin], [], [], CONFIRM_S)
+    if not r:
+        return None
+    a = sys.stdin.readline().strip().lower()
+    return True if a in ("y", "yes") else False if a in ("n", "no") else None
+
+
 def leg_manual(sess, blob: bytes, run: Run, budget: int, poll: float,
-               max_minutes: float) -> str:
+               max_minutes: float, ask=None) -> str:
     """One operator run -> its judge_run result.  Raises ProgramStuck
-    (after the checks and the judge lines) when the program never ended."""
+    (after the checks and the judge lines) when the program never ended.
+    The poll period goes into the run-start line and to the judge (fix5
+    (b)).  Every nosettle hold step is put to the operator
+    (:func:`hold_question_steps`; *ask*, default :func:`ask_operator`), in
+    neutral words, and the answer is logged for the replay."""
     tag = f"manual/{run}"
-    for line in checklist(run):
+    for line in checklist(run, poll):
         print(line)
     args = control_args(run.build) if run.kind == CONTROL else b"\n"
     pc, manifest = stage_program(sess, blob, args)
     st = Stream(sess)
+    st.poll_s, st.period = poll, poll_period(poll)
     start_async(sess, pc, manifest["stack_top"], budget)
-    st.emit(f"{run} started: operator, follow the C64 screen" +
+    st.emit(f"{run} started (--poll {poll:g}s): operator, follow the C64 "
+            "screen" +
             ("  *** CONTROL: SUPPOSED TO SHOW THE DEFECT ***"
              if run.kind == CONTROL else ""))
     vice = sess.target.backend == "vice"      # dry runs only
@@ -1428,6 +2495,7 @@ def leg_manual(sess, blob: bytes, run: Run, budget: int, poll: float,
         while not is_done(sess) and time.monotonic() < end:
             tick()
     st.poll()
+    st.hb_flush()
     done = is_done(sess)
     sess.check(f"{tag}: program ended ({why})", done and why == "exited",
                why if done else f"{why}; program still running")
@@ -1437,17 +2505,34 @@ def leg_manual(sess, blob: bytes, run: Run, budget: int, poll: float,
         sess.check(f"{tag}: program halted HALT_OK", res.halt != 0 and
                    res.reason == 0 and res.timeout == 0,
                    f"halt={res.halt} reason={res.reason:02X}")
+    verdicts = st.verdicts() if done else None
+    for n in hold_question_steps(run) if done else []:
+        held = " and ".join(KEY_NAMES[K(c)] for c in STEPS[n - 1].keys)
+        yes = (ask or ask_operator)(
+            f"{run} step {n}: did you hold {held} at the '>' prompt as the "
+            "checklist asked?  (y = yes; n = no, or not sure; the answer "
+            "is logged only, it does not change the verdict)")
+        st.emit(f"operator: step {n} held as asked ({held})? "
+                + {True: "yes", False: "no", None: "no answer"}[yes])
+        if yes:
+            st.confirmed.add(n)
+        elif yes is False:
+            st.denied.add(n)
     judges = {n: judge_step(st, n, control=run.kind == CONTROL)
               for n in run.steps}
-    verdicts = st.verdicts() if done else None
     for n, j in judges.items():
         v = verdicts[n - 1] if verdicts else "?"
         st.emit(f"step {n} {STEPS[n - 1].title}: program {v}; performed "
                 f"{'yes' if j.performed else 'NO'}; " + "; ".join(j.notes)
+                + (f"; NOT JUDGEABLE: {j.not_judgeable}"
+                   if j.not_judgeable else "")
                 + (f"; DEFECT: {' | '.join(j.defects)}" if j.defects else ""))
     got = judge_run(run.kind, verdicts, judges, run.steps)
     want = "PASS" if run.kind == FIXED else "DEFECT SHOWN"
     st.emit(f"{run}: {got} (want {want}), STEPS {verdicts}")
+    if got == NOT_JUDGEABLE:
+        st.emit(f"{run}: a step could not be judged at this poll (see "
+                "NOT JUDGEABLE above): not operator error, not a validation")
     if run.kind == CONTROL and got == "INCOMPLETE":
         st.emit(f"{run}: no defect signature, and a step was not done as "
                 "asked or not P: operator error, REDO THIS LEG "
@@ -1463,7 +2548,7 @@ def leg_manual(sess, blob: bytes, run: Run, budget: int, poll: float,
 class Tee:
     def __init__(self, path: str, stream):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        self.f = open(path, "a", buffering=1)
+        self.f = open(path, "x", buffering=1)   # one log per session
         self.s = stream
 
     def write(self, data: str) -> int:
@@ -1477,6 +2562,17 @@ class Tee:
 
 
 MHZ_OK = (1, 48)
+
+
+_OUT_SEQ = iter(range(1, 1 << 30))
+
+
+def default_out_dir(stamp: str | None = None) -> str:
+    """A new evidence directory per u64 session (fix5 F7), unique per call
+    (fix6 R5: time, process and a counter)."""
+    return os.path.join(PROJECT_ROOT, "build", "evidence", "kbd_echo-u64-"
+                        + (stamp or f"{time.strftime('%Y%m%d-%H%M%S')}-"
+                           f"{os.getpid()}-{next(_OUT_SEQ)}"))
 
 
 def parse_mhz(text: str | None) -> list[int]:
@@ -1494,7 +2590,14 @@ def parse_mhz(text: str | None) -> list[int]:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python3 -m tests.kbd_echo",
                                  description=__doc__.split("\n")[0])
-    ap.add_argument("--prg", required=True, help="runner PRG")
+    ap.add_argument("--prg", help="runner PRG (required unless --replay)")
+    ap.add_argument("--replay", nargs="+", metavar="LOG",
+                    help="re-judge the runs of session.log files offline, "
+                    "each session on its own (no emulator, no device)")
+    ap.add_argument("--assume-poll", type=float, metavar="S",
+                    help="--replay: the --poll of logs that record neither "
+                    "--poll nor a heartbeat (before fix4); without it their "
+                    "timing is unknown.  Never enough to VALIDATE")
     ap.add_argument("--labels", help="ld65 -Ln label file (default: PRG .lbl)")
     ap.add_argument("--backend", default="vice", choices=["vice", "u64"])
     ap.add_argument("--legs", default=",".join(VICE_LEGS),
@@ -1531,10 +2634,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", default=os.path.join(
         PROJECT_ROOT, "build", "vbcc", f"kbd_echo-{os.getpid()}"),
         help="build dir for the compiled program (default per process)")
-    ap.add_argument("--out-dir", default=os.path.join(
-        PROJECT_ROOT, "build", "evidence", "kbd_echo-u64"),
-        help="u64: session.log + config_before/after.json")
+    ap.add_argument("--out-dir",
+                    help="u64: session.log + config_before/after.json, one "
+                    "session per directory (default: a new "
+                    "build/evidence/kbd_echo-u64-<date>-<time>)")
     args = ap.parse_args(argv)
+    if args.replay:
+        res = replay_report(args.replay, assume_poll=args.assume_poll)
+        # as live: only a VALIDATED session exits 0, and a log is only as
+        # good as its worst session
+        return 0 if all(file_verdict([s.verdict for s in r]) == "VALIDATED"
+                        for r in res.values()) else 1
+    if not args.prg:
+        print("error: --prg is required", file=sys.stderr)
+        return 2
     if args.timeout is None:
         args.timeout = 600.0 if args.backend == "u64" else 60.0
     try:
@@ -1558,6 +2671,13 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if not os.environ.get("U64_HOST"):
             print("error: set U64_HOST", file=sys.stderr)
+            return 2
+        args.out_dir = args.out_dir or default_out_dir()
+        if os.path.isdir(args.out_dir) and os.listdir(args.out_dir):
+            # one log per session (fix5 F7), and no evidence of another
+            # session overwritten (fix6 R5: config_before/after.json)
+            print(f"error: {args.out_dir} is not empty; give each session "
+                  "its own --out-dir", file=sys.stderr)
             return 2
     elif mhzs:
         print("error: --mhz is for --backend u64 (VICE has no CPU speed)",
@@ -1739,7 +2859,7 @@ def run_u64(args, prg: str, labels, blob: bytes, mhzs: list[int],
     log(f"kbd_echo {'MANUAL' if manual else 'smoke (queue-fed, no human)'} "
         f"on {os.environ['U64_HOST']}, " +
         (f"runs {', '.join(str(r) for r in runs)}" if manual
-         else f"speeds {mhzs}") + f", prg {prg}")
+         else f"speeds {mhzs}") + f", poll {args.poll:g}s, prg {prg}")
     sess = Session(target=None, labels=labels, timeout=args.timeout)
     results: dict[str, str] = {}
     gate, info = firmware_gate(os.environ["U64_HOST"], args.expect_git,

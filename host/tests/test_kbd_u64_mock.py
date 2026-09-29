@@ -247,8 +247,12 @@ class FakeStream:
 
     def __init__(self, sess, out=print):
         self.samples, self.bleeds, self.screen_log = [], [], []
+        self.confirmed = set()
 
     def emit(self, line):
+        pass
+
+    def hb_flush(self):
         pass
 
     def poll(self, screen=True):

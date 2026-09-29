@@ -1,0 +1,627 @@
+[08:41:49] kbd_echo MANUAL on 10.43.23.81, runs fixed@48, nosettle@48, poll 1s, prg build/w6-int/runner.prg
+[08:41:49] firmware gate: Ultimate 64 Elite fw 3.15 git c47155b7 fpga 125 core 1.50 = resting build (git c47155b7, core 1.50): proceeding
+
+========================================================================
+MANUAL KEYBOARD SESSION: runs in this order: fixed@48, nosettle@48
+Controls are SUPPOSED to show the defect.
+The runner will now be uploaded (run_prg) and the config changed (restored at the end).
+Press Enter when the operator is at the C64 keyboard (abort in 300s)...
+========================================================================
+[08:41:49] confirmation: operator ready
+[08:41:49] requesting the device (DeviceLock) ...
+[08:41:50] acquired after 0s wait; Ultimate 64 Elite fw 3.15 fpga 125 core 1.50
+[08:41:50] config before: {'turbo_control': 'Manual', 'cpu_speed': '48', 'reu_enabled': 'Enabled', 'reu_size': '16 MB', 'cartridge': '', 'badline_timing': 'Enabled', 'bus_operation_mode': 'Quiet', 'sid_addressing': {'SID Socket 1 Address': '$D400', 'SID Socket 2 Address': '$D400', 'Ext DualSID Range Split': 'Off', 'UltiSID 1 Address': '$D400', 'UltiSID 2 Address': '$D400', 'UltiSID Range Split': 'Off', 'Paddle Override': 'Enabled', 'Auto Address Mirroring': 'Enabled'}, 'cartridge_preference': 'Auto'}
+[08:41:50] device: Ultimate 64 Elite fw 3.15 git c47155b7 fpga 125 core 1.50 (lock wait 0s)
+[08:41:50] CPU speed 1 MHz for the boot; REU enabled 16 MB next (prepare_target: set_reu)
+  u64: dosio_want_uci residue at boot: 00000000
+  u64: hle_dos_magic residue at boot: 00000000
+  u64: hle_dos_magic after the probe init: 444f5321
+[08:41:53] CPU speed set to 48 MHz
+========================================================================
+FIXED BUILD at 48 MHz: every step must PASS
+========================================================================
+Steps 1-9 of 9; each ends with RETURN and shows PASS or FAIL.
+Type ONLY while the '>' prompt shows (keys pressed while the program prints are lost).
+At the run's FIRST '>' prompt: tap LEFT SHIFT once and release it before anything else
+(the keyboard's LED board hides the first key hold after ~2 min idle).
+NO joystick in control port 2 (it locks the keyboard out by design).
+Do each step exactly as described: the driver checks HOW (held time, keys down
+at once, which SHIFT, the stick's row).  A skipped step is never a pass.
+
+STEP 1  HOLD Q
+   do:     tap LEFT SHIFT once and release it (wakes the keyboard), then hold Q to a count of 10 (5 s or more), release it, press RETURN
+   expect: the line 'q', then STEP 1 PASS
+   defect: ^q: the UP-ARROW glyph ($5E, c6r6, read in the same sample as Q) then q; or nothing (the phantom keeps restarting the debounce)
+STEP 2  HOLD ; AND /
+   do:     hold ; to a count of 10, release; hold / to a count of 10, release; RETURN
+   expect: the line ';/', then STEP 2 PASS
+   defect: l; (c5r2, bleed from ;) or ,/ (c5r7, bleed from /)
+STEP 3  ROLLOVER
+   do:     press Z and keep it down, add I, add P (all three held), release all, RETURN
+   expect: the line 'zip', then STEP 3 PASS
+   defect: a missing or doubled letter, or a letter nobody pressed
+STEP 4  RSHIFT, C=
+   do:     hold RIGHT SHIFT: type A and /, release; hold C=: type Q, release; RETURN (do not touch LEFT SHIFT)
+   expect: the line 'A?q', then STEP 4 PASS
+   defect: a/ (RSHIFT not decoded), or an extra character from C=
+STEP 5  PORT-1 STICK UP
+   do:     hold the stick in CONTROL PORT 1 UP and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 5 PASS
+   defect: 1 3 5 7 9 + \ appear (row 0), DEL rubs characters out
+STEP 6  PORT-1 STICK DOWN
+   do:     hold the stick in CONTROL PORT 1 DOWN and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 6 PASS
+   defect: the step ends at once with an empty line (RETURN is on row 1): SKIP, then w r y i p * _ land in the next line
+STEP 7  PORT-1 STICK LEFT
+   do:     hold the stick in CONTROL PORT 1 LEFT and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 7 PASS
+   defect: CTRL reads as held (row 2): letters turn into control codes, CTRL+D ends the program, CTRL+J ends the line; a d g j l ;
+STEP 8  PORT-1 STICK RIGHT
+   do:     hold the stick in CONTROL PORT 1 RIGHT and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 8 PASS
+   defect: 4 6 8 0 - 2 appear (row 3)
+STEP 9  PORT-1 FIRE
+   do:     hold the stick in CONTROL PORT 1 FIRE and type HOSE; release the stick; RETURN
+   expect: the line 'hose', then STEP 9 PASS
+   defect: RSHIFT reads as held (row 4): HOSE comes out upper case, with Z C B M > and spaces
+
+At --poll 1 steps 3-9 cannot be judged: only steps 1-2 are evidence.
+RETURN alone at steps 3-9 is fine (docs/HLE_CON.md, 'The settle A/B').
+
+Then FREE mode: type any lines (every key once, with and without SHIFT);
+an empty line ends the program.
+
+This terminal shows what the SCANNER saw ('key DOWN c7r6 Q'); 'COLUMN BLEED?'
+marks the phantom the row settle must prevent.  Letters look the same in both
+cases on screen (upper-case charset); the hex code tells them apart.
+========================================================================
+[kbd_echo] 11552-byte hunk file, args b'\n'
+  staged 24404 byte(s) in 22 record(s)
+[   0.04] fixed@48 started (--poll 1s): operator, follow the C64 screen
+[   0.19]   | KBD-ECHO KEYBOARD CHECK (W6-K)
+[   1.20] hb polls +2 max gap 1.15s
+[   1.33]   | EMPTY LINE: SKIP STEP. CTRL+D: QUIT
+[   1.33]   | STEP 1/9: HOLD Q
+[   1.33]   | TAP SHIFT, THEN HOLD Q (COUNT 10),
+[   1.33]   | RELEASE, RETURN
+[   1.33]   | >
+[   2.34] hb polls +1 max gap 1.14s
+[   3.49] hb polls +1 max gap 1.14s
+[   4.63] hb polls +1 max gap 1.14s
+[   5.77] hb polls +1 max gap 1.14s
+[   6.91] hb polls +1 max gap 1.15s
+[   8.07] hb polls +1 max gap 1.15s
+[   9.21] hb polls +1 max gap 1.14s
+[  10.35] hb polls +1 max gap 1.14s
+[  11.49] hb polls +1 max gap 1.14s
+[  12.64] hb polls +1 max gap 1.15s
+[  13.80] hb polls +1 max gap 1.15s
+[  14.93] hb polls +1 max gap 1.14s
+[  16.07] hb polls +1 max gap 1.14s
+[  17.21] hb polls +1 max gap 1.14s
+[  18.35] hb polls +1 max gap 1.14s
+[  19.49] hb polls +1 max gap 1.14s
+[  20.65] hb polls +1 max gap 1.16s
+[  21.80] hb polls +1 max gap 1.15s
+[  22.94] hb polls +1 max gap 1.14s
+[  24.08] hb polls +1 max gap 1.14s
+[  25.22] hb polls +1 max gap 1.14s
+[  26.36] hb polls +1 max gap 1.14s
+[  27.50] hb polls +1 max gap 1.14s
+[  28.64] hb polls +1 max gap 1.14s
+[  29.78] hb polls +1 max gap 1.14s
+[  30.92] hb polls +1 max gap 1.14s
+[  32.05] hb polls +1 max gap 1.14s
+[  33.19] hb polls +1 max gap 1.14s
+[  34.34] hb polls +1 max gap 1.14s
+[  35.48] hb polls +1 max gap 1.14s
+[  36.62] hb polls +1 max gap 1.15s
+[  37.77] hb polls +1 max gap 1.14s
+[  38.90] hb polls +1 max gap 1.14s
+[  40.05] hb polls +1 max gap 1.14s
+[  41.18] hb polls +1 max gap 1.14s
+[  42.32] hb polls +1 max gap 1.14s
+[  43.46] hb polls +1 max gap 1.14s
+[  44.60] hb polls +1 max gap 1.15s
+[  45.74] hb polls +1 max gap 1.13s
+[  46.88] hb polls +1 max gap 1.14s
+[  48.02] hb polls +1 max gap 1.14s
+[  49.16] hb polls +1 max gap 1.14s
+[  50.30] hb polls +1 max gap 1.14s
+[  51.45] hb polls +1 max gap 1.14s
+[  52.60] hb polls +1 max gap 1.15s
+[  53.75] hb polls +1 max gap 1.15s
+[  54.89] hb polls +1 max gap 1.15s
+[  56.03] hb polls +1 max gap 1.14s
+[  57.18] hb polls +1 max gap 1.15s
+[  58.33] hb polls +1 max gap 1.14s
+[  59.47] hb polls +1 max gap 1.15s
+[  60.62] hb polls +1 max gap 1.14s
+[  61.76] hb polls +1 max gap 1.14s
+[  62.90] hb polls +1 max gap 1.14s
+[  64.05] hb polls +1 max gap 1.15s
+[  65.19] hb polls +1 max gap 1.14s
+[  66.33] hb polls +1 max gap 1.14s
+[  67.47] hb polls +1 max gap 1.14s
+[  68.61] hb polls +1 max gap 1.14s
+[  69.75] hb polls +1 max gap 1.14s
+[  70.90] hb polls +1 max gap 1.15s
+[  72.04] hb polls +1 max gap 1.14s
+[  73.18] hb polls +1 max gap 1.15s
+[  74.32] hb polls +1 max gap 1.14s
+[  75.47] hb polls +1 max gap 1.14s
+[  76.60] hb polls +1 max gap 1.14s
+[  77.74] hb polls +1 max gap 1.14s
+[  78.88] hb polls +1 max gap 1.14s
+[  80.03] hb polls +1 max gap 1.14s
+[  81.17] hb polls +1 max gap 1.14s
+[  82.31] hb polls +1 max gap 1.14s
+[  83.46] hb polls +1 max gap 1.14s
+[  84.60] hb polls +1 max gap 1.14s
+[  85.75] hb polls +1 max gap 1.15s
+[  86.91] hb polls +1 max gap 1.16s
+[  88.04] hb polls +1 max gap 1.13s
+[  89.18] hb polls +1 max gap 1.14s
+[  90.32] hb polls +1 max gap 1.14s
+[  91.46] hb polls +1 max gap 1.14s
+[  92.60] hb polls +1 max gap 1.14s
+[  93.74] hb polls +1 max gap 1.14s
+[  94.90] hb polls +1 max gap 1.16s
+[  96.05] hb polls +1 max gap 1.14s
+[  97.18] hb polls +1 max gap 1.14s
+[  98.32] hb polls +1 max gap 1.14s
+[  99.46] hb polls +1 max gap 1.14s
+[ 100.60] hb polls +1 max gap 1.14s
+[ 101.75] hb polls +1 max gap 1.15s
+[ 102.88] hb polls +1 max gap 1.14s
+[ 104.02] hb polls +1 max gap 1.13s
+[ 105.16] hb polls +1 max gap 1.14s
+[ 106.31] hb polls +1 max gap 1.15s
+[ 107.45] hb polls +1 max gap 1.14s
+[ 108.59] hb polls +1 max gap 1.14s
+[ 109.72] hb polls +1 max gap 1.14s
+[ 110.86] hb polls +1 max gap 1.14s
+[ 112.00] hb polls +1 max gap 1.14s
+[ 113.14] hb polls +1 max gap 1.14s
+[ 114.28] hb polls +1 max gap 1.14s
+[ 115.41] hb polls +1 max gap 1.13s
+[ 116.55] hb polls +1 max gap 1.14s
+[ 117.69] hb polls +1 max gap 1.14s
+[ 118.83] hb polls +1 max gap 1.14s
+[ 119.96] hb polls +1 max gap 1.14s
+[ 121.11] hb polls +1 max gap 1.14s
+[ 122.24] hb polls +1 max gap 1.14s
+[ 123.39] hb polls +1 max gap 1.15s
+[ 124.53] hb polls +1 max gap 1.14s
+[ 125.67] hb polls +1 max gap 1.14s
+[ 126.81] hb polls +1 max gap 1.14s
+[ 127.97] hb polls +1 max gap 1.15s
+[ 129.11] hb polls +1 max gap 1.14s
+[ 130.27] hb polls +1 max gap 1.16s
+[ 131.41] hb polls +1 max gap 1.15s
+[ 132.57] hb polls +1 max gap 1.15s
+[ 133.71] hb polls +1 max gap 1.14s
+[ 134.86] hb polls +1 max gap 1.15s
+[ 136.02] hb polls +1 max gap 1.16s
+[ 137.17] hb polls +1 max gap 1.14s
+[ 138.31] hb polls +1 max gap 1.15s
+[ 139.46] hb polls +1 max gap 1.14s
+[ 140.60] hb polls +1 max gap 1.14s
+[ 141.74] hb polls +1 max gap 1.14s
+[ 142.88] hb polls +1 max gap 1.13s
+[ 144.02] hb polls +1 max gap 1.14s
+[ 145.17] hb polls +1 max gap 1.15s
+[ 146.31] hb polls +1 max gap 1.14s
+[ 147.45] hb polls +1 max gap 1.14s
+[ 148.59] hb polls +1 max gap 1.14s
+[ 149.73] hb polls +1 max gap 1.14s
+[ 150.86] hb polls +1 max gap 1.13s
+[ 152.01] hb polls +1 max gap 1.14s
+[ 153.14] hb polls +1 max gap 1.14s
+[ 154.28] hb polls +1 max gap 1.14s
+[ 155.43] hb polls +1 max gap 1.15s
+[ 156.57] hb polls +1 max gap 1.14s
+[ 157.72] hb polls +1 max gap 1.15s
+[ 158.87] hb polls +1 max gap 1.16s
+[ 160.02] hb polls +1 max gap 1.14s
+[ 161.17] hb polls +1 max gap 1.15s
+[ 162.31] hb polls +1 max gap 1.14s
+[ 163.46] hb polls +1 max gap 1.15s
+[ 164.59] hb polls +1 max gap 1.14s
+[ 165.73] hb polls +1 max gap 1.14s
+[ 166.87] hb polls +1 max gap 1.14s
+[ 168.01] hb polls +1 max gap 1.14s
+[ 169.14] hb polls +1 max gap 1.13s
+[ 170.28] hb polls +1 max gap 1.14s
+[ 171.42] hb polls +1 max gap 1.14s
+[ 172.56] hb polls +1 max gap 1.14s
+[ 173.70] hb polls +1 max gap 1.14s
+[ 174.84] hb polls +1 max gap 1.14s
+[ 175.99] hb polls +1 max gap 1.15s
+[ 177.13] hb polls +1 max gap 1.14s
+[ 178.27] hb polls +1 max gap 1.14s
+[ 179.42] hb polls +1 max gap 1.16s
+[ 180.56] hb polls +1 max gap 1.14s
+[ 181.71] hb polls +1 max gap 1.15s
+[ 182.86] hb polls +1 max gap 1.15s
+[ 184.01] hb polls +1 max gap 1.15s
+[ 185.15] hb polls +1 max gap 1.14s
+[ 186.29] hb polls +1 max gap 1.14s
+[ 187.42] hb polls +1 max gap 1.14s
+[ 188.56] hb polls +1 max gap 1.14s
+[ 189.70] hb polls +1 max gap 1.14s
+[ 190.84] hb polls +1 max gap 1.14s
+[ 191.98] hb polls +1 max gap 1.15s
+[ 193.12] hb polls +1 max gap 1.14s
+[ 194.26] hb polls +1 max gap 1.14s
+[ 195.39] hb polls +1 max gap 1.14s
+[ 196.53] hb polls +1 max gap 1.14s
+[ 197.67] hb polls +1 max gap 1.14s
+[ 198.82] hb polls +1 max gap 1.15s
+[ 199.96] hb polls +1 max gap 1.14s
+[ 201.10] hb polls +1 max gap 1.14s
+[ 202.24] hb polls +1 max gap 1.14s
+[ 203.39] hb polls +1 max gap 1.14s
+[ 204.52] hb polls +1 max gap 1.14s
+[ 205.66] hb polls +1 max gap 1.14s
+[ 206.80] hb polls +1 max gap 1.14s
+[ 207.94] hb polls +1 max gap 1.14s
+[ 209.08] hb polls +1 max gap 1.14s
+[ 210.22] hb polls +1 max gap 1.14s
+[ 211.36] hb polls +1 max gap 1.14s
+[ 212.51] hb polls +1 max gap 1.15s
+[ 213.66] hb polls +1 max gap 1.15s
+[ 214.80] hb polls +1 max gap 1.15s
+[ 215.94] hb polls +1 max gap 1.14s
+[ 217.07] hb polls +1 max gap 1.14s
+[ 218.22] hb polls +1 max gap 1.14s
+[ 219.37] hb polls +1 max gap 1.15s
+[ 220.52] hb polls +1 max gap 1.15s
+[ 221.68] hb polls +1 max gap 1.15s
+[ 222.83] hb polls +1 max gap 1.15s
+[ 223.98] hb polls +1 max gap 1.15s
+[ 225.12] hb polls +1 max gap 1.15s
+[ 226.27] hb polls +1 max gap 1.15s
+[ 227.43] hb polls +1 max gap 1.15s
+[ 228.58] hb polls +1 max gap 1.16s
+[ 229.73] hb polls +1 max gap 1.15s
+[ 230.88] hb polls +1 max gap 1.15s
+[ 232.03] hb polls +1 max gap 1.14s
+[ 233.17] hb polls +1 max gap 1.14s
+[ 234.31] hb polls +1 max gap 1.14s
+[ 235.46] hb polls +1 max gap 1.15s
+[ 236.60] hb polls +1 max gap 1.15s
+[ 237.75] hb polls +1 max gap 1.15s
+[ 238.89] hb polls +1 max gap 1.14s
+[ 240.03] hb polls +1 max gap 1.14s
+[ 241.18] hb polls +1 max gap 1.15s
+[ 242.32] hb polls +1 max gap 1.15s
+[ 243.46] hb polls +1 max gap 1.14s
+[ 244.60] hb polls +1 max gap 1.14s
+[ 245.74] hb polls +1 max gap 1.14s
+[ 246.88] hb polls +1 max gap 1.14s
+[ 248.02] hb polls +1 max gap 1.13s
+[ 249.16] hb polls +1 max gap 1.14s
+[ 250.29] hb polls +1 max gap 1.14s
+[ 251.44] hb polls +1 max gap 1.14s
+[ 252.59] hb polls +1 max gap 1.16s
+[ 253.74] hb polls +1 max gap 1.14s
+[ 254.89] hb polls +1 max gap 1.15s
+[ 256.03] hb polls +1 max gap 1.14s
+[ 257.18] hb polls +1 max gap 1.14s
+[ 258.33] hb polls +1 max gap 1.15s
+[ 259.48] hb polls +1 max gap 1.15s
+[ 260.63] hb polls +1 max gap 1.15s
+[ 261.78] hb polls +1 max gap 1.15s
+[ 262.94] hb polls +1 max gap 1.16s
+[ 264.08] hb polls +1 max gap 1.15s
+[ 265.23] hb polls +1 max gap 1.15s
+[ 266.36] hb polls +1 max gap 1.14s
+[ 267.50] hb polls +1 max gap 1.13s
+[ 268.63] hb polls +1 max gap 1.14s
+[ 269.78] hb polls +1 max gap 1.14s
+[ 270.93] hb polls +1 max gap 1.15s
+[ 272.08] hb polls +1 max gap 1.15s
+[ 273.21] hb polls +1 max gap 1.13s
+[ 274.35] hb polls +1 max gap 1.14s
+[ 275.50] hb polls +1 max gap 1.15s
+[ 276.64] hb polls +1 max gap 1.14s
+[ 277.78] hb polls +1 max gap 1.14s
+[ 278.93] hb polls +1 max gap 1.15s
+[ 280.08] hb polls +1 max gap 1.15s
+[ 281.23] hb polls +1 max gap 1.15s
+[ 282.39] hb polls +1 max gap 1.15s
+[ 283.53] hb polls +1 max gap 1.14s
+[ 284.67] hb polls +1 max gap 1.14s
+[ 285.81] hb polls +1 max gap 1.14s
+[ 286.96] hb polls +1 max gap 1.15s
+[ 288.09] hb polls +1 max gap 1.13s
+[ 289.23] hb polls +1 max gap 1.14s
+[ 290.38] hb polls +1 max gap 1.15s
+[ 291.53] hb polls +1 max gap 1.15s
+[ 292.66] hb polls +1 max gap 1.13s
+[ 293.79] hb polls +1 max gap 1.13s
+[ 294.93] hb polls +1 max gap 1.14s
+[ 296.07] hb polls +1 max gap 1.14s
+[ 297.21] hb polls +1 max gap 1.14s
+[ 298.36] hb polls +1 max gap 1.15s
+[ 299.51] hb polls +1 max gap 1.15s
+[ 300.65] hb polls +1 max gap 1.14s
+[ 301.81] hb polls +1 max gap 1.16s
+[ 302.97] hb polls +1 max gap 1.16s
+[ 304.13] hb polls +1 max gap 1.16s
+[ 305.26] hb polls +1 max gap 1.14s
+[ 306.40] hb polls +1 max gap 1.14s
+[ 307.54] hb polls +1 max gap 1.14s
+[ 308.68] hb polls +1 max gap 1.14s
+[ 309.83] hb polls +1 max gap 1.15s
+[ 310.98] hb polls +1 max gap 1.14s
+[ 312.13] hb polls +1 max gap 1.15s
+[ 313.27] hb polls +1 max gap 1.14s
+[ 314.41] hb polls +1 max gap 1.14s
+[ 315.56] hb polls +1 max gap 1.15s
+[ 316.71] hb polls +1 max gap 1.15s
+[ 317.85] hb polls +1 max gap 1.14s
+[ 319.00] hb polls +1 max gap 1.15s
+[ 320.15] hb polls +1 max gap 1.15s
+[ 321.29] hb polls +1 max gap 1.14s
+[ 322.43] hb polls +1 max gap 1.14s
+[ 323.58] hb polls +1 max gap 1.15s
+[ 324.75] hb polls +1 max gap 1.17s
+[ 325.90] hb polls +1 max gap 1.15s
+[ 327.04] hb polls +1 max gap 1.14s
+[ 328.18] hb polls +1 max gap 1.14s
+[ 329.33] hb polls +1 max gap 1.15s
+[ 330.48] hb polls +1 max gap 1.15s
+[ 331.62] hb polls +1 max gap 1.14s
+[ 332.76] hb polls +1 max gap 1.14s
+[ 333.90] hb polls +1 max gap 1.14s
+[ 335.04] hb polls +1 max gap 1.14s
+[ 336.19] hb polls +1 max gap 1.14s
+[ 337.33] hb polls +1 max gap 1.14s
+[ 338.50] hb polls +1 max gap 1.17s
+[ 339.64] hb polls +1 max gap 1.14s
+[ 340.79] hb polls +1 max gap 1.14s
+[ 340.80] key DOWN c7r6 Q
+[ 340.92]   | > Q
+[ 341.94] hb polls +1 max gap 1.15s
+[ 343.08] hb polls +1 max gap 1.14s
+[ 344.23] hb polls +1 max gap 1.15s
+[ 345.37] hb polls +1 max gap 1.14s
+[ 346.51] hb polls +1 max gap 1.14s
+[ 347.66] hb polls +1 max gap 1.15s
+[ 348.80] hb polls +1 max gap 1.14s
+[ 348.82] key UP   c7r6 Q
+[ 349.95] hb polls +1 max gap 1.14s
+[ 349.96] (+1 key event(s) released before this poll saw them)
+[ 350.08]   |  'Q' $71 C7R6
+[ 350.08]   | STEP 1 PASS
+[ 350.08]   | STEP 2/9: HOLD ; AND /
+[ 350.08]   | HOLD ; (COUNT 10), RELEASE;
+[ 350.08]   | HOLD / (COUNT 10), RELEASE; RETURN
+[ 350.08]   | >
+[ 351.10] hb polls +1 max gap 1.15s
+[ 351.11] key DOWN c6r2 ;
+[ 351.22]   | > ;
+[ 352.25] hb polls +1 max gap 1.15s
+[ 353.45] hb polls +1 max gap 1.20s
+[ 354.59] hb polls +1 max gap 1.14s
+[ 355.73] hb polls +1 max gap 1.14s
+[ 356.87] hb polls +1 max gap 1.14s
+[ 358.01] hb polls +1 max gap 1.14s
+[ 359.15] hb polls +1 max gap 1.14s
+[ 359.17] key UP   c6r2 ;
+[ 360.31] hb polls +1 max gap 1.15s
+[ 360.32] key DOWN c6r7 /
+[ 360.43]   | > ;/
+[ 361.45] hb polls +1 max gap 1.14s
+[ 362.60] hb polls +1 max gap 1.15s
+[ 363.75] hb polls +1 max gap 1.15s
+[ 364.89] hb polls +1 max gap 1.14s
+[ 366.03] hb polls +1 max gap 1.14s
+[ 367.17] hb polls +1 max gap 1.14s
+[ 368.30] hb polls +1 max gap 1.14s
+[ 368.32] key UP   c6r7 /
+[ 369.45] hb polls +1 max gap 1.14s
+[ 369.46] (+1 key event(s) released before this poll saw them)
+[ 369.57]   |  ';' $3B C6R2
+[ 369.57]   |  '/' $2F C6R7
+[ 369.57]   | STEP 2 PASS
+[ 369.57]   | STEP 3/9: ROLLOVER
+[ 369.57]   | PRESS Z, KEEP IT; ADD I, KEEP IT;
+[ 369.57]   | ADD P; RELEASE ALL; RETURN
+[ 369.57]   | >
+[ 370.59] hb polls +1 max gap 1.14s
+[ 370.60] (+4 key event(s) released before this poll saw them)
+[ 370.72]   | STEP 3 SKIP
+[ 370.72]   | STEP 4/9: RSHIFT, C=
+[ 370.72]   | RSHIFT+A, RSHIFT+/, THEN C=+Q;
+[ 370.72]   | NO LEFT SHIFT; RETURN
+[ 370.72]   | >
+[ 370.72]   | STEP 4 SKIP
+[ 370.72]   | STEP 5/9: PORT-1 STICK UP
+[ 370.72]   | HOLD THE STICK UP, TYPE HOSE,
+[ 370.72]   | RELEASE THE STICK; RETURN
+[ 370.72]   | >
+[ 370.72]   | STEP 5 SKIP
+[ 370.72]   | STEP 6/9: PORT-1 STICK DOWN
+[ 370.72]   | HOLD THE STICK DOWN, TYPE HOSE,
+[ 370.72]   | RELEASE THE STICK; RETURN
+[ 370.72]   | >       KIP
+[ 370.72]   | STEP 7/9: PORT-1 STICK LEFT
+[ 370.72]   | HOLD THE STICK LEFT, TYPE HOSE,
+[ 370.72]   | RELEASE THE STICK; RETURN
+[ 370.72]   | >
+[ 370.72]   | STEP 7 SKIP
+[ 371.73] hb polls +1 max gap 1.14s
+[ 371.75] (+3 key event(s) released before this poll saw them)
+[ 371.85]   | >
+[ 371.85]   | STEP 6 SKIP
+[ 371.85]   | STEP 7/9: PORT-1 STICK LEFT
+[ 371.85]   | HOLD THE STICK LEFT, TYPE HOSE,
+[ 371.86]   | RELEASE THE STICK; RETURN
+[ 371.86]   | >
+[ 371.86]   | STEP 7 SKIP
+[ 371.86]   | STEP 8/9: PORT-1 STICK RIGHT
+[ 371.86]   | HOLD THE STICK RIGHT, TYPE HOSE,
+[ 371.86]   | RELEASE THE STICK; RETURN
+[ 371.86]   | >
+[ 371.86]   | STEP 8 SKIP
+[ 371.86]   | STEP 9/9: PORT-1 FIRE
+[ 371.86]   | HOLD FIRE, TYPE HOSE,
+[ 371.86]   | RELEASE FIRE; RETURN
+[ 371.86]   | >
+[ 371.86]   | STEP 9 SKIP
+[ 371.86]   | FREE: TYPE LINES, EMPTY LINE ENDS
+[ 371.86]   | >
+[ 372.87] hb polls +1 max gap 1.14s
+[ 372.88] key DOWN c0r1 RETURN
+[ 372.99]   | STEPS PPSSSSSSS
+[ 372.99]   | RESULT PASS=2 FAIL=0 SKIP=7
+  D0=00000000  D1=00000000  D2=00000000  D3=00000000  D4=00001000  D5=0000000C  D6=00000000  D7=00000000
+  A0=00100038  A1=00100010  A2=00000000  A3=00012ABC  A4=0001A95E  A5=00100010  A6=000F0400  A7=0000F004
+  PC=00000442  SR=0004  instructions=57516  [halt reason=00]
+[ 373.02] step 1 HOLD Q: program P; performed yes; Q held 6.9s
+[ 373.02] step 2 HOLD ; AND /: program P; performed yes; ; held 6.9s; / held 6.9s
+[ 373.02] step 3 ROLLOVER: program S; performed NO; at most 0 keys down at once; NOT JUDGEABLE: --poll period 1.15s > 0.4s: a tapped step cannot be proven at this poll rate
+[ 373.02] step 4 RSHIFT, C=: program S; performed NO; A with RSHIFT: NO; / with RSHIFT: NO; Q with C=: NO
+[ 373.02] step 5 PORT-1 STICK UP: program S; performed NO; stick row r0 seen held in 0 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[ 373.02] step 6 PORT-1 STICK DOWN: program S; performed NO; stick row r1 seen held in 0 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[ 373.02] step 7 PORT-1 STICK LEFT: program S; performed NO; stick row r2 seen held in 0 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[ 373.02] step 8 PORT-1 STICK RIGHT: program S; performed NO; stick row r3 seen held in 0 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[ 373.02] step 9 PORT-1 FIRE: program S; performed NO; stick row r4 seen held in 0 poll(s); H not typed with the stick held; O not typed with the stick held; S not typed with the stick held; E not typed with the stick held
+[ 373.02] fixed@48: INCOMPLETE (want PASS), STEPS PPSSSSSSS
+  CHECK FAILED  manual/fixed@48: PASS  INCOMPLETE
+[08:48:20] CPU speed set to 48 MHz
+[08:48:20] control patch nosettle applied (readback ok): THIS RUN IS SUPPOSED TO SHOW THE DEFECT
+========================================================================
+CONTROL RUN nosettle@48: THIS BUILD IS SUPPOSED TO SHOW THE DEFECT
+(the 'nosettle' fix is taken out of the runner in RAM; the C64 screen says CONTROL BUILD)
+========================================================================
+Steps 1-2 of 9; each ends with RETURN and shows PASS or FAIL.
+Type ONLY while the '>' prompt shows (keys pressed while the program prints are lost).
+At the run's FIRST '>' prompt: tap LEFT SHIFT once and release it before anything else
+(the keyboard's LED board hides the first key hold after ~2 min idle).
+NO joystick in control port 2 (it locks the keyboard out by design).
+Do each step exactly as described: the driver checks HOW (held time, keys down
+at once, which SHIFT, the stick's row).  A skipped step is never a pass.
+
+STEP 1  HOLD Q
+   do:     tap LEFT SHIFT once and release it (wakes the keyboard), then hold Q to a count of 10 (5 s or more), release it, press RETURN
+   expect (defect): ^q: the UP-ARROW glyph ($5E, c6r6, read in the same sample as Q) then q; or nothing (the phantom keeps restarting the debounce)
+STEP 2  HOLD ; AND /
+   do:     hold ; to a count of 10, release; hold / to a count of 10, release; RETURN
+   expect (defect): l; (c5r2, bleed from ;) or ,/ (c5r7, bleed from /)
+
+This terminal shows what the SCANNER saw ('key DOWN c7r6 Q'); 'COLUMN BLEED?'
+marks the phantom the row settle must prevent.  Letters look the same in both
+cases on screen (upper-case charset); the hex code tells them apart.
+========================================================================
+[kbd_echo] 11552-byte hunk file, args b'CONTROL nosettle 1 2\n'
+  staged 24404 byte(s) in 22 record(s)
+[   0.06] nosettle@48 started (--poll 1s): operator, follow the C64 screen  *** CONTROL: SUPPOSED TO SHOW THE DEFECT ***
+[   0.20]   | KBD-ECHO KEYBOARD CHECK (W6-K)
+[   1.21] hb polls +2 max gap 1.14s
+[   1.35]   | *** CONTROL BUILD: NOSETTLE ***
+[   1.36]   | SUPPOSED TO FAIL: IT LACKS THE FIX,
+[   1.36]   | SO IT SHOULD SHOW THE DEFECT.
+[   1.36]   | EMPTY LINE: SKIP STEP. CTRL+D: QUIT
+[   1.36]   | STEP 1/9: HOLD Q
+[   1.36]   | TAP SHIFT, THEN HOLD Q (COUNT 10),
+[   1.36]   | RELEASE, RETURN
+[   1.36]   | >
+[   2.37] hb polls +1 max gap 1.16s
+[   3.50] hb polls +1 max gap 1.13s
+[   4.64] hb polls +1 max gap 1.14s
+[   5.78] hb polls +1 max gap 1.14s
+[   6.93] hb polls +1 max gap 1.15s
+[   8.07] hb polls +1 max gap 1.14s
+[   9.21] hb polls +1 max gap 1.14s
+[  10.35] hb polls +1 max gap 1.14s
+[  11.48] hb polls +1 max gap 1.14s
+[  12.61] hb polls +1 max gap 1.13s
+[  13.76] hb polls +1 max gap 1.14s
+[  14.90] hb polls +1 max gap 1.14s
+[  16.04] hb polls +1 max gap 1.14s
+[  17.18] hb polls +1 max gap 1.14s
+[  18.31] hb polls +1 max gap 1.14s
+[  19.46] hb polls +1 max gap 1.14s
+[  20.60] hb polls +1 max gap 1.15s
+[  21.76] hb polls +1 max gap 1.15s
+[  22.90] hb polls +1 max gap 1.14s
+[  24.04] hb polls +1 max gap 1.14s
+[  25.18] hb polls +1 max gap 1.14s
+[  26.33] hb polls +1 max gap 1.15s
+[  27.46] hb polls +1 max gap 1.14s
+[  27.48] mod DOWN c1r7 LSHIFT
+[  28.60] hb polls +1 max gap 1.14s
+[  28.62] key DOWN c7r6 Q
+[  28.62] mod UP   c1r7 LSHIFT
+[  28.73]   | > Q
+[  29.74] hb polls +1 max gap 1.14s
+[  30.89] hb polls +1 max gap 1.15s
+[  32.03] hb polls +1 max gap 1.14s
+[  33.18] hb polls +1 max gap 1.14s
+[  34.32] hb polls +1 max gap 1.15s
+[  35.47] hb polls +1 max gap 1.15s
+[  36.62] hb polls +1 max gap 1.15s
+[  37.77] hb polls +1 max gap 1.15s
+[  37.78] key DOWN c0r1 RETURN
+[  37.78] key UP   c7r6 Q
+[  37.90]   |  'Q' $71 C7R6
+[  37.90]   | STEP 1 PASS
+[  37.90]   | STEP 2/9: HOLD ; AND /
+[  37.90]   | HOLD ; (COUNT 10), RELEASE;
+[  37.90]   | HOLD / (COUNT 10), RELEASE; RETURN
+[  37.90]   | >
+[  38.91] hb polls +1 max gap 1.14s
+[  38.92] key DOWN c6r2 ;
+[  38.92] key UP   c0r1 RETURN
+[  39.04]   | > ;
+[  40.05] hb polls +1 max gap 1.14s
+[  41.19] hb polls +1 max gap 1.14s
+[  42.37] hb polls +1 max gap 1.17s
+[  43.51] hb polls +1 max gap 1.14s
+[  44.65] hb polls +1 max gap 1.14s
+[  45.80] hb polls +1 max gap 1.14s
+[  46.94] hb polls +1 max gap 1.15s
+[  48.09] hb polls +1 max gap 1.14s
+[  48.10] key DOWN c6r7 /
+[  48.10] key UP   c6r2 ;
+[  48.21]   | > ;/
+[  49.23] hb polls +1 max gap 1.14s
+[  50.37] hb polls +1 max gap 1.14s
+[  51.51] hb polls +1 max gap 1.14s
+[  52.66] hb polls +1 max gap 1.14s
+[  53.80] hb polls +1 max gap 1.14s
+[  54.94] hb polls +1 max gap 1.14s
+[  56.09] hb polls +1 max gap 1.15s
+[  57.22] hb polls +1 max gap 1.14s
+[  57.24] key UP   c6r7 /
+[  58.36] hb polls +1 max gap 1.14s
+[  58.38] key DOWN c0r1 RETURN
+[  58.49]   |  ';' $3B C6R2
+[  58.49]   |  '/' $2F C6R7
+[  58.49]   | STEP 2 PASS
+[  58.49]   | STEPS PP-------
+[  58.49]   | RESULT PASS=2 FAIL=0 SKIP=0
+  D0=00000000  D1=00000000  D2=00000000  D3=00000000  D4=00001000  D5=00000018  D6=00000000  D7=00000000
+  A0=00100058  A1=00100010  A2=00000000  A3=00012ABC  A4=0001A95E  A5=00100010  A6=000F0400  A7=0000F004
+  PC=00000442  SR=0004  instructions=27899  [halt reason=00]
+nosettle@48 step 1: did you hold Q at the '>' prompt as the checklist asked?  (y = yes; n = no, or not sure; the answer is logged only, it does not change the verdict) [y/n] [  59.02] operator: step 1 held as asked (Q)? no answer
+nosettle@48 step 2: did you hold ; and / at the '>' prompt as the checklist asked?  (y = yes; n = no, or not sure; the answer is logged only, it does not change the verdict) [y/n] [  59.52] operator: step 2 held as asked (; and /)? no answer
+[  59.53] step 1 HOLD Q: program P; performed yes; Q held 8.0s
+[  59.53] step 2 HOLD ; AND /: program P; performed yes; ; held 8.0s; / held 8.0s
+[  59.53] nosettle@48: INCONCLUSIVE (want DEFECT SHOWN), STEPS PP-------
+  CHECK FAILED  manual/nosettle@48: DEFECT SHOWN  INCONCLUSIVE
+[08:49:33] control patch removed (readback ok)
+[08:49:33] restoring config ...
+[08:49:37] config after (full, all categories): IDENTICAL
+[08:49:37] fixed@48: INCOMPLETE
+[08:49:37] nosettle@48: INCONCLUSIVE
+[08:49:37] SESSION VERDICT: INCOMPLETE (not the full plan): a step was skipped or not done as asked, a control had no defect signature and an operator error (redo that leg), or a run is missing: not validated
+  CHECK FAILED  session verdict VALIDATED  INCOMPLETE (not the full plan)
+13/16 checks passed
+FAIL  manual/fixed@48: PASS: INCOMPLETE
+FAIL  manual/nosettle@48: DEFECT SHOWN: INCONCLUSIVE
+FAIL  session verdict VALIDATED: INCOMPLETE (not the full plan)

@@ -387,8 +387,13 @@ def test_judge_mods_needs_rshift_and_cbm_and_no_lshift():
 def test_judge_stick_row_per_direction(n):
     row = ke.STEPS[n - 1].row
     idle = 0xFF & ~(1 << row)
-    typed = [(k, n, {ke.K(c)}, idle) for k, c in enumerate("hose")]
+    typed = [(0.2 * k, n, {ke.K(c)}, idle) for k, c in enumerate("hose")]
     assert ke.judge_step(_stream(typed), n).performed
+    # the same polls 1 s apart at the default poll: stalls (fix5 F3), so
+    # not judgeable rather than performed
+    slow = [(k, n, {ke.K(c)}, idle) for k, c in enumerate("hose")]
+    j = ke.judge_step(_stream(slow), n)
+    assert not j.performed and "gap" in j.not_judgeable
     # no stick (Demo A's "typed without the stick"): not performed
     nostick = [(k, n, {ke.K(c)}, 0xFF) for k, c in enumerate("hose")]
     assert not ke.judge_step(_stream(nostick), n).performed
@@ -447,8 +452,11 @@ def test_judge_run_control():
                         r) == "INCOMPLETE"
     assert ke.judge_run(ke.CONTROL, "PP" + v, {1: _j(), 2: _j()},
                         r) == "INCONCLUSIVE"
-    # an unperformed step is INCOMPLETE even with a signature elsewhere
+    # fix7 K4 (was INCOMPLETE): a signature is an observed fact, and an
+    # unperformed step elsewhere does not hide it
     assert ke.judge_run(ke.CONTROL, "FS" + v, {1: sig, 2: _j(False)},
+                        r) == "DEFECT SHOWN"
+    assert ke.judge_run(ke.CONTROL, "PS" + v, {1: _j(), 2: _j(False)},
                         r) == "INCOMPLETE"
 
 
@@ -478,10 +486,12 @@ def test_settle_signature_is_the_c_minus_1_phantom_in_the_same_sample(held,
     same = _held(n, {k, p}, 0, 2.0)
     j = ke.judge_step(_stream(same), n, control=True)
     assert j.signature and ke.KEY_NAMES[p] in j.signature[0]
-    # the same key pressed LATER (a stray press, not the phantom): no sig
+    # fix8 F2 (was "a stray press, no signature"): the c-1 key committed
+    # LATER while the key is held is the row still low from its column
+    # (review7 A2); the A/B counts a step-2 one only when it repeats (R4)
     later = _held(n, {k}, 0, 1.0) + _held(n, {k, p}, 1.1, 2.0)
     j = ke.judge_step(_stream(later), n, control=True)
-    assert j.defects and not j.signature
+    assert j.defects and j.signature and j.settle
     # another stray key with Q in the same sample: not the signature
     if held == "q":
         j = ke.judge_step(_stream(_held(1, {k, ke.K("w")}, 0, 2.0)), 1,
