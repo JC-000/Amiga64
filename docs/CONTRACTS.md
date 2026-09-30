@@ -336,29 +336,45 @@ Tests: `tests/run_mach.py` (+ `tests/mach/drv.s`), `host/tests/test_mach.py`.
   RAM vectors are installed (NMI → `mach_nmi`, IRQ → `mach_irq`, re-written
   on every entry); CIA #1 timer A, one-shot, is the only unmasked IRQ
   source; `cli` around `emu_run` and the service pass. **On every exit:**
-  CIA #1 ICR masked (`$7F`) and acknowledged, I = 1, `$01` = the caller's
-  value. The RAM vectors stay (harmless with the KERNAL in); they are
-  written before `$01` changes, so an NMI can never find stale RAM there.
-  The KERNAL's jiffy IRQ (CIA #1 timer A continuous + mask) is not
-  restored: a caller that returns to the KERNAL must re-init it. Existing
+  CIA #1 ICR masked (`$7F`) and acknowledged, **I forced to 1** (whatever
+  the caller had: `mach_run` does not restore the caller's I flag), `$01`
+  = the caller's value. The RAM vectors stay (harmless with the KERNAL
+  in). **The KERNAL's jiffy IRQ is not restored**: CIA #1 timer A is left
+  a stopped (or running-out) one-shot with every ICR source masked, so a
+  caller that returns to the KERNAL (BASIC, keyboard scan, `$A0–$A2`) must
+  re-init CIA #1 itself (timer A continuous, ICR `$81`). Existing
   drivers (`runner.s`, `run_program.s`, HLE) keep `sei`, never call
   `mach_run`, and see no event.
+- **Vector invariant.** Whenever `$01` exposes the RAM vectors,
+  `$FFFA–$FFFF` holds a valid handler. RAM vectors are written only while
+  the ROM vectors are live, or rewritten with identical bytes. Sanctioned
+  writers: `mach_vec` (called by `mach_run` under `sei` before it changes
+  `$01`, i.e. with the caller's `$01`: ROM live, or identical bytes when a
+  caller already runs at `$35` after an earlier `mach_run`) and `c2v_fill`
+  (stores `mach_nmi`: identical bytes inside `mach_run`, ROM live outside).
+  A caller that exposes the RAM vectors itself (`$01` = `$35`/`$34` before
+  any `mach_vec`) must have written valid handlers first. Tests: run_mach
+  `win` (NMI swept over the prologue, poisoned vector), `c2vnmi` (NMI swept
+  over c2v's store and fill at `$35`).
 - **Race-free clear.** After `emu_run` returns, under `sei`: `st_halt &=
   $7F`; nonzero → a real halt → exit with `ev_pend` untouched (a halt
-  racing an event, `st_halt` = `$81`, returns `$01`). Zero → `ev_pend` is
-  copied to `mach_ev` and cleared, `cli`, service, re-enter `emu_run`.
+  racing an event, `st_halt` = `$81`, returns `$01`, `ev_pend` set). Zero
+  → `ev_pend` is copied to `mach_ev` and cleared, `cli`, service,
+  re-enter `emu_run`. The next `mach_run` takes a kept `ev_pend` on entry
+  the same way (under `sei`, before its catch-up pass), so it never goes
+  stale. Tested live (`race2`: IRQ/halt races at s = 0, ≥ 1 genuine race,
+  `ev_pend` set only when the boundary really passed, no stray IRQ).
 - **IRQ handler** (`mach_irq`, ~40 cycles with the 6502's IRQ entry):
   saves A, reads the CIA #1 ICR (acknowledge); if an enabled source fired,
   `ev_pend |= 1` and `st_halt |= $80`. Touches nothing else: never the
   REC, the REU or guest state. It is valid only with I/O mapped in, which
   holds inside `mach_run` (the c2v `$01` = `$34` fill runs under `sei`).
-- **NMI handler** (`mach_nmi`): valid under any `$01` (RAM below `$A000`);
-  saves A and `$01`, maps I/O in (`$01 & $F8 | $05`), reads the CIA #2 ICR
-  (never leaves /NMI latched), `inc mach_nmis`, restores, `rti`. RESTORE
-  and CIA #2 NMIs are dropped. `c2v_fill` still points `$FFFA` at its own
-  `c2v_nmi_rti` around its `$34` fill and leaves it there (also valid under
-  any `$01`); `mach_run` re-installs `mach_nmi` on entry. RESET (`$FFFC`)
-  is claimed but never written: a reset maps the KERNAL in.
+- **NMI handler** (`mach_nmi`), **the only one** (c2v's fill uses it too;
+  review W8-L F1): valid under any `$01` (RAM below `$A000`); saves A and
+  `$01`, maps I/O in (`$01 & $F8 | $05`), reads the CIA #2 ICR (never
+  leaves /NMI latched), `inc mach_nmis` (u8, wraps: every NMI taken through
+  the RAM vector), restores, `rti`. RESTORE and CIA #2 NMIs are dropped.
+  RESET (`$FFFC`) is claimed but never written: a reset maps the KERNAL in.
 - **Time base.** CIA #2 timer A (φ2, continuous, latch `$FFFF`) cascades
   into timer B (counts A's underflows, latch `$FFFF`): C = `~(TB:TA)`, a
   free-running 32-bit φ2 counter (wraps after 2^32 φ2, ~73 min). `mach_rdc`
@@ -368,10 +384,15 @@ Tests: `tests/run_mach.py` (+ `tests/mach/drv.s`), `host/tests/test_mach.py`.
   else may reprogram the CIA #2 timers after `mach_init` (the runtime does
   not; test tools such as `perf_cycles` and `run_c2v`'s NMI leg do, and
   need a fresh `mach_init`). The CIA #2
-  ICR data bits (TA/TB underflows) stay masked; `c2v_nmi_rti`/`mach_nmi`
-  reading the ICR does not disturb the counter.
-- **Guest time.** E = C >> s, s = `mach_s` (u8 setting, power-up 4,
-  clamped to 16, latched by `mach_init`). One guest frame = 14188 E ticks
+  ICR data bits (TA/TB underflows) stay masked; `mach_nmi` reading the ICR
+  does not disturb the counter.
+- **Guest time.** E = C >> s, s = `mach_s`: a u8 in the PRG's DATA segment
+  (label `mach_s` in `runner.lbl`, value 4 at load; not an rc claim, since
+  an rc address cannot carry a load-time default), clamped to 16 and
+  latched by `mach_init`. A driver overrides it by storing the new shift at
+  the `mach_s` address (`runner.lbl`) before `mach_init`, from 6502 code
+  (`lda #s / sta mach_s`) or from the host; a change after `mach_init`
+  takes effect at the next `mach_init`. One guest frame = 14188 E ticks
   = 14188 << s φ2. The runtime has no φ2 constant: frames/s = φ2 / 14188 /
   2^s. PAL (985248 Hz, VICE `-pal`): 69.44 / 2^s (4.340 at s = 4). NTSC
   (1022727 Hz, the harness's default VICE and **the bench U64E**, whose
@@ -381,9 +402,14 @@ Tests: `tests/run_mach.py` (+ `tests/mach/drv.s`), `host/tests/test_mach.py`.
   event: for every frame boundary C has passed, `mach_frames` += 1, INTREQR
   bit 5 set (`chip_shd+$1F`), next boundary += frame; then CIA #1 timer A,
   one-shot, := min(next − C, `$FFFF`) (a frame longer than 65535 φ2 takes
-  several wake-ups). Frames are counted, never skipped. Arithmetic is
-  modular: correct while `mach_run` is re-entered within 2^31 φ2 (~36 min)
-  of its last service pass. No interrupt delivery (S3.3), no CIA-A/B guest
+  several wake-ups). Frames are counted (one pass, ~85 cycles, per missed
+  frame) as long as the absence since the last service pass is below 2^31
+  φ2 (~36 min). **Aliasing:** after a service pass next − C is in (0,
+  frame], so next − C > frame (unsigned) can only mean C − next wrapped past
+  2^31 (a longer absence). The pass then posts one VERTB and restarts the
+  frame at C (next = C + frame): the lost frames are not counted, but time
+  never stalls, so there is no re-entry bound (the round-0 ~36 min bound is
+  gone; test `catch`: 2^31 + 1 frame of absence). No interrupt delivery (S3.3), no CIA-A/B guest
   timers (S3.4), no copper/refresh (S3.5). `HALT_STOP` returns to the
   caller like any halt (idle skip needs S3.3).
 - **Beam** (`mach_beam`, from `chip.s` VPOSR/VHPOSR reads once `mach_on`):
@@ -401,6 +427,7 @@ Tests: `tests/run_mach.py` (+ `tests/mach/drv.s`), `host/tests/test_mach.py`.
   `mach_frames` (u32 LE); none is written by the KERNAL IRQ. rc ram s3
   `$FFFA–$FFFF`: `mach_vnmi`, `mach_vrst`, `mach_virq`. CIA #1/#2 register
   equates in the rc sys block. Linker state in `runner.lbl`: `mach_s`
-  (DATA, 4 at load), `mach_on`, `mach_nmis`, `mach_bv`/`mach_bh`.
+  (DATA, 4 at load), `mach_on`, `mach_nmis`, `mach_bv`/`mach_bh`,
+  `mach_next`/`mach_now` and the entry `mach_rdc` (test visibility).
 - **Link order.** `mach.s` links after `chip.s` (Makefile), so no other
   module's code moves; `core.s` is unchanged.

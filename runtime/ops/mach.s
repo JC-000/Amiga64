@@ -37,7 +37,14 @@
 ;
 ; Host-visible state (runner.lbl / rc): mach_s (u8 setting, power-up 4),
 ; ev_pend and mach_frames (rc zp, s3), mach_on (0 until mach_init: beam
-; reads keep the S3.1 stub values), mach_nmis (NMIs taken, wraps).
+; reads keep the S3.1 stub values), mach_nmis (NMIs taken, wraps: the only
+; NMI handler, c2v's fill included), mach_next/mach_now (test visibility).
+;
+; Vector invariant (docs/CONTRACTS.md): whenever $01 exposes the RAM
+; vectors, $FFFA-$FFFF holds a valid handler.  They are written only while
+; the ROM vectors are live, or rewritten with identical bytes: mach_vec
+; runs before mach_run changes $01, and c2v_fill stores mach_nmi (the same
+; bytes inside mach_run, the ROM live outside it).
 ;
 ; Link layout: linked after chip.s (Makefile), so no other module's code
 ; moves.
@@ -46,7 +53,8 @@
 .include "../macros.inc"
 
 .export mach_init, mach_run, mach_vec, mach_beam, mach_irq, mach_nmi
-.export mach_s, mach_on, mach_nmis, mach_bv, mach_bh
+.export mach_rdc
+.export mach_s, mach_on, mach_nmis, mach_bv, mach_bh, mach_next, mach_now
 .import emu_run, chip_shd
 
 MACH_FRAME_E  = 14188   ; @value E ticks per guest frame (709379 Hz / 50)
@@ -176,7 +184,11 @@ shifted:
         lda mach_on
         bne on
         jsr mach_init
-on:     lda #$7F                ; CIA1: every source masked (the KERNAL's
+on:     lda ev_pend             ; entry: take a pending event (a halt that
+        sta mach_ev             ; raced one left it); the pass below does
+        lda #0                  ; its work
+        sta ev_pend
+        lda #$7F                ; CIA1: every source masked (the KERNAL's
         sta CIA1_ICR            ; jiffy IRQ too) ...
         lda CIA1_ICR            ; ... and acknowledged
         jsr mach_svc            ; catch up with guest time, arm timer A
@@ -207,9 +219,11 @@ exit:   lda #$7F                ; mask every CIA1 source
 ; ---------------------------------------------------------------------------
 ; mach_svc — count every frame boundary the counter has passed (VERTB),
 ; then arm the CIA1 one-shot for min(next - now, $FFFF) phi2.  Frames are
-; counted, not skipped: after a long absence it loops once per frame.
-; Modular 32-bit arithmetic: correct while mach_run is re-entered within
-; 2^31 phi2 (~36 min) of its last service pass.
+; counted, not skipped (one loop pass, ~85 cycles, per missed frame).
+; Aliasing: after service next - now is in (0, flen], so next - now > flen
+; (unsigned) means now - next wrapped past 2^31 (an absence of 2^31 phi2
+; or more, ~36 min): the lost frames cannot be counted, so the pass posts
+; one VERTB and restarts the frame at now (next = now + flen).
 ; ---------------------------------------------------------------------------
 .proc mach_svc
         jsr mach_rdc
@@ -231,16 +245,7 @@ chk:    sec                     ; t = next - now
         ora mach_t+1
         ora mach_t
         bne arm
-due:    inc mach_frames         ; VERTB
-        bne :+
-        inc mach_frames+1
-        bne :+
-        inc mach_frames+2
-        bne :+
-        inc mach_frames+3
-:       lda chip_shd+MACH_INTREQR+1
-        ora #MACH_VERTB
-        sta chip_shd+MACH_INTREQR+1
+due:    jsr post
         clc
         lda mach_next
         adc mach_flen
@@ -255,7 +260,36 @@ due:    inc mach_frames         ; VERTB
         adc mach_flen+3
         sta mach_next+3
         jmp chk
-arm:    lda mach_t+3
+arm:    lda mach_flen           ; t > flen: aliased (see above)
+        cmp mach_t
+        lda mach_flen+1
+        sbc mach_t+1
+        lda mach_flen+2
+        sbc mach_t+2
+        lda mach_flen+3
+        sbc mach_t+3
+        bcs inrange
+        jsr post                ; resync: one VERTB, next = now + flen
+        clc
+        lda mach_now
+        adc mach_flen
+        sta mach_next
+        lda mach_now+1
+        adc mach_flen+1
+        sta mach_next+1
+        lda mach_now+2
+        adc mach_flen+2
+        sta mach_next+2
+        lda mach_now+3
+        adc mach_flen+3
+        sta mach_next+3
+        ldx #3
+cpfl:   lda mach_flen,x
+        sta mach_t,x
+        dex
+        bpl cpfl
+inrange:
+        lda mach_t+3
         ora mach_t+2
         beq short
         lda #$FF                ; farther than $FFFF: wake up on the way
@@ -272,6 +306,18 @@ short:  lda CIA1_CRA
         and #$C0
         ora #$19                ; one-shot, force load, start (phi2)
         sta CIA1_CRA
+        rts
+
+post:   inc mach_frames         ; one VERTB
+        bne :+
+        inc mach_frames+1
+        bne :+
+        inc mach_frames+2
+        bne :+
+        inc mach_frames+3
+:       lda chip_shd+MACH_INTREQR+1
+        ora #MACH_VERTB
+        sta chip_shd+MACH_INTREQR+1
         rts
 .endproc
 
@@ -427,11 +473,12 @@ done:   pla
 .endproc
 
 ; ---------------------------------------------------------------------------
-; mach_nmi — the RAM NMI vector (docs/C2V.md "Handover to S3.2"): valid
-; under any $01 (it runs from RAM below $A000), saves A and $01, maps I/O
-; in, acknowledges CIA2 so /NMI is never left latched, counts, rti.  A
-; RESTORE press or a CIA2 NMI is dropped, not delivered: no S3.2 source
-; uses NMI.
+; mach_nmi — the one RAM NMI handler (docs/C2V.md "Handover to S3.2"; c2v's
+; $01=$34 fill uses it too): valid under any $01 (it runs from RAM below
+; $A000), saves A and $01, maps I/O in, acknowledges CIA2 so /NMI is never
+; left latched, counts, rti.  A RESTORE press or a CIA2 NMI is dropped, not
+; delivered: no S3.2 source uses NMI.  MACH_MUT_NMIACK (tests/run_c2v.py
+; teeth only) drops the acknowledge.
 ; ---------------------------------------------------------------------------
 .proc mach_nmi
         pha
@@ -440,7 +487,9 @@ done:   pla
         and #$F8                ; NMI: I/O in
         ora #$05
         sta CPU_PORT
+.ifndef MACH_MUT_NMIACK
         lda CIA2_ICR            ; acknowledge: releases /NMI
+.endif
         inc mach_nmis
         pla
         sta CPU_PORT

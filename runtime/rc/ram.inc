@@ -168,7 +168,7 @@ c2v_bitmap = $E000      ; W7-V c2v: VIC bank 3 bitmap
 ; W8-L mach: the 6502 hardware vectors in the RAM under the KERNAL (mach_run runs with $01 = $35)
 ; @region s3 $FFFA-$FFFF 6502 NMI/RESET/IRQ vectors in RAM under KERNAL
 .ifndef mach_vnmi
-mach_vnmi = $FFFA       ; W8-L mach: NMI -> mach_nmi (c2v_fill points it at c2v_nmi_rti around its $01=$34 fill)
+mach_vnmi = $FFFA       ; W8-L mach: NMI -> mach_nmi.  Sanctioned writers: mach_vec, and c2v_fill (stores mach_nmi: identical bytes inside mach_run, ROM vectors live outside)
 .endif
 .ifndef mach_vrst
 mach_vrst = $FFFC       ; W8-L mach: RESET, never written (a reset maps the KERNAL in)

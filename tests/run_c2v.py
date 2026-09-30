@@ -11,7 +11,7 @@ from the PRG's labels.  Per case and kernel:
   * the whole RAM at $E000-$FFFF and the whole RAM under I/O $D000-$DFFF
     are filled with a guard pattern first; afterwards they must equal the
     pattern with exactly the reference bitmap, screen matrix and (for a
-    matrix under I/O) the RAM NMI vector -> c2v_nmi_rti overlaid: nothing
+    matrix under I/O) the RAM NMI vector -> mach_nmi overlaid: nothing
     else in either block may change (REU DMA never targets $D000-$DFFF);
   * the low nibbles of colour RAM and c2v_a_bgc equal the reference;
   * guards: $B800-$B8FF (free RAM just below the work RAM) and the VIC/CIA2
@@ -24,10 +24,11 @@ from the PRG's labels.  Per case and kernel:
   * NMI leg (matrix under I/O only): a CIA2 timer-A NMI is armed to fire
     inside the $01=$34 screen fill, with the RAM NMI vector first pointed
     at a `jmp *` trap.  The call must return with correct output, the NMI
-    must have been taken by c2v_nmi_rti (its counter c2v_v_nmis +1) and
-    acknowledged (ICR $00), and a LATER CIA2 timer-B NMI must still be
-    delivered to the KERNAL (the stub released /NMI, review F2).  A control
-    NMI before the fill must be taken by the KERNAL, not the stub.
+    must have been taken by mach_nmi, the one NMI handler (W8-L review F1:
+    its counter mach_nmis +1) and acknowledged (ICR $00), and a LATER CIA2
+    timer-B NMI must still be delivered to the KERNAL (the handler released
+    /NMI, review F2).  A control NMI before the fill must be taken by the
+    KERNAL, not the handler.
 
 Legs:
   (default)          correctness + NMI, the given PRG must pass
@@ -81,7 +82,7 @@ LUT_BANK = 0x14F800
 
 VARIANTS = {"stub": ["C2V_STUB=1"], "bitorder": ["C2V_MUT_BITORDER=1"],
             "lut": ["C2V_MUT_LUT=1"], "row": ["C2V_MUT_ROW=1"],
-            "nmi": ["C2V_MUT_NMI=1"], "nmiack": ["C2V_MUT_NMIACK=1"]}
+            "nmi": ["C2V_MUT_NMI=1"], "nmiack": ["MACH_MUT_NMIACK=1"]}
 OTHER_VARIANTS = {"layout-b": ["C2V_ROWS=22", "c2v_screen=0xFC00"],
                   "nofetch": ["C2V_PERF_NOFETCH=1"]}
 GUARD_REGS = (0xD011, 0xD016, 0xD018, 0xD020, 0xD021, 0xDD00)
@@ -182,7 +183,8 @@ class Session:
         self.rows = lookup_label(labels, "C2V_ROWS")
         self.bitmap = lookup_label(labels, "c2v_bitmap")
         self.screen = lookup_label(labels, "c2v_screen")
-        self.nmi_rti = lookup_label(labels, "c2v_nmi_rti")
+        self.nmi_h = lookup_label(labels, "mach_nmi")      # the NMI handler
+        self.nmis_at = lookup_label(labels, "mach_nmis")   # its counter
         self.under_io = 0xD000 <= self.screen <= 0xDFFF
 
     def call(self, name_or_addr) -> None:
@@ -250,7 +252,7 @@ def expected_blocks(s: Session, g: dict, ref: dict) -> tuple[bytes, bytes]:
             if lo <= base < lo + len(blk):
                 blk[base - lo:base - lo + len(data)] = data
     if s.under_io:
-        top[NMIVEC - 0xE000:NMIVEC - 0xE000 + 2] = s.nmi_rti.to_bytes(2, "little")
+        top[NMIVEC - 0xE000:NMIVEC - 0xE000 + 2] = s.nmi_h.to_bytes(2, "little")
     return bytes(top), bytes(io)
 
 
@@ -367,7 +369,6 @@ ARM_B = bytes([0xA9, 0x00, 0x8D, 0x0F, 0xDD, 0xA9, 200, 0x8D, 0x06, 0xDD,
                0xA9, 0, 0x8D, 0x07, 0xDD, 0xA9, 0x82, 0x8D, 0x0D, 0xDD,
                0xA9, 0x19, 0x8D, 0x0F, 0xDD,
                0xA2, 0x00, 0xCA, 0xD0, 0xFD, 0x60])
-NMIS_OFF = 72                       # c2v_v_nmis in the args block
 
 
 def run_nmi(s: Session, case: dict, luts: dict) -> list[str]:
@@ -377,7 +378,7 @@ def run_nmi(s: Session, case: dict, luts: dict) -> list[str]:
     if not s.under_io:
         print("  nmi leg: skipped (screen matrix not under I/O: no $01=$34 fill)")
         return fails
-    nmis_at = s.lab["c2v_args"] + NMIS_OFF
+    nmis_at = s.nmis_at
     for kind in ("mc2", "hires"):
         for count in (NMI_CONTROL,) + NMI_COUNTS:
             ref = reference(s, kind, case, luts)
@@ -412,13 +413,13 @@ def run_nmi(s: Session, case: dict, luts: dict) -> list[str]:
             s.call(TRAMP)
             want = 0 if count == NMI_CONTROL else 1
             if taken != want:
-                f.append(f"c2v_nmi_rti took {taken} NMI(s), want {want}"
+                f.append(f"mach_nmi took {taken} NMI(s), want {want}"
                          + (" (control: must go to the KERNAL)" if not want else ""))
             if icr & 0x81:
                 f.append(f"ICR ${icr:02X} after the call: NMI not acknowledged")
             what = ("control: taken and acked by the KERNAL before the fill"
                     if count == NMI_CONTROL else
-                    "taken by c2v_nmi_rti, ICR acked; later TB NMI delivered")
+                    "taken by mach_nmi, ICR acked; later TB NMI delivered")
             print(f"  {tag:30s} {'OK' if not f else 'FAIL'}  ({what})")
             for x in f:
                 print(f"      {x}")

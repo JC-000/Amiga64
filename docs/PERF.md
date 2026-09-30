@@ -416,7 +416,8 @@ absolute operands (BSS +$400, page-aligned; the chip entries +10; RODATA
 `tests.perf_cycles --base <wave8/integration> --max-delta 0` passes. An event
 costs [EST, static] one IRQ (~40 cycles: entry, `lda CIA1_ICR`, two `ora`,
 `rti`), the return from `emu_run` at the next instruction boundary, and a
-service pass (counter read + compare + re-arm, ~200 cycles). With frames longer than
+service pass (counter read + compare + aliasing check + re-arm, ~220
+cycles; ~85 more per missed frame on a catch-up). With frames longer than
 65535 φ2 (s ≥ 3) the one-shot wakes the loop every 65536 φ2 on the way:
 < 0.5% of the time at 1 MHz. Guest frames/s = φ2 / 14188 / 2^s: 69.4 / 2^s
 on PAL, **72.1 / 2^s on the bench U64E** (NTSC; its CIAs count φ2 unscaled

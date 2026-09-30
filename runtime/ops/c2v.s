@@ -32,10 +32,12 @@
 ; per frame): CPU stores with $01 = %xx100 ($34, all RAM) under sei, the
 ; caller's $01 restored right after.  NMI is not maskable and with $01=$34
 ; vectors through RAM $FFFA, so mach_vnmi (S3.2's RAM NMI vector, rc s3
-; $FFFA-$FFFF) is pointed at c2v_nmi_rti first, by a store under ROM that
-; lands in RAM whatever $01 is, before $01 ever changes.  It stays there:
-; like S3.2's own mach_nmi it is valid under any $01 (docs/C2V.md
-; "Handover to S3.2", option 1), and mach_run re-installs mach_nmi on entry.
+; $FFFA-$FFFF) is pointed at mach_nmi, the one NMI handler (valid under any
+; $01), before $01 ever changes.  The store keeps the vector invariant
+; (docs/CONTRACTS.md "Machine loop"): outside mach_run the caller's $01 has
+; the ROM vectors live; inside it ($01 = $35) the RAM vector already holds
+; mach_nmi and the store rewrites identical bytes, so an NMI between the
+; two byte stores can never take a torn vector.
 ;
 ; Entry points (JSR; clobber A/X/Y; call with I/O mapped in and no IRQ that
 ; touches the REC).  The work RAM at $B900 lies under BASIC ROM, so every
@@ -62,16 +64,16 @@
 ; Test-only variants (tests/run_c2v.py): C2V_STUB (every entry is rts, the
 ; red leg), C2V_MUT_BITORDER (planes swapped / pair tables swapped),
 ; C2V_MUT_LUT (LUT index + 1), C2V_MUT_ROW (source row advance one short),
-; C2V_MUT_NMI (the RAM NMI vector is not set before the $01=$34 fill),
-; C2V_MUT_NMIACK (the stub does not acknowledge CIA2).
+; C2V_MUT_NMI (the RAM NMI vector is not set before the $01=$34 fill).
+; (tests/run_c2v.py's nmiack variant is MACH_MUT_NMIACK in runtime/ops/mach.s.)
 ; ===========================================================================
 
 .include "../macros.inc"
 
 .export c2v_init, c2v_pal_mc2, c2v_pal_hires, c2v_mc2, c2v_hires
 .export c2v_args, c2v_bitmap, c2v_screen   ; labels for the host (runner.lbl)
-.export c2v_nmi_rti, C2V_ROWS
-.import mem_rec_dirty
+.export C2V_ROWS
+.import mem_rec_dirty, mach_nmi
 
 .ifndef C2V_ROWS
 C2V_ROWS   = 25                 ; char rows converted (20-25)
@@ -95,7 +97,6 @@ c2v_v_line = c2v_args + 68      ; u8 output line 0..C2V_LINES-1
 c2v_v_port = c2v_args + 69      ; u8 $01 saved around the under-I/O fill
 c2v_v_adv  = c2v_args + 70      ; u8 source row advance
 c2v_v_tmp  = c2v_args + 71      ; u8 scratch / LUT byte target
-c2v_v_nmis = c2v_args + 72      ; u8 NMIs taken by c2v_nmi_rti (wraps)
 
 P0 = c2v_stage
 P1 = c2v_stage + $100
@@ -135,8 +136,6 @@ c2v_pal_hires:
 c2v_mc2:
 c2v_hires:
         rts
-c2v_nmi_rti:
-        rti
 .else
 
 ; ---------------------------------------------------------------------------
@@ -246,10 +245,10 @@ c2v_fill:
         sta c2v_v_band
 .if C2V_SCR_UNDER_IO
 .ifndef C2V_MUT_NMI
-        lda #<c2v_nmi_rti       ; NMI guard first: a store under ROM lands
-        sta mach_vnmi           ; in RAM, so the RAM vector is valid before
-        lda #>c2v_nmi_rti       ; $01 ever exposes it
-        sta mach_vnmi+1
+        lda #<mach_nmi          ; NMI guard first: a store under ROM lands
+        sta mach_vnmi           ; in RAM (identical bytes inside mach_run),
+        lda #>mach_nmi          ; so the RAM vector is valid before $01 ever
+        sta mach_vnmi+1         ; exposes it
 .endif
         php
         sei
@@ -274,26 +273,6 @@ c2v_leave:
         pla
         sta CPU_PORT
         rts
-
-; c2v_nmi_rti — the NMI handler while $01=$34 (mach_vnmi points here).  The
-; NMI is dropped but its source acknowledged, not delayed: with I/O mapped
-; back in for three instructions, a read of the CIA2 ICR releases /NMI, so
-; the next NMI edge (CIA2 or RESTORE) is delivered normally.  Counts the
-; NMIs taken in c2v_v_nmis (docs/C2V.md "Handover to S3.2").
-c2v_nmi_rti:
-        pha
-        inc c2v_v_nmis
-.ifndef C2V_MUT_NMIACK
-        lda CPU_PORT
-        pha
-        lda c2v_v_port          ; the pre-fill $01: I/O in
-        sta CPU_PORT
-        lda CIA2_ICR            ; acknowledge CIA2
-        pla
-        sta CPU_PORT
-.endif
-        pla
-        rti
 
 ; c2v_lookn — X = highest colour index: c2v_v_col[0..X] = LUT[pal[i] & $FFF]
 ; (one byte DMA each).

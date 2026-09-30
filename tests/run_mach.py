@@ -23,13 +23,25 @@ Legs:
   fps_ntsc  the fps leg again in an NTSC VICE (phi2 1022727, the bench
           U64E's standard): its own session, run after the PAL legs
   race    st_halt = $81 on entry (a halt racing an event): the halt comes
-          back ($01, reason kept) and ev_pend stays set
+          back ($01, reason kept), the guest does not run
   exit    after mach_run: $01 restored ($37 and $36 callers), I = 1, and a
           following plain emu_run with IRQs enabled sees no event
   nmi     CIA2 timer-A NMIs during mach_run are acknowledged (all counted)
   nmi34   the same with $01 = $34 (all RAM): the handler maps I/O in
   stop    STOP #$2700 (exception mode) after a VERTB: HALT_STOP comes back
           unchanged (st_halt $01, reason 4)
+  c2vnmi  c2v_pal_mc2 at $01 = $35 (as inside mach_run), an NMI swept over
+          its vector store and fill: every NMI counted by mach_nmi, none
+          through a torn vector (review F1)
+  win     an NMI swept over mach_run's prologue, RAM vector poisoned,
+          caller $37: the poison is never taken (review F3)
+  race2   live IRQ/halt races at s = 0, $37 and $35 callers: >= 1 genuine
+          race with ev_pend kept, no false pending, st_halt $01 / $01 / I
+          right every time, no stray IRQ after the exit (review F4)
+  rdc     mach_rdc over a forced TALO $00 -> $FF wrap and a forced TA
+          underflow, swept through the read (review F6)
+  catch   re-entry after 7 frames (counted) and 2^31 + 1 frame (aliased:
+          VERTB resumes) of absence (review F5)
 
     python3 -m tests.run_mach --prg build/X/runner.prg [--legs a,b]
     python3 -m tests.run_mach --prg ... --mutants [--only m1,m2]
@@ -52,9 +64,9 @@ from host import chipset_ref, fixturegen, hunk, image
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-DRV_ORG = 0xC400          # buf_case tail: written after the guest is staged
+DRV_ORG = 0xC200          # buf_case tail: written after the guest is staged
 P, R = 0xCA00, 0xCB00     # drv.s parameter / result blocks (buf_result)
-DMA_STUB, DMA_BUF = 0xC300, 0xC000
+DMA_STUB, DMA_BUF = 0xC100, 0xC000
 F_INIT, F_FOLLOW, F_PRESET, F_NMI, F_TOD = 0x01, 0x02, 0x04, 0x08, 0x10
 F_SUPER = 0x20
 HALT_STOP = 0x04
@@ -63,7 +75,11 @@ SAMPLES = BASE + 0x10000  # beam samples (guest RAM)
 HALT = 0xAFFF
 VPOSR, VHPOSR, INTREQR, INTREQ = 0xDFF004, 0xDFF006, 0xDFF01E, 0xDFF09C
 DRV_SYMS = ("emu_reset", "emu_run", "mem_read16", "mem_rec_dirty",
-            "mach_init", "mach_run", "mach_vec", "mach_s", "mach_nmis")
+            "mach_init", "mach_run", "mach_vec", "mach_s", "mach_nmis",
+            "mach_nmi", "mach_beam", "c2v_pal_mc2")
+# Symbols a build may lack (29b9ce9 did not export them): BSS offsets from
+# mach_on as a fallback, or 0 (the legs that need them check first).
+DRV_OPT = {"mach_next": 9, "mach_now": 13, "mach_rdc": None}
 VERBOSE = False
 
 
@@ -238,13 +254,19 @@ def build_driver(labels_path: str, out_dir: str) -> bytes:
     defs = []
     for n in DRV_SYMS:
         defs += ["-D", f"{n}=${lookup_label(labels, n):04X}"]
+    for n, off in DRV_OPT.items():
+        try:
+            a = lookup_label(labels, n)
+        except KeyError:
+            a = 0 if off is None else lookup_label(labels, "mach_on") + off
+        defs += ["-D", f"{n}=${a:04X}"]
     os.makedirs(out_dir, exist_ok=True)
     obj, out = os.path.join(out_dir, "drv.o"), os.path.join(out_dir, "drv.bin")
     cfg = os.path.join(out_dir, "drv.cfg")
     with open(cfg, "w") as f:
         f.write("MEMORY { M: file = %%O, start = $%04X, size = $%04X; }\n"
                 "SEGMENTS { CODE: load = M, type = rw; }\n"
-                % (DRV_ORG, 0x400))
+                % (DRV_ORG, 0xC800 - DRV_ORG))
     for cmd in (["ca65", "-g", *defs, "-o", obj, os.path.join(ROOT, "tests", "mach", "drv.s")],
                 ["ld65", "-C", cfg, "-o", out, "-Ln", os.path.join(out_dir, "drv.lbl"), obj]):
         r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
@@ -283,6 +305,26 @@ class Rig:
     def call(self, addr: int, timeout: float = 300.0) -> None:
         from tests.harness_util import call_runner
         call_runner(self.tg, addr, timeout)
+
+    def opt(self, name: str) -> int:
+        """A DRV_OPT symbol as the driver was built with it (0: missing)."""
+        try:
+            return self.lab(name)
+        except KeyError:
+            off = DRV_OPT[name]
+            return 0 if off is None else self.lab("mach_on") + off
+
+    def dcall(self, name: str, timeout: float = 300.0) -> bytes:
+        self.w(R, b"\0")
+        self.call(self.dl[name], timeout)
+        r = self.r(R, 32)
+        if r[0] != 0xFF:
+            raise RuntimeError(f"{name} did not complete")
+        return r
+
+    def init(self, s: int = 4) -> None:
+        self.w(P + 8, bytes([s]))
+        self.dcall("drv_init")
 
     def w(self, addr: int, data: bytes) -> None:
         from c64_test_harness import write_bytes
@@ -494,8 +536,9 @@ def leg_race(rig: Rig) -> list[str]:
         f.append(f"race: st_reason {res['reason']} changed")
     if res["d"][0] != 0:
         f.append(f"race: the guest ran on past the halt (d0=${res['d'][0]:X})")
-    if not res["ev"] & 1:
-        f.append(f"race: ev_pend ${res['ev']:02X}: the pending event was lost")
+    # ev_pend preset before entry is taken by this mach_run's entry pass
+    # (review fix round 1); ev_pend kept at the EXIT of a raced run is the
+    # live race2 leg's check
     return f
 
 
@@ -585,9 +628,151 @@ def leg_stop(rig: Rig) -> list[str]:
     return f
 
 
+def prog_halt() -> list[int]:
+    return [HALT]
+
+
+def leg_c2vnmi(rig: Rig) -> list[str]:
+    """F1: c2v's vector store inside mach_run ($01 = $35, vector already
+    mach_nmi) under an NMI swept over it: every NMI is mach_nmi's, none
+    goes through a torn vector."""
+    if not rig.mach:
+        return ["c2vnmi: base build (no mach_nmi)"]
+    f: list[str] = []
+    rig.stage(prog_stub())
+    rig.w(rig.lab("c2v_args"), bytes(80))
+    rig.call(rig.lab("c2v_init"), 60)
+    patch = None
+    try:                                    # the old code's torn vector
+        c2v = rig.lab("c2v_nmi_rti")
+        torn = (rig.lab("mach_nmi") & 0xFF00) | (c2v & 0xFF)
+        tgt = rig.dl["drv_torn"]
+        patch = (torn, rig.r(torn, 3))
+        rig.w(torn, bytes([0x4C, tgt & 0xFF, tgt >> 8]))
+    except KeyError:
+        pass
+    bad = torn_n = 0
+    try:
+        for lo in range(0, 1024, 256):
+            rig.w(P + 8, bytes([0x35]))
+            rig.w(P + 11, struct.pack("<HB", lo, 0))     # 256 calls
+            r = rig.dcall("drv_c2vnmi", 600)
+            bad += r[1] | r[2] << 8
+            torn_n += r[3] | r[4] << 8
+    finally:
+        if patch:
+            rig.w(*patch)
+    print(f"    c2vnmi: 1024 c2v_pal_mc2 calls at $01=$35, NMI at N=0..1023: "
+          f"{bad} not counted by mach_nmi, {torn_n} torn"
+          + ("" if patch else " (no second handler to tear with)"))
+    if bad or torn_n:
+        f.append(f"c2vnmi: {bad} NMIs missed by mach_nmi, {torn_n} through a "
+                 "torn vector")
+    rig.init()
+    return f
+
+
+def leg_win(rig: Rig) -> list[str]:
+    """F3: an NMI swept over mach_run's prologue (caller $37, the RAM
+    vector poisoned) never takes the poison."""
+    if not rig.mach:
+        return ["win: base build (no mach_run)"]
+    (pc,) = rig.stage(prog_halt())
+    rig.init()
+    rig.w(P, struct.pack("<IIBHHB", pc, BASE + 0x8000, 0x37, 0, 0, 120))
+    r = rig.dcall("drv_win", 120)
+    poison = r[1] | r[2] << 8
+    print(f"    win: 120 mach_run entries, NMI at N=0..119: poison={poison} "
+          f"returned={r[3]}")
+    rig.init()
+    if poison or r[3] != 120:
+        return [f"win: the poisoned RAM NMI vector was taken {poison}x "
+                f"({r[3]}/120 returned)"]
+    return []
+
+
+def busy_d3() -> list[int]:
+    g = G()
+    g.label("lp")
+    g(0x5281)                                   # addq.l #1,d1
+    g.dbra(3, "lp")
+    g(HALT)
+    return g.words()
+
+
+def leg_race2(rig: Rig) -> list[str]:
+    """F4: live IRQ races at s = 0: >= 1 halt raced an event with ev_pend
+    kept, ev_pend never set without a passed boundary, every return
+    st_halt $01 / $01 restored / I = 1, no stray IRQ afterwards."""
+    if not rig.mach:
+        return ["race2: base build (no mach_run)"]
+    f: list[str] = []
+    (pc,) = rig.stage(busy_d3())
+    for port, iters in ((0x37, 3000), (0x35, 1500)):
+        rig.init(0)
+        rig.w(P, struct.pack("<IIBHHB", pc, BASE + 0x8000, port, 0, iters, 0x3F))
+        r = rig.dcall("drv_race", 1800)
+        bad, ev, false, stray = struct.unpack_from("<4H", r, 1)
+        msg = (f"race2 ${port:02X} x{iters}: bad={bad} races={ev} "
+               f"false-pending={false} stray={stray} first-bad={r[9:13].hex()}")
+        print("    " + msg)
+        if bad or false or stray or not ev:
+            f.append(msg)
+    rig.init()
+    return f
+
+
+def leg_rdc(rig: Rig) -> list[str]:
+    """F6: mach_rdc across a forced TA low-byte wrap."""
+    if not rig.mach or not rig.opt("mach_rdc"):
+        return ["rdc: no mach_rdc export"]
+    f: list[str] = []
+    rig.stage(prog_halt())                      # (loads the driver)
+    for mode, what, lo, n in ((0, "a TALO $00->$FF wrap", 0, 120),
+                              (1, "a TA underflow (TB moves)", 16, 200)):
+        rig.w(P + 13, bytes([n, mode, lo]))
+        r = rig.dcall("drv_rdc")
+        print(f"    rdc: {n - lo} reads over {what}: {r[1]} torn"
+              + (f" (first at d={r[2]})" if r[1] else ""))
+        if r[1]:
+            c = struct.unpack_from("<I", r, 4)[0]
+            f.append(f"rdc: {r[1]} torn counter reads over {what} "
+                     f"(first d={r[2]}: C=${c:08X}, ~C=${c ^ 0xFFFFFFFF:08X})")
+    rig.init()
+    return f
+
+
+def leg_catch(rig: Rig) -> list[str]:
+    """F5: re-entry after an absence of 7 frames (counted) and of 2^31 + 1
+    frame of phi2 (the next boundary aliases ahead: VERTB must resume)."""
+    if not rig.mach:
+        return ["catch: base build (no mach_run)"]
+    f: list[str] = []
+    (pc,) = rig.stage(prog_count(3))
+    flen = chipset_ref.MACH_FRAME_E
+    for absent, extra in ((7 * flen + 100, 7), ((1 << 31) + flen, 0)):
+        rig.init(0)
+        rig.dcall("drv_now")
+        now = struct.unpack("<I", rig.r(rig.opt("mach_now"), 4))[0]
+        rig.w(rig.opt("mach_next"), struct.pack("<I", (now - absent) & 0xFFFFFFFF))
+        rig.w(0x96, bytes(4))                   # mach_frames
+        res = rig.run(pc, s=0, flags=0)
+        msg = (f"catch absence {absent} phi2 ({absent / flen:.0f} frames): "
+               f"halt=${res['halt']:02X} guest VERTBs={res['d'][0] & 0xFFFF}/3 "
+               f"mach_frames={res['frames']}")
+        print("    " + msg)
+        if (res["halt"] != 1 or res["d"][0] & 0xFFFF != 3
+                or res["frames"] < 3 + extra):
+            f.append(msg)
+    rig.init()
+    return f
+
+
 LEGS = {"stub": leg_stub, "poll": leg_poll, "vertb": leg_vertb,
         "beam": leg_beam, "fps": leg_fps, "race": leg_race, "exit": leg_exit,
         "nmi": leg_nmi, "nmi34": leg_nmi34, "stop": leg_stop,
+        "c2vnmi": leg_c2vnmi, "win": leg_win, "race2": leg_race2,
+        "rdc": leg_rdc, "catch": leg_catch,
         "fps_ntsc": leg_fps}
 NTSC_LEGS = {"fps_ntsc"}              # run in their own NTSC session
 
@@ -683,6 +868,48 @@ MUTANTS = {
                   [("        ldx mach_sl             ; beam: t >> s\n",
                     "        ldx mach_sl             ; beam: t >> s\n"
                     "        dex                     ; MUTANT\n")]),
+    # --- review w8-loop-review mutants (fix round 1) ---
+    # $01 = $35 before the vectors are written (the round-0 order)
+    "oldorder": ("runtime/ops/mach.s",
+                 [("        sei\n        jsr mach_vec            ; vectors first: $35 "
+                   "exposes them to an NMI\n        lda CPU_PORT\n        sta mach_port\n"
+                   "        and #$F8\n        ora #$05                ; $35: I/O in, BASIC "
+                   "and KERNAL out\n        sta CPU_PORT\n",
+                   "        sei\n        lda CPU_PORT\n        sta mach_port\n"
+                   "        and #$F8\n        ora #$05\n        sta CPU_PORT\n"
+                   "        jsr mach_vec\n")]),
+    # mach_irq never sets ev_pend
+    "noevpend": ("runtime/ops/mach.s",
+                 [("        lda ev_pend\n        ora #MACH_EV_TIMER\n        sta ev_pend\n",
+                   "")]),
+    # the event path takes ev_pend but never clears it
+    "keepev": ("runtime/ops/mach.s",
+               [("        lda ev_pend             ; only an event: take the flags "
+                 "(still sei)\n        sta mach_ev\n        lda #0\n        sta ev_pend\n",
+                 "        lda ev_pend             ; only an event: take the flags "
+                 "(still sei)\n        sta mach_ev\n")]),
+    # mach_run's entry leaves a raced ev_pend in place (the 29b9ce9 code)
+    "noentryev": ("runtime/ops/mach.s",
+                  [("        sta mach_ev             ; raced one left it); the pass "
+                    "below does\n        lda #0                  ; its work\n"
+                    "        sta ev_pend\n",
+                    "        sta mach_ev\n")]),
+    # the long read does not latch the beam (VPOSR/VHPOSR from two times)
+    "nolatch": ("runtime/ops/chip.s",
+                [("        lda #$80                ; W8-L: one beam for both words\n"
+                  "        sta chip_bk\n", "")]),
+    # mach_rdc does not re-check TB (a TA underflow tears the read)
+    "rdcnotb": ("runtime/ops/mach.s",
+                [("        lda CIA2_TBLO\n        cmp mach_c+2\n"
+                  "        bne rd                  ; TA underflowed: TB moved\n", "")]),
+    # mach_rdc does not re-check TAHI (a TALO wrap tears the read)
+    "rdcnota": ("runtime/ops/mach.s",
+                [("        lda CIA2_TAHI\n        cmp mach_c+1\n"
+                  "        bne rd                  ; TA's low byte wrapped in between\n",
+                  "")]),
+    # mach_svc without the aliasing resync (the 29b9ce9 2^31 stall)
+    "noalias": ("runtime/ops/mach.s",
+                [("        bcs inrange\n", "        jmp inrange\n")]),
     # no sei after emu_run: the exit leaves I = 0 (and the RMW races)
     "nosei": ("runtime/ops/mach.s",
               [("        sei                     ; the RMW below must not race"
@@ -721,8 +948,12 @@ def build_mutant(name: str, out_dir: str) -> str:
 
 
 MUTANT_LEGS = {"noirq": ["vertb"], "eq80": ["race"], "irqexit": ["exit"],
-               "port": ["exit"], "nmiack": ["nmi"], "nmimap": ["nmi34"],
-               "shift": ["fps", "fps_ntsc"], "beamshift": ["beam"], "nosei": ["exit"]}
+               "port": ["exit"], "nmiack": ["nmi", "c2vnmi"],
+               "nmimap": ["nmi34"], "shift": ["fps", "fps_ntsc"],
+               "beamshift": ["beam"], "nosei": ["exit"],
+               "oldorder": ["win"], "noevpend": ["race2"], "keepev": ["race2"],
+               "noentryev": ["race2"], "nolatch": ["beam"], "rdcnotb": ["rdc"],
+               "rdcnota": ["rdc"], "noalias": ["catch"]}
 
 
 def teeth(prg: str, only: list[str] | None) -> int:
