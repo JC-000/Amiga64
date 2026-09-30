@@ -25,7 +25,7 @@ with `wait_for_memory` (never a bare `read_bytes` loop; see #514).
 |---|---|---|
 | **W7-M** | `w7-models` | new `host/chipset_ref.py`, new `host/tests/test_chipset_ref*.py`, new `tests/chip_oracle.py`, new `tests/chip_oracle/` (our own m68k test programs + FS-UAE configs), `tools/s3probe/aros_boot_model.py` (only to import the promoted classes; see C1) |
 | **W7-T** | `w7-trap` | `runtime/core.s` (the MIO hook, cold path, STRADDLE bank+1 route, `mio_split`), new `runtime/ops/chip.s`, **new** claims in `runtime/rc/zp.inc` and `runtime/rc/ram.inc` (label them `; W7-T chip`), the registration of `chip.s` in `host/rescheck.py` and `Makefile` (those lines only), new `tests/run_chip.py`, new `host/tests/test_chip*.py`, `docs/CONTRACTS.md` (new section "I/O trap ($BF/$DF)"), `docs/PERF.md` (new section) |
-| **W7-V** | `w7-c2v` | new `runtime/ops/c2v.s`, **new** claims in `runtime/rc/zp.inc`/`ram.inc` (label them `; W7-V c2v`), the registration of `c2v.s` in `host/rescheck.py` and `Makefile` (those lines only), new `host/c2v_ref.py`, new `host/tests/test_c2v*.py`, new `tests/run_c2v.py`, new `docs/C2V.md` |
+| **W7-V** | `w7-c2v` | new `runtime/ops/c2v.s`, **new** claims in `runtime/rc/zp.inc`/`ram.inc` (label them `; W7-V c2v`), the registration of `c2v.s` in `host/rescheck.py` and `Makefile` (those lines only), new `host/c2v_ref.py`, new `host/tests/test_c2v*.py`, new `tests/run_c2v.py`, new `docs/C2V.md`; *amended 2026-09-29 (user chose placement A)*: the minimal "RAM under I/O" change in `host/rescheck.py` + its tests, and the one `sys $D000-$DEFF` claim line if the design needs it |
 
 Frozen (supervisor only): `runtime/ops/hle*.s`, `runtime/ops/dosio_*.s`,
 `runtime/ops/g*.s`, `host/image.py`, `host/gen_dispatch.py`,
