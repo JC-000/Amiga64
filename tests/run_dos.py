@@ -890,9 +890,8 @@ def build_fake_uci(prg: str) -> tuple[str, str]:
     out = os.path.join(bdir, "fakeuci")
     os.makedirs(out, exist_ok=True)
     fprg, flbl = os.path.join(out, "runner.prg"), os.path.join(out, "runner.lbl")
-    srcs = sorted(glob.glob(os.path.join(root, "runtime", "*.s"))
-                  + glob.glob(os.path.join(root, "runtime", "ops", "*.s"))
-                  + glob.glob(os.path.join(root, "tests", "runner", "*.s")))
+    from tests.run_c2v import makefile_sources  # the Makefile's link order
+    srcs = makefile_sources(root)               # (chip.s last), not sorted()
     cmd = ["cl65", "-t", "none", "-C", os.path.join(root, "runtime", "c64.cfg"),
            "--asm-define", "DOSIO_FAKE_UCI=1",
            "--asm-define", "DOSIO_UCI_FENCE_OUTER=1",

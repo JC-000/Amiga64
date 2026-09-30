@@ -101,8 +101,11 @@ trap:   jmp chip_r32        ; per entry: chip_r8/r16/r32/w8/w16/w32
 ```
 
 - **Invariant: `m_rbk` never holds $BF or $DF.** The warm path traps before
-  it stores `m_rbk`; the cold path runs the same 8-cycle test before
-  `jsr mio_full`. So every access whose *first byte* is in $BF/$DF
+  it stores `m_rbk`; the cold path runs the same 8-cycle test inside
+  `mio_full`, before any REC store, and then re-enters the bank compare
+  (`jmp hiok`), so a cold call costs +23 cycles, not +8. With that, the
+  vbcc programs pay 1.9–4.1 cycles/instruction [MEASURED VICE counts], not
+  1.1–2.8 (as built in W7-T; `docs/PERF.md` (g)). So every access whose *first byte* is in $BF/$DF
   arrives at the compare as a bank change and cannot take the same-bank
   fast path. A trapped call leaves the REC consistent with the shadow (the
   length/low bytes stored before the trap are harmless) and issues no DMA.

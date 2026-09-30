@@ -130,6 +130,11 @@ CCR_MASK = 0x001F
 
 ADDR_MASK = 0xFFFFFF  # 24-bit guest bus
 
+# Guest banks that are chip registers, not RAM (W7-T I/O trap,
+# docs/CONTRACTS.md "I/O trap ($BF/$DF)"): $BF CIAs, $DF custom chips.
+IO_BANKS = (0xBF, 0xDF)
+IO_BANK_REASON = "io-bank"
+
 
 # --- download ---------------------------------------------------------------
 
@@ -299,6 +304,27 @@ def case_bin_size(norm: dict[str, Any]) -> int:
 
 # --- sampling ---------------------------------------------------------------
 
+def touches_io_bank(case: dict[str, Any]) -> bool:
+    """True when an upstream case has initial or final RAM (which lists
+    every byte the instruction reads or writes, prefetch included) in an
+    I/O bank ($BF/$DF), where the interpreter has chip registers instead
+    of the flat RAM the vectors assume."""
+    addrs = [a for a, _ in case["initial"]["ram"]]
+    addrs += [a for a, _ in case["final"]["ram"]]
+    pc = case["initial"]["pc"]
+    addrs += [pc + i for i in range(4)]
+    return any(((a & ADDR_MASK) >> 16) in IO_BANKS for a in addrs)
+
+
+def exclude_io_bank(cases: Sequence[dict[str, Any]]
+                    ) -> tuple[list[dict[str, Any]], int]:
+    """POST-sample exclusion (supervisor ruling, Wave 7): drop whole cases
+    that touch an I/O bank, never re-sample, so every other sampled case
+    stays exactly the one validated before the trap existed."""
+    kept = [c for c in cases if not touches_io_bank(c)]
+    return kept, len(cases) - len(kept)
+
+
 def stride_sample(items: Sequence[Any], n: int, seed: int = SAMPLE_SEED
                   ) -> list[Any]:
     """Deterministic fixed-stride sample of ``n`` items in original order."""
@@ -312,7 +338,9 @@ def stride_sample(items: Sequence[Any], n: int, seed: int = SAMPLE_SEED
 def filter_and_sample(cases: Iterable[dict[str, Any]], n: int,
                       seed: int = SAMPLE_SEED, stem: str | None = None
                       ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Filter, then stride-sample the retained pool; returns (cases, stats).
+    """Filter, then stride-sample the retained pool, then drop the sampled
+    cases that touch an I/O bank (``exclude_io_bank``: post-sample, no
+    re-sample); returns (cases, stats).
 
     ``stem`` selects the filter: a SUPER_FILES stem uses classify_super
     (and the smaller super size limit), anything else the M1 classify.
@@ -337,13 +365,15 @@ def filter_and_sample(cases: Iterable[dict[str, Any]], n: int,
             retained.append(case)
         else:
             dropped[reason] = dropped.get(reason, 0) + 1
-    sampled = stride_sample(retained, n, seed)
+    sampled, n_io = exclude_io_bank(stride_sample(retained, n, seed))
     stats = {
         "total": total,
         "retained_pool": len(retained),
         "sampled": len(sampled),
         "dropped": dict(sorted(dropped.items())),
     }
+    if n_io:
+        stats["dropped_after_sampling"] = {IO_BANK_REASON: n_io}
     return sampled, stats
 
 
@@ -1071,7 +1101,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     total_cases = 0
     for stem in stems:
-        cases = load_fixture(stem, fixtures_dir)
+        cases, _ = exclude_io_bank(load_fixture(stem, fixtures_dir))
         if args.set == "super":
             blob = compile_super_batch(cases, stem.endswith(EXC_SUFFIX))
         else:
