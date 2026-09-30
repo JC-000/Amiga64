@@ -101,8 +101,11 @@ trap:   jmp chip_r32        ; per entry: chip_r8/r16/r32/w8/w16/w32
 ```
 
 - **Invariant: `m_rbk` never holds $BF or $DF.** The warm path traps before
-  it stores `m_rbk`; the cold path runs the same 8-cycle test before
-  `jsr mio_full`. So every access whose *first byte* is in $BF/$DF
+  it stores `m_rbk`; the cold path runs the same 8-cycle test inside
+  `mio_full`, before any REC store, and then re-enters the bank compare
+  (`jmp hiok`), so a cold call costs +23 cycles, not +8. With that, the
+  vbcc programs pay 1.9–4.1 cycles/instruction [MEASURED VICE counts], not
+  1.1–2.8 (as built in W7-T; `docs/PERF.md` (g)). So every access whose *first byte* is in $BF/$DF
   arrives at the compare as a bank change and cannot take the same-bank
   fast path. A trapped call leaves the REC consistent with the shadow (the
   length/low bytes stored before the trap are harmless) and issues no DMA.
@@ -439,7 +442,7 @@ relies on (review L8); the S3.1/S3.7 stub must return them, not the "reads
 | CIA-A PRA inputs | $EB | bit 6 = 1 (left button up; with POTINP bit 10 it keeps AROS out of the boot menu, `rom/dosboot/menu.c:900` [SOURCE]); /RDY high, /TK0 low (track 0), /WPRO high, /CHNG low (no disk) |
 | DENISEID | $FFFF | OCS has no DENISEID; amigavideo then takes the OCS path |
 | VPOSR | $8000 \| V8 | LOF set, Agnus ID 0 (OCS PAL) |
-| DMACONR | DMACON & $03FF | BBUSY never set (synchronous blitter) |
+| DMACONR | (DMACON & $07FF) | BZERO | BBUSY never set (synchronous blitter); BLTPRI and BZERO as FS-UAE shows (W7-M oracle, `host/chipset_ref.py`); the boot counts are the same either way |
 
 Unmapped space is a deliberate divergence (review L7): the plan and the
 model return 0 for $DF0000–$DFEFFF (an A500 mirrors the custom registers

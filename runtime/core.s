@@ -71,6 +71,7 @@ emu_brnc_enforced = 1           ; @value guards fail the link (production/gate)
 .export mem_read8, mem_read16, mem_read32
 .export mem_write8, mem_write16, mem_write32
 .export mem_rec_dirty           ; REC-ownership seam (docs/WAVE4_BRIEF.md C1)
+.export m_scmd                  ; W7-T: chip_split reads mio_split's command
 .import __BSS_RUN__, __BSS_SIZE__   ; ld65 (c64.cfg BSS define = yes): boot clear
 .export ea_calc, ea_load, ea_store
 .export alu_add, alu_sub, alu_cmp, alu_and, alu_or, alu_eor
@@ -103,6 +104,8 @@ HALT_ADDRESS = $05      ; @value odd PC from a vector / RTE (reason code only)
 .import dispatch_lo, dispatch_hi        ; generated: build/gen/dispatch.s
 .import main                            ; runner entry (tests/runner owns it)
 .import hle_aline                       ; HLE A-line dispatch (runtime/ops/hle.s or gen stub)
+.import chip_r8, chip_r16, chip_r32     ; W7-T I/O trap targets (runtime/ops/chip.s)
+.import chip_w8, chip_w16, chip_w32, chip_split
 
 ; ===========================================================================
 ; Instruction-stream window state (core-internal; linker-assigned, outside
@@ -475,6 +478,22 @@ miss:                           ; refill the window with PC's guest page:
 ; register (probed), so those stay on the fast path.  Every other DMA in
 ; the tree is either 1 byte (test_load_chunk staging, mem_write8/read8)
 ; or a page-aligned 256-byte window refill -- neither can straddle.
+;
+; I/O trap (W7-T, docs/S3_PLAN.md §1.2-1.3, CONTRACTS.md "I/O trap").
+; Accesses whose bank is $DF (custom chips) or $BF (CIAs) go to
+; runtime/ops/chip.s instead of the REU.  The test sits only where the
+; bank is about to be (re)programmed: MIO_PROG's bank-changed branch
+; (+8 cycles there, +0 on the same-bank path) and its cold path, before
+; any REC store.  INVARIANT: m_rbk never holds $BF or $DF, so an I/O
+; access always arrives at the bank compare as a change and can never take
+; the same-bank fast path.  A trapped call issues no DMA; the length/low/
+; high bytes a warm call stored before the trap stay consistent with the
+; shadow.  A 16/32-bit access that starts in $BE/$DE and carries into
+; $BF/$DF is routed by STRADDLE to mio_split (only reached when the low
+; bytes are $FFFD-$FFFF), and mio_split hands every I/O byte of a split
+; access to chip_split (data in t_tmp, so the read copy stays correct).
+; Lines added by W7-T carry a "; W7-T" tag (host/tests/test_chip_hotpath.py
+; strips them and must get the base fingerprint back).
 ; ===========================================================================
 
 ; ---------------------------------------------------------------------------
@@ -547,7 +566,9 @@ REU_CMD_STASH_AL = REU_CMD_STASH | $20
 ; MIO_PROG len — program the REC for t_tmp <-> REU[m_addr], len bytes,
 ; touching only registers whose shadow differs.  Clobbers A.  Inlined in
 ; each entry (saves the jsr/rts of the v0 mio_setup).  Warm cycles: 41
-; (nothing changes) .. 47 (low byte changes, the common case) .. ~68.
+; (nothing changes) .. 47 (low byte changes, the common case) .. ~68;
+; a bank change pays the 8-cycle I/O test (W7-T).  `trap` is the calling
+; entry's own label (jmp chip_*): taken for bank $DF/$BF, m_rbk untouched.
 ; ---------------------------------------------------------------------------
 .macro MIO_PROG len
         .local warm, lenok, look, hiok, done
@@ -555,7 +576,7 @@ REU_CMD_STASH_AL = REU_CMD_STASH | $20
         BRNC bne, warm                ; 3
         lda #len                ; cold: REC state unknown
         jsr mio_full
-        jmp done
+        jmp hiok                ; W7-T (was jmp done): I/O -> the bank test
 warm:   lda #len                ; 2
         cmp m_rlen              ; 3
         BRNC beq, lenok               ; 3
@@ -574,6 +595,10 @@ look:   lda m_addr+1            ; 3
 hiok:   lda m_addr+2            ; 3
         cmp m_rbk               ; 3
         BRNC beq, done                ; 3
+        cmp #$DF                ; W7-T 2  bank changed: I/O?
+        beq trap                ; W7-T 2  (never-taken branches: +8 total;
+        cmp #$BF                ; W7-T 2   trap = the entry's jmp chip_*)
+        beq trap                ; W7-T 2
         sta m_rbk
         sta REC_REUBANK
 done:
@@ -581,8 +606,18 @@ done:
 
 ; mio_full — A = transfer length.  Cold path: program every register the
 ; data path relies on, load the shadow, mark it valid.  8 REC stores.
+; W7-T: bank $DF/$BF programs nothing (m_rok stays 0, m_rbk := 0) and
+; returns; the caller's jmp hiok then takes the bank-changed branch, whose
+; I/O test traps.  So the cold path pays the same 8-cycle test, before
+; any REC access, plus the hiok compare (9 cycles) on every cold call.
 .proc mio_full
         sta m_rlen
+        lda m_addr+2            ; W7-T cold path: I/O bank?  Tested before
+        cmp #$DF                ; W7-T any REC store, so a trapped cold
+        beq io                  ; W7-T call touches no REC register
+        cmp #$BF                ; W7-T
+        beq io                  ; W7-T
+        lda m_rlen              ; W7-T
         sta REC_LENLO
         lda #0
         sta REC_LENHI
@@ -602,12 +637,16 @@ done:
         lda #1
         sta m_rok
         rts
+io:     lda #0                  ; W7-T m_rbk := a non-I/O bank (m_rok stays
+        sta m_rbk               ; W7-T 0): MIO_PROG's jmp hiok then sees a
+        rts                     ; W7-T bank change and traps
 .endproc
 
 ; ---------------------------------------------------------------------------
 ; STRADDLE len, slow — branch to slow when a len-byte access at m_addr
 ; crosses a 512 KB REU block line ($x7FFFF -> $x80000).  Common path
 ; (address low byte < $100-(len-1)): 7 cycles, falls through.  Clobbers A.
+; W7-T: also routes a bank carry $BE->$BF / $DE->$DF to slow (mio_split).
 ; ---------------------------------------------------------------------------
 .macro STRADDLE len, slow
         .local no
@@ -621,6 +660,11 @@ done:
         ora #$F8                ; bits 18-16 all set?
         cmp #$FF
         BRNC beq, slow
+        lda m_addr+2            ; W7-T bank carry into $BF/$DF?
+        cmp #$BE                ; W7-T (only reached at $xxFFFD-$xxFFFF:
+        beq slow                ; W7-T  plain branches, not hot)
+        cmp #$DE                ; W7-T
+        beq slow                ; W7-T
 no:
 .endmacro
 
@@ -635,6 +679,7 @@ m_slen: .res 1                  ; mio_split: byte count
 ; one byte per DMA, every register programmed each time, the 24-bit
 ; address sum done by the CPU.  Leaves the shadow invalid (cleared before
 ; the first REC store), so the next call re-programs from scratch.
+; W7-T: a byte in bank $BF/$DF goes to chip_split instead (no DMA).
 ; Clobbers A only (X and Y preserved, like the fast path).  ~9 REC
 ; accesses per byte -- rare by construction (one address in 2^19 per
 ; long, and only misaligned-for-the-block data).
@@ -667,10 +712,14 @@ loop:   lda #0
         sta REC_REUHI
         lda m_addr+2
         adc #0                  ; carry out of bit 23 dropped: 24-bit wrap
+        cmp #$DF                ; W7-T split: I/O byte?  (The address
+        beq io                  ; W7-T stores above are harmless: shadow
+        cmp #$BF                ; W7-T already invalid, and no command.)
+        beq io                  ; W7-T
         sta REC_REUBANK
         lda m_scmd
         sta REC_COMMAND
-        iny
+next:   iny
         cpy m_slen
         BRNC bne, loop
         pla
@@ -678,6 +727,8 @@ loop:   lda #0
         pla
         tax
         rts
+io:     jsr chip_split          ; W7-T I/O byte: chip.s, no DMA (keeps Y)
+        jmp next                ; W7-T
 .endproc
 
 ; ---------------------------------------------------------------------------
@@ -702,6 +753,7 @@ loop:   lda #0
         lda t_tmp
         sta m_val
         rts
+trap:   jmp chip_r8             ; W7-T
 .endproc
 
         HOTALIGN 128
@@ -720,6 +772,7 @@ split:  lda #REU_CMD_FETCH
         lda #2
         jsr mio_split
         jmp copy
+trap:   jmp chip_r16            ; W7-T
 .endproc
 
 .proc mem_read32
@@ -741,6 +794,7 @@ split:  lda #REU_CMD_FETCH
         lda #4
         jsr mio_split
         jmp copy
+trap:   jmp chip_r32            ; W7-T
 .endproc
 
         HOTALIGN 128
@@ -752,6 +806,7 @@ split:  lda #REU_CMD_FETCH
         lda #REU_CMD_STASH_AL
         sta REC_COMMAND
         rts
+trap:   jmp chip_w8             ; W7-T
 .endproc
 
 .proc mem_write16
@@ -769,6 +824,7 @@ split:  lda #REU_CMD_STASH
         sta m_scmd
         lda #2
         jmp mio_split
+trap:   jmp chip_w16            ; W7-T
 .endproc
 
         HOTALIGN 128
@@ -791,6 +847,7 @@ split:  lda #REU_CMD_STASH
         sta m_scmd
         lda #4
         jmp mio_split
+trap:   jmp chip_w32            ; W7-T
 .endproc
 
 ; ===========================================================================

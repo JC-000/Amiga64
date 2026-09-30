@@ -21,13 +21,24 @@ Checks
       guessed at.
   (e) host mirror cross-check: the guest-space constants duplicated in
       host/hle_env.py and host/image.py must match runtime/rc/guest.inc.
+  (f) ``@under`` regions (the RAM under an I/O window, which the VIC reads
+      while the CPU sees I/O): allowed only in the windows of
+      ``UNDER_WINDOWS`` (space ``ram``, $D000-$DFFF), only for a registered
+      module owner (FILE_OWNERS / OWNER_GLOBS: never a hardware prefix such
+      as VIC); each must lie inside ONE ``sys`` region, never
+      overlap another ``@under`` region, have a module owner, and every
+      equate under it must carry that owner's prefix (``<owner>_``), so an
+      I/O register equate cannot move into it.  They take no part in (a)/(b)
+      and the scan (d) still classifies raw literals by the sys region.
 
 Region grammar (in rc files; parsed from comments)::
 
     ; @space <name> $<start>-$<end>          one per file
     ; @region <owner> $<start>-$<end> <role text>
+    ; @under <owner> $<start>-$<end> <role text>   RAM under a sys I/O region
 
-Equate lines (``name = $hex``) below a ``@region`` line belong to it.
+Equate lines (``name = $hex``) below a ``@region``/``@under`` line belong
+to it.
 
 Usage: ``python3 -m host.rescheck [--root DIR] [-v]`` — exit 1 on violation.
 Wired into ``make rescheck`` and host/tests/test_rescheck.py.
@@ -61,6 +72,8 @@ FILE_OWNERS = {
     "runtime/ops/g5_flow.s": "g5",
     "runtime/ops/g6_muldiv.s": "g6",
     "runtime/ops/hle.s": "hle",
+    "runtime/ops/c2v.s": "c2v",         # W7-V c2v: VIC converter v0
+    "runtime/ops/chip.s": "chip",       # W7-T I/O trap stub (S3.1)
     "tests/runner/runner.s": "run",
     "tests/runner/run_program.s": "run",
 }
@@ -74,6 +87,11 @@ OWNER_GLOBS = [
     ("runtime/ops/dosio*.s", "hle"),    # dos I/O backends (WS-B2)
 ]
 SCANNED_GLOBS = ["runtime/*.s", "runtime/ops/*.s", "tests/runner/*.s"]
+
+# Where @under (RAM under an I/O window) is legal: space -> inclusive ranges.
+UNDER_WINDOWS = {"ram": ((0xD000, 0xDFFF),)}
+# Who may own an @under region: the registered module owners.
+MODULE_OWNERS = frozenset(FILE_OWNERS.values()) | {o for _, o in OWNER_GLOBS}
 
 
 def source_owners(root: Path) -> tuple[dict[str, str], list[str]]:
@@ -121,6 +139,7 @@ class Region:
     hi: int
     role: str
     line: int
+    under: bool = False     # an @under region (RAM under a sys I/O window)
 
 
 @dataclass
@@ -139,6 +158,7 @@ class Space:
     path: str
     regions: list[Region] = field(default_factory=list)
     equates: list[Equate] = field(default_factory=list)
+    under: list[Region] = field(default_factory=list)
 
     def region_at(self, addr: int) -> Region | None:
         for r in self.regions:
@@ -148,6 +168,7 @@ class Space:
 
 
 _SPACE_RE = re.compile(r"^;\s*@space\s+(\w+)\s+\$([0-9A-Fa-f]+)-\$([0-9A-Fa-f]+)\s*$")
+_UNDER_RE = re.compile(r"^;\s*@under\s+(\w+)\s+\$([0-9A-Fa-f]+)-\$([0-9A-Fa-f]+)\s+(.*)$")
 _REGION_RE = re.compile(r"^;\s*@region\s+(\w+)\s+\$([0-9A-Fa-f]+)-\$([0-9A-Fa-f]+)\s+(.*)$")
 _EQUATE_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s*=\s*\$([0-9A-Fa-f]+)\s*(?:;.*)?$")
 
@@ -164,6 +185,15 @@ def parse_rc_text(text: str, path: str) -> tuple[Space | None, list[str]]:
                 errors.append(f"{path}:{n}: second @space line (one per file)")
                 continue
             space = Space(m.group(1), int(m.group(2), 16), int(m.group(3), 16), path)
+            continue
+        m = _UNDER_RE.match(raw.strip())
+        if m:
+            if space is None:
+                errors.append(f"{path}:{n}: @under before @space")
+                continue
+            current = Region(m.group(1), int(m.group(2), 16), int(m.group(3), 16),
+                             m.group(4).strip(), n, under=True)
+            space.under.append(current)
             continue
         m = _REGION_RE.match(raw.strip())
         if m:
@@ -217,6 +247,36 @@ def check_space(space: Space) -> list[str]:
         errors.append(
             f"{p}: undeclared gap ${cursor:X}-${space.hi:X} at end of space "
             f"{space.name}")
+
+    # (f) @under regions: RAM under exactly one sys I/O region.
+    for u in space.under:
+        where = f"{p}:{u.line}: @under {u.owner} ${u.lo:X}-${u.hi:X}"
+        if u.lo > u.hi:
+            errors.append(f"{where} is inverted")
+        if u.owner not in MODULE_OWNERS:
+            errors.append(f"{where}: owner '{u.owner}' is not a registered "
+                          f"module (FILE_OWNERS/OWNER_GLOBS)")
+        if not any(lo <= u.lo and u.hi <= hi
+                   for lo, hi in UNDER_WINDOWS.get(space.name, ())):
+            errors.append(f"{where} (space {space.name}) is outside the "
+                          f"UNDER_WINDOWS: @under is only allowed in space ram "
+                          f"$D000-$DFFF")
+        if not any(r.owner == "sys" and r.lo <= u.lo and u.hi <= r.hi
+                   for r in space.regions):
+            errors.append(f"{where} does not lie inside one sys region")
+    by_lo_u = sorted(space.under, key=lambda r: (r.lo, r.hi))
+    for a, b in zip(by_lo_u, by_lo_u[1:]):
+        if b.lo <= a.hi:
+            errors.append(
+                f"{p}:{b.line}: @under {b.owner} ${b.lo:X}-${b.hi:X} overlaps "
+                f"@under {a.owner} ${a.lo:X}-${a.hi:X} (line {a.line})")
+    for e in space.equates:
+        if e.region is not None and e.region.under and \
+                not e.name.startswith(e.region.owner + "_"):
+            errors.append(
+                f"{p}:{e.line}: equate {e.name} under @under {e.region.owner} "
+                f"lacks the owner prefix '{e.region.owner}_' (I/O register "
+                f"equates stay under sys)")
 
     for e in space.equates:
         if e.region is None:

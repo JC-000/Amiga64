@@ -3,8 +3,11 @@
  "files": {
   "ABCD": {
    "dropped": {},
+   "dropped_after_sampling": {
+    "io-bank": 1
+   },
    "retained_pool": 8065,
-   "sampled": 50,
+   "sampled": 49,
    "total": 8065
   },
   "ADD.b": {
@@ -47,8 +50,11 @@
   },
   "ADDX.b": {
    "dropped": {},
+   "dropped_after_sampling": {
+    "io-bank": 1
+   },
    "retained_pool": 8065,
-   "sampled": 50,
+   "sampled": 49,
    "total": 8065
   },
   "ADDX.l": {
@@ -193,8 +199,11 @@
    "dropped": {
     "exception": 3162
    },
+   "dropped_after_sampling": {
+    "io-bank": 1
+   },
    "retained_pool": 4903,
-   "sampled": 50,
+   "sampled": 49,
    "total": 8065
   },
   "CLR.w": {
@@ -207,8 +216,11 @@
   },
   "CMP.b": {
    "dropped": {},
+   "dropped_after_sampling": {
+    "io-bank": 1
+   },
    "retained_pool": 8065,
-   "sampled": 50,
+   "sampled": 49,
    "total": 8065
   },
   "CMP.l": {
@@ -255,8 +267,11 @@
    "dropped": {
     "exception": 3073
    },
+   "dropped_after_sampling": {
+    "io-bank": 1
+   },
    "retained_pool": 4992,
-   "sampled": 50,
+   "sampled": 49,
    "total": 8065
   },
   "DIVU": {
@@ -294,8 +309,11 @@
    "dropped": {
     "exception": 3135
    },
+   "dropped_after_sampling": {
+    "io-bank": 1
+   },
    "retained_pool": 4930,
-   "sampled": 50,
+   "sampled": 49,
    "total": 8065
   },
   "EORItoSR": {
@@ -334,8 +352,11 @@
    "dropped": {
     "exception": 3882
    },
+   "dropped_after_sampling": {
+    "io-bank": 1
+   },
    "retained_pool": 4183,
-   "sampled": 50,
+   "sampled": 49,
    "total": 8065
   },
   "LEA": {
@@ -408,8 +429,11 @@
    "dropped": {
     "exception": 4697
    },
+   "dropped_after_sampling": {
+    "io-bank": 2
+   },
    "retained_pool": 3368,
-   "sampled": 50,
+   "sampled": 48,
    "total": 8065
   },
   "MOVEA.l": {
@@ -432,24 +456,33 @@
    "dropped": {
     "exception": 3842
    },
+   "dropped_after_sampling": {
+    "io-bank": 1
+   },
    "retained_pool": 4223,
-   "sampled": 50,
+   "sampled": 49,
    "total": 8065
   },
   "MOVEM.w": {
    "dropped": {
     "exception": 3784
    },
+   "dropped_after_sampling": {
+    "io-bank": 2
+   },
    "retained_pool": 4281,
-   "sampled": 50,
+   "sampled": 48,
    "total": 8065
   },
   "MOVEfromSR": {
    "dropped": {
     "address-error": 3048
    },
+   "dropped_after_sampling": {
+    "io-bank": 1
+   },
    "retained_pool": 5017,
-   "sampled": 50,
+   "sampled": 49,
    "total": 8065
   },
   "MOVEfromUSP": {
@@ -476,16 +509,22 @@
    "dropped": {
     "exception": 3122
    },
+   "dropped_after_sampling": {
+    "io-bank": 1
+   },
    "retained_pool": 4943,
-   "sampled": 50,
+   "sampled": 49,
    "total": 8065
   },
   "MULU": {
    "dropped": {
     "exception": 3073
    },
+   "dropped_after_sampling": {
+    "io-bank": 1
+   },
    "retained_pool": 4992,
-   "sampled": 50,
+   "sampled": 49,
    "total": 8065
   },
   "NBCD": {
@@ -512,8 +551,11 @@
    "dropped": {
     "exception": 3154
    },
+   "dropped_after_sampling": {
+    "io-bank": 1
+   },
    "retained_pool": 4911,
-   "sampled": 50,
+   "sampled": 49,
    "total": 8065
   },
   "NEGX.b": {
@@ -534,8 +576,11 @@
    "dropped": {
     "exception": 3086
    },
+   "dropped_after_sampling": {
+    "io-bank": 3
+   },
    "retained_pool": 4979,
-   "sampled": 50,
+   "sampled": 47,
    "total": 8065
   },
   "NOP": {
@@ -706,8 +751,11 @@
    "dropped": {
     "exception": 4057
    },
+   "dropped_after_sampling": {
+    "io-bank": 1
+   },
    "retained_pool": 4008,
-   "sampled": 50,
+   "sampled": 49,
    "total": 8065
   },
   "SBCD": {
@@ -726,16 +774,22 @@
    "dropped": {
     "exception": 2972
    },
+   "dropped_after_sampling": {
+    "io-bank": 1
+   },
    "retained_pool": 5093,
-   "sampled": 50,
+   "sampled": 49,
    "total": 8065
   },
   "SUB.w": {
    "dropped": {
     "exception": 2944
    },
+   "dropped_after_sampling": {
+    "io-bank": 1
+   },
    "retained_pool": 5121,
-   "sampled": 50,
+   "sampled": 49,
    "total": 8065
   },
   "SUBA.l": {

@@ -326,6 +326,84 @@ An earlier "layout control" (base padded only at the ends of core.s and
 g5_flow.s) is withdrawn: W6-S inserts code INSIDE core.s and g5_flow.s, so
 that control did not reproduce W6-S's core-internal layout (review F4).
 
+## (g) S3.1 I/O trap (W7-T): cycle accounting and 48 MHz measurements
+
+**Static cost** (`runtime/core.s`, lines tagged `; W7-T`; contract
+`docs/CONTRACTS.md` "I/O trap"). Same-bank call: **+0**, the instruction
+stream up to MIO_PROG's `beq done` is the base one. Bank change: **+8**
+(`cmp #$DF / beq / cmp #$BF / beq`, both not taken). Cold call
+(`mio_full`): +23 for RAM (`lda m_addr+2` + 8 + `lda m_rlen` + the
+`jmp hiok` compare, 9), and 0 REC accesses when the call traps. STRADDLE:
++11 only on its slow branch ($xxFFFD–$xxFFFF: `lda zp` + 4 × 2). `mio_split`: +8 per byte.
+REC accesses are unchanged everywhere. core.s CODE stays $D34 bytes (the
+growth fits the HOTALIGN fills), and `chip.s` links last, so no other
+module moves. BSS moves by whole pages ($300) only.
+`host/tests/test_chip_hotpath.py` strips the tagged lines and gets back the
+base memory-API fingerprint (246, 55bef079f4cb52cf).
+
+**VICE [MEASURED VICE]** (`build/evidence/w7-trap/perf/`, base = wave7/integration 2d61eaa):
+
+| Check | Result |
+|---|---|
+| `tests/perf_cycles.py --max-delta 0`, run + step, six loops | delta **+0.000** on every loop; one-off per call identical (1666 / 2942) |
+| `tests/rec_budget.py` | API and loop counts identical (JSON equal) |
+| `tools/s3probe/bank_probe.py` (hello, scroll, alloc, sysbase, exit) | instr / calls / bank switches identical (e.g. alloc 921,683 / 428,457 / 131,140); 7 bank-store sites |
+| bank-alternating loop `MOVE.L (A0),D1 / MOVE.L (A1),D2`, banks $00/$02 (`tests/run_chip.py --perf`) | +16.000 cycles/iter at 2.000 switches/iter = **+8.000 per switch**; same-bank control +0.000 |
+| one code-window refill (JMP abs.L + DBRA between two pages vs in-page control) | 336.9 cycles (1 MHz model; PERF.md's estimate ~380) |
+| cold call (a MOVE.L (A0),D1 as the first data call after each refill, `run_chip --perf` `cold_cross`) | **+23.000 per cold call**; in-page control +0.000 (fix round 1; also the reviewer's `coldperf.py`) |
+
+**Per instruction on real programs [MEASURED VICE counts × static cost].**
+`bank_probe` separates cold calls (the `mio_full` site) from warm bank
+switches (the six MIO_PROG sites). Hook cost = (23 × cold + 8 × warm) /
+instructions:
+
+| vbcc program | instr | cold | warm switches | hook cyc/instr | S3_PLAN §1.2 estimate |
+|---|---:|---:|---:|---:|---:|
+| hello | 2,841 | 230 | 398 | **2.98** | 1.8 |
+| scroll | 28,452 | 2,103 | 2,280 | **2.34** | 1.2 |
+| alloc | 921,683 | 48,346 | 82,794 | **1.93** | 1.1 |
+| sysbase | 11,259 | 905 | 1,277 | **2.76** | 1.6 |
+| exit | 1,101 | 95 | 294 | **4.12** | 2.8 |
+
+That is **1.9–4.1 cycles/instruction**, not the plan's 1.1–2.8. The plan
+charged +8 to cold calls too, but the cold test lives in `mio_full` and
+costs +23. Against the measured 518–674 cycles/instruction at 48 MHz this
+is 0.3–0.8%. `perf_cycles` cannot see it, because its loops never refill and the
+two-point delta cancels the one cold call per run.
+
+**U64E at 48 MHz [MEASURED HW]** (2026-09-29, `tests/run_chip.py --hw u64`,
+`build/evidence/w7-trap/hw/`). One DeviceLock hold (0 s wait), fw 3.15 git
+c47155b7, FPGA 125, core 1.50. Config found at Turbo Manual / 48, REU 16 MB.
+The full config was snapshotted and restored (re-read IDENTICAL), and
+nothing was written to flash. ABBA order base, trap, trap, base; wall-clock
+two-point deltas (200 vs 24,000 iterations). Calibrated effective clock
+41.6–48.3 MHz across the four loads (the last load read high; the cycle
+conversions below use each core's mean).
+
+| Loop | base IPS | trap IPS | change |
+|---|---|---|---|
+| ALU ADDQ/ADD | 75,120 | 75,624 | +0.7% |
+| MEM MOVE.L (A0) | 68,910 | 68,550 | −0.5% |
+| STREAM MOVE.L (A0)+ | 62,395 | 62,327 | −0.1% |
+| RMW ADDQ.L #1,(A0) | 56,616 | 57,643 | +1.8% |
+| two reads, same bank | 58,486 | 57,752 | −1.3% |
+| two reads, alternating banks | 59,379 | 58,613 | −1.3% |
+| `MOVE.W $DFF004,D1` (base: REU; trap: chip_r16) | 65,678 | 67,421 | +2.7% |
+
+Rep-to-rep spread is ±1.5% (e.g. alternating 57.8k–59.4k). Every change is
+inside it. The expected +8 cycles × 2 switches (~0.4 µs of 51 µs/iter, 0.7%)
+is below the resolution of this wall-clock method. The exact figure is the
+VICE +8.000 above. A trapped custom-register read is at least as fast as a
+same-bank REU read.
+
+**Code-window refill at 48 MHz [MEASURED HW]:** the loop that jumps between
+two pages every iteration costs 199.3 µs/iter, against 19.4 µs for the
+in-page control. That is **one refill = 89.9 µs (base) / 90.0 µs (trap)**,
+≈ 3,800–4,000 cycles at the measured clock. It confirms the ~90 µs that
+`docs/S3_PLAN.md` §3.5 assumed for the AROS boot estimate (~17 s of refills
+over 193,692 page changes). The trap does not change it: `fetch_word` is
+unchecked.
+
 ## (e) Caveats
 
 - Every number above comes from **hand-written cycle comments**, not

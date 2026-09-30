@@ -37,7 +37,7 @@ REGIONS = {  # name: (start marker, end marker) in runtime/core.s
 EXPECTED = {
     "dispatch_loop": (43, "23d798b7d4164ace"),
     "fetch_word": (77, "1ca2fda98a5dc60f"),
-    "memory_api": (246, "55bef079f4cb52cf"),
+    "memory_api": (276, "aa3a66e6ef2c37cc"),   # W7-T trap hook (strip proof: test_chip_hotpath)
     "ea": (337, "6b52f2bbd7b65462"),
     "alu_ccr": (293, "ab83e441a4fe7cfe"),
 }

@@ -199,8 +199,15 @@ emu_halt` with `HALT_ILLEGAL`; in exception mode `emu_halt` re-decodes
 `st_iop` and executes/raises instead. `op_illegal` distinguishes MOVEP
 (G3's stub) from true illegal encodings the same way.
 
-**Vector sets.** `build/vectors` (golden, 5150) is unchanged and runs with
-the flag clear. `python3 -m host.vectors --set super --offline --out
+**Vector sets.** `build/vectors` (golden, **5129**) runs with the flag
+clear. **io-bank exclusion (Wave 7, W7-T):** banks $BF/$DF are chip
+registers since the I/O trap, so `host/vectors.py` (`exclude_io_bank`)
+drops, AFTER stride sampling and without re-sampling, every case whose
+initial/final RAM or prefetch touches them (MANIFEST reason
+`dropped_after_sampling: io-bank`). 21 golden cases go (5150 -> 5129; every
+other case is bit-identical to the hardware-validated 5150) and one super
+case (MOVEfromSR case 26: 679 -> 678). The hand vectors (63) and
+SUPERHAND contain none (`host/tests/test_chip_vectors.py`). `python3 -m host.vectors --set super --offline --out
 build/vectors-super` builds ANDItoSR, ORItoSR, EORItoSR, MOVEtoSR,
 MOVEfromSR, MOVEtoUSP, MOVEfromUSP, RTE, RESET, TRAP, TRAPV, CHK (50 each,
 same pin, same seed) plus `DIVU.exc` (the single upstream divide-by-zero
@@ -241,3 +248,74 @@ pokes `st_exc`/`r_osp` around the unchanged `test_run_case`.
 - `make vectors` — generate binary batches into `build/vectors/`
 - `make vice-test` — run vector batches through VICE via harness (warp allowed: correctness-only; **VICE warp ≠ U64E 48 MHz** — performance claims only via cycle accounting or real hardware)
 - `make smoke` — trivial PRG in VICE proving the harness path works
+
+## I/O trap ($BF/$DF) (W7-T, S3.1)
+
+Owner: core (`runtime/core.s` memory API) + chip (`runtime/ops/chip.s`).
+Design: `docs/S3_PLAN.md` §1.2–1.3, §3.4. Tests: `tests/run_chip.py`,
+`host/tests/test_chip_hotpath.py`, `host/tests/test_chip_ref.py`.
+
+- **Guest model.** Banks `$DF` (custom chips) and `$BF` (CIAs) are no
+  longer RAM. Every `mem_read*`/`mem_write*` access whose bank is `$DF` or
+  `$BF` goes to `chip.s`, and no REU DMA is issued for it. A 16/32-bit
+  access that straddles into or out of an I/O bank is split into bytes, and
+  each byte goes to its own bank (REU or chip). The instruction window
+  (`fetch_word`) is NOT checked: executing from `$BF`/`$DF` reads the REU
+  (in a FETCH_DIRECT variant build, instruction fetch goes through the API
+  and does trap). **Other bypass:** HLE DOS bulk transfers
+  (`hle_dos.s` `dosio_dma1`) program the REC directly, so a guest DOS
+  buffer placed in `$BF`/`$DF` would move its bulk bytes to or from the REU
+  underneath, while the first/last-byte fix-ups go through `mem_write8` and
+  hit the chip stub. This is acceptable for now: the HLE memory map
+  (`rc/guest.inc`) never puts program, heap or RAMDISK memory in those
+  banks, and a program that passes an I/O address as a DOS buffer is
+  already broken on an Amiga. It becomes a risk once the S3.7 machine
+  profile exists; the S3.7 guard is to reject such buffers in `hle_dos`.
+- **Where the test sits.** Only where the REC bank is about to be
+  programmed: MIO_PROG's bank-changed branch (`cmp #$DF / beq trap / cmp
+  #$BF / beq trap`, +8 cycles, never taken for RAM), the cold path
+  (`mio_full`, tested before any REC store; the caller's `jmp hiok` then
+  takes the bank-changed branch), STRADDLE's slow branch (bank carry
+  `$BE→$BF`, `$DE→$DF` → `mio_split`), and `mio_split` per byte (before the
+  bank store and the command). Same-bank calls execute exactly the base
+  instructions (+0).
+- **Invariant.** `m_rbk` never holds `$BF` or `$DF`. An I/O access
+  therefore always arrives at the bank compare as a change and can never
+  take the same-bank fast path. A trapped warm call may already have
+  stored the length and low/high address bytes. These stay consistent with
+  the shadow, so the next call is still correct. A trapped cold call
+  touches no REC register and leaves `m_rok` = 0, `m_rbk` = 0.
+- **Chip ABI** = the memory API's: `m_addr` in, `m_val` LE in/out (a read
+  writes only the bytes its size covers), X/Y preserved, clobbers A, `rts`
+  to the API's caller. Entries `chip_r8/r16/r32/w8/w16/w32`, which are
+  `jmp`'d from the API entries, plus `chip_split` (one byte, from
+  `mio_split`).
+- **Decode.** Custom registers are `$DFF000–$DFF1FF`, register = `m_addr &
+  $1FE`. A word access is one register and a long is two. A byte write
+  lands on both halves; a byte read returns the addressed half. CIA-A is
+  the odd bytes with A12 = 0 and CIA-B the even bytes with A13 = 0,
+  register = `(m_addr+1) & $0F`, always byte-wise. Everything else in the
+  two banks is open bus: reads 0, writes ignored, counted in `chip_nopen`.
+  This deliberately differs from an A500 and from the boot model, which
+  mirror the custom registers and return $FF on undecoded CIA reads
+  (S3_PLAN §3.4 L7).
+- **Values (S3.1 stub).** Reads return fixed values: VPOSR `$8000`,
+  POTINP `$FF00`, SERDATR `$3000`, DENISEID `$FFFF`. The other read-only
+  slots (`$000–$01E`) return their shadow word, and write-only registers
+  (`$020–$1FE`) return 0. CIA registers return their shadow, except CIA-A
+  PRA = `(PRA & DDRA) | ($EB & ~DDRA)`. Not modelled yet: DMACONR (it
+  reads its slot, 0), timers, ICR and TOD (S3.3/S3.4).
+- **Writes.** Every decoded write is logged. A write to a write-only
+  register also lands in the shadow, while a write to a read-only slot is
+  ignored there. CIA writes land in `chip_cia`, and a SERDAT write appends
+  its low byte to the serial ring.
+- **Host-visible state** (labels in `runner.lbl`, LE): `chip_shd` is a
+  512 B big-endian register image (index = offset), `chip_cia` 32 B (A
+  0–15, B 16–31), and `chip_log` a ring of 64 {u16 id, u16 value} (id =
+  offset, CIA-A `$0A00+reg`, CIA-B `$0B00+reg`) with u16 `chip_logn`.
+  `chip_ser` is a 256 B ring with u16 `chip_sern`, and u16 `chip_nopen`
+  counts open-bus accesses. It is cleared by the boot BSS clear and by
+  `chip_reset` (host entry, clobbers A/X), but NOT by `emu_reset`: it is
+  machine state, like guest RAM.
+- **Link order.** `chip.s` links last (Makefile), so adding it moves no
+  other module. core.s CODE size is unchanged ($D34).

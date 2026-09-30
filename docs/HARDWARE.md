@@ -75,8 +75,13 @@ vector batches and hand suite all green.
 | Harness smoke (3 ADD.b cases) | 3/3 pass | 4.1 s incl. boot |
 | M0 demo (`tests.run_program`, minimal+reloc+budget) | 48/48 checks | ~40 s |
 | Hand vectors (48) | 48/48 pass | 14.8 s |
-| **Full SingleStepTests suite, 103 batches** | **5150/5150 pass, 0 field failures** | 1392.8 s (~0.27 s/case, REST-bound) |
+| **Full SingleStepTests suite, 103 batches** | **5150/5150 pass, 0 field failures** [^io] | 1392.8 s (~0.27 s/case, REST-bound) |
 | Hand vectors on the **windowed** core | 48/48 pass | 14.0 s |
+
+[^io]: Since Wave 7 the golden gate set is the 5129-case subset of this
+validated 5150-case set: the 21 cases that touch banks $BF/$DF were
+dropped after sampling (the I/O trap, `docs/CONTRACTS.md` "Vector sets").
+The same holds for every 5150/5150 row below.
 
 **No hardware-vs-VICE behavioral divergence found.** No wedges, no
 re-acquisitions, no REU addressing anomalies at 16 MB. (The windowed core

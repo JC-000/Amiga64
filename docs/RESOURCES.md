@@ -30,7 +30,14 @@ them does not even assemble).
 ```
 ; @space <name> $<start>-$<end>              -- one per file
 ; @region <owner> $<start>-$<end> <role...>  -- claims [start,end] inclusive
+; @under <owner> $<start>-$<end> <role...>   -- RAM under the I/O window (W7-V)
 ```
+
+`@under` claims the RAM that the CPU sees only with I/O banked out and the
+VIC sees in bank 3. It is allowed only in space `ram`, only inside
+`$D000-$DFFF`, and only for a registered module owner (never a hardware
+prefix). It may overlap the `sys` I/O region; ordinary `@region` claims
+still may not (`host/rescheck.py`, `host/tests/test_rescheck_under.py`).
 
 A source-file equate that is a plain value (size, offset, flag bits) and
 never an address may carry `; @value` (`NAME = $1000  ; @value`). The
@@ -56,7 +63,9 @@ registered as-is (no renames: `build/runner.lbl` consumers exist).
 | `fam_` + `g1_`..`g6_` file-locals | ops groups G1-G6 | `fam_move`, `g3_t` |
 | `hle_` `SCREEN*` `ENV_` `EXEC_`/`DOS_`/`EXIT_`/`ABSEXECBASE_` `FH_` `HEAP_` | HLE (M2) | `hle_aline`, `SCREEN`, `DOS_BASE` |
 | `run_` `mb_` `test_` `RES_` `CASE_` `RUN_` `LOAD_` `READY_` + the legacy scratch names `cp cnt nexp expp rbidx srcp lcnt gaddr icount nobud` | runner/harness | `test_run_case`, `RES_DONE` |
-| `REC_` `ULT_` `CIA1_` `VIC_` | sys (hardware regs, declared in `rc/ram.inc`) | `REC_COMMAND` |
+| `REC_` `ULT_` `CIA1_` `CIA2_` `VIC_` | sys (hardware regs, declared in `rc/ram.inc`) | `REC_COMMAND` |
+| `chip_` | chip (W7-T I/O trap stub, `runtime/ops/chip.s`) | `chip_split`, `chip_cia` |
+| `c2v_` `C2V_` | c2v (W7-V VIC converter, `runtime/ops/c2v.s`) | `c2v_bitmap`, `C2V_ROWS` |
 | `rc_` | the resource contract itself | reserved for future contract symbols |
 
 New symbols MUST take a registered prefix of their owning module (new
