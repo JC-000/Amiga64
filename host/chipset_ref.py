@@ -62,6 +62,15 @@ API -- this is all of it:
     (from ``cycles``), ``update_irq()``, ``blit(size, ecs)``,
     ``dsklen(val)``.
 
+``MachTime(s=4)``
+    The S3.2 time base of the C64 machine loop (``runtime/ops/mach.s``,
+    docs/CONTRACTS.md "Machine loop (S3.2)"): guest E clock = C64 phi2
+    counter >> *s*, one guest frame = ``MACH_FRAME_E`` (14188) E ticks.
+    ``frame_phi2()``, ``fps(phi2_hz)``, ``beam(t)`` -> ``(vposr, vhposr)``
+    for *t* phi2 cycles into the current frame (clamped to the frame's last
+    tick), ``pos(e)`` -> ``(v, h)`` for E tick *e*, and ``is_beam(v, h)``
+    (the pair is one ``pos`` produces).
+
 **Copper SKIP and WAIT beam timing are not modelled; later packages must
 not derive SKIP/WAIT behaviour from this model.**  The copper runs once per
 frame and never feeds back into CPU timing here: no DMA slots are stolen,
@@ -705,3 +714,61 @@ class Chipset:
 
     def copper_write(self, reg, val):
         self.custom_write(reg, val)
+
+
+# ---------------------------------------------------------------------------
+# S3.2 machine-loop time base (W8-L).  The C64 side (runtime/ops/mach.s,
+# runtime/ops/chip.s beam reads) is tested against this class by
+# tests/run_mach.py; the formula is pinned in docs/CONTRACTS.md.
+# ---------------------------------------------------------------------------
+
+MACH_FRAME_E = 14188        # E ticks per guest frame (709379 Hz / 50)
+MACH_CCK_PER_E = 5          # colour clocks per E tick (3546895 / 709379)
+MACH_LINE_CCK = 227         # colour clocks per PAL line (H 0-226)
+MACH_S_DEFAULT = 4          # runtime/ops/mach.s mach_s power-up value
+MACH_S_MAX = 16             # mach_init clamps mach_s to this
+VPOSR_STUB = 0x8000         # LOF, Agnus ID 0 (OCS PAL): S3.1 stub bits
+C64_PAL_PHI2 = 985_248      # VICE PAL phi2 (Hz)
+
+
+class MachTime:
+    """Guest time and beam as a function of the C64 phi2 counter.
+
+    E = phi2 >> s.  A frame is MACH_FRAME_E E ticks; E tick e of the frame
+    is colour clock cc = 5 e, i.e. line v = cc // 227, h = cc % 227: 313
+    lines (V 0-312), the last one partial (h 0-115, cc 70824-70939).
+    VPOSR = $8000 | v >> 8 (LOF and Agnus ID of the stub, V8 in bit 0),
+    VHPOSR = (v & $FF) << 8 | h.
+    """
+
+    def __init__(self, s: int = MACH_S_DEFAULT):
+        self.s = min(s, MACH_S_MAX)
+
+    def frame_phi2(self) -> int:
+        """Frame length in phi2 cycles."""
+        return MACH_FRAME_E << self.s
+
+    def fps(self, phi2_hz: int = C64_PAL_PHI2) -> float:
+        """Guest frames per wall-clock second."""
+        return phi2_hz / self.frame_phi2()
+
+    @staticmethod
+    def pos(e: int) -> tuple[int, int]:
+        """(v, h) of E tick *e* (0 <= e < MACH_FRAME_E) of a frame."""
+        if not 0 <= e < MACH_FRAME_E:
+            raise ValueError(f"E tick {e} outside the frame")
+        return divmod(e * MACH_CCK_PER_E, MACH_LINE_CCK)
+
+    def beam(self, t: int) -> tuple[int, int]:
+        """(VPOSR, VHPOSR) *t* phi2 cycles into the frame.  A t past the
+        frame's end (the VERTB not serviced yet) reads the last E tick."""
+        e = min(t >> self.s, MACH_FRAME_E - 1) if t >= 0 else 0
+        v, h = self.pos(e)
+        return VPOSR_STUB | (v >> 8), (v & 0xFF) << 8 | h
+
+    @staticmethod
+    def is_beam(v: int, h: int) -> bool:
+        """True if (v, h) is a position pos() can return."""
+        cc = v * MACH_LINE_CCK + h
+        return (0 <= h < MACH_LINE_CCK and cc % MACH_CCK_PER_E == 0
+                and cc < MACH_FRAME_E * MACH_CCK_PER_E)

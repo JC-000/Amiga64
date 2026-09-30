@@ -74,6 +74,7 @@ FILE_OWNERS = {
     "runtime/ops/hle.s": "hle",
     "runtime/ops/c2v.s": "c2v",         # W7-V c2v: VIC converter v0
     "runtime/ops/chip.s": "chip",       # W7-T I/O trap stub (S3.1)
+    "runtime/ops/mach.s": "s3",         # W8-L machine loop (S3.2)
     "tests/runner/runner.s": "run",
     "tests/runner/run_program.s": "run",
 }

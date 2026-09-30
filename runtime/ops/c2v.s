@@ -31,9 +31,11 @@
 ; Screen fill under I/O (only in c2v_pal_*, i.e. on a palette change, never
 ; per frame): CPU stores with $01 = %xx100 ($34, all RAM) under sei, the
 ; caller's $01 restored right after.  NMI is not maskable and with $01=$34
-; vectors through RAM $FFFA, so c2v_nmivec (a W7-V interim claim,
-; superseded by S3.2's vectors) is pointed at c2v_nmi_rti first, by a store
-; under ROM that lands in RAM whatever $01 is, before $01 ever changes.
+; vectors through RAM $FFFA, so mach_vnmi (S3.2's RAM NMI vector, rc s3
+; $FFFA-$FFFF) is pointed at c2v_nmi_rti first, by a store under ROM that
+; lands in RAM whatever $01 is, before $01 ever changes.  It stays there:
+; like S3.2's own mach_nmi it is valid under any $01 (docs/C2V.md
+; "Handover to S3.2", option 1), and mach_run re-installs mach_nmi on entry.
 ;
 ; Entry points (JSR; clobber A/X/Y; call with I/O mapped in and no IRQ that
 ; touches the REC).  The work RAM at $B900 lies under BASIC ROM, so every
@@ -103,9 +105,9 @@ P3 = c2v_stage + $300
 .assert (c2v_pairhi & $FF) = 0 .and (c2v_pairlo & $FF) = 0, error, "c2v pair tables must be page-aligned"
 .assert (c2v_stage & $FF) = 0, error, "c2v plane rows must be page-aligned"
 .assert C2V_ROWS >= 20 .and C2V_ROWS <= 25, error, "C2V_FILL needs 20-25 rows"
-.assert c2v_screen + 1000 <= c2v_nmivec, error, "screen matrix overlaps the NMI vector"
+.assert c2v_screen + 1000 <= mach_vnmi, error, "screen matrix overlaps the NMI vector"
 .assert c2v_screen >= c2v_bitmap + C2V_ROWS * 320 .or c2v_screen + 1000 <= c2v_bitmap, error, "bitmap rows overlap the screen matrix"
-.assert c2v_bitmap + C2V_ROWS * 320 <= c2v_nmivec, error, "bitmap overlaps the NMI vector"
+.assert c2v_bitmap + C2V_ROWS * 320 <= mach_vnmi, error, "bitmap overlaps the NMI vector"
 .assert (c2v_stage >> 12) <> $D .and ((c2v_stage + $3FF) >> 12) <> $D, error, "REU DMA must never target the RAM under I/O"
 .assert (c2v_args >> 12) <> $D, error, "REU DMA must never target the RAM under I/O"
 
@@ -245,9 +247,9 @@ c2v_fill:
 .if C2V_SCR_UNDER_IO
 .ifndef C2V_MUT_NMI
         lda #<c2v_nmi_rti       ; NMI guard first: a store under ROM lands
-        sta c2v_nmivec          ; in RAM, so the RAM vector is valid before
+        sta mach_vnmi           ; in RAM, so the RAM vector is valid before
         lda #>c2v_nmi_rti       ; $01 ever exposes it
-        sta c2v_nmivec+1
+        sta mach_vnmi+1
 .endif
         php
         sei
@@ -273,7 +275,7 @@ c2v_leave:
         sta CPU_PORT
         rts
 
-; c2v_nmi_rti — the NMI handler while $01=$34 (c2v_nmivec points here).  The
+; c2v_nmi_rti — the NMI handler while $01=$34 (mach_vnmi points here).  The
 ; NMI is dropped but its source acknowledged, not delayed: with I/O mapped
 ; back in for three instructions, a read of the CIA2 ICR releases /NMI, so
 ; the next NMI edge (CIA2 or RESTORE) is delivered normally.  Counts the

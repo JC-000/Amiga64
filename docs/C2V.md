@@ -112,28 +112,30 @@ it takes in `c2v_v_nmis` (args +72).
 
 ### Handover to S3.2
 
-- **The interim claim.** `c2v $FFFA-$FFFB` in `rc/ram.inc` is labelled
-  "W7-V interim, superseded by S3.2's vectors". S3.2's planned claim
-  `s3 $FFFA-$FFFF` overlaps it, so rescheck fails until the interim line is
-  removed. The handover cannot be missed.
-- **What S3.2's vector must do.** Once S3.2 owns the RAM vectors, it must
-  either keep pointing NMI at a handler that is valid with `$01=$34`, or
-  `c2v_fill` must stop writing `c2v_nmivec` and rely on S3.2's handler.
-  That handler must:
-  - run from RAM that is visible with `$01=$34` (i.e. not KERNAL);
-  - save and restore A and `$01`;
-  - map I/O in before touching CIA2;
-  - acknowledge CIA2 by reading the ICR, or deliver the event itself, and
-    never leave /NMI latched;
-  - return with `rti`.
-  S3_PLAN §1.5's "NMI → `rti`" must therefore become "NMI → acknowledge
-  CIA2, `rti`".
-- **Dropped, acknowledged, not delayed.** An NMI source that fires during
-  the ~10k-cycle fill loses that one event. This is harmless today: nothing
-  in the runtime enables a CIA2 interrupt source, and a RESTORE press is
-  simply lost. If S3.2 or HLE ever uses a CIA2 NMI (e.g. as a time base),
-  its handler must cover the fill window instead of this stub, or it must
-  accept one lost event per palette change.
+Done in Wave 8 (W8-L), **option 1**: S3.2's own NMI handler is valid under
+any `$01`, and `c2v_fill` keeps installing its own stub around the fill.
+
+- **The claim.** The W7-V interim `c2v $FFFA-$FFFB` line is gone; rc
+  `s3 $FFFA-$FFFF` (`mach_vnmi`, `mach_vrst`, `mach_virq`) owns the RAM
+  vectors. `c2v.s` stores to `mach_vnmi` (was `c2v_nmivec`); its asserts
+  (screen matrix and bitmap end below the vectors) test the same address.
+- **S3.2's handler** (`mach_nmi`, `runtime/ops/mach.s`), installed by
+  `mach_run` on every entry: runs from RAM below `$A000` (visible with
+  `$01=$34`); saves A and `$01`; maps I/O in (`$01 & $F8 | $05`); reads the
+  CIA2 ICR, so /NMI is never left latched; counts in `mach_nmis`; restores
+  `$01` and A; `rti`. Tested with `$01=$35` inside `mach_run` and with
+  `$01=$34` (`tests/run_mach.py` legs `nmi`/`nmi34`, mutants `nmiack` and
+  `nmimap`).
+- **`c2v_fill`** still points `$FFFA` at `c2v_nmi_rti` before it sets
+  `$01=$34` (so it stays correct when called outside `mach_run`, as
+  `tests/run_c2v.py` does) and leaves it there. `c2v_nmi_rti` maps I/O in
+  with the pre-fill `$01` (`$35` inside `mach_run`), so it is valid too.
+  The next `mach_run` entry re-installs `mach_nmi`.
+- **Dropped, acknowledged, not delayed**, as before: an NMI source that
+  fires during the fill loses that one event. No S3.2 time-base source
+  uses NMI. The CIA2 timers run the free 32-bit time base with the NMI mask
+  untouched, and reading the ICR does not disturb them. S3_PLAN §1.5's
+  "NMI → `rti`" now reads "NMI → acknowledge CIA2, `rti`" (supervisor).
 
 ### rescheck: `@under` regions
 

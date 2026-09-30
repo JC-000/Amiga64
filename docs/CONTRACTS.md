@@ -319,3 +319,85 @@ Design: `docs/S3_PLAN.md` §1.2–1.3, §3.4. Tests: `tests/run_chip.py`,
   machine state, like guest RAM.
 - **Link order.** `chip.s` links last (Makefile), so adding it moves no
   other module. core.s CODE size is unchanged ($D34).
+
+## Machine loop (S3.2) (W8-L)
+
+Owner: s3 (`runtime/ops/mach.s`; beam reads and the INTREQ VERTB bit in
+`runtime/ops/chip.s`). Design: `docs/S3_PLAN.md` §1.5, §4 "S3.2";
+`docs/WAVE8_BRIEF.md` C1–C3. Reference: `host/chipset_ref.MachTime`.
+Tests: `tests/run_mach.py` (+ `tests/mach/drv.s`), `host/tests/test_mach.py`.
+
+- **`mach_run`** is `emu_run`'s drop-in: the same entry state (after
+  `emu_reset`, regs loaded, `st_halt` = 0) and the same exit contract
+  (`st_halt`/`st_reason` as `emu_run` leaves them). It returns only on a
+  real halt; events are serviced inside. It calls `mach_init` itself if
+  that never ran. Clobbers A/X/Y.
+- **Inside `mach_run`:** `$01` = `$35` (I/O in, BASIC and KERNAL out); the
+  RAM vectors are installed (NMI → `mach_nmi`, IRQ → `mach_irq`, re-written
+  on every entry); CIA #1 timer A, one-shot, is the only unmasked IRQ
+  source; `cli` around `emu_run` and the service pass. **On every exit:**
+  CIA #1 ICR masked (`$7F`) and acknowledged, I = 1, `$01` = the caller's
+  value. The RAM vectors stay (harmless with the KERNAL in); they are
+  written before `$01` changes, so an NMI can never find stale RAM there.
+  The KERNAL's jiffy IRQ (CIA #1 timer A continuous + mask) is not
+  restored: a caller that returns to the KERNAL must re-init it. Existing
+  drivers (`runner.s`, `run_program.s`, HLE) keep `sei`, never call
+  `mach_run`, and see no event.
+- **Race-free clear.** After `emu_run` returns, under `sei`: `st_halt &=
+  $7F`; nonzero → a real halt → exit with `ev_pend` untouched (a halt
+  racing an event, `st_halt` = `$81`, returns `$01`). Zero → `ev_pend` is
+  copied to `mach_ev` and cleared, `cli`, service, re-enter `emu_run`.
+- **IRQ handler** (`mach_irq`, ~40 cycles with the 6502's IRQ entry):
+  saves A, reads the CIA #1 ICR (acknowledge); if an enabled source fired,
+  `ev_pend |= 1` and `st_halt |= $80`. Touches nothing else: never the
+  REC, the REU or guest state. It is valid only with I/O mapped in, which
+  holds inside `mach_run` (the c2v `$01` = `$34` fill runs under `sei`).
+- **NMI handler** (`mach_nmi`): valid under any `$01` (RAM below `$A000`);
+  saves A and `$01`, maps I/O in (`$01 & $F8 | $05`), reads the CIA #2 ICR
+  (never leaves /NMI latched), `inc mach_nmis`, restores, `rti`. RESTORE
+  and CIA #2 NMIs are dropped. `c2v_fill` still points `$FFFA` at its own
+  `c2v_nmi_rti` around its `$34` fill and leaves it there (also valid under
+  any `$01`); `mach_run` re-installs `mach_nmi` on entry. RESET (`$FFFC`)
+  is claimed but never written: a reset maps the KERNAL in.
+- **Time base.** CIA #2 timer A (φ2, continuous, latch `$FFFF`) cascades
+  into timer B (counts A's underflows, latch `$FFFF`): C = `~(TB:TA)`, a
+  free-running 32-bit φ2 counter (wraps after 2^32 φ2, ~73 min). `mach_rdc`
+  reads a consistent snapshot (TA high byte read around its low byte, TB
+  around TA, repeat on a change). CIA #2 port A (VIC bank), DDRs and ICR
+  mask are never written; CRA bits 7–6 and CRB bit 7 are kept. Nothing
+  else may reprogram the CIA #2 timers after `mach_init` (the runtime does
+  not; test tools such as `perf_cycles` and `run_c2v`'s NMI leg do, and
+  need a fresh `mach_init`). The CIA #2
+  ICR data bits (TA/TB underflows) stay masked; `c2v_nmi_rti`/`mach_nmi`
+  reading the ICR does not disturb the counter.
+- **Guest time.** E = C >> s, s = `mach_s` (u8 setting, power-up 4,
+  clamped to 16, latched by `mach_init`). One guest frame = 14188 E ticks
+  = 14188 << s φ2. In VICE PAL (985248 Hz): 69.44 / 2^s frames/s (4.340 at
+  s = 4); the harness's default NTSC VICE gives 72.08 / 2^s.
+- **Events (S3.2: VERTB only).** `mach_svc`, on entry and after each
+  event: for every frame boundary C has passed, `mach_frames` += 1, INTREQR
+  bit 5 set (`chip_shd+$1F`), next boundary += frame; then CIA #1 timer A,
+  one-shot, := min(next − C, `$FFFF`) (a frame longer than 65535 φ2 takes
+  several wake-ups). Frames are counted, never skipped. Arithmetic is
+  modular: correct while `mach_run` is re-entered within 2^31 φ2 (~36 min)
+  of its last service pass. No interrupt delivery (S3.3), no CIA-A/B guest
+  timers (S3.4), no copper/refresh (S3.5). `HALT_STOP` returns to the
+  caller like any halt (idle skip needs S3.3).
+- **Beam** (`mach_beam`, from `chip.s` VPOSR/VHPOSR reads once `mach_on`):
+  t = C − frame start (φ2 into the frame; t ≥ frame length, i.e. the
+  boundary passed but not serviced yet, reads the last tick), e = t >> s,
+  cc = 5 e, V = cc / 227 (0–312; line 312 has H 0–115), H = cc mod 227.
+  **VPOSR = `$8000 | V8`** (LOF and Agnus ID of the S3.1 stub),
+  **VHPOSR = `(V & $FF) << 8 | H`**. A long read (`move.l VPOSR`) latches
+  one beam for both words. Before `mach_init` (`mach_on` = 0) both return
+  the S3.1 values (VPOSR `$8000`, VHPOSR its shadow word).
+- **INTREQ VERTB** (only once `mach_on`): an INTREQ (`$09C`) write with bit
+  5 set sets (bit 15 = 1) or clears INTREQR bit 5. Every other INTREQ bit
+  keeps the S3.1 behaviour (S3.3).
+- **Claims.** rc zp s3 `$95–$99`: `ev_pend` (bit 0 = CIA #1 timer A),
+  `mach_frames` (u32 LE); none is written by the KERNAL IRQ. rc ram s3
+  `$FFFA–$FFFF`: `mach_vnmi`, `mach_vrst`, `mach_virq`. CIA #1/#2 register
+  equates in the rc sys block. Linker state in `runner.lbl`: `mach_s`
+  (DATA, 4 at load), `mach_on`, `mach_nmis`, `mach_bv`/`mach_bh`.
+- **Link order.** `mach.s` links after `chip.s` (Makefile), so no other
+  module's code moves; `core.s` is unchanged.

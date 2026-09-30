@@ -404,6 +404,43 @@ in-page control. That is **one refill = 89.9 µs (base) / 90.0 µs (trap)**,
 over 193,692 page changes). The trap does not change it: `fetch_word` is
 unchecked.
 
+## (h) S3.2 machine loop (W8-L): event path and beam reads
+
+**Static cost** (`runtime/ops/mach.s`; contract `docs/CONTRACTS.md`
+"Machine loop (S3.2)"). The interpreter's per-instruction cost is
+**+0**: `core.s` is byte-identical (the PRG linked with the base tree's
+`core.o` equals the new one, `build/evidence/w8-loop/green/core_identical.txt`),
+`mach.s` links after `chip.s`, and the only core bytes that moved are
+absolute operands (BSS +$400, page-aligned; the chip entries +10; RODATA
++$36D, where neither `ea_*` table crosses a page in either build).
+`tests.perf_cycles --base <wave8/integration> --max-delta 0` passes. An event
+costs [EST, static] one IRQ (~40 cycles: entry, `lda CIA1_ICR`, two `ora`,
+`rti`), the return from `emu_run` at the next instruction boundary, and a
+service pass (counter read + compare + re-arm, ~200 cycles). With frames longer than
+65535 φ2 (s ≥ 3) the one-shot wakes the loop every 65536 φ2 on the way:
+< 0.5% of the time at 1 MHz.
+
+**Beam reads [MEASURED VICE]** (`python3 -m tests.run_mach --perf`, PAL,
+screen off; cycles of one `mem_read16` API call including its jsr/rts,
+CIA1 timer B; `build/evidence/w8-loop/perf/beam_read.json`):
+
+| read | s = 0 | s = 4 | s = 8 | s = 16 |
+|---|---|---|---|---|
+| VHPOSR (live) | 1050 | 1155 | 1268 | 1500 |
+| VPOSR (live) | 1042 | 1155 | 1264 | 1492 |
+| VHPOSR before `mach_init` (stub) | 225 | | | |
+| INTREQR (a plain trapped register) | 215 | | | |
+
+So a live beam read costs **~940 cycles more** than a plain trapped read
+at s = 4 (+27 per shift step; a counter re-read adds ~40 on rare CIA
+wraps). The parts: the consistent 32-bit CIA read (~70), frame offset and
+clamp (~100), t >> s (27 s), 5·e (~70), and divmod by 227 as 16
+shift-subtract steps (~450). A `move.l VPOSR` computes the beam once, not
+twice (latched for the second word). The path is cold (only `$DFF004–7`
+reads). If a guest turns out to poll the beam hard (AROS's VHPOSR PAL
+probe polls a few hundred times at boot), the division is the lever: a
+313-entry line table would cut ~400 cycles.
+
 ## (e) Caveats
 
 - Every number above comes from **hand-written cycle comments**, not

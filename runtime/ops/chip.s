@@ -26,7 +26,13 @@
 ; Reads (§3.4): VPOSR $8000, POTINP $FF00, SERDATR $3000, DENISEID $FFFF;
 ;   other read-only slots ($000-$01E) return their shadow word (0 unless
 ;   a later chip model or the host puts a value there); write-only
-;   registers ($020-$1FE) return 0.  CIA registers read their shadow,
+;   registers ($020-$1FE) return 0.
+; S3.2 (W8-L, once mach_init ran, i.e. mach_on != 0): VPOSR = $8000 | V8
+;   and VHPOSR = V7-V0 : H from the machine loop's time base (mach_beam,
+;   docs/CONTRACTS.md "Machine loop (S3.2)"); a long read keeps the beam
+;   of its first word, so move.l VPOSR is one coherent position.  An
+;   INTREQ write sets or clears INTREQR bit 5 (VERTB, SET/CLR by bit 15);
+;   the other INTREQ bits stay as S3.1 left them (S3.3).  CIA registers read their shadow,
 ;   except CIA-A PRA = (PRA & DDRA) | ($EB & ~DDRA): the port inputs of an
 ;   A500 with DF0 present and empty, both mouse buttons up.
 ; Writes: every decoded write is appended to chip_log; write-only
@@ -56,6 +62,7 @@
 .export chip_shd, chip_cia, chip_log, chip_logn, chip_ser, chip_sern
 .export chip_nopen
 .import m_scmd                  ; core.s mio_split: REC command of the split
+.import mach_on, mach_beam, mach_bv, mach_bh    ; W8-L mach.s: S3.2 beam
 
 CHIP_LOGN_MASK = 63     ; @value log ring entries - 1
 CHIP_SERDAT    = $30    ; @value SERDAT register offset
@@ -64,6 +71,9 @@ CHIP_DENISEID  = $7C    ; @value DENISEID (read-only, OCS: floats $FFFF)
 CHIP_PRA_IN    = $EB    ; @value CIA-A PRA input pins (docs/S3_PLAN.md §3.4)
 CHIP_ID_CIAA   = $0A    ; @value log id high byte, CIA-A
 CHIP_ID_CIAB   = $0B    ; @value log id high byte, CIA-B
+CHIP_INTREQR   = $1E    ; @value INTREQR (read-only) register offset
+CHIP_INTREQ    = $9C    ; @value INTREQ (write) register offset
+CHIP_VERTB     = $20    ; @value INTREQ bit 5, low byte
 
 .segment "BSS"
 chip_shd:   .res 512
@@ -81,6 +91,7 @@ chip_lh:    .res 1              ; log id, high byte
 chip_n:     .res 1              ; byte counter (long CIA accesses)
 chip_t:     .res 1              ; scratch
 chip_sx:    .res 1              ; caller's X
+chip_bk:    .res 1              ; beam latch: $80 armed (long read), 1 held
 
 .segment "CODE"
 
@@ -122,6 +133,8 @@ cia:    jsr c_rdb
         jsr c_ldadr
         cmp #$DF
         bne cia
+        lda #$80                ; W8-L: one beam for both words
+        sta chip_bk
         jsr c_rdw
         lda chip_vh
         sta m_val+3
@@ -129,6 +142,8 @@ cia:    jsr c_rdb
         sta m_val+2
         jsr c_inc2
         jsr c_rdw
+        lda #0
+        sta chip_bk
         lda chip_vh
         sta m_val+1
         lda chip_vl
@@ -363,6 +378,8 @@ p0:     lda chip_a
         and #$FE
         cmp #$04                ; VPOSR: LOF, Agnus ID 0 (OCS PAL)
         beq vposr
+        cmp #$06                ; VHPOSR (W8-L: live after mach_init)
+        beq vhposr
         cmp #$16                ; POTINP: right button up
         beq potinp
         cmp #$18                ; SERDATR: TBE | TSRE
@@ -371,7 +388,7 @@ p0:     lda chip_a
         beq denise
         cmp #CHIP_RO_END
         bcs done                ; write-only -> 0
-        tax                     ; other read-only slot: its shadow
+shadow: tax                     ; other read-only slot: its shadow
         lda chip_shd,x
         sta chip_vh
         lda chip_shd+1,x
@@ -379,6 +396,18 @@ p0:     lda chip_a
 done:   rts
 vposr:  lda #$80
         sta chip_vh
+        jsr c_beam
+        bcs done
+        lda mach_bv+1           ; V8 in bit 0
+        sta chip_vl
+        rts
+vhposr: jsr c_beam
+        lda #$06
+        bcs shadow              ; before mach_init: the S3.1 shadow word
+        lda mach_bv
+        sta chip_vh
+        lda mach_bh
+        sta chip_vl
         rts
 potinp: lda #$FF
         sta chip_vh
@@ -390,6 +419,27 @@ serdatr:
 denise: lda #$FF
         sta chip_vh
         sta chip_vl
+        rts
+.endproc
+
+; c_beam — W8-L: the S3.2 beam into mach_bv/mach_bh; C = 1 before
+; mach_init (no time base: the caller keeps the S3.1 value).  Inside a long
+; read (chip_bk armed by chip_r32) the first beam word latches the beam and
+; the second reuses it.  Clobbers A and X.
+.proc c_beam
+        lda mach_on
+        bne on
+        sec
+        rts
+on:     lda chip_bk
+        cmp #1
+        beq have                ; this long's first word latched it
+        jsr mach_beam
+        lda chip_bk
+        beq have
+        lda #1
+        sta chip_bk
+have:   clc
         rts
 .endproc
 
@@ -429,8 +479,23 @@ p0:     lda #0
         lda chip_vl
         sta chip_shd+1,x
         cpx #CHIP_SERDAT
+        beq ser
+        cpx #CHIP_INTREQ
         bne done
-        ldx chip_sern           ; SERDAT: low byte -> the serial ring
+        and #CHIP_VERTB         ; W8-L: INTREQ SET/CLR of the VERTB bit only,
+        beq done                ; once the machine loop runs (mach_on)
+        lda mach_on
+        beq done
+        lda chip_shd+CHIP_INTREQR+1
+        bit chip_vh
+        bmi set
+        and #<~CHIP_VERTB
+        sta chip_shd+CHIP_INTREQR+1
+        rts
+set:    ora #CHIP_VERTB
+        sta chip_shd+CHIP_INTREQR+1
+        rts
+ser:    ldx chip_sern           ; SERDAT: low byte -> the serial ring
         sta chip_ser,x
         inc chip_sern
         bne done
