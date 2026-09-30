@@ -728,7 +728,8 @@ MACH_LINE_CCK = 227         # colour clocks per PAL line (H 0-226)
 MACH_S_DEFAULT = 4          # runtime/ops/mach.s mach_s power-up value
 MACH_S_MAX = 16             # mach_init clamps mach_s to this
 VPOSR_STUB = 0x8000         # LOF, Agnus ID 0 (OCS PAL): S3.1 stub bits
-C64_PAL_PHI2 = 985_248      # VICE PAL phi2 (Hz)
+C64_PAL_PHI2 = 985_248      # C64 PAL phi2 (Hz): VICE -pal
+C64_NTSC_PHI2 = 1_022_727   # C64 NTSC phi2 (Hz): VICE -ntsc, the bench U64E
 
 
 class MachTime:
@@ -749,7 +750,8 @@ class MachTime:
         return MACH_FRAME_E << self.s
 
     def fps(self, phi2_hz: int = C64_PAL_PHI2) -> float:
-        """Guest frames per wall-clock second."""
+        """Guest frames per wall-clock second on a C64 whose phi2 is
+        *phi2_hz* (the runtime itself has no phi2 constant)."""
         return phi2_hz / self.frame_phi2()
 
     @staticmethod

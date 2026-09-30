@@ -418,7 +418,10 @@ costs [EST, static] one IRQ (~40 cycles: entry, `lda CIA1_ICR`, two `ora`,
 `rti`), the return from `emu_run` at the next instruction boundary, and a
 service pass (counter read + compare + re-arm, ~200 cycles). With frames longer than
 65535 φ2 (s ≥ 3) the one-shot wakes the loop every 65536 φ2 on the way:
-< 0.5% of the time at 1 MHz.
+< 0.5% of the time at 1 MHz. Guest frames/s = φ2 / 14188 / 2^s: 69.4 / 2^s
+on PAL, **72.1 / 2^s on the bench U64E** (NTSC; its CIAs count φ2 unscaled
+at 48 MHz [MEASURED HW, W8-H]) [MEASURED VICE: 70.00 / 4.333 PAL and
+72.41 / 4.561 NTSC at s = 0 / 4, `tests/run_mach.py` legs fps / fps_ntsc].
 
 **Beam reads [MEASURED VICE]** (`python3 -m tests.run_mach --perf`, PAL,
 screen off; cycles of one `mem_read16` API call including its jsr/rts,

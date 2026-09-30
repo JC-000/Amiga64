@@ -11,6 +11,7 @@
 ;   P+0  u32 PC          P+4  u32 A7        P+8  u8 s (-> mach_s)
 ;   P+9  u8  flags       P+10 u8 caller $01  P+11 u32 PC of the follow-up
 ;   P+15 u8  preset st_halt   P+16 u8 preset ev_pend
+;   P+21 u8  CIA1 CRA TODIN bit for the TOD ($80 = 50 Hz mains, 0 = 60 Hz)
 ;   P+17 u24 guest address of the timed read (drv_time), P+20 u8 nonzero
 ;   = do the read (0 = the empty calibration window)
 ;   flags: F_INIT  mach_init first      F_FOLLOW  follow-up emu_run (below)
@@ -301,7 +302,8 @@ drv_null:
 ; todstart — CIA1 TOD at 50 Hz, set to 1:00:00.0 and started; R+16 = start.
 todstart:
         lda CIA1_CRA
-        ora #$80                ; TODIN: 50 Hz
+        and #$7F
+        ora P+21                ; TODIN: the machine's mains (50/60 Hz)
         sta CIA1_CRA
         lda CIA1_CRB
         and #$7F                ; writes set the clock, not the alarm

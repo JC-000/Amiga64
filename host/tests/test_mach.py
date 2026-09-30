@@ -28,9 +28,15 @@ def test_s_clamped():
 
 
 @pytest.mark.parametrize("s,fps", [(0, 69.44), (2, 17.36), (4, 4.340)])
-def test_fps_vice(s, fps):
-    # the brief's 69.4 / 2^s at VICE's 985248 Hz
+def test_fps_pal(s, fps):
+    # the brief's 69.4 / 2^s at PAL's 985248 Hz
     assert cr.MachTime(s).fps() == pytest.approx(fps, rel=1e-3)
+
+
+@pytest.mark.parametrize("s,fps", [(0, 72.08), (2, 18.02), (4, 4.505)])
+def test_fps_ntsc(s, fps):
+    # the bench U64E is NTSC (supervisor note, W8-H [MEASURED HW])
+    assert cr.MachTime(s).fps(cr.C64_NTSC_PHI2) == pytest.approx(fps, rel=1e-3)
 
 
 @pytest.mark.parametrize("e,vh", [(0, (0, 0)), (1, (0, 5)), (45, (0, 225)),

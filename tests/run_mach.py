@@ -17,8 +17,11 @@ Legs:
   beam    VPOSR/VHPOSR sampled by move.l: every sample is a position of the
           host/chipset_ref.MachTime formula, monotonic within a frame, and
           the wraps match mach_frames; s = 0, 4, 8
-  fps     guest frames per second (CIA1 TOD) = 985248 / 14188 / 2^s +-10%
-          for s = 0, 2, 4; the guest's VERTB count = mach_frames
+  fps     guest frames per second (CIA1 TOD) = phi2 / 14188 / 2^s +-10%
+          for s = 0, 2, 4, phi2 of the VICE model launched (PAL 985248);
+          the guest's VERTB count = mach_frames
+  fps_ntsc  the fps leg again in an NTSC VICE (phi2 1022727, the bench
+          U64E's standard): its own session, run after the PAL legs
   race    st_halt = $81 on entry (a halt racing an event): the halt comes
           back ($01, reason kept) and ev_pend stays set
   exit    after mach_run: $01 restored ($37 and $36 callers), I = 1, and a
@@ -259,12 +262,14 @@ def drv_labels(out_dir: str) -> dict[str, int]:
 
 
 class Rig:
-    def __init__(self, target, labels, prg: str):
+    def __init__(self, target, labels, prg: str, ntsc: bool = False):
         from tests.harness_util import lookup_label
         from tests.run_program import Session
         self.tg, self.t = target, target.transport
         self.lab = lambda n: lookup_label(labels, n)
         self.sess = Session(target=target, labels=labels, timeout=300.0)
+        self.ntsc = ntsc
+        self.phi2 = chipset_ref.C64_NTSC_PHI2 if ntsc else chipset_ref.C64_PAL_PHI2
         try:
             self.lab("mach_run")
             self.mach = True
@@ -325,6 +330,10 @@ class Rig:
         blk = struct.pack("<IIBBBIBB", pc, BASE + 0x8000, s, flags, port, pc2,
                           *preset)
         self.w(P, blk)
+        # TODIN = 50 Hz in both models: VICE feeds the TOD 50 Hz mains even
+        # with -ntsc (measured: TODIN = 60 Hz there runs the TOD at 5/6;
+        # 50 Hz matches 300 NTSC raster frames to 0.1 s)
+        self.w(P + 21, bytes([0x80]))
         self.call(self.dl["drv_run"])
         r = self.r(R, 48)
         if r[0] != 0xFF:
@@ -459,9 +468,10 @@ def leg_fps(rig: Rig) -> list[str]:
         if res["frames"] != n:
             f.append(f"fps s={s}: mach_frames = {res['frames']}, guest saw {n}")
         dt = (tod_tenths(res["tod1"]) - tod_tenths(res["tod0"])) / 10
-        want = chipset_ref.MachTime(s).fps()
+        want = chipset_ref.MachTime(s).fps(rig.phi2)
         got = res["frames"] / dt if dt > 0 else 0.0
-        print(f"    fps s={s}: {res['frames']} frames in {dt:.1f} s (TOD) = "
+        print(f"    fps s={s} ({'NTSC' if rig.ntsc else 'PAL'}): "
+              f"{res['frames']} frames in {dt:.1f} s (TOD) = "
               f"{got:.3f}/s, want {want:.3f} +-10%")
         if not 0.9 * want <= got <= 1.1 * want:
             f.append(f"fps s={s}: {got:.3f} frames/s, want {want:.3f} +-10%")
@@ -530,7 +540,7 @@ def leg_nmi(rig: Rig) -> list[str]:
     if clean(res, "nmi", f):
         dt = (tod_tenths(res["tod1"]) - tod_tenths(res["tod0"])) / 10
         n = (res["nmi1"] - res["nmi0"]) & 0xFF
-        want = int(dt * chipset_ref.C64_PAL_PHI2 / 65536)
+        want = int(dt * rig.phi2 / 65536)
         print(f"    nmi: {n} NMIs in {dt:.1f} s (~{want} timer-A underflows)")
         if n < max(3, want // 2):
             f.append(f"nmi: {n} CIA2 NMIs taken in {dt:.1f} s, want ~{want}: "
@@ -577,29 +587,40 @@ def leg_stop(rig: Rig) -> list[str]:
 
 LEGS = {"stub": leg_stub, "poll": leg_poll, "vertb": leg_vertb,
         "beam": leg_beam, "fps": leg_fps, "race": leg_race, "exit": leg_exit,
-        "nmi": leg_nmi, "nmi34": leg_nmi34, "stop": leg_stop}
+        "nmi": leg_nmi, "nmi34": leg_nmi34, "stop": leg_stop,
+        "fps_ntsc": leg_fps}
+NTSC_LEGS = {"fps_ntsc"}              # run in their own NTSC session
 
 
-def session(prg: str, fn) -> object:
+def session(prg: str, fn, ntsc: bool = False) -> object:
     from c64_test_harness import Labels, UnifiedManager, ViceConfig
     from tests.harness_util import REU_VICE_ARGS
     from tests.run_vectors import prepare_target
     prg = os.path.abspath(prg)
     labels = Labels.from_file(os.path.splitext(prg)[0] + ".lbl")
-    # PAL (the harness defaults to NTSC): the guest is a PAL A500 and the
-    # frames/s legs are PAL numbers (phi2 985248 Hz, 50 Hz TOD)
-    cfg = ViceConfig(prg_path=prg, warp=True, sound=False, ntsc=False,
+    # The video standard is explicit (the harness defaults to NTSC): PAL for
+    # the main legs, NTSC for NTSC_LEGS; the fps legs expect this model's phi2
+    cfg = ViceConfig(prg_path=prg, warp=True, sound=False, ntsc=ntsc,
                      extra_args=list(REU_VICE_ARGS))
     with UnifiedManager(backend="vice", vice_config=cfg) as mgr:
         tg = mgr.acquire()
         try:
             prepare_target(tg, prg)
-            return fn(Rig(tg, labels, prg))
+            return fn(Rig(tg, labels, prg, ntsc))
         finally:
             mgr.release(tg)
 
 
 def run_all(prg: str, legs: list[str]) -> list[str]:
+    pal = [x for x in legs if x not in NTSC_LEGS]
+    ntsc = [x for x in legs if x in NTSC_LEGS]
+    fails = run_legs(prg, pal, False) if pal else []
+    if ntsc:
+        fails += run_legs(prg, ntsc, True)
+    return fails
+
+
+def run_legs(prg: str, legs: list[str], ntsc: bool) -> list[str]:
     def body(rig: Rig) -> list[str]:
         fails: list[str] = []
         for name in legs:
@@ -617,7 +638,7 @@ def run_all(prg: str, legs: list[str]) -> list[str]:
                 print(f"    {x}")
             fails += f
         return fails
-    return session(prg, body)
+    return session(prg, body, ntsc)
 
 
 # --------------------------------------------------------------------------
@@ -701,7 +722,7 @@ def build_mutant(name: str, out_dir: str) -> str:
 
 MUTANT_LEGS = {"noirq": ["vertb"], "eq80": ["race"], "irqexit": ["exit"],
                "port": ["exit"], "nmiack": ["nmi"], "nmimap": ["nmi34"],
-               "shift": ["fps"], "beamshift": ["beam"], "nosei": ["exit"]}
+               "shift": ["fps", "fps_ntsc"], "beamshift": ["beam"], "nosei": ["exit"]}
 
 
 def teeth(prg: str, only: list[str] | None) -> int:

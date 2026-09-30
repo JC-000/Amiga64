@@ -372,8 +372,11 @@ Tests: `tests/run_mach.py` (+ `tests/mach/drv.s`), `host/tests/test_mach.py`.
   reading the ICR does not disturb the counter.
 - **Guest time.** E = C >> s, s = `mach_s` (u8 setting, power-up 4,
   clamped to 16, latched by `mach_init`). One guest frame = 14188 E ticks
-  = 14188 << s φ2. In VICE PAL (985248 Hz): 69.44 / 2^s frames/s (4.340 at
-  s = 4); the harness's default NTSC VICE gives 72.08 / 2^s.
+  = 14188 << s φ2. The runtime has no φ2 constant: frames/s = φ2 / 14188 /
+  2^s. PAL (985248 Hz, VICE `-pal`): 69.44 / 2^s (4.340 at s = 4). NTSC
+  (1022727 Hz, the harness's default VICE and **the bench U64E**, whose
+  CIAs count φ2 unscaled at 48 MHz [MEASURED HW, W8-H]): **72.08 / 2^s**
+  (4.505 at s = 4).
 - **Events (S3.2: VERTB only).** `mach_svc`, on entry and after each
   event: for every frame boundary C has passed, `mach_frames` += 1, INTREQR
   bit 5 set (`chip_shd+$1F`), next boundary += frame; then CIA #1 timer A,
