@@ -22,6 +22,9 @@
 
 ; @region sys $00-$01 6510 CPU port (DDR/data) - hardware, never claimable
 ; (no equates: core never touches $01; default bank state assumed)
+.ifndef CPU_PORT
+CPU_PORT  = $01         ; W7-V c2v: 6510 data port; c2v.s banks BASIC out ($37 -> $36) per call, $34 under sei for the under-I/O screen fill; always restored
+.endif
 
 ; @region run $02-$0F loader/harness scratch - two overlaid banks, entries never run concurrently
 ; runner.s bank (test_run_case):

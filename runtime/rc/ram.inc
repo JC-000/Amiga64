@@ -31,7 +31,21 @@ SCREEN     = $0400      ; 40x25 screen RAM; hle.s cursor offset 0-999
 ; @region core $0900-$0AFF DISPATCH jump tables - two page-aligned 256-byte tables (build/gen/dispatch.s)
 ; @region core $0B00-$9FFF PRG code/rodata/data/bss - CODE onward, incl. page-aligned code_win in BSS
 
-; @region free $A000-$BFFF BASIC ROM / RAM underneath - unclaimed
+; @region free $A000-$B8FF BASIC ROM / RAM underneath - unclaimed
+; W7-V c2v: VIC converter v0 work RAM (RAM under BASIC ROM; runtime/ops/c2v.s, docs/C2V.md)
+; @region c2v $B900-$BFFF c2v pair-OR tables, one staged plane row per plane, argument block
+.ifndef c2v_pairhi
+c2v_pairhi = $B900      ; W7-V c2v: byte -> pair-OR of its 4 pixel pairs, bits 7-4 (page-aligned)
+.endif
+.ifndef c2v_pairlo
+c2v_pairlo = $BA00      ; W7-V c2v: same, bits 3-0 (page-aligned)
+.endif
+.ifndef c2v_stage
+c2v_stage  = $BB00      ; W7-V c2v: 4 page-aligned plane rows ($BB00/$BC00/$BD00/$BE00)
+.endif
+.ifndef c2v_args
+c2v_args   = $BF00      ; W7-V c2v: argument block + converter state (layout: docs/C2V.md)
+.endif
 
 ; @region run $C000-$C7FF buf_case - harness writes test cases / load records here
 .ifndef buf_case
@@ -61,6 +75,17 @@ CIA1_DDRA   = $DC02     ; CIA 1 data direction A
 .endif
 .ifndef CIA1_DDRB
 CIA1_DDRB   = $DC03     ; CIA 1 data direction B
+.endif
+.ifndef VIC_COLRAM
+VIC_COLRAM  = $D800     ; W7-V c2v: VIC colour RAM (low nibbles), written by runtime/ops/c2v.s
+.endif
+.ifndef CIA2_ICR
+CIA2_ICR    = $DD0D     ; W7-V c2v: CIA 2 interrupt control; read = acknowledge (releases /NMI)
+.endif
+; W7-V c2v: the RAM under this I/O window is a separate claimable resource (host/rescheck.py `@under`)
+; @under c2v $D000-$D3FF c2v VIC screen matrix + sprite pointers in the RAM under VIC/SID I/O (bank 3 + $1000); CPU writes with $01=$34 under sei only, never REU DMA
+.ifndef c2v_screen
+c2v_screen = $D000      ; W7-V c2v: 40x25 screen matrix
 .endif
 ; @region sys $DF00-$DF0A REU RAM-Expansion-Controller registers
 .ifndef REC_STATUS
@@ -104,7 +129,17 @@ ULT_CMD_BASE = $DF1C    ; control/command/response/status window
 .endif
 ; @region free $DF20-$DFFF expansion I/O - unclaimed
 
-; @region free $E000-$FFFF KERNAL ROM / RAM underneath - unclaimed
+; W7-V c2v: VIC bank 3 output (RAM under KERNAL; writes need no banking, the VIC always reads RAM)
+; @region c2v $E000-$FF3F c2v VIC hires/multicolour bitmap, 25 char rows (200 lines) in char-cell order (bank + $2000)
+.ifndef c2v_bitmap
+c2v_bitmap = $E000      ; W7-V c2v: VIC bank 3 bitmap
+.endif
+; @region free $FF40-$FFF9 KERNAL ROM / RAM underneath - unclaimed
+; @region c2v $FFFA-$FFFB W7-V interim, superseded by S3.2's vectors: RAM NMI vector -> c2v RTI stub, for the $01=$34 screen fill
+.ifndef c2v_nmivec
+c2v_nmivec = $FFFA      ; W7-V c2v: written (under ROM) before every under-I/O screen fill
+.endif
+; @region free $FFFC-$FFFF KERNAL ROM / RAM underneath - unclaimed (S3.2 claims $FFFA-$FFFF)
 
 ; --- Contract invariants (assemble-time; keep true under -D relocation) ----
 .assert (buf_case & $FF) = 0,   error, "buf_case must be page-aligned (c64.cfg CASEBUF)"
