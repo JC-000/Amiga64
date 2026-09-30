@@ -7,9 +7,9 @@ A translation layer for running Amiga 500 programs on the **C64 Ultimate** and *
 | Milestone | State |
 |---|---|
 | **M0 — Hunk loader** | ✅ done (`m0-loader-green`) — Amiga Hunk executables parsed, relocated, staged into REU, and run end-to-end |
-| **M1 — 68000 interpreter** | ✅ done (`m1-vectors-green`, `hw-validated`) — full user-mode integer set, 5150 golden + 63 hand vectors green in VICE **and on real U64E hardware with zero divergence** |
+| **M1 — 68000 interpreter** | ✅ done (`m1-vectors-green`, `hw-validated`) — full user-mode integer set, 5150 golden + 63 hand vectors green in VICE **and on real U64E hardware with zero divergence** (the current golden gate is the 5129-case subset without $BF/$DF cases, see `docs/CONTRACTS.md` "Vector sets") |
 | **M2 — AmigaOS HLE** | ✅ done — **vbcc-compiled C programs run to completion**: stdio incl. file I/O (`fopen` r/w/a/r+, `fseek`, `remove`), keyboard input on stdin, `malloc`/`free` on a real heap, pools, custom stacks, `getenv`/`time`/`system` |
-| M3 — Chipset shim | groundwork (Wave 6): **68000 supervisor mode & exceptions** (gated by `st_exc`; 679 super vectors + full upstream pool 83,435 green), plan in [`docs/S3_PLAN.md`](docs/S3_PLAN.md) |
+| M3 — Chipset shim | groundwork (Wave 6): **68000 supervisor mode & exceptions** (gated by `st_exc`; 678 super vectors (679 before the $BF/$DF exclusion) + full upstream pool 83,435 green); **S3.1 I/O trap** (Wave 7): banks $BF/$DF go to a chip-register stub (`runtime/ops/chip.s`, `docs/CONTRACTS.md` "I/O trap"), plan in [`docs/S3_PLAN.md`](docs/S3_PLAN.md) |
 | M4 — AOT translator | not started |
 
 Measured on a real Ultimate 64 Elite (48 MHz turbo): **~75–80k 68k instructions/sec** on an ALU mix and **~68k memory-bound** (+25% memory-bound / +43% read-modify-write since the REC-shadow memory API) — roughly a 0.5–1 MHz 68000. Details in [`docs/HARDWARE.md`](docs/HARDWARE.md); model in [`docs/PERF.md`](docs/PERF.md).

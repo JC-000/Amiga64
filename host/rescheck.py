@@ -61,6 +61,7 @@ FILE_OWNERS = {
     "runtime/ops/g5_flow.s": "g5",
     "runtime/ops/g6_muldiv.s": "g6",
     "runtime/ops/hle.s": "hle",
+    "runtime/ops/chip.s": "chip",       # W7-T I/O trap stub (S3.1)
     "tests/runner/runner.s": "run",
     "tests/runner/run_program.s": "run",
 }
