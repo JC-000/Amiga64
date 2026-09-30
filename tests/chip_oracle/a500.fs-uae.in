@@ -1,0 +1,19 @@
+# tests/chip_oracle/a500.fs-uae.in -- FS-UAE config for one chip-oracle run
+# (tests/chip_oracle.py fills in rom, serial and base).  A500 (68000, OCS), the
+# oracle's own 256 KB ROM as the "Kickstart" (bare metal: no Kickstart or
+# AROS code), 512 KB chip and nothing else, no floppy in DF0:, serial port
+# to a file, headless, no sound, warp.
+[fs-uae]
+amiga_model = A500
+chipset = ocs
+kickstart_file = {rom}
+chip_memory = 512
+slow_memory = 0
+fast_memory = 0
+headless = 1
+sound = 0
+warp_mode = 1
+automatic_input_grab = 0
+initial_input_grab = 0
+serial_port = {serial}
+base_dir = {base}
