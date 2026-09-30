@@ -439,7 +439,7 @@ relies on (review L8); the S3.1/S3.7 stub must return them, not the "reads
 | CIA-A PRA inputs | $EB | bit 6 = 1 (left button up; with POTINP bit 10 it keeps AROS out of the boot menu, `rom/dosboot/menu.c:900` [SOURCE]); /RDY high, /TK0 low (track 0), /WPRO high, /CHNG low (no disk) |
 | DENISEID | $FFFF | OCS has no DENISEID; amigavideo then takes the OCS path |
 | VPOSR | $8000 \| V8 | LOF set, Agnus ID 0 (OCS PAL) |
-| DMACONR | DMACON & $03FF | BBUSY never set (synchronous blitter) |
+| DMACONR | (DMACON & $07FF) | BZERO | BBUSY never set (synchronous blitter); BLTPRI and BZERO as FS-UAE shows (W7-M oracle, `host/chipset_ref.py`); the boot counts are the same either way |
 
 Unmapped space is a deliberate divergence (review L7): the plan and the
 model return 0 for $DF0000–$DFEFFF (an A500 mirrors the custom registers
