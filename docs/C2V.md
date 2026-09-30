@@ -78,9 +78,10 @@ The VIC always reads RAM.
 
 Only `c2v_pal_*` do this, i.e. only on a palette change:
 
-1. Store `<c2v_nmi_rti`/`>c2v_nmi_rti` to `$FFFA/$FFFB`. A store under ROM
-   lands in RAM whatever `$01` is, so the RAM vector is valid **before**
-   `$01` ever exposes it.
+1. Store `<mach_nmi`/`>mach_nmi` to `$FFFA/$FFFB` (W8-L: the one NMI
+   handler, see "Handover to S3.2"). A store under ROM lands in RAM
+   whatever `$01` is, so the RAM vector is valid **before** `$01` ever
+   exposes it.
 2. `php`, `sei`, save `$01`, then `$01 := ($01 & $F8) | $04` (`$34`: RAM
    everywhere, no I/O).
 3. CPU stores to the 1000 matrix bytes.
@@ -101,39 +102,49 @@ vectors through RAM `$FFFA`. Two choices were considered:
   every fill. This was chosen: it is race-free, costs 16 cycles, and no
   other module owns the bytes.
 
-`c2v_nmi_rti` drops an NMI taken during the fill but **acknowledges its
-source**: it maps I/O back in for three instructions (the pre-fill `$01`),
-reads the CIA2 ICR (`CIA2_ICR`), restores `$01` and returns. So the NMI is
-lost, not delayed. Reading the ICR releases CIA2's /NMI line, and the next NMI
-edge (CIA2 or RESTORE) is delivered normally. Without the read, /NMI would
-stay low and block every later NMI (review F2, measured: ICR `$83`, a later
-timer-B NMI not taken). The stub costs ~40 cycles per NMI and counts the NMIs
-it takes in `c2v_v_nmis` (args +72).
+(W7-V history: the vector pointed at a c2v-own stub, `c2v_nmi_rti`; since
+W8-L it points at `mach_nmi`, the one NMI handler.) The handler drops an
+NMI taken during the fill but **acknowledges its source**: it maps I/O in
+(`$01 & $F8 | $05`), reads the CIA2 ICR, restores `$01` and returns. So the
+NMI is lost, not delayed. Reading the ICR releases CIA2's /NMI line, and the
+next NMI edge (CIA2 or RESTORE) is delivered normally. Without the read,
+/NMI would stay low and block every later NMI (W7 review F2, measured: ICR
+`$83`, a later timer-B NMI not taken). It costs ~45 cycles per NMI and
+counts the NMIs it takes in `mach_nmis`.
 
 ### Handover to S3.2
 
-- **The interim claim.** `c2v $FFFA-$FFFB` in `rc/ram.inc` is labelled
-  "W7-V interim, superseded by S3.2's vectors". S3.2's planned claim
-  `s3 $FFFA-$FFFF` overlaps it, so rescheck fails until the interim line is
-  removed. The handover cannot be missed.
-- **What S3.2's vector must do.** Once S3.2 owns the RAM vectors, it must
-  either keep pointing NMI at a handler that is valid with `$01=$34`, or
-  `c2v_fill` must stop writing `c2v_nmivec` and rely on S3.2's handler.
-  That handler must:
-  - run from RAM that is visible with `$01=$34` (i.e. not KERNAL);
-  - save and restore A and `$01`;
-  - map I/O in before touching CIA2;
-  - acknowledge CIA2 by reading the ICR, or deliver the event itself, and
-    never leave /NMI latched;
-  - return with `rti`.
-  S3_PLAN §1.5's "NMI → `rti`" must therefore become "NMI → acknowledge
-  CIA2, `rti`".
-- **Dropped, acknowledged, not delayed.** An NMI source that fires during
-  the ~10k-cycle fill loses that one event. This is harmless today: nothing
-  in the runtime enables a CIA2 interrupt source, and a RESTORE press is
-  simply lost. If S3.2 or HLE ever uses a CIA2 NMI (e.g. as a time base),
-  its handler must cover the fill window instead of this stub, or it must
-  accept one lost event per palette change.
+Done in Wave 8 (W8-L). Round 0 kept two handlers (option 1); the W8-L
+review found the two byte-wise stores of different handlers into one
+vector could tear (an NMI between them, with `$01=$35`, took half of each:
+F1). Ruling: **one NMI handler**.
+
+- **The claim.** The W7-V interim `c2v $FFFA-$FFFB` line is gone; rc
+  `s3 $FFFA-$FFFF` (`mach_vnmi`, `mach_vrst`, `mach_virq`) owns the RAM
+  vectors, and names `c2v_fill` as a sanctioned writer of `mach_vnmi`
+  (identical bytes). `c2v.s`'s asserts (screen matrix and bitmap end below
+  the vectors) test the same address.
+- **The handler** is `mach_nmi` (`runtime/ops/mach.s`): runs from RAM below
+  `$A000` (visible with `$01=$34`); saves A and `$01`; maps I/O in (`$01 &
+  $F8 | $05`); reads the CIA2 ICR, so /NMI is never left latched; counts in
+  `mach_nmis`; restores `$01` and A; `rti`. `c2v_nmi_rti` and its counter
+  `c2v_v_nmis` (args +72) are deleted, and with them the stale-`c2v_v_port`
+  hazard (review F2): nothing reads `c2v_v_port` outside the fill any more.
+- **`c2v_fill`** stores `mach_nmi` into `$FFFA/$FFFB` before it sets
+  `$01=$34`, so it stays correct when called outside `mach_run` (as
+  `tests/run_c2v.py` does; the store then lands in RAM with the ROM vectors
+  live). Inside `mach_run` (`$01=$35`) the vector already holds `mach_nmi`
+  and the store rewrites identical bytes: no tear is possible
+  (`docs/CONTRACTS.md` "Machine loop": vector invariant; test
+  `tests/run_mach.py` leg `c2vnmi`, 1024 NMIs swept over the store and the
+  fill: all counted by `mach_nmi`, 0 torn; red on the two-handler code:
+  602 missed, 4 torn).
+- **Dropped, acknowledged, not delayed**, as before: an NMI source that
+  fires during the fill loses that one event. No S3.2 time-base source
+  uses NMI. `tests/run_c2v.py`'s NMI leg checks `mach_nmis` (+1 per in-fill
+  NMI) and its `nmiack` tooth is now `MACH_MUT_NMIACK` (in `mach.s`).
+  S3_PLAN §1.5's "NMI → `rti`" reads "NMI → acknowledge CIA2, `rti`"
+  (supervisor).
 
 ### rescheck: `@under` regions
 
@@ -261,7 +272,7 @@ every module linked after `c2v.s` moves by exactly `$400` (105 labels).
     Every entry is called with CIA1 IRQ sources masked and `cli`, and must
     return with I clear;
   - NMI leg: CIA2 NMIs at 1500/3000/5000 cycles, inside the fill, must be
-    taken by `c2v_nmi_rti` (`c2v_v_nmis` + 1) and acknowledged (ICR `$00`),
+    taken by `mach_nmi` (`mach_nmis` + 1) and acknowledged (ICR `$00`),
     with correct output. A **later** CIA2 timer-B NMI must then still reach
     the KERNAL. A control NMI at 100 cycles, before the fill, must go to the
     KERNAL (counter unchanged). The RAM vector is preset to a `jmp *` trap.
