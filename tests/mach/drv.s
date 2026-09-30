@@ -350,6 +350,33 @@ drv_init:
         sta R
         rts
 
+; drv_setc — stop the CIA2 cascade at counter C = P+0 (u32): TB:TA :=
+; ~C, both stopped, so no time passes (fix round 2 exact catch-up counts;
+; mach_init restarts the cascade afterwards).
+drv_setc:
+        sei
+        lda CIA2_CRA
+        and #$C0
+        sta CIA2_CRA
+        lda CIA2_CRB
+        and #$80
+        sta CIA2_CRB
+        lda P+0
+        eor #$FF
+        sta CIA2_TALO
+        lda P+1
+        eor #$FF
+        sta CIA2_TAHI           ; stopped: loads the counter
+        lda P+2
+        eor #$FF
+        sta CIA2_TBLO
+        lda P+3
+        eor #$FF
+        sta CIA2_TBHI
+        lda #$FF
+        sta R
+        rts
+
 ; drv_now — refresh mach_now (through mach_beam).
 drv_now:
         sei

@@ -352,8 +352,12 @@ Tests: `tests/run_mach.py` (+ `tests/mach/drv.s`), `host/tests/test_mach.py`.
   `$01`, i.e. with the caller's `$01`: ROM live, or identical bytes when a
   caller already runs at `$35` after an earlier `mach_run`) and `c2v_fill`
   (stores `mach_nmi`: identical bytes inside `mach_run`, ROM live outside).
-  A caller that exposes the RAM vectors itself (`$01` = `$35`/`$34` before
-  any `mach_vec`) must have written valid handlers first. Tests: run_mach
+  A caller that is already at a `$01` exposing the RAM vectors (`$35`/`$34`)
+  when it enters `mach_run` must already have `$FFFA` = `mach_nmi`, the only
+  sanctioned NMI handler: `mach_vec` rewrites `$FFFA/$FFFB` byte by byte,
+  and an NMI between the two stores would take a torn vector from any other
+  handler, even a valid one (review round 2: 6/120 torn at `$35`). Any IRQ
+  handler is fine there, because `mach_vec` writes `$FFFE` under `sei`. Tests: run_mach
   `win` (NMI swept over the prologue, poisoned vector), `c2vnmi` (NMI swept
   over c2v's store and fill at `$35`).
 - **Race-free clear.** After `emu_run` returns, under `sei`: `st_halt &=

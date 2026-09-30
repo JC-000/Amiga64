@@ -41,7 +41,8 @@ Legs:
   rdc     mach_rdc over a forced TALO $00 -> $FF wrap and a forced TA
           underflow, swept through the read (review F6)
   catch   re-entry after 7 frames (counted) and 2^31 + 1 frame (aliased:
-          VERTB resumes) of absence (review F5)
+          VERTB resumes) of absence (review F5); exact counts and next-now
+          with the counter stopped, late by flen, flen + 1, 2^31 + flen
 
     python3 -m tests.run_mach --prg build/X/runner.prg [--legs a,b]
     python3 -m tests.run_mach --prg ... --mutants [--only m1,m2]
@@ -764,6 +765,25 @@ def leg_catch(rig: Rig) -> list[str]:
         if (res["halt"] != 1 or res["d"][0] & 0xFFFF != 3
                 or res["frames"] < 3 + extra):
             f.append(msg)
+    # exact counts: the cascade stopped at C (no time passes) and st_halt
+    # preset, so exactly one entry pass runs (review round 2, catch2)
+    for late, want in ((flen, 2), (flen + 1, 2), ((1 << 31) + flen, 1)):
+        rig.init(0)
+        c = 0x80000000
+        rig.w(P, struct.pack("<I", c))
+        rig.dcall("drv_setc")
+        nxt = (c - late) & 0xFFFFFFFF
+        rig.w(rig.opt("mach_next"), struct.pack("<I", nxt))
+        rig.w(0x96, bytes(4))
+        res = rig.run(pc, s=0, flags=F_PRESET, preset=(1, 0))
+        ahead = (struct.unpack("<I", rig.r(rig.opt("mach_next"), 4))[0] - c) \
+            & 0xFFFFFFFF
+        want_ahead = flen if want == 1 else (nxt + want * flen - c) & 0xFFFFFFFF
+        msg = (f"catch exact: late {late} phi2: frames={res['frames']} want "
+               f"{want}, next-now={ahead} want {want_ahead}")
+        print("    " + msg)
+        if res["frames"] != want or ahead != want_ahead or res["halt"] != 1:
+            f.append(msg)
     rig.init()
     return f
 
@@ -907,6 +927,11 @@ MUTANTS = {
                 [("        lda CIA2_TAHI\n        cmp mach_c+1\n"
                   "        bne rd                  ; TA's low byte wrapped in between\n",
                   "")]),
+    # the resync posts two VERTBs (review round 2: over-posting)
+    "alias2": ("runtime/ops/mach.s",
+               [("        jsr post                ; resync: one VERTB, next = now + flen\n",
+                 "        jsr post                ; resync: one VERTB, next = now + flen\n"
+                 "        jsr post                ; MUTANT\n")]),
     # mach_svc without the aliasing resync (the 29b9ce9 2^31 stall)
     "noalias": ("runtime/ops/mach.s",
                 [("        bcs inrange\n", "        jmp inrange\n")]),
@@ -953,7 +978,8 @@ MUTANT_LEGS = {"noirq": ["vertb"], "eq80": ["race"], "irqexit": ["exit"],
                "beamshift": ["beam"], "nosei": ["exit"],
                "oldorder": ["win"], "noevpend": ["race2"], "keepev": ["race2"],
                "noentryev": ["race2"], "nolatch": ["beam"], "rdcnotb": ["rdc"],
-               "rdcnota": ["rdc"], "noalias": ["catch"]}
+               "rdcnota": ["rdc"], "noalias": ["catch"],
+               "alias2": ["catch"]}
 
 
 def teeth(prg: str, only: list[str] | None) -> int:
