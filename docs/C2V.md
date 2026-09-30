@@ -59,11 +59,11 @@ screen matrix uses the new `@under` region kind.
 | `$E000-$FF3F` | `c2v_bitmap`: 25 char rows (bank + `$2000`), under KERNAL |
 | `$D000-$D3FF` (`@under`) | `c2v_screen`: matrix + sprite pointers in the RAM under I/O (bank + `$1000`) |
 | `$D800-$DBE7` | colour RAM (`VIC_COLRAM`, sys) |
-| `$FFFA-$FFFB` | `c2v_nmivec`: **W7-V interim, superseded by S3.2's vectors** |
+| `$FFFA-$FFFB` | `mach_vnmi` (rc `s3 $FFFA-$FFFF`, owned by S3.2): c2v_fill is a sanctioned writer and stores `mach_nmi` (identical bytes; `docs/CONTRACTS.md` "Machine loop (S3.2)") |
 | `$01` | `CPU_PORT` (zp sys equate) |
 
 `$A000-$B8FF` stays free, including S3_PLAN's planned plane-row staging at
-`$A000-$A9FF`. So do `$FF40-$FFF9` and `$FFFC-$FFFF`. The work RAM moved
+`$A000-$A9FF`. So does `$FF40-$FFF9`; `$FFFA-$FFFF` is S3.2's vector claim. The work RAM moved
 from the approved `$A000-$ACFF` to `$B900-$BFFF` because
 `host/tests/test_rescheck.py::test_free_region_literal_fails` uses `$A000`
 as its example of free space.
