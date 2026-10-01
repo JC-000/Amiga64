@@ -445,6 +445,68 @@ reads). If a guest turns out to poll the beam hard (AROS's VHPOSR PAL
 probe polls a few hundred times at boot), the division is the lever: a
 313-entry line table would cut ~400 cycles.
 
+## (i) S3.3 event seam and interrupt delivery (W9-I)
+
+**Hot path: +0.** `core.s` is unchanged and byte-identical modulo
+relocation (link-swap: the PRG linked with the base tree's `core.o` equals
+the PRG linked with its own, `build/evidence/W9-I/green/coreswap.txt`);
+`chip.s` and `mach.s` still link last; `tests.perf_cycles --base <wave9
+base> --max-delta 0` passes (`build/evidence/W9-I/green/perf.txt`). The
+seam and delivery live entirely in the service pass and the I/O trap path.
+No per-instruction work: the IPL is evaluated only at a pass (each event,
+each kick), never per instruction.
+
+**Static costs [EST, static, 6502 cycles]:**
+
+| path | cost |
+|---|---|
+| service pass, nothing armed (vs S3.2) | +~110: `mach_insv`, the VERTB post through `mach_pset`, the empty slot-0 hook, `mach_slots`/`mach_wake` early-outs, `mach_w` copy |
+| `mach_etime` | ~70 (`mach_rdc`) + ~38 per shift step (s = 4: ~220) |
+| a pass with k armed slots | + 2 × `mach_etime` + ~45 k (due test) + ~70–110 k (wait) + each callback |
+| `mach_arm` from the trap context | ~70 + the kick (~35 under `sei`), then one `emu_run` exit and a pass |
+| INTENA/INTREQ write (trap path) | +~45 (SET/CLR into the read register, hold OR); a SET adds `mach_ichk` ~60, plus a pass only when it makes an interrupt deliverable |
+| delivery (`mach_lvl` ~40–60, `mach_dlv`, `exc_raise`) | ~150 + the frame: one `mem_write32`, one `mem_write16`, one `mem_read32` through the memory API |
+| STOP | the CPU idles in a 7-cycle `ev_pend` spin with `cli` until the next event; no fast-forward |
+
+**Latency [MEASURED VICE, `tests/run_irq.py`]:** a slot fires at most
+4096 phi2 after its deadline (legs `arm`, `periodic` at s = 4 and 0,
+`trap`, `race`; bound `SLACK_PHI2`), never early. A SET write to
+INTENA/INTREQ that makes an interrupt deliverable is taken at the next
+instruction boundary (leg `levels`: stacked PC = the next instruction for
+all 14 sources). An IPL drop by MOVE to SR/RTE is seen within
+`MACH_POLL` phi2 while an interrupt is pending (`storm`, `starve`,
+`kick`), else at the next event (nothing to deliver then).
+
+**`MACH_POLL` poll cost (fix round 1, review F2) [MEASURED VICE, PAL,
+`python3 -m tests.run_irq --perf`, `build/evidence/W9-I/fix1/green/
+pollcost.json`]:** the same register-only guest loop at s = 0, IPL 7,
+with nothing pending vs VERTB enabled and pending but masked (a pass
+every `MACH_POLL` = `$0400` phi2): 23.12 M vs 37.66 M phi2, i.e. **+63%
+wall time at 1 MHz; 39% of the time goes to passes**, ~640 cycles per
+pass (IRQ, `emu_run` exit/re-entry, `mach_svc` with `mach_pclamp`,
+`mach_dlv`'s level test) [EST from share = c / (1024 + c)]. At 48 MHz the
+CIAs still count phi2 at ~1 MHz, so the pass rate stays ~980/s and the
+share is **~1.3%** [EST]. The poll runs only in exception mode and only
+while `mach_lvl` ≠ 0: AROS's Disable() clears INTEN, so `mach_lvl` = 0 and
+nothing polls; the case is a request pending under a higher running level
+(a handler) or under an SR mask. `MACH_POLL` is one named constant in
+`mach.s`; at 1 MHz a larger value trades latency for throughput. Exact
+recognition at the SR write would need a core.s SR-write hook (backlog).
+
+**Forward progress: one forced guest instruction (fix round 2).** A pass
+that leaves a client slot due now is followed by one `emu_step` before
+the next pass (no time floor; round 1b's `MACH_MINW` floor made periodic
+clients drift and is gone). Cost: one single-step call (~+15 cycles over
+the instruction itself, `emu_step` vs `dispatch_go`) per such pass, and
+only when a client is at or behind its deadline. Measured [VICE, s = 0,
+`run_irq` legs `progress`/`lag`]: an always-due slot gives 802 passes for
+the 801-instruction loop, ~2,830 phi2 per pass+instruction at 1 MHz (a
+callback that logs and re-arms included); a period of 3000 phi2 keeps its
+lateness bounded (max 2,333); 1500 phi2 is below that service time on a
+1 MHz 6502, so its lateness grows ~1,430 phi2 per period (round 0, which
+guaranteed no instruction, ~800; round 1b ~3,150). At 48 MHz the same
+pass is ~60 phi2, so client periods down to ~100 phi2 stay bounded [EST].
+
 ## (e) Caveats
 
 - Every number above comes from **hand-written cycle comments**, not

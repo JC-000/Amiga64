@@ -1,7 +1,9 @@
 ; ===========================================================================
-; runtime/ops/mach.s — S3.2 machine loop, guest time base and events
-; Owner: W8-L (mach).  Spec: docs/S3_PLAN.md §1.5, §4 "S3.2";
-; contract: docs/CONTRACTS.md "Machine loop (S3.2)".
+; runtime/ops/mach.s — S3.2 machine loop, guest time base and events;
+; S3.3 event seam and interrupt delivery
+; Owner: W8-L (mach), W9-I (irq).  Spec: docs/S3_PLAN.md §1.5, §4 "S3.2",
+; "S3.3"; contracts: docs/CONTRACTS.md "Machine loop (S3.2)", "Event seam
+; (S3.3/S3.4)", "Interrupt delivery (S3.3)".
 ;
 ; Time base: CIA #2 timer A (phi2, continuous, latch $FFFF) cascades into
 ; timer B (counts A's underflows): a free-running 32-bit phi2 counter,
@@ -16,9 +18,12 @@
 ; into st_halt, and emu_run returns at the next instruction boundary.
 ; mach_run then services: every frame boundary the counter has passed adds
 ; one to mach_frames and sets INTREQ bit 5 (VERTB) in the chip shadow; the
-; one-shot is re-armed.  No interrupt delivery (S3.3), no CIA-A/B guest
-; timers (S3.4), no copper or refresh (S3.5).  HALT_STOP goes back to the
-; caller like any halt (idle skip waits for S3.3).
+; one-shot is re-armed.  S3.3 (W9-I) adds the event seam (client slots
+; 1-7 in guest E time, the slot-0 VERTB hook, mach_post/mach_hold; contract
+; "Event seam (S3.3/S3.4)") and, in exception mode, interrupt delivery
+; after every pass and the STOP wait (contract "Interrupt delivery
+; (S3.3)").  No CIA-A/B guest timers here (cia.s, S3.4), no copper or
+; refresh (S3.5).
 ;
 ; Entries (JSR; clobber A/X/Y):
 ;   mach_init  start the time base, frame 0 begins now; mach_frames,
@@ -55,23 +60,32 @@
 .export mach_init, mach_run, mach_vec, mach_beam, mach_irq, mach_nmi
 .export mach_rdc
 .export mach_s, mach_on, mach_nmis, mach_bv, mach_bh, mach_next, mach_now
-.import emu_run, chip_shd
+.import emu_run, emu_step, chip_shd
 ; W9-I: the event seam (docs/CONTRACTS.md "Event seam (S3.3/S3.4)")
 .export mach_etime, mach_arm, mach_disarm, mach_post, mach_kick
 .export mach_et, mach_at, mach_cbv, mach_hold, mach_am, mach_dl, mach_chi
 .export mach_in, mach_insv
 .export MACH_NSLOT
+; W9-I: S3.3 interrupt delivery (docs/CONTRACTS.md "Interrupt delivery (S3.3)")
+.export mach_lvl, mach_ichk, mach_nirq, mach_stp
+.import exc_group2
+.importzp HALT_STOP
 
 MACH_FRAME_E  = 14188   ; @value E ticks per guest frame (709379 Hz / 50)
 MACH_S_DEF    = 4       ; @value power-up E-clock shift
 MACH_S_MAX    = 16      ; @value largest shift (a frame stays < 2^31 phi2)
 MACH_EV_TIMER = $01     ; @value ev_pend bit: CIA1 timer A fired
 MACH_INTREQR  = $1E     ; @value chip_shd index of INTREQR (big-endian word)
+MACH_INTENAR  = $1C     ; @value chip_shd index of INTENAR (big-endian word)
 MACH_LINE_CCK = 227     ; @value colour clocks per line
 MACH_NSLOT    = 8       ; @value event slots: 0 = VERTB (mach), 1-7 clients
 MACH_EV_KICK  = $02     ; @value ev_pend bit: a trap-context arm/post wants a pass
 MACH_NBIT     = 15      ; @value INTREQ bits 0-14
 MACH_VERTB_BIT = 5      ; @value INTREQ bit number of VERTB
+MACH_PRESET    = $40     ; @value st_halt preset while mach_dlv raises
+MACH_AUTOVEC  = 24      ; @value autovector base: vector 24 + level
+MACH_STOPCODE = $04     ; @value HALT_STOP (core.s; asserted at link)
+MACH_POLL     = $0400   ; @value phi2 between passes while an interrupt is pending
 
 .segment "DATA"
 mach_s:    .byte MACH_S_DEF     ; E-clock shift, read by mach_init (0-16)
@@ -107,6 +121,14 @@ mach_d:    .res 4       ; scratch: deadline - now
 mach_fr:   .res 2       ; scratch: phi2 into the current E tick
 mach_jv:   .res 2       ; callback jump vector
 mach_w:    .res 2       ; scratch: the one-shot wait being chosen (phi2)
+; --- W9-I interrupt delivery ---
+mach_stp:  .res 1       ; nonzero while the guest CPU is stopped (STOP)
+mach_lv:   .res 1       ; level being delivered
+mach_iq:   .res 1       ; scratch: mach_ichk's level
+mach_act:  .res 1       ; scratch: mach_lvl / mach_wk
+mach_fs:   .res 1       ; a slot is due now: run one emu_step before emu_run
+mach_es:   .res 4       ; mach_slots' E snapshot (callbacks move mach_et)
+mach_nirq: .res 4       ; interrupts delivered (u32 LE, wraps; tests)
 
 .segment "CODE"
 
@@ -219,6 +241,8 @@ on:     lda ev_pend             ; entry: take a pending event (a halt that
         sta mach_ev             ; raced one left it); the pass below does
         lda #0                  ; its work
         sta ev_pend
+        sta mach_stp            ; W9-I: the CPU runs
+        sta mach_fs             ; no forced step pending
         lda #$7F                ; CIA1: every source masked (the KERNAL's
         sta CIA1_ICR            ; jiffy IRQ too) ...
         lda CIA1_ICR            ; ... and acknowledged
@@ -226,20 +250,60 @@ on:     lda ev_pend             ; entry: take a pending event (a halt that
         lda #$81
         sta CIA1_ICR            ; timer A -> /IRQ
         sta mach_in             ; W9-I: trap-context arms/posts kick from here
-loop:   cli
+        jmp deliv               ; W9-I: an interrupt may be pending already
+loop:   lda mach_fs             ; W9-I: a slot is due now (fix round 2)
+        bne step
+        cli
         jsr emu_run
+ret:
         sei                     ; the RMW below must not race mach_irq's ora
         lda st_halt
         and #$7F
         sta st_halt
-        bne exit
+        bne halt
+event:
         lda ev_pend             ; only an event: take the flags (still sei)
         sta mach_ev
         lda #0
         sta ev_pend
         cli
         jsr mach_svc
-        jmp loop
+deliv:  jsr mach_dlv            ; W9-I: S3.3 delivery after every pass
+        bcs exit                ; the raise halted (odd vector)
+        lda mach_stp
+        beq loop
+        jsr mach_wk             ; stopped: can anything still wake it?
+        bcs wait
+        sei
+        lda #1                  ; no: HALT_STOP back to the caller
+        sta st_halt             ; (st_reason is still HALT_STOP)
+        bne exit                ; always
+wait:   cli                     ; idle until the next event (no fast-forward)
+:       lda ev_pend
+        beq :-
+        sei
+        lda st_halt             ; mach_irq's bit 7 (no emu_run ran)
+        and #$7F
+        sta st_halt
+        jmp event
+halt:   cmp #1                  ; W9-I: STOP in exception mode stops the CPU
+        bne exit
+        lda st_reason
+        cmp #MACH_STOPCODE
+        bne exit
+        lda st_exl
+        beq exit
+        sta mach_stp
+        lda #0
+        sta st_halt
+        jmp event               ; take ev_pend (the one-shot may have fired
+                                ; during the STOP), pass, then deliver
+step:   sei                     ; forward progress: ONE guest instruction
+        lda #0                  ; before the next pass, even if a client
+        sta mach_fs             ; re-arms "now".  Under sei, with st_halt's
+        sta st_halt             ; event bit cleared (ev_pend keeps the event,
+        jsr emu_step            ; the event path below takes it), so the
+        jmp ret                 ; step runs; a halt from it exits as usual
 exit:   lda #$7F                ; mask every CIA1 source
         sta CIA1_ICR
         lda CIA1_ICR            ; and acknowledge
@@ -337,6 +401,7 @@ short:  lda mach_t                ; W9-I: the VERTB wait, then the slots
         sta mach_w+1
         jsr mach_slots          ; fire the due client slots
         jsr mach_wake           ; mach_w := min(VERTB, armed slots)
+        jsr mach_pclamp         ; pending interrupt: poll every MACH_POLL
         lda CIA1_CRA
         and #$C0
         sta CIA1_CRA            ; timer A stopped (TOD 50/60 Hz, SP kept)
@@ -447,13 +512,13 @@ done:   rts
 .endproc
 
 ; mach_post — A = INTREQ bit (0-14): set it in INTREQR (chip_shd).  The
-; interrupt is delivered at the next service pass (kicked from the trap
-; context).  Clobbers A, X; Y kept.
+; interrupt is delivered at the next service pass; from the trap context a
+; post that makes one deliverable kicks (mach_ichk).  Clobbers A, X; Y kept.
 .proc mach_post
         cmp #MACH_NBIT
         bcs done
         jsr mach_pset
-        jmp mach_kick
+        jmp mach_ichk
 done:   rts
 .endproc
 
@@ -518,6 +583,11 @@ none:   rts
         lda mach_am
         beq done
         jsr mach_etime
+        ldx #3                  ; the pass's own snapshot: a callback's
+cp:     lda mach_et,x           ; mach_etime overwrites mach_et
+        sta mach_es,x
+        dex
+        bpl cp
         ldx #1
 lp:     stx mach_sx
         lda mach_am
@@ -527,14 +597,14 @@ lp:     stx mach_sx
         asl a
         asl a
         tay
-        sec                     ; et - deadline >= 0 (signed): due
-        lda mach_et
+        sec                     ; es - deadline >= 0 (signed): due
+        lda mach_es
         sbc mach_dl,y
-        lda mach_et+1
+        lda mach_es+1
         sbc mach_dl+1,y
-        lda mach_et+2
+        lda mach_es+2
         sbc mach_dl+2,y
-        lda mach_et+3
+        lda mach_es+3
         sbc mach_dl+3,y
         bmi next
         lda mach_bit,x
@@ -580,7 +650,9 @@ fr:     sec
 lp:     stx mach_sx
         lda mach_am
         and mach_bit,x
-        beq next
+        bne armed
+        jmp next
+armed:
         txa
         asl a
         asl a
@@ -618,7 +690,8 @@ sub:    sec
         sbc mach_fr+1
         sta mach_d+1
         jmp min
-now1:   lda #1
+now1:   lda #1                  ; due now: the next pass must not come
+        sta mach_fs             ; before one guest instruction (mach_run)
         sta mach_d
         lda #0
         sta mach_d+1
@@ -820,7 +893,202 @@ done:   pla
         pla
         rti
 .endproc
+; ===========================================================================
+; W9-I S3.3 interrupt delivery (docs/CONTRACTS.md "Interrupt delivery
+; (S3.3)").  Paula's IPL = host/chipset_ref.Paula.level(): 0 unless INTEN
+; (INTENA bit 14), else the level of the highest source enabled and
+; pending.  In exception mode (st_exl) mach_run calls mach_dlv after every
+; service pass: level > SR's I2-I0 raises autovector 24 + level through
+; core.s's exc_group2 (stacked PC = r_pc, stacked SR, S = 1, T = 0), then
+; I2-I0 := level.  A CPU write to INTENA/INTREQ that sets bits, or a post,
+; kicks a pass when it makes an interrupt deliverable (mach_ichk), so it
+; acts at the next instruction boundary; an IPL drop by MOVE to SR / RTE
+; acts at the next event (S3_PLAN §1.5).
+; ===========================================================================
+
+; mach_lvl — A := Paula's IPL (0-6), Z set on 0.  Clobbers X; Y kept.
+.proc mach_lvl
+        lda chip_shd+MACH_INTENAR
+        and #$40                ; INTEN, the master enable
+        beq done
+        lda chip_shd+MACH_INTENAR+1
+        and chip_shd+MACH_INTREQR+1
+        sta mach_act            ; enabled and pending, bits 0-7
+        lda chip_shd+MACH_INTENAR
+        and chip_shd+MACH_INTREQR
+        and #$3F                ; bits 8-13 (14 is INTEN, not a source)
+        tax
+        beq lo
+        and #$20
+        bne l6
+        txa
+        and #$18
+        bne l5
+        lda #4                  ; bits 8-10
+        rts
+l6:     lda #6
+        rts
+l5:     lda #5
+        rts
+lo:     ldx #4
+lp:     lda mach_act
+        and mach_lvlo-1,x
+        bne hit
+        dex
+        bne lp
+hit:    txa
+done:   rts
+.endproc
+
+; mach_dlv — deliver (see above).  Out: C = 1 when the raise halted (odd
+; vector: st_halt = 1, st_reason = HALT_ADDRESS; I = 1), else C = 0.
+; Clobbers A/X/Y.
+.proc mach_dlv
+        lda st_exl
+        beq none
+        lda st_halt             ; a real halt pending (st_halt = $81 on
+        and #$7F                ; entry): emu_run returns it, no frame
+        bne none
+        jsr mach_lvl
+        beq none
+        sta mach_lv
+        lda r_sr+1
+        and #7
+        cmp mach_lv
+        bcs none                ; I2-I0 >= level: masked (Paula levels are
+                                ; 1-6, never 7, so >= is exact: a level-7
+                                ; source would need NMI semantics)
+        lda #0
+        sta mach_stp            ; a stopped CPU resumes
+        sei
+        lda st_halt
+        ora #MACH_PRESET         ; dispatch_next returns right after the frame
+        sta st_halt
+        cli
+        lda mach_lv
+        clc
+        adc #MACH_AUTOVEC
+        jsr mach_raise
+        sei
+        lda st_halt
+        and #$7F
+        cmp #MACH_PRESET
+        bne halted
+        lda st_halt
+        and #$80                ; keep an event that came meanwhile
+        sta st_halt
+        cli
+        lda r_sr+1              ; I2-I0 := level (S = 1, T = 0 already)
+        and #$F8
+        ora mach_lv
+        sta r_sr+1
+        lda #0                  ; no forced step after a delivery: a higher
+        sta mach_fs             ; level must nest before the handler runs
+        inc mach_nirq
+        bne none
+        inc mach_nirq+1
+        bne none
+        inc mach_nirq+2
+        bne none
+        inc mach_nirq+3
+none:   clc
+        rts
+halted: sta st_halt             ; = 1: halt_now's (an IRQ's bit 7 dropped,
+        sec                     ; ev_pend kept)
+        rts
+.endproc
+
+; mach_raise — A = vector: raise it from mach_run as if from inside
+; emu_run.  exc_raise unwinds the 6502 stack to st_sp6 (here: just below
+; this jsr's return address, the depth emu_run's step loop runs at), builds
+; the frame, and ends in dispatch_next, which returns here at once because
+; st_halt is nonzero (the $40 preset, or halt_now's 1 on an odd vector).
+.proc mach_raise
+        tsx
+        stx st_sp6
+        jmp exc_group2
+.endproc
+
+; mach_pclamp — in exception mode, while an interrupt is pending and enabled
+; (mach_lvl != 0) but not yet taken (masked by I2-I0, or a second one
+; behind the one this pass delivers), clamp the one-shot to MACH_POLL phi2:
+; an IPL drop by RTE / MOVE to SR (core.s, no hook) is then recognised
+; within MACH_POLL instead of at the next VERTB, and a lower level is never
+; starved by a recurring higher one.  Nothing pending: no cost but this
+; test.  Clobbers A, X.
+.proc mach_pclamp
+        lda st_exl
+        beq done
+        jsr mach_lvl
+        beq done
+        lda mach_w              ; mach_w > MACH_POLL: mach_w := MACH_POLL
+        cmp #<(MACH_POLL + 1)
+        lda mach_w+1
+        sbc #>(MACH_POLL + 1)
+        bcc done
+        lda #<MACH_POLL
+        sta mach_w
+        lda #>MACH_POLL
+        sta mach_w+1
+done:   rts
+.endproc
+
+; mach_wk — C = 1 when a stopped CPU can still be woken: INTEN and an
+; enabled source above I2-I0 that VERTB posts (bit 5), or any enabled
+; source above I2-I0 while a client slot is armed or the VERTB hook is
+; installed (a client may post it).  Clobbers A, X.
+.proc mach_wk
+        lda chip_shd+MACH_INTENAR
+        and #$40
+        beq no
+        lda r_sr+1
+        and #7
+        tax
+        lda chip_shd+MACH_INTENAR+1
+        and mach_ablo,x
+        sta mach_act
+        lda chip_shd+MACH_INTENAR
+        and mach_abhi,x
+        ora mach_act
+        beq no                  ; nothing enabled above the IPL
+        lda mach_act
+        and #1 << MACH_VERTB_BIT
+        bne yes
+        lda mach_am
+        bne yes
+        lda mach_cbv+1
+        bne yes
+no:     clc
+        rts
+yes:    sec
+        rts
+.endproc
+
+; mach_ichk — from the trap context: kick a pass when an interrupt is
+; deliverable now (exception mode, level > I2-I0).  chip.s calls it after a
+; SET write to INTENA/INTREQ; mach_post after a post.  Clobbers A, X.
+.proc mach_ichk
+        lda st_exl
+        beq done
+        jsr mach_lvl
+        beq done
+        sta mach_iq
+        lda r_sr+1
+        and #7
+        cmp mach_iq
+        bcs done
+        jmp mach_kick
+done:   rts
+.endproc
+
 .segment "RODATA"
 mach_bit:  .byte $01, $02, $04, $08, $10, $20, $40, $80
+; INTREQ bits 0-7 of levels 1-4 (bits 8-13: levels 4, 5, 6 in mach_lvl);
+; host/chipset_ref.IRQ_LEVELS, pinned by host/tests/test_irq.py
+mach_lvlo: .byte $07, $08, $70, $80
+; INTREQ bits above I2-I0 = 0..7 (low, high byte)
+mach_ablo: .byte $FF, $F8, $F0, $80, $00, $00, $00, $00
+mach_abhi: .byte $3F, $3F, $3F, $3F, $38, $20, $00, $00
 .segment "CODE"
 .assert mach_nmi < $A000 .and mach_irq < $A000, lderror, "mach vectors must point at RAM visible under $01 = $34"
+.assert HALT_STOP = MACH_STOPCODE, lderror, "MACH_STOPCODE must equal core.s HALT_STOP"

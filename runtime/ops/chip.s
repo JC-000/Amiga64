@@ -35,7 +35,9 @@
 ; S3.3 (W9-I): every INTENA/INTREQ write applies the SET/CLR rule (bit 15
 ;   set: OR in bits 0-14, else clear them) to INTENAR/INTREQR (chip_shd
 ;   $01C/$01E, bit 15 reads 0), mach_on or not; after an INTREQ write the
-;   bits a level source holds (mach_hold, mach.s) are ORed back.  The raw
+;   bits a level source holds (mach_hold, mach.s) are ORed back; a SET
+;   write then calls mach_ichk (a pass at the next instruction boundary if
+;   an interrupt became deliverable, S3.3 delivery).  The raw
 ;   written word still lands in the write-only slot.  CIA registers read their shadow,
 ;   except CIA-A PRA = (PRA & DDRA) | ($EB & ~DDRA): the port inputs of an
 ;   A500 with DF0 present and empty, both mouse buttons up.
@@ -67,7 +69,7 @@
 .export chip_nopen
 .import m_scmd                  ; core.s mio_split: REC command of the split
 .import mach_on, mach_beam, mach_bv, mach_bh    ; W8-L mach.s: S3.2 beam
-.import mach_hold                               ; W9-I irq: INTREQ level hold
+.import mach_hold, mach_ichk                    ; W9-I irq: level hold, delivery kick
 
 CHIP_LOGN_MASK = 63     ; @value log ring entries - 1
 CHIP_SERDAT    = $30    ; @value SERDAT register offset
@@ -513,7 +515,7 @@ set:    lda chip_vl             ; SET: reg |= val
 hi:     and #$7F                ; bit 15 always reads 0
         sta chip_shd,x
         cpx #CHIP_INTREQR
-        bne done
+        bne kick
         lda mach_hold           ; a level source still asserting re-raises
         ora chip_shd+CHIP_INTREQR+1
         sta chip_shd+CHIP_INTREQR+1
@@ -521,7 +523,9 @@ hi:     and #$7F                ; bit 15 always reads 0
         and #$7F
         ora chip_shd+CHIP_INTREQR
         sta chip_shd+CHIP_INTREQR
-        rts
+kick:   bit chip_vh             ; a SET may make an interrupt deliverable:
+        bpl done                ; act at the next instruction boundary
+        jmp mach_ichk
         ; --- end W9-I irq
 ser:    ldx chip_sern           ; SERDAT: low byte -> the serial ring
         sta chip_ser,x

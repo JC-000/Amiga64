@@ -19,15 +19,17 @@
 ;   P+12 u32 rst delay (E ticks)   P+16 u8 SR high byte (F_SUPER)
 ;   P+17 u8 slot to disarm right after the initial arms (0 = none)
 ;   P+18 u16 INTENAR preset (F_IEN; written through chip_shd, LE)
-;   P+20 u32 USP (F_SUPER: r_osp)
+;   P+20 u32 USP (F_SUPER: r_osp)   P+24 u8 st_halt, P+25 u8 ev_pend
+;   (F_PRESET, after mach_init)   P+26 u16 INTREQR preset (F_IEN, LE)
 ;   P+$40 + 16 k, slot k = 1-7:
 ;     +0 u8 armed at start   +1 u8 post bit ($FF none)   +2 u16 period
-;     +4 u32 deadline relative to E0 (signed)   +8 u8 re-arms left
+;     +4 u32 deadline relative to E0 (signed)   +8 u8 re-arms left ($FF: forever)
 ;     +9 u8 slot to disarm on fire (0 none)   +10 u8 hold op (1 = set)
 ;     +11 u16 hold value
 ;   flags: F_INIT mach_init first   F_SUPER exception mode (st_exc = 1)
 ;          F_HOOK slot-0 VERTB hook   F_RST RESET arms slot P+11
-;          F_IEN  INTENAR := P+18 before the run
+;          F_IEN  INTENAR := P+18, INTREQR := P+26 before the run
+;          F_PRESET st_halt/ev_pend := P+24/P+25 right before mach_run
 ; Result block R (driver writes):
 ;   R+0 done $FF  R+1 st_halt  R+2 st_reason  R+3 ev_pend  R+4 u32 frames
 ;   R+8 u32 E0    R+12 u16 fires[8] (slot 0 unused)  R+28 u16 trap arms
@@ -36,6 +38,7 @@
 ;   R+58 u32 A7   R+62 u16 log entries   R+64 u32 E at the end
 ;   R+68 mach_am  R+69 u16 mach_hold   R+71 u32 VERTB hook calls
 ;   R+75 u32 frames at the start (after mach_init)   R+79 u32 r_osp
+;   R+83 u32 mach_nirq delta (interrupts delivered)   R+87 mach_stp
 ; Log at LOG: 8-byte entries {u8 slot, u32 E at the callback, u24 E -
 ;   deadline}; slot $80 = a trap arm {E at the arm, u24 delay}.
 ;
@@ -56,9 +59,10 @@ F_SUPER = $02
 F_HOOK  = $04
 F_RST   = $08
 F_IEN   = $10
+F_PRESET = $20
 
 SLOT = P + $40
-R_LEN = 84
+R_LEN = 92
 
 .segment "CODE"
 
@@ -120,9 +124,15 @@ drv_run:
         sta chip_shd+$1C
         lda P+18
         sta chip_shd+$1D
+        lda P+27
+        sta chip_shd+$1E
+        lda P+26
+        sta chip_shd+$1F
 @noien: ldx #3
 @f0:    lda mach_frames,x
         sta R+75,x
+        lda mach_nirq,x
+        sta q_nirq,x
         dex
         bpl @f0
         ; callbacks
@@ -194,6 +204,13 @@ drv_run:
         sta emu_rst_hook+1
         lda #>rst_arm
         sta emu_rst_hook+2
+:       lda P+9
+        and #F_PRESET
+        beq :+
+        lda P+24
+        sta st_halt
+        lda P+25
+        sta ev_pend
 :       jsr mach_run
         sei
         lda q_hook
@@ -263,6 +280,17 @@ drv_run:
         sta R+64,x
         dex
         bpl @ee
+        sec
+        ldx #0
+        ldy #4
+@ni:    lda mach_nirq,x
+        sbc q_nirq,x
+        sta R+83,x
+        inx
+        dey
+        bne @ni
+        lda mach_stp
+        sta R+87
         lda mach_am
         sta R+68
         lda mach_hold
@@ -345,7 +373,10 @@ cbrec:  stx q_k
         ldx q_k
         lda left,x
         beq @done
+        cmp #$FF                ; $FF: re-arm forever
+        beq :+
         dec left,x
+:
         txa
         asl a
         asl a
@@ -638,15 +669,18 @@ drv_out:
 ; --- tables and state ---------------------------------------------------------
 cbtab:  .word cb0, cb1, cb2, cb3, cb4, cb5, cb6, cb7
 bits:   .byte $01, $02, $04, $08, $10, $20, $40, $80
-e0:     .res 4
-dl:     .res 32
-left:   .res 8
-fires:  .res 16
-arms:   .word 0
-repl:   .word 0
-logn:   .word 0
-vtbn:   .res 4
-q_k:    .byte 0
-q_n:    .byte 0
-q_d:    .res 3
-q_hook: .word 0
+; driver state lives in RESBUF ($CD00-), not in the driver image
+ST     = buf_result + $500
+e0     = ST                     ; 4
+dl     = ST + 4                 ; 32
+left   = ST + 36                ; 8
+fires  = ST + 44                ; 16
+arms   = ST + 60                ; 2
+repl   = ST + 62                ; 2
+logn   = ST + 64                ; 2
+vtbn   = ST + 66                ; 4
+q_k    = ST + 70
+q_n    = ST + 71
+q_d    = ST + 72                ; 3
+q_hook = ST + 75                ; 2
+q_nirq = ST + 77                ; 4
