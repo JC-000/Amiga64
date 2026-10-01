@@ -31,8 +31,12 @@
 ;   and VHPOSR = V7-V0 : H from the machine loop's time base (mach_beam,
 ;   docs/CONTRACTS.md "Machine loop (S3.2)"); a long read keeps the beam
 ;   of its first word, so move.l VPOSR is one coherent position.  An
-;   INTREQ write sets or clears INTREQR bit 5 (VERTB, SET/CLR by bit 15);
-;   the other INTREQ bits stay as S3.1 left them (S3.3).
+;   INTREQ write sets or clears INTREQR bit 5 (VERTB, SET/CLR by bit 15).
+; S3.3 (W9-I): every INTENA/INTREQ write applies the SET/CLR rule (bit 15
+;   set: OR in bits 0-14, else clear them) to INTENAR/INTREQR (chip_shd
+;   $01C/$01E, bit 15 reads 0), mach_on or not; after an INTREQ write the
+;   bits a level source holds (mach_hold, mach.s) are ORed back.  The raw
+;   written word still lands in the write-only slot.
 ; CIA registers (W9-C, S3.4): every decoded CIA byte goes to
 ;   runtime/ops/cia.s (cia_read/cia_write: timers, ICR, TOD, ports as
 ;   host/chipset_ref.CIA; docs/CONTRACTS.md "CIA-A/B (S3.4)").
@@ -64,6 +68,7 @@
 .import m_scmd                  ; core.s mio_split: REC command of the split
 .import mach_on, mach_beam, mach_bv, mach_bh    ; W8-L mach.s: S3.2 beam
 .import cia_read, cia_write, cia_reset          ; W9-C cia.s: S3.4 CIA-A/B
+.import mach_hold                               ; W9-I irq: INTREQ level hold
 
 CHIP_LOGN_MASK = 63     ; @value log ring entries - 1
 CHIP_SERDAT    = $30    ; @value SERDAT register offset
@@ -73,7 +78,8 @@ CHIP_ID_CIAA   = $0A    ; @value log id high byte, CIA-A
 CHIP_ID_CIAB   = $0B    ; @value log id high byte, CIA-B
 CHIP_INTREQR   = $1E    ; @value INTREQR (read-only) register offset
 CHIP_INTREQ    = $9C    ; @value INTREQ (write) register offset
-CHIP_VERTB     = $20    ; @value INTREQ bit 5, low byte
+CHIP_INTENAR   = $1C    ; @value INTENAR (read-only) register offset; W9-I irq
+CHIP_INTENA    = $9A    ; @value INTENA (write) register offset; W9-I irq
 
 .segment "BSS"
 chip_shd:   .res 512
@@ -478,21 +484,43 @@ p0:     lda #0
         sta chip_shd+1,x
         cpx #CHIP_SERDAT
         beq ser
+        ; --- W9-I irq: INTENA/INTREQ SET/CLR (bit 15) into INTENAR/INTREQR
+        cpx #CHIP_INTENA
+        beq paula
         cpx #CHIP_INTREQ
         bne done
-        and #CHIP_VERTB         ; W8-L: INTREQ SET/CLR of the VERTB bit only,
-        beq done                ; once the machine loop runs (mach_on)
-        lda mach_on
-        beq done
-        lda chip_shd+CHIP_INTREQR+1
+paula:  txa
+        sec
+        sbc #CHIP_INTENA - CHIP_INTENAR ; $09A -> $01C, $09C -> $01E
+        tax
         bit chip_vh
         bmi set
-        and #<~CHIP_VERTB
+        lda chip_vl             ; CLR: reg &= ~val
+        eor #$FF
+        and chip_shd+1,x
+        sta chip_shd+1,x
+        lda chip_vh
+        eor #$FF
+        and chip_shd,x
+        jmp hi
+set:    lda chip_vl             ; SET: reg |= val
+        ora chip_shd+1,x
+        sta chip_shd+1,x
+        lda chip_vh
+        ora chip_shd,x
+hi:     and #$7F                ; bit 15 always reads 0
+        sta chip_shd,x
+        cpx #CHIP_INTREQR
+        bne done
+        lda mach_hold           ; a level source still asserting re-raises
+        ora chip_shd+CHIP_INTREQR+1
         sta chip_shd+CHIP_INTREQR+1
+        lda mach_hold+1
+        and #$7F
+        ora chip_shd+CHIP_INTREQR
+        sta chip_shd+CHIP_INTREQR
         rts
-set:    ora #CHIP_VERTB
-        sta chip_shd+CHIP_INTREQR+1
-        rts
+        ; --- end W9-I irq
 ser:    ldx chip_sern           ; SERDAT: low byte -> the serial ring
         sta chip_ser,x
         inc chip_sern
