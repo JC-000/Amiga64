@@ -704,3 +704,217 @@ real time, so 50 frames is a fixed span). Three runs per speed, interleaved
   saved hardware data (`build/evidence/w8-hw/red/`).
 - Scope: CIA2 timers and TOD only; CIA1 was not sampled (same clock tree, not
   measured). Only 1 and 48 MHz were run.
+
+## U64 sampler (Ultimate Audio) (W10-H, 2026-10-01)
+
+Question (WAVE10_BRIEF C4): can the U64E's built-in 8-voice sample player
+carry Paula's four sample channels, reading from REU memory, with an
+end-of-sample IRQ the 6510 can service?
+
+**Answer: [MEASURED HW] yes for fetch from REU, timing, IRQ and REU
+coexistence; the register interface is coarser than Paula's (see "What
+Paula needs" below).** The sampler is mapped at `$DF20-$DFFF` by the config
+item `C64 and Cartridge Settings / Map Ultimate Audio $DF20-DFFF`
+(default Disabled). The item takes effect at once: no C64 reset was needed
+(`$DF21` read `$10` about 1 s after the REST write).
+
+Conditions: U64E `Ultimate-64-Elite-688004`, firmware 3.15, **git f2e46946**
+(not the c47155b7 of the W8-H and W7 sections: the device's build changed;
+the register behaviour below is what this build does), FPGA 125, core 1.50
+(`GET /v1/info`, recorded after taking the DeviceLock). NTSC. Config found
+at Turbo Manual / CPU Speed 48, REU Enabled 16 MB, Audio Mixer at defaults;
+the whole config (all categories) was snapshotted and read back IDENTICAL
+after every session. Probe: `tools/s3probe/sampler/` (`sampler.s` is a
+script interpreter run by the 6510, `sampler.py` the driver), uploaded once
+per session with `run_prg_via_sys`. The host cannot reach the expansion port,
+so every `$DFxx` access is made by the 6510; time base = CIA2 timers A+B
+(phi2, 32-bit, unscaled by turbo, see "CIA clock at turbo"); KERNAL ROM off,
+CIA/VIC interrupt sources off, so only the cartridge IRQ line can enter the
+handler. Evidence: `build/evidence/w10-hw/green/` (39/39 checks, exit 0).
+
+### Register map as the C64 sees it
+
+[SOURCE] `fpga/io/sampler/vhdl_source/sampler_regs.vhd`, `sampler_pkg.vhd`,
+`slot_server_v4.vhd` (`slot_to_io_bridge`, slot range `$120-$1FF`); every item
+marked [MEASURED HW] was exercised by the driver.
+
+- Window `$DF20-$DFFF` = 224 bytes = **7 voices** x 32 bytes at
+  `$DF20 + 32*v`. The RTL has 8 voices, but voice 7 would sit at `$E000`:
+  [SOURCE] it is not reachable from the C64 (status bit 7 exists, never
+  settable from here). Voices 0, 3 and 6 were driven [MEASURED HW].
+- **Reads**: any even address in the window returns the IRQ status
+  (bit v = voice v); any odd address returns `$10` (version). [MEASURED HW]
+  all 112 even bytes `$00` when idle and all 112 odd bytes `$10`, at 1, 8 and
+  48 MHz (0 bad bytes of 224 each). With the item Disabled the same window
+  reads floating bus (several distinct values, not `$10`). Every other
+  register is **write-only**: scribbling `$55` over voices 0 and 3 (control
+  excluded) changed no read [MEASURED HW].
+- **Writes**, offsets within a voice block (multi-byte fields big-endian):
+
+| Off | Reg | Bits |
+|---|---|---|
+| +00 | CTRL | b0 enable, b1 repeat, b2 IRQ at end, b5:4 non-zero = 16-bit, b6 interleave |
+| +01 | VOL | 6 bits, 0-63 (**64 wraps to 0**: Paula's 64 must be sent as 63) |
+| +02 | PAN | 4 bits |
+| +04..+07 | START | 26-bit sample-memory address (+04 holds bits 25:24) |
+| +09..+0B | LENGTH | 24-bit, in positions (samples) |
+| +0E,+0F | RATE | 16-bit |
+| +11..+13 | REPEAT A | 24-bit, **relative to START** |
+| +15..+17 | REPEAT B | 24-bit, relative to START |
+| +1F | CLEAR IRQ | b0 clears this voice; `$FF` clears all voices |
+
+- **REU address**: START = `$1000000 + REU offset` ([SOURCE] REU base
+  16 MB). [MEASURED HW] two 4 KB patterns stashed at REU `$0000` and `$1000`
+  were heard (UDP audio stream, see below) at the predicted frequencies, so
+  a start address in the REU does select REU data. Measured with the REU at
+  16 MB (as found); the 512 KB size was not tried.
+- **Capability**: not readable from the C64 and not in `/v1/info`. The
+  config item exists regardless; the capability shows only as `$DF21 = $10`
+  once mapped [MEASURED HW]. ([SOURCE] the firmware maps it only when the FPGA
+  capability bit CAPAB_SAMPLER is set.)
+
+### Playback timing [MEASURED HW]
+
+Seven rates (0, 1, 3, 28, 63, 126, 283) x lengths 1024/4096/16384, voice 0,
+8-bit, IRQ on, start `$1000000`; time = arm stamp (just after the control
+write) to the first poll that sees the status bit.
+
+- **Sample time = (rate + 1) x 160.0 ns + 118 ns** (fit; every rate within
+  1 % + 10 ns). That is 6.25 MHz rate ticks plus one fixed 120 ns fetch step:
+  rate 0 = 277 ns (3.6 MHz), rate 126 = 20.44 us, rate 283 = 45.56 us.
+  [SOURCE] the 160 ns is 8 voice slots x 1/50 MHz, independent of the 66.67
+  MHz core clock; the 120 ns is one 8-clock voice slot at 66.67 MHz.
+- **The end status rises after `length` samples**: time to end =
+  length x sample time with a residual under 27 us (stamp jitter, section
+  below), e.g. 83.67 ms (end stamp 84873 us minus the 1201 us arm stamp) for rate 126 x 4096; the law gives 83.71 ms.
+- Audio capture agrees: pattern A (period 64 samples, rate 283) played at
+  343.0 Hz against 343.0 Hz predicted; pattern B (period 32) at 686.1 Hz
+  against 685.9. The prediction uses the *fitted* law (slope and constant
+  from the poll timing), so it checks consistency of two instruments, not the
+  law itself.
+- The constant is checked against an independent expectation (120 ns +-15 ns,
+  one 8-clock slot, `sampler2.vhd` `fetch1`), not only against the fit: the
+  fit alone would pass any constant. Red: the saved data with the expectation
+  set to 400 ns fails, and a reviewer's mutant dataset with +0.4 us per
+  sample (fit constant 518 ns) fails (`build/evidence/w10-hw/fix1_red_*.txt`).
+- **Speed**: register writes land at 8 and 48 MHz: play time of rate 126 x
+  4096 was 83.72 ms at 1, 8 and 48 MHz (within 0.1 %), and the window read
+  back clean at both. The UCI-style fence (~38 us between accesses) was not
+  needed for this peripheral at the access pattern used.
+
+### What Paula needs, as measured
+
+- **Rate**: Paula's sample time is PERIOD x 281.9 ns (PAL/NTSC colour
+  clocks differ by 0.9 %), so `rate + 1 = (PERIOD x 281.9 ns - 118 ns) /
+  160 ns`; rounding to an integer is at most 80 ns, 0.25 % at PERIOD 113 (the
+  Amiga minimum). [DERIVED]
+- **Volume/gain**: 6-bit volume scales linearly: volume 8 gave 0.127 of the
+  volume-63 level (8/63 = 0.127). At volume 63 and centre pan an 8-bit
+  sample LSB is about 137 stream LSB (DC step 4410 for sample `$20`; RMS
+  8777 for a +-64 square). [MEASURED HW, stream is post mixer]
+- **Pan**: hard left/right at the voice (pan 0 / 15) [SOURCE]. The stream
+  after the Audio Mixer showed pan 0 as L 6638 / R 2139 and pan 15 mirrored:
+  the leak is likely the mixer (the mixer was not changed; `Pan Sampler L = Left 3`, `Pan Sampler R = Right
+  3` at default), not the voice. A hard-panned Paula would need those two
+  mixer items changed, which is a config change this probe did not make.
+- **Loops**: [MEASURED HW] with REPEAT B inside the sample and ENABLE+REPEAT
+  the voice loops for ever and raises **no status and no IRQ** at the loop
+  point (none in 17 sample times); REPEAT B beyond LENGTH makes it end
+  normally and raise the status. Paula's per-loop audio interrupt cannot be
+  taken from this IRQ; it would have to be timed from the 6510 side
+  (sample time x length).
+- **A stopped voice holds its last sample as a DC level** until it is
+  replayed ([MEASURED HW] DC step 4410 after a 16-sample `$20` play, back
+  to 0 after a zero play; [SOURCE] `sample_out` is only reset when a voice
+  restarts). Channels that Paula leaves with DMA off need zeros played.
+- **Capacity**: 7 usable voices, so four Paula channels fit; 16-bit and
+  interleave modes were not measured.
+
+### End-of-sample IRQ [MEASURED HW]
+
+- Reaches the **C64 IRQ line** (not NMI): the 6510 entered the `$FFFE`
+  handler with the status bit set, no spurious entry in any run.
+- **Level**, held until cleared: with no acknowledge the handler re-entered
+  50 times to the test limit, and once more after a SEI/CLI (count 51).
+  Reading the status (the handler read `$DF20` every time) does **not**
+  acknowledge it.
+- **Acknowledge**: write bit 0 = 1 to the voice's own clear register
+  (`$DF20 + 32*v + $1F`) -> count 1, status bit gone; write `$FF` to any
+  clear register -> count 1 (clears all). Writing 0 does not clear; writing
+  1 to another voice's clear register does not clear (count 51). Voice 3
+  raised status `$08`, voice 6 `$40`, each acknowledged by its own register.
+- CTRL bit 2 off: no status bit, no IRQ.
+- **Latency**: the handler's first timer stamp trails the status-poll stamp
+  of the same kind of event by +28.6 us on average (n = 10, -39 to +107 us);
+  that is inside the method's resolution (poll loop about 14 us per pass,
+  7-cycle IRQ entry plus about 40 cycles to the stamp, +-40 us arm-stamp
+  jitter from VIC badlines), so no latency beyond the 6510's own is shown.
+  The two runs per pair are separate plays, not one event.
+
+### Coexistence with REU DMA [MEASURED HW]
+
+- **Load tested: one voice at rate 126**, about 49 KB/s of sample fetches
+  (one byte per 20.4 us). One voice at rate 0 would be about 3.6 MB/s, and
+  four Paula channels at typical periods about 0.1-0.2 MB/s; neither was
+  tried. At this load **no effect was detected**.
+- A 1 KB REU fetch took 1409.7 us alone (n = 8, range 1332-1465 us, a 9.4 %
+  spread) and 1420.8 us with a voice playing (mean of 40, max 1454.9): +0.8 %,
+  which is inside that spread, so it is noise, not a cost. The driver's
+  tolerance is 10 %, just above the spread.
+- The voice's play time (end stamp minus arm stamp) was 83672 us alone and
+  83710 us with 40 DMAs in flight (arm stamp of the second run not recorded;
+  the first's 1201 us is used): +38 us = 0.05 %, inside the +-40 us stamp
+  jitter. The driver's tolerance is 0.5 %.
+- The fetched block was bit-exact (stash then fetch of a 1 KB pattern during
+  playback); every DMA ended inside the playback window.
+- An end-of-sample IRQ that became due during a 30-DMA burst was delivered
+  once (count 1) and acknowledged normally.
+- Not shown: sample under-runs during DMA. The stream was not captured in
+  that window; the only audio captures ran without DMA.
+
+### Audio-stream capture (what was and was not measured)
+
+The U64 UDP audio stream (`stream_audio_start`) was captured on the host and
+used for frequency, level and DC checks only; no audio quality was judged.
+Before the voices were zeroed the stream carried a large constant offset
+(-32768, +32767 and -4482 in the three earlier runs, `green_run1..3`): that was
+the held last sample of voices used by the IRQ tests, which is the DC-hold
+finding above. Zeroing every voice gave an offset of -2.
+
+### Checks with teeth
+
+- The driver on VICE (no sampler there): the interpreter self-test passes,
+  the sampler checks FAIL, exit 1 (`build/evidence/w10-hw/red/vice/`).
+- The driver on the U64E with deliberately wrong expectations (version `$11`,
+  tick 320 ns) failed both of those checks before the real run (`red/hw/`;
+  that early driver also failed checks that were its own defects, listed
+  below); the saved final data judged
+  with the same wrong expectations (and a 0.01 % DMA tolerance) exits 1 with
+  4 FAILs (`red/analyze.txt`).
+- Defects the first hardware runs caught in the driver itself (the first
+  run's log was overwritten; later ones are in `green_run1..4`): a poll
+  timeout of 4096 iterations, REPEAT A/B given as absolute rather than
+  relative positions, a level-IRQ count that forgot the re-entry after
+  SEI/CLI, play times that included register-write time (it differs by
+  speed), a latency comparison that mixed arm stamps, and a per-rate slope
+  tolerance tighter than the stamp jitter at rate 0.
+
+### Scope and limits
+
+Single session at 1 MHz (8 and 48 MHz for the window and play-time checks),
+NTSC, REU 16 MB, one sampler in voice 0 for timing, voices 3 and 6 for IRQ.
+Firmware hazard (not measured): `sampler2.vhd:145` tests `position =
+repeat_b` before `position = length` (line 149), so with REPEAT B equal to
+LENGTH and repeat off, the voice is not shown to finish or raise its IRQ
+(the position == repeat_b branch only jumps when enable and repeat are both
+set, and otherwise falls through without finishing). Keep REPEAT B different
+from LENGTH when relying on the end IRQ.
+Wrong-expectation runs against the FINAL driver were done with `--analyze` on
+the saved data, not repeated on hardware (the hardware red run used the
+earlier driver).
+Not measured: 16-bit and interleave modes, voice 7, more than one voice
+playing at once, REU smaller than 16 MB, the effect of the mixer's pan items,
+sample content beyond frequency, and whether playing during heavy REU DMA
+under-runs audibly. Evidence is in `build/evidence/` (ignored by git); the
+reproduction is `U64_HOST=10.43.23.81 U64_BASELINE_ON_ENTRY=0 python3
+tools/s3probe/sampler/sampler.py --backend u64 --out DIR`.
