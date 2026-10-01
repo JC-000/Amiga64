@@ -1273,6 +1273,25 @@ def leg_raiseev(rig: Rig) -> list[str]:
     return f
 
 
+def leg_raiseslot(rig: Rig) -> list[str]:
+    """Review L1 (fix round 3): raiseev with an always-due client slot.  The
+    slot makes the pass set mach_fs (a forced step); the delivery in the
+    same pass must cancel it, or the step runs h3's first instruction
+    before level 6 nests (d1 = 3)."""
+    f = need_seam(rig, "raiseslot")
+    if f:
+        return f
+    (pc,) = rig.stage(link(prog_raiseev(), BASE))
+    res = rig.run(pc, s=4, flags=F_INIT | F_SUPER, sr=0x27,
+                  slots={4: Slot(0, period=1, rearms=0xFF)})
+    if not clean(res, "raiseslot", f):
+        return f
+    if res["d"][0] != 6 or res["d"][1] != 0:
+        f.append(f"raiseslot: d0 = {res['d'][0]}, d1 = {res['d'][1]}; want 6, 0 "
+                 "(the forced step ran the level-3 handler before level 6 nested)")
+    return f
+
+
 def leg_progress(rig: Rig) -> list[str]:
     """W9-C review / fix round 2: a client whose callback re-arms its slot
     in the past every time (always due) must not livelock the guest: a
@@ -1338,7 +1357,7 @@ LEGS = {"setclr": leg_setclr, "etime": leg_etime, "etlive": leg_etlive,
         "oddvec": leg_oddvec, "haltrace": leg_haltrace,
         "stoplost": leg_stoplost, "starve": leg_starve, "kick": leg_kick,
         "ustop": leg_ustop, "progress": leg_progress, "raiseev": leg_raiseev,
-        "lag": leg_lag}
+        "lag": leg_lag, "raiseslot": leg_raiseslot}
 
 
 def session(prg: str, fn) -> object:
@@ -1468,6 +1487,9 @@ MUTANTS = {
     # reviewer's: the STOP wake ignores a VERTB enabled above the IPL
     "wkvb": (MACH, [("        and #1 << MACH_VERTB_BIT\n        bne yes\n", "")]),
     # fix round 2: no forced guest instruction when a slot is due now
+    # fix round 3: a delivery does not cancel the forced step
+    "fsclear": (MACH, [("        lda #0                  ; no forced step after a delivery: a higher\n"
+                        "        sta mach_fs             ; level must nest before the handler runs\n", "")]),
     "nostep": (MACH, [("loop:   lda mach_fs             ; W9-I: a slot is due now (fix round 2)\n"
                        "        bne step\n", "loop:\n")]),
 }
@@ -1481,7 +1503,7 @@ MUTANT_LEGS = {"noslot": ["arm"], "nokick": ["trap"], "kickout": ["out"],
                "wkslot": ["stop"], "haltguard": ["haltrace"],
                "stopev": ["stoplost"], "nopoll": ["starve", "kick", "storm"],
                "dropb7": ["stoplost", "kick", "raiseev"], "wkvb": ["stop"],
-               "nostep": ["progress"]}
+               "nostep": ["progress"], "fsclear": ["raiseslot"]}
 
 
 def build_mutant(name: str, out_dir: str) -> str:

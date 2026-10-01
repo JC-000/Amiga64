@@ -982,6 +982,8 @@ done:   rts
         and #$F8
         ora mach_lv
         sta r_sr+1
+        lda #0                  ; no forced step after a delivery: a higher
+        sta mach_fs             ; level must nest before the handler runs
         inc mach_nirq
         bne none
         inc mach_nirq+1
