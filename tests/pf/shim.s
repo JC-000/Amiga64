@@ -1,21 +1,16 @@
 ; tests/pf/shim.s — W10-V test shim, linked ONLY into tests/run_pf.py's
-; shim builds (never into runtime/).  Until W10-P's rc claims exist it
-; stands in for the display-state block and the hook vector
-; (docs/WAVE10_BRIEF.md C1, C3); afterwards it only adds shim_kick.
-;   disp_st    the C1 block (103 bytes, host-filled through runner.lbl)
-;   cop_dhook  the RAM vector disp_init fills (high byte 0 = none)
+; shim builds (never into runtime/): a fake caller of the display hook
+; (docs/WAVE10_BRIEF.md C3), so the host can drive disp_frame with a
+; host-filled disp_st.  disp_st and cop_dhook come from W10-P (or, before
+; it lands, from disp.s's pre-merge placeholder).
 ;   shim_kick  a fake cop_frame end: calls through cop_dhook if set
 .include "../../runtime/macros.inc"
 
 .export shim_kick
 
-.ifndef disp_st                 ; before W10-P lands (it brings both)
-.export disp_st, cop_dhook
-.segment "BSS"
-disp_st:   .res 104             ; C1 + valid (+103)
-cop_dhook: .res 2
-.else
 .import cop_dhook
+.ifndef disp_st
+.import disp_st
 .endif
 
 .segment "CODE"
