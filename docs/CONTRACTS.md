@@ -810,6 +810,11 @@ with a `valid` byte, `cop_dhook` in BSS, copper DMA gating). Reference:
   (frame-hook calls), `cop_nskip` (u16 each), `cop_why`; entries
   `cop_reset`, `cop_frame`; `mach_fhook`; exports `c_wrw`, `chip_a`,
   `chip_vl`, `chip_vh` (chip.s: the copper's write path).
+- **Deliberate deviation (supervisor-approved):** a DMACON turn-on with no
+  copper PC loaded since `cop_reset` (no strobe, no frame restart) runs
+  nothing. Real hardware would run from an undefined PC; nothing legitimate
+  depends on it, and running guest address 0 would only write garbage
+  (`run_cop` case `nopc`, mutant `nopcok`).
 - **Not modelled:** WAIT/SKIP beam timing (the model's limit), copper DMA
   cycles, the copper stopping when its own DMA goes off mid-list, DMACONR
   (still reads its slot), BPLCON3+, the blitter's response to copper
