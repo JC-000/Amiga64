@@ -209,3 +209,14 @@ def test_blank_border_is_colour0():
     lut = R.build_lut()
     out = R.disp_convert(st(dmacon=0, color=[0x0F00] + [0] * 31), None, lut)
     assert out["decide"]["why"] == R.WHY_DMA and out["border"] == lut[0xF00]
+
+
+def test_cop_valid_matches_w10p():
+    """disp.s's mirror of W10-P's valid byte value (cop.s COP_VALID)."""
+    from host import chipset_ref
+    e = equates(DISP_S)
+    assert e["DISP_COPVALID"] == chipset_ref.COP_VALID == R.COP_VALID
+    ram = (ROOT / "runtime" / "rc" / "ram.inc").read_text()
+    m = re.search(r"^disp_st\s*=\s*\$([0-9A-Fa-f]+)", ram, re.M)
+    assert m, "W10-P's disp_st claim"
+    assert int(m.group(1), 16) + e["DISP_ST_VALID"] < int(m.group(1), 16) + 0x100

@@ -197,11 +197,22 @@ R_DISP_N = 16      # replaced from the PRG's DISP_N label at run time
 
 # --- VICE ------------------------------------------------------------------------
 
+def rc_equate(name: str) -> int:
+    """An rc RAM equate (runtime/rc/ram.inc), e.g. W10-P's disp_st."""
+    import re
+    with open(os.path.join(ROOT, "runtime", "rc", "ram.inc")) as f:
+        m = re.search(rf"^{name}\s*=\s*\$([0-9A-Fa-f]+)", f.read(), re.M)
+    if not m:
+        raise KeyError(f"{name} not in runtime/rc/ram.inc")
+    return int(m.group(1), 16)
+
+
 class Pf(C.Session):
     def __init__(self, target, labels):
         super().__init__(target, labels)
         from tests.harness_util import lookup_label
-        for k in ("disp_init", "disp_frame", "disp_refresh", "disp_st",
+        self.lab["disp_st"] = rc_equate("disp_st")
+        for k in ("disp_init", "disp_frame", "disp_refresh",
                   "cop_dhook", "shim_kick", "disp_mode", "disp_why",
                   "disp_nconv", "disp_nblank", "disp_lastf", "mach_in",
                   "mem_rec_dirty", "DISP_N", "mem_write8", "mem_write16",
@@ -270,6 +281,25 @@ def run_perf(s: "Pf") -> dict:
         out[name] = cyc
         print(f"  perf {name:34s} {cyc:9d} cycles")
     return out
+
+
+def check_outputs(s, g: dict, want: dict, st_block: bytes | None) -> list[str]:
+    """run_c2v's check_outputs, with its $B800-$B8FF guard made exact: that
+    page is now W10-P's disp_st claim.  The block must hold st_block (the
+    bytes the host wrote; None: the copper's, not checked here) and the
+    spare tail after it must keep the guard pattern."""
+    f = [x for x in C.check_outputs(s, g, want, C.read_regs(s.T))
+         if not x.startswith("guard $B800-$B8FF")]
+    base = rc_equate("disp_st")
+    page = s.read_ram(0xB800, 0x100)
+    exp = bytearray(g["free_b"])
+    n = R.DISP_ST_LEN
+    if st_block is not None:
+        exp[base - 0xB800:base - 0xB800 + n] = st_block
+    else:
+        exp[base - 0xB800:base - 0xB800 + n] = page[base - 0xB800:base - 0xB800 + n]
+    f += C.diff("$B800-$B8FF (disp_st + spare)", page, bytes(exp), 0xB800)
+    return f
 
 
 def run_shim(prg: str, perf: bool = False) -> list[str]:
@@ -402,7 +432,7 @@ def run_step(s: Pf, step: dict, mem: Mem, lut: bytes, shown: bool):
         if d["mode"] == R.MODE_BLANK:
             f.append(f"TEST BUG: the model blanks (why {d['why']})")
         # the VIC registers change on purpose: checked against the model below
-        f += C.check_outputs(s, g, want, C.read_regs(s.T))
+        f += check_outputs(s, g, want, R.pack_disp_st(st))
         vic = s.vic()
         exp = dict(want["vic"])
         exp[0xDD00] = 0
@@ -534,7 +564,7 @@ def run_fixture(prg: str, budget: int = 0) -> list[str]:
             want = R.disp_convert(st, mem.read, lut)
             if want["decide"]["mode"] != R.MODE_MC2:
                 fails.append(f"TEST BUG: model decides {want['decide']}")
-            f = C.check_outputs(sess, g, want, C.read_regs(c.T))
+            f = check_outputs(sess, g, want, None)
             bm = sess.read_ram(sess.bitmap, 8000)
             if bm == g["top"][sess.bitmap - 0xE000:sess.bitmap - 0xE000 + 8000]:
                 f.append("bitmap UNCHANGED (guard pattern intact): nothing converted")

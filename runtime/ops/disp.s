@@ -15,8 +15,7 @@
 ; byte 0 = none).  cop_frame calls it at the end of every frame, and a
 ; synchronous COPJMP run calls it after the copper stops.  Neither module
 ; links against the other's code: disp_st is an rc equate and cop_dhook a
-; cop.s BSS export that disp.s imports (before W10-P lands, a placeholder
-; below defines both).  disp_st is RAM under BASIC ROM; its valid byte (+103)
+; cop.s BSS export that disp.s imports.  disp_st is RAM under BASIC ROM; its valid byte (+103)
 ; must be $A5 (cop_reset ran), else the state is ignored (blank, why 7).
 ;
 ; Refresh policy v0 (docs/PERF.md "Display refresh"):
@@ -57,17 +56,8 @@
 .export DISP_N, disp_lut       ; disp_lut: the rc equate, for the host
 .import c2v_init, c2v_pal_mc2, c2v_pal_hires, c2v_mc2s, c2v_hiress
 .import mem_rec_dirty, mach_in
-.ifdef disp_st
 .import cop_dhook               ; cop.s BSS (consumer -> provider, as cia.s
-                                ; imports mach_cbv)
-.else
-; PRE-MERGE PLACEHOLDER (supervisor, Wave 10 item 5): until W10-P's rc
-; claim disp_st exists, this module defines the C1 block and the hook
-; vector itself so the default tree links.  It disappears by itself when
-; W10-P lands (disp_st becomes an rc equate, cop_dhook comes from cop.s).
-.export disp_st, cop_dhook
-DISP_PREMERGE = 1
-.endif
+                                ; imports mach_cbv); disp_st: rc equate (cop)
 
 .ifndef DISP_N
 DISP_N     = 20                 ; duty budget: frames per conversion (PERF (j))
@@ -149,10 +139,6 @@ DISP_VHI       = $08              ; hires, 40 columns
 ; ---------------------------------------------------------------------------
 .segment "BSS"
 disp_b0:
-.ifdef DISP_PREMERGE
-disp_st:    .res 104            ; placeholder: C1 + valid (+103)
-cop_dhook:  .res 2              ; placeholder hook vector
-.endif
 disp_new:   .res DISP_SNAP      ; fields as just copied
 disp_cur:   .res DISP_SNAP      ; fields of the last decision
 disp_seen:  .res 1              ; gen when the fields were last copied

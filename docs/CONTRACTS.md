@@ -856,7 +856,8 @@ spec: `docs/C2V.md` "Row skip", "Display refresh (S3.5)". Reference:
   never ran) means "no display state": blank, reason 7. `cop_dhook` is a
   cop.s BSS export that disp.s imports (consumer → provider, as cia.s
   imports `mach_cbv`). It is written only by `disp_init`: high byte first
-  to 0, then low, then high. Before W10-P, `tests/pf/shim.s` provides both.
+  to 0, then low, then high. `tests/pf/shim.s` (test builds only) adds
+  `shim_kick`, a fake `cop_frame` end that calls through `cop_dhook`.
 - **Entries** (JSR; clobber A/X/Y; any `$01` that maps I/O in: `$37`,
   `$36`, `$35`; BASIC banked out inside, the caller's `$01` restored; the
   I flag preserved; every REC use ends with `mem_rec_dirty`, and a call

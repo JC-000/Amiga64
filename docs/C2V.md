@@ -432,14 +432,21 @@ blank border look it up with one byte DMA each.
 ### Tests (`tests/run_pf.py`)
 
 - **Shim leg**: init (LUT readback, the hook, the state), `lut-trap`, and
-  16 scripted steps (the first: valid ≠ `$A5`). After each one: the whole RAM at `$E000-$FFFF` and `$D000-$DFFF`
+  16 scripted steps (the first: valid ≠ `$A5`). The host writes W10-P's
+  real `disp_st` (`$B800`, RAM under BASIC ROM) and calls `shim_kick`
+  (`tests/pf/shim.s`, test builds only), a fake `cop_frame` end. The page
+  `$B800-$B8FF` is checked exactly: the block as written, the spare tail
+  unchanged. After each one: the whole RAM at `$E000-$FFFF` and `$D000-$DFFF`
   against the guard pattern with exactly the reference overlay (or
   untouched), colour RAM, `c2v_a_bgc`, the VIC registers, the state counters,
   `$01`, the I flag, and `m_rok` (0 after REC use, untouched otherwise).
 - **Fixture leg**: `pf_static` through `cop_reset` + `disp_init`, then the
   HLE run. Its planes are read back from the REU and checked against the
   formula, and the conversion against `disp_convert`. `disp_nconv` must be
-  2 (the decoy palette, then the final one).
+  2 (the decoy palette, then the final one), and the LUT must be intact
+  after the program's stores over `$DF0000-$DF0FFF`. The fixture alone
+  catches the five C3 mutants and `bank`. `straddle`, `clr` and `budget`
+  need the shim leg's dedicated steps.
 - **Red**: `--variant stub`, and the base PRG (no `disp.s`): the bitmap is
   left intact and the VIC is untouched.
 - **Teeth** (`--teeth`, both legs): `C2V_MUT_BITORDER`, `DISP_MUT_PAL`,
