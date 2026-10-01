@@ -82,6 +82,36 @@ VIC_COLRAM  = $D800     ; W7-V c2v: VIC colour RAM (low nibbles), written by run
 .ifndef CIA2_ICR
 CIA2_ICR    = $DD0D     ; W7-V c2v: CIA 2 interrupt control; read = acknowledge (releases /NMI)
 .endif
+.ifndef CIA1_TALO
+CIA1_TALO   = $DC04     ; W8-L mach: CIA 1 timer A latch low (the event one-shot)
+.endif
+.ifndef CIA1_TAHI
+CIA1_TAHI   = $DC05     ; W8-L mach: CIA 1 timer A latch high
+.endif
+.ifndef CIA1_ICR
+CIA1_ICR    = $DC0D     ; W8-L mach: CIA 1 interrupt control; read = acknowledge (releases /IRQ)
+.endif
+.ifndef CIA1_CRA
+CIA1_CRA    = $DC0E     ; W8-L mach: CIA 1 control A (bits 7-6 TODIN/SPMODE kept)
+.endif
+.ifndef CIA2_TALO
+CIA2_TALO   = $DD04     ; W8-L mach: CIA 2 timer A (time base, bits 15-0, counts down)
+.endif
+.ifndef CIA2_TAHI
+CIA2_TAHI   = $DD05     ; W8-L mach
+.endif
+.ifndef CIA2_TBLO
+CIA2_TBLO   = $DD06     ; W8-L mach: CIA 2 timer B (time base, bits 31-16: counts TA underflows)
+.endif
+.ifndef CIA2_TBHI
+CIA2_TBHI   = $DD07     ; W8-L mach
+.endif
+.ifndef CIA2_CRA
+CIA2_CRA    = $DD0E     ; W8-L mach: CIA 2 control A (bits 7-6 kept)
+.endif
+.ifndef CIA2_CRB
+CIA2_CRB    = $DD0F     ; W8-L mach: CIA 2 control B (bit 7 kept)
+.endif
 ; W7-V c2v: the RAM under this I/O window is a separate claimable resource (host/rescheck.py `@under`)
 ; @under c2v $D000-$D3FF c2v VIC screen matrix + sprite pointers in the RAM under VIC/SID I/O (bank 3 + $1000); CPU writes with $01=$34 under sei only, never REU DMA
 .ifndef c2v_screen
@@ -135,11 +165,17 @@ ULT_CMD_BASE = $DF1C    ; control/command/response/status window
 c2v_bitmap = $E000      ; W7-V c2v: VIC bank 3 bitmap
 .endif
 ; @region free $FF40-$FFF9 KERNAL ROM / RAM underneath - unclaimed
-; @region c2v $FFFA-$FFFB W7-V interim, superseded by S3.2's vectors: RAM NMI vector -> c2v RTI stub, for the $01=$34 screen fill
-.ifndef c2v_nmivec
-c2v_nmivec = $FFFA      ; W7-V c2v: written (under ROM) before every under-I/O screen fill
+; W8-L mach: the 6502 hardware vectors in the RAM under the KERNAL (mach_run runs with $01 = $35)
+; @region s3 $FFFA-$FFFF 6502 NMI/RESET/IRQ vectors in RAM under KERNAL
+.ifndef mach_vnmi
+mach_vnmi = $FFFA       ; W8-L mach: NMI -> mach_nmi.  Sanctioned writers: mach_vec, and c2v_fill (stores mach_nmi: identical bytes inside mach_run, ROM vectors live outside)
 .endif
-; @region free $FFFC-$FFFF KERNAL ROM / RAM underneath - unclaimed (S3.2 claims $FFFA-$FFFF)
+.ifndef mach_vrst
+mach_vrst = $FFFC       ; W8-L mach: RESET, never written (a reset maps the KERNAL in)
+.endif
+.ifndef mach_virq
+mach_virq = $FFFE       ; W8-L mach: IRQ/BRK -> mach_irq
+.endif
 
 ; --- Contract invariants (assemble-time; keep true under -D relocation) ----
 .assert (buf_case & $FF) = 0,   error, "buf_case must be page-aligned (c64.cfg CASEBUF)"

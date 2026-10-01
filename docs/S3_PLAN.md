@@ -177,8 +177,10 @@ ceiling [MEASURED HW]), so `rec_budget` stays bit-identical.
 - **Time base.** A C64 CIA-2 TA→TB cascade runs free as a 32-bit φ2
   counter (its ports keep driving the VIC bank, its NMI stays off). CIA #1
   timer A, one-shot, is armed for the next guest event (VERTB, CIA
-  underflow, TOD alarm). The C64 CIAs are assumed to count φ2 (~0.985 MHz)
-  whatever the turbo setting: **unverified here** (§5, risk 4).
+  underflow, TOD alarm). The C64 CIAs count φ2 whatever the turbo setting
+  (**[MEASURED HW]**, W8-H, `docs/HARDWARE.md` "CIA clock at turbo"; §5
+  risk 5, resolved). φ2 is ~0.985 MHz on PAL and ~1.023 MHz on NTSC. The
+  bench U64E is NTSC, so guest frames/s there = 72.1/2^s, not 69.4/2^s.
 - **The event path costs 0 cycles per instruction.** The CIA #1 IRQ
   handler (~40 cycles [EST, static]) sets `ev_pend` and ORs $80 into
   `st_halt`; `dispatch_go` and W6-S's `dispatch_gox` both already begin
@@ -208,8 +210,9 @@ ceiling [MEASURED HW]), so `rec_budget` stays bit-identical.
 - **Vectoring.** `$0314` sits in rc region "sys $0200–$03FF, not
   claimable", so the KERNAL path is out. `mach_run` runs with KERNAL
   banked out (`$01` = $35; the interpreter never calls it) and owns the
-  RAM vectors at $FFFA–$FFFF: IRQ → the event handler, NMI → `rti`
-  (RESTORE key). S3.2 claims them in `runtime/rc/ram.inc` as
+  RAM vectors at $FFFA–$FFFF: IRQ → the event handler, NMI → `mach_nmi`
+  (acknowledge CIA2, `rti`; the only NMI handler, also used by the c2v
+  fill; the invariant is in `docs/CONTRACTS.md` "Machine loop (S3.2)"). S3.2 claims them in `runtime/rc/ram.inc` as
   `@region s3 $FFFA-$FFFF 6502 NMI/RESET/IRQ vectors in RAM under KERNAL`
   (the bitmap of §2.4 ends at $FF3F), and restores `$01` on exit.
 - **Recognition latency.** A CPU write to INTENA/INTREQ or an IPL drop
@@ -217,8 +220,9 @@ ceiling [MEASURED HW]), so `rec_budget` stays bit-identical.
   CPU-originated raise in the model and still reaches the no-media frame
   at 3,328,539 [MODEL]. If needed later, the chip handler can force an
   early `mach_run` pass via `st_halt`.
-- **STOP.** On `HALT_STOP` (W6-S), `mach_run` waits for `ev_pend` or
-  fast-forwards guest time to the next armed event (idle skip). The ROM
+- **STOP.** As built in S3.2, `HALT_STOP` returns to the caller unchanged.
+  Idle skip waits for S3.3, which can wake a stopped CPU: then `mach_run`
+  waits for `ev_pend` or fast-forwards guest time to the next armed event. The ROM
   idles only 0.15 s of 5.5 s before the screen [MODEL].
 - **Time dilation, a key design parameter.** Guest E-clock = φ2 counter
   >> *s*.
@@ -624,9 +628,9 @@ is the priority.
    per static refresh [EST]).
 4. **16-colour hires fidelity:** a 1-bit silhouette in v0; v1 costs 2–4×
    [EST].
-5. **CIA φ2 at turbo is unverified.** If the U64E clocks the C64 CIAs with
-   the turbo clock, calibrate the time base against the VIC raster
-   instead; a 10-line probe for the device owner.
+5. **CIA φ2 at turbo: RESOLVED (W8-H, [MEASURED HW]).** CIA2 counts φ2 at
+   48 MHz exactly as at 1 MHz (17095 ticks/frame, NTSC); CIA1 is inferred
+   (same clock, not sampled). No raster calibration needed.
 6. **Merge contention in `core.s`:** S3.1 follows W6-S's merge and re-runs
    its perf proof on the merged tree.
 7. **Model-vs-ROM drift:** pin the ROM hash (W6-O does); re-run the model

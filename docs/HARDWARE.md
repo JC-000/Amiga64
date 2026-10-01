@@ -648,3 +648,59 @@ set the speed to 1 MHz explicitly and REU Size to `512 KB`.
 
 Log: `build/evidence/w5-tools/hw/validate_hold2.log`; JSON in
 `build/evidence/w5-tools/hw/validate_hold2/`.
+
+## CIA clock at turbo (W8-H, 2026-09-30)
+
+Question (S3_PLAN section 5 risk 5): with the U64E at 48 MHz, do the CIAs
+count phi2 (~1 MHz) or a turbo-scaled clock?
+
+**Answer: [MEASURED HW] CIA2 counts phi2 at 48 MHz (CIA1 inferred: same
+chip clock, not sampled).** Mean ticks per video frame are identical to the
+1 MHz control (17095 = 263 lines x 65 cycles), and the means agree within
++-0.01 %. The bench U64E runs the NTSC video standard (KERNAL flag), so the
+PAL figure 19656 does not apply. CIA2 does not scale with the turbo clock, so
+a time base built on CIA ticks needs no speed correction.
+
+Conditions: U64E `Ultimate-64-Elite-688004`, firmware 3.15 (git c47155b7),
+FPGA 125, core 1.50 (`GET /v1/info`, recorded after taking the DeviceLock).
+Device found at CPU Speed 48 / Turbo Control Manual (not the " 1" older
+sections of this file record); the whole config, all categories, was
+snapshotted and read back IDENTICAL after the session. Probe:
+`tools/s3probe/cia_rate/` (`cia_rate.s`, driver `cia_rate.py`), uploaded once
+with `run_prg_via_sys`, interrupts off. CIA2 timer A (phi2 source, continuous,
+latch $FFFF) cascaded into timer B is a 32-bit down counter, sampled with the
+CIA2 TOD at raster line 100 at frames 0, 50 ... 250 (the VIC raster runs in
+real time, so 50 frames is a fixed span). Three runs per speed, interleaved
+1, 48, 1, 48, 1, 48; speed switched by REST while the probe idled.
+
+| Speed | Run | Mean CIA ticks/frame (5 x 50-frame intervals) | TOD tenths over 250 frames (expect 42) | Raster polls/frame |
+|---|---|---|---|---|
+| 1 MHz | 1 | 17095.0 | 41 | 533 |
+| 1 MHz | 2 | 17095.1 | 41 | 535 |
+| 1 MHz | 3 | 17095.0 | 41 | 534 |
+| 48 MHz | 1 | 17095.0 | 42 | 24061 |
+| 48 MHz | 2 | 17095.0 | 41 | 24029 |
+| 48 MHz | 3 | 17095.0 | 42 | 24096 |
+
+- [MEASURED HW] At 48 MHz every 50-frame interval reads 17095.0. At 1 MHz a
+  few intervals are off by about +-10 ticks per frame (SESSION.log 11:00:41:
+  17100.3 and 17089.8, a pair of +-256-tick interval errors). This is
+  attributed to a tear in the non-atomic TALO/TAHI read (a TA borrow between
+  the two reads; the probe's retry check covers TB only), not to poll
+  jitter. It cancels in the run mean.
+- [MEASURED HW] The CPU really did run fast: raster polls per frame rose from
+  about 534 to about 24060, a factor of 45, so the 48 MHz runs are not a
+  speed change that failed to apply. Why the factor is below 48 is not
+  measured; this is a sanity check, not a clock measurement.
+- [MEASURED HW] TOD advances in real time at both speeds (41-42 tenths per
+  250 NTSC frames = 4.18 s), with the 60 Hz divider selected to match the
+  KERNAL's NTSC flag. TOD is not turbo-scaled either. A first session
+  without the poll counter gave the same table (41/41/41 and 41/41/42).
+- [MEASURED VICE] Control for the probe itself: x64sc (NTSC) gives 17095.0
+  ticks/frame; its TOD reads 34 tenths (VICE feeds a 50 Hz-derived pin to a
+  60 Hz-divider CIA), so VICE's TOD is not a reference for this.
+- Check with teeth: the driver run against a deliberately wrong expectation
+  (17095 x 48 = 820560 ticks/frame) exits 1 on both the VICE run and the
+  saved hardware data (`build/evidence/w8-hw/red/`).
+- Scope: CIA2 timers and TOD only; CIA1 was not sampled (same clock tree, not
+  measured). Only 1 and 48 MHz were run.

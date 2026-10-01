@@ -226,7 +226,19 @@ st_sp6    = $93         ; 6502 SP at instruction start (exception unwind)
 st_exl    = $94         ; st_exc as LATCHED by emu_reset: every runtime test reads this
 .endif
 
-; @region free $95-$FF UNALLOCATED - $95-$F8 is still inside the ld65 ZEROPAGE pool (c64.cfg: start $0080 size $0079) but NOT usable by .res past $87 (core.s asserts); claim via this file + rescheck green
+; W8-L mach: S3.2 machine loop (runtime/ops/mach.s, docs/CONTRACTS.md "Machine loop (S3.2)").
+; Machine state, not interpreter state: emu_reset does not touch it; mach_init
+; clears it.  None of $95-$99 is written by the KERNAL IRQ (it keeps $A0-$A2,
+; $91, $C5/$CB/$C6, $F5-$F6), so the values survive between host calls.
+; @region s3 $95-$99 machine loop: pending-event flags (IRQ handler) and the guest frame counter
+.ifndef ev_pend
+ev_pend     = $95       ; W8-L mach: pending events, bit 0 = CIA1 timer A (set by mach_irq, taken by mach_run)
+.endif
+.ifndef mach_frames
+mach_frames = $96       ; W8-L mach: u32 LE guest frames (VERTBs) since mach_init
+.endif
+
+; @region free $9A-$FF UNALLOCATED - $9A-$F8 is still inside the ld65 ZEROPAGE pool (c64.cfg: start $0080 size $0079) but NOT usable by .res past $87 (core.s asserts); claim via this file + rescheck green
 
 ; --- Contract invariants (assemble-time; keep true under -D relocation) ----
 .assert r_a0 = r_d0 + $20, error, "getreg/setreg do reg*4 indexing from r_d0 - A regs must follow D regs contiguously"

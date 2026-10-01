@@ -14,8 +14,9 @@ $(BUILD)/gen/dispatch.s: host/gen_dispatch.py runtime/core.s $(wildcard runtime/
 	mkdir -p $(BUILD)/gen
 	$(PY) host/gen_dispatch.py -o $@
 
-# W7-T: chip.s links LAST so adding it moves no other module (perf layout)
-RUNTIME_SRC := $(filter-out runtime/ops/chip.s,$(wildcard runtime/*.s runtime/ops/*.s tests/runner/*.s)) runtime/ops/chip.s
+# W7-T: chip.s links LAST so adding it moves no other module (perf layout);
+# W8-L: mach.s after it, for the same reason
+RUNTIME_SRC := $(filter-out runtime/ops/chip.s runtime/ops/mach.s,$(wildcard runtime/*.s runtime/ops/*.s tests/runner/*.s)) runtime/ops/chip.s runtime/ops/mach.s
 RUNTIME_INC := runtime/macros.inc $(wildcard runtime/rc/*.inc)
 
 $(BUILD)/runner.prg: $(RUNTIME_SRC) $(RUNTIME_INC) $(BUILD)/gen/dispatch.s runtime/c64.cfg
