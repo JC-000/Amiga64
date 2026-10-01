@@ -435,3 +435,83 @@ Tests: `tests/run_mach.py` (+ `tests/mach/drv.s`), `host/tests/test_mach.py`.
   `mach_next`/`mach_now` and the entry `mach_rdc` (test visibility).
 - **Link order.** `mach.s` links after `chip.s` (Makefile), so no other
   module's code moves; `core.s` is unchanged.
+
+## Event seam (S3.3/S3.4) (W9-I)
+
+Owner: s3 (`runtime/ops/mach.s`). Design: `docs/WAVE9_BRIEF.md` C1,
+`docs/S3_PLAN.md` §1.5. Tests: `tests/run_irq.py` legs `etime`, `etlive`,
+`arm`, `periodic`, `trap`, `race`, `post`, `out` (+ `tests/irq/drv.s`, a
+fake event source) and `--mutants`. Clients: `cia.s` (S3.4); `mach.s` has
+no link dependency on any client.
+
+- **Guest time.** `mach_etime` (JSR; clobbers A, X; keeps Y) → `mach_et`
+  (u32 LE) = the low 32 bits of `(chi:C) >> s`, where C is the S3.2 phi2
+  counter and `mach_chi` (u16) counts its wraps (`mach_rdc` compares C's top
+  byte with the previous read's: lower = a wrap). It is THE time base of
+  every guest clock. It wraps at 2^32 E ticks, so compare E times by signed
+  difference. A wrap is counted only if C is read at least once per 2^31
+  phi2 (~36 min): `mach_run` reads it at every pass (at least every 65536
+  phi2); a caller that stays away from `mach_run` longer loses the wrap
+  (as S3.2's frame count does). `mach_init` restarts E at 0 (`chi` := 0).
+- **Slots.** `MACH_NSLOT` = 8 (exported). Slot 0 is VERTB (mach-internal,
+  in phi2, as S3.2); slots 1–7 belong to the client (`cia.s` assigns them).
+  State: `mach_dl` (u32 deadline per slot, 4 bytes × slot), `mach_am`
+  (armed mask, bit n = slot n).
+- **`mach_arm`** (A = slot 1–7, `mach_at` = absolute E deadline u32 LE;
+  clobbers A, X; keeps Y): arms or re-arms (replaces the deadline). Slot 0
+  and A ≥ 8 are ignored. **`mach_disarm`** (A = slot; clobbers A, X):
+  disarms, a no-op when not armed. Both are callable from the trap context
+  (inside `emu_run` under `mach_run`, IRQ enabled), from callbacks, and
+  outside `mach_run` (no kick; the next `mach_run`'s entry pass sees it).
+  `mach_init` disarms every slot (callbacks are kept): init the time base
+  before the client arms.
+- **Firing.** Every service pass (`mach_svc`: the entry pass of
+  `mach_run`, and the pass after each event or kick) first counts VERTBs,
+  then takes ONE E snapshot and fires every armed slot 1..7 (in slot order)
+  whose deadline is ≤ the snapshot: the slot is disarmed, then its callback
+  runs. Each slot fires at most once per pass, so a callback that re-arms
+  in the past is fired by the next pass, not this one (no livelock). A
+  deadline never fires early. Then the pass programs CIA #1 timer A
+  (one-shot) for the earliest of the next frame boundary and every armed
+  deadline: wait = `(d − et) << s` − the phi2 already spent in tick `et`
+  (the first phi2 of tick d is `d << s`), at least 1 (a deadline at or
+  before the snapshot gives 1: the next pass comes at once), at most
+  `$FFFF` (a farther one is reached through the VERTB wake-ups). Latency
+  [MEASURED VICE, `run_irq` `arm`/`periodic`/`trap`]: a firing comes at
+  most `4096 >> s` E ticks late (an IRQ, the instruction in flight and one
+  pass).
+- **Trap-context kick.** `mach_arm` and `mach_post` called while
+  `mach_run` runs the guest (`mach_in` ≠ 0) and no pass runs (`mach_insv`
+  = 0) **kick** (S3.3 phase B narrows the post's kick to "when it makes an
+  interrupt deliverable"): under `php`/`sei`, `ev_pend |= 2` (bit 1, `MACH_EV_KICK`)
+  and `st_halt |= $80` — exactly what `mach_irq` does — so `emu_run`
+  returns at the next instruction boundary and the pass re-programs the
+  one-shot. Race-free against `mach_irq` by construction: the IRQ handler
+  touches only `ev_pend`, `st_halt` and the CIA #1 ICR, the slot state is
+  never touched in the IRQ, and both read-modify-writes run under `sei`.
+  A kick costs one pass (~400 cycles [EST, static]) per arm. Outside
+  `mach_run`, `mach_in` = 0, so a client's direct-API use (tests) never
+  sets `st_halt`.
+- **Callbacks.** `mach_cbv`: 2 bytes per slot (LE address; high byte 0 =
+  none), RAM, filled by the client at its own init. A callback runs in the
+  service pass, never in the IRQ, with `$01` = `$35`; it may call
+  `mach_etime`, `mach_arm`, `mach_disarm`, `mach_post` (no kick inside a
+  pass), must not call `emu_*` or `mach_run`, and returns with `rts`
+  (A/X/Y clobbered). It must not use `mach_t`/`mach_c` (beam scratch).
+- **VERTB hook.** Slot 0's callback runs after every VERTB the pass posts
+  (catch-up passes call it once per frame), so CIA-A's TOD can count
+  vsyncs. Default none.
+- **`mach_post`** (A = INTREQ bit 0–14; clobbers A, X; keeps Y): sets that
+  bit in INTREQR (`chip_shd+$1E`, big-endian) at once (a guest INTREQR read
+  sees it) and kicks from the trap context. Delivery (S3.3 phase B) happens
+  at the next pass. VERTB uses the same path (inside the pass).
+- **`mach_hold`** (u16 LE, RAM): the INTREQ bits a **level** source still
+  asserts. Every INTREQ write (`chip.s`) ORs it back after the SET/CLR, so
+  a guest CLR of a held bit leaves it set — `chipset_ref.Chipset.
+  custom_write`'s `ciaa.update()`/`ciab.update()` re-raise. The client keeps
+  bit 3 (CIA-A) / bit 13 (CIA-B) of `mach_hold` equal to its ICR `IR`
+  condition (data & mask ≠ 0) and `mach_post`s on the rising edge.
+- **Host-visible** (`runner.lbl`): `mach_et`, `mach_at`, `mach_dl`,
+  `mach_am`, `mach_cbv`, `mach_hold`, `mach_chi`, `mach_in`, `mach_insv`;
+  entries `mach_etime`, `mach_arm`, `mach_disarm`, `mach_post`,
+  `mach_kick`. All BSS (no rc claim): cleared at boot, not by `emu_reset`.

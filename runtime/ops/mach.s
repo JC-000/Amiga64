@@ -56,14 +56,22 @@
 .export mach_rdc
 .export mach_s, mach_on, mach_nmis, mach_bv, mach_bh, mach_next, mach_now
 .import emu_run, chip_shd
+; W9-I: the event seam (docs/CONTRACTS.md "Event seam (S3.3/S3.4)")
+.export mach_etime, mach_arm, mach_disarm, mach_post, mach_kick
+.export mach_et, mach_at, mach_cbv, mach_hold, mach_am, mach_dl, mach_chi
+.export mach_in, mach_insv
+.export MACH_NSLOT
 
 MACH_FRAME_E  = 14188   ; @value E ticks per guest frame (709379 Hz / 50)
 MACH_S_DEF    = 4       ; @value power-up E-clock shift
 MACH_S_MAX    = 16      ; @value largest shift (a frame stays < 2^31 phi2)
 MACH_EV_TIMER = $01     ; @value ev_pend bit: CIA1 timer A fired
 MACH_INTREQR  = $1E     ; @value chip_shd index of INTREQR (big-endian word)
-MACH_VERTB    = $20     ; @value INTREQ bit 5, in the low byte
 MACH_LINE_CCK = 227     ; @value colour clocks per line
+MACH_NSLOT    = 8       ; @value event slots: 0 = VERTB (mach), 1-7 clients
+MACH_EV_KICK  = $02     ; @value ev_pend bit: a trap-context arm/post wants a pass
+MACH_NBIT     = 15      ; @value INTREQ bits 0-14
+MACH_VERTB_BIT = 5      ; @value INTREQ bit number of VERTB
 
 .segment "DATA"
 mach_s:    .byte MACH_S_DEF     ; E-clock shift, read by mach_init (0-16)
@@ -81,6 +89,24 @@ mach_c:    .res 4       ; scratch: raw CIA reads, then 5 x E tick
 mach_t:    .res 4       ; scratch
 mach_bv:   .res 2       ; beam V (LE)
 mach_bh:   .res 1       ; beam H
+; --- W9-I event seam ---
+mach_et:   .res 4       ; mach_etime out: guest E time now (u32 LE)
+mach_at:   .res 4       ; mach_arm in: absolute E deadline (u32 LE)
+mach_dl:   .res 4 * MACH_NSLOT  ; per-slot deadline (slot 0 unused)
+mach_cbv:  .res 2 * MACH_NSLOT  ; per-slot callback (LE; high byte 0 = none)
+mach_hold: .res 2       ; INTREQ bits a level source holds (LE): ORed back
+                        ; after every INTREQ write (chip.s)
+mach_am:   .res 1       ; armed slots, bit n = slot n (bit 0 never set)
+mach_chi:  .res 2       ; counter bits 32-47 (wraps counted by mach_rdc)
+mach_ctop: .res 1       ; counter bits 24-31 at the last mach_rdc
+mach_eh:   .res 2       ; scratch: E-time shift, bits 32-47
+mach_in:   .res 1       ; nonzero while mach_run runs the guest
+mach_insv: .res 1       ; nonzero while a service pass runs
+mach_sx:   .res 1       ; scratch: slot being serviced
+mach_d:    .res 4       ; scratch: deadline - now
+mach_fr:   .res 2       ; scratch: phi2 into the current E tick
+mach_jv:   .res 2       ; callback jump vector
+mach_w:    .res 2       ; scratch: the one-shot wait being chosen (phi2)
 
 .segment "CODE"
 
@@ -148,6 +174,11 @@ shifted:
         sta mach_frames+2
         sta mach_frames+3
         sta ev_pend
+        sta mach_am             ; W9-I: every slot disarmed (callbacks kept)
+        sta mach_chi
+        sta mach_chi+1
+        lda mach_now+3          ; the restart is not a wrap
+        sta mach_ctop
         lda #1
         sta mach_on
         rts
@@ -194,6 +225,7 @@ on:     lda ev_pend             ; entry: take a pending event (a halt that
         jsr mach_svc            ; catch up with guest time, arm timer A
         lda #$81
         sta CIA1_ICR            ; timer A -> /IRQ
+        sta mach_in             ; W9-I: trap-context arms/posts kick from here
 loop:   cli
         jsr emu_run
         sei                     ; the RMW below must not race mach_irq's ora
@@ -211,6 +243,8 @@ loop:   cli
 exit:   lda #$7F                ; mask every CIA1 source
         sta CIA1_ICR
         lda CIA1_ICR            ; and acknowledge
+        lda #0                  ; W9-I: no kick outside mach_run
+        sta mach_in
         lda mach_port
         sta CPU_PORT
         rts
@@ -226,6 +260,8 @@ exit:   lda #$7F                ; mask every CIA1 source
 ; one VERTB and restarts the frame at now (next = now + flen).
 ; ---------------------------------------------------------------------------
 .proc mach_svc
+        lda #1                  ; W9-I: arms/posts in here need no kick
+        sta mach_insv
         jsr mach_rdc
 chk:    sec                     ; t = next - now
         lda mach_next
@@ -295,17 +331,25 @@ inrange:
         lda #$FF                ; farther than $FFFF: wake up on the way
         sta mach_t
         sta mach_t+1
-short:  lda CIA1_CRA
+short:  lda mach_t                ; W9-I: the VERTB wait, then the slots
+        sta mach_w
+        lda mach_t+1
+        sta mach_w+1
+        jsr mach_slots          ; fire the due client slots
+        jsr mach_wake           ; mach_w := min(VERTB, armed slots)
+        lda CIA1_CRA
         and #$C0
         sta CIA1_CRA            ; timer A stopped (TOD 50/60 Hz, SP kept)
-        lda mach_t
+        lda mach_w
         sta CIA1_TALO
-        lda mach_t+1
+        lda mach_w+1
         sta CIA1_TAHI
         lda CIA1_CRA
         and #$C0
         ora #$19                ; one-shot, force load, start (phi2)
         sta CIA1_CRA
+        lda #0
+        sta mach_insv
         rts
 
 post:   inc mach_frames         ; one VERTB
@@ -315,10 +359,284 @@ post:   inc mach_frames         ; one VERTB
         inc mach_frames+2
         bne :+
         inc mach_frames+3
-:       lda chip_shd+MACH_INTREQR+1
-        ora #MACH_VERTB
+:       lda #MACH_VERTB_BIT     ; INTREQ bit 5 (W9-I: via the post path)
+        jsr mach_pset
+        ldx #0                  ; slot 0's hook (CIA-A TOD), if any
+        jmp mach_cb
+.endproc
+
+; ===========================================================================
+; W9-I event seam (docs/CONTRACTS.md "Event seam (S3.3/S3.4)").  Slots 1-7
+; hold absolute E-time deadlines (u32, compared by signed difference, so
+; they survive the E wrap).  E = (chi:C) >> s with chi counting C's wraps,
+; i.e. the low 32 bits of a 48-bit phi2 counter shifted by s.  The service
+; pass fires every armed slot whose deadline is <= its E snapshot (each
+; slot once per pass: a deadline armed in the past by a callback fires at
+; the next pass), then programs the CIA1 one-shot for the earliest of the
+; next frame boundary and the armed deadlines.  A trap-context arm or post
+; (inside emu_run, mach_in set, no pass running) kicks: ev_pend bit 1 and
+; st_halt bit 7 under sei, exactly what mach_irq does, so emu_run returns
+; at the next instruction boundary and the pass re-arms the one-shot.
+; ===========================================================================
+
+; mach_etime — mach_et := guest E time now (u32 LE); mach_now = the counter
+; snapshot it came from.  Clobbers A and X; Y kept.
+.proc mach_etime
+        jsr mach_rdc
+        ldx #3
+cp:     lda mach_now,x
+        sta mach_et,x
+        dex
+        bpl cp
+        lda mach_chi
+        sta mach_eh
+        lda mach_chi+1
+        sta mach_eh+1
+        ldx mach_sl
+        beq done
+sh:     lsr mach_eh+1
+        ror mach_eh
+        ror mach_et+3
+        ror mach_et+2
+        ror mach_et+1
+        ror mach_et
+        dex
+        bne sh
+done:   rts
+.endproc
+
+; mach_arm — A = slot (1-7), mach_at = absolute E deadline: arm (re-arm
+; replaces the deadline).  Slot 0 and A >= 8 are ignored.  Clobbers A, X;
+; Y kept.
+.proc mach_arm
+        cmp #MACH_NSLOT
+        bcs done
+        tax
+        beq done                ; slot 0 is VERTB, mach-internal
+        lda mach_bit,x
+        pha
+        txa
+        asl a
+        asl a
+        tax
+        lda mach_at
+        sta mach_dl,x
+        lda mach_at+1
+        sta mach_dl+1,x
+        lda mach_at+2
+        sta mach_dl+2,x
+        lda mach_at+3
+        sta mach_dl+3,x
+        pla
+        ora mach_am
+        sta mach_am
+        jmp mach_kick
+done:   rts
+.endproc
+
+; mach_disarm — A = slot: disarm (no-op when not armed).  Clobbers A, X.
+.proc mach_disarm
+        cmp #MACH_NSLOT
+        bcs done
+        tax
+        lda mach_bit,x
+        eor #$FF
+        and mach_am
+        sta mach_am
+done:   rts
+.endproc
+
+; mach_post — A = INTREQ bit (0-14): set it in INTREQR (chip_shd).  The
+; interrupt is delivered at the next service pass (kicked from the trap
+; context).  Clobbers A, X; Y kept.
+.proc mach_post
+        cmp #MACH_NBIT
+        bcs done
+        jsr mach_pset
+        jmp mach_kick
+done:   rts
+.endproc
+
+; mach_pset — A = INTREQ bit (0-14): INTREQR |= 1 << A.  Clobbers A, X.
+.proc mach_pset
+        cmp #8
+        bcs hi
+        tax
+        lda mach_bit,x
+        ora chip_shd+MACH_INTREQR+1
         sta chip_shd+MACH_INTREQR+1
         rts
+hi:     and #7
+        tax
+        lda mach_bit,x
+        ora chip_shd+MACH_INTREQR
+        sta chip_shd+MACH_INTREQR
+        rts
+.endproc
+
+; mach_kick — ask for a service pass at the next instruction boundary when
+; called from the trap context (mach_run running the guest, no pass in
+; progress); otherwise nothing (a pass in progress re-arms at its end, and
+; the next mach_run's entry pass sees every arm).  Clobbers A.
+.proc mach_kick
+        lda mach_insv
+        bne done
+        lda mach_in
+        beq done
+        php
+        sei                     ; the RMWs must not race mach_irq's ora
+        lda ev_pend
+        ora #MACH_EV_KICK
+        sta ev_pend
+        lda st_halt
+        ora #$80
+        sta st_halt
+        plp
+done:   rts
+.endproc
+
+; mach_cb — X = slot: run its callback (none: return).  The callback ends
+; with rts; A/X/Y clobbered.
+.proc mach_cb
+        txa
+        asl a
+        tax
+        lda mach_cbv+1,x
+        beq none
+        sta mach_jv+1
+        lda mach_cbv,x
+        sta mach_jv
+        jmp (mach_jv)
+none:   rts
+.endproc
+.assert (mach_jv & $FF) <> $FF, lderror, "jmp (mach_jv) must not straddle a page"
+
+; mach_slots — fire every armed slot whose deadline is <= now (one E
+; snapshot for the whole pass; each slot is disarmed before its callback,
+; which may re-arm it).
+.proc mach_slots
+        lda mach_am
+        beq done
+        jsr mach_etime
+        ldx #1
+lp:     stx mach_sx
+        lda mach_am
+        and mach_bit,x
+        beq next
+        txa
+        asl a
+        asl a
+        tay
+        sec                     ; et - deadline >= 0 (signed): due
+        lda mach_et
+        sbc mach_dl,y
+        lda mach_et+1
+        sbc mach_dl+1,y
+        lda mach_et+2
+        sbc mach_dl+2,y
+        lda mach_et+3
+        sbc mach_dl+3,y
+        bmi next
+        lda mach_bit,x
+        eor #$FF
+        and mach_am
+        sta mach_am
+        jsr mach_cb
+        ldx mach_sx
+next:   inx
+        cpx #MACH_NSLOT
+        bcc lp
+done:   rts
+.endproc
+
+; mach_wake — mach_w := min(mach_w, phi2 until each armed deadline); a
+; deadline at or before now gives 1 (the next pass comes at once), one
+; farther than $FFFF phi2 is left to the VERTB wait (already <= $FFFF).
+; The first phi2 of E tick d is d << s, so the wait is (d - et) << s minus
+; the phi2 already spent in tick et (mach_fr = now16 - (et16 << s)).
+.proc mach_wake
+        lda mach_am
+        bne go
+        rts
+go:     jsr mach_etime
+        lda mach_et
+        sta mach_fr
+        lda mach_et+1
+        sta mach_fr+1
+        ldx mach_sl
+        beq fr
+fs:     asl mach_fr
+        rol mach_fr+1
+        dex
+        bne fs
+fr:     sec
+        lda mach_now
+        sbc mach_fr
+        sta mach_fr
+        lda mach_now+1
+        sbc mach_fr+1
+        sta mach_fr+1
+        ldx #1
+lp:     stx mach_sx
+        lda mach_am
+        and mach_bit,x
+        beq next
+        txa
+        asl a
+        asl a
+        tay
+        sec                     ; d = deadline - et
+        lda mach_dl,y
+        sbc mach_et
+        sta mach_d
+        lda mach_dl+1,y
+        sbc mach_et+1
+        sta mach_d+1
+        lda mach_dl+2,y
+        sbc mach_et+2
+        sta mach_d+2
+        lda mach_dl+3,y
+        sbc mach_et+3
+        bmi now1                ; already past
+        ora mach_d+2
+        bne next                ; >= 2^16 E ticks: beyond any wait
+        lda mach_d
+        ora mach_d+1
+        beq now1                ; due now
+        ldx mach_sl
+        beq sub
+sh:     asl mach_d
+        rol mach_d+1
+        bcs next                ; > $FFFF phi2: beyond the VERTB wait
+        dex
+        bne sh
+sub:    sec
+        lda mach_d
+        sbc mach_fr
+        sta mach_d
+        lda mach_d+1
+        sbc mach_fr+1
+        sta mach_d+1
+        jmp min
+now1:   lda #1
+        sta mach_d
+        lda #0
+        sta mach_d+1
+min:    lda mach_d              ; d < w: w := d
+        cmp mach_w
+        lda mach_d+1
+        sbc mach_w+1
+        bcs next
+        lda mach_d
+        sta mach_w
+        lda mach_d+1
+        sta mach_w+1
+next:   ldx mach_sx
+        inx
+        cpx #MACH_NSLOT
+        bcs done
+        jmp lp
+done:   rts
 .endproc
 
 ; ---------------------------------------------------------------------------
@@ -353,7 +671,13 @@ rd:     lda CIA2_TBLO
         lda mach_c+3
         eor #$FF
         sta mach_now+3
-        rts
+        cmp mach_ctop           ; W9-I: bits 24-31 went down = C wrapped
+        sta mach_ctop
+        bcs :+
+        inc mach_chi
+        bne :+
+        inc mach_chi+1
+:       rts
 .endproc
 
 ; ---------------------------------------------------------------------------
@@ -496,4 +820,7 @@ done:   pla
         pla
         rti
 .endproc
+.segment "RODATA"
+mach_bit:  .byte $01, $02, $04, $08, $10, $20, $40, $80
+.segment "CODE"
 .assert mach_nmi < $A000 .and mach_irq < $A000, lderror, "mach vectors must point at RAM visible under $01 = $34"
