@@ -87,6 +87,7 @@ ERROR_OBJECT_NOT_FOUND       = 205
 ERROR_ACTION_NOT_KNOWN       = 209
 ERROR_INVALID_COMPONENT_NAME = 210
 ERROR_INVALID_LOCK           = 211
+ERROR_OBJECT_WRONG_TYPE      = 212 ; W10-V: a Read/Write buffer in bank $BF/$DF
 ERROR_SEEK_ERROR             = 219
 ERROR_DISK_FULL              = 221
 CHANGE_FH      = 1              ; ChangeMode type: object is a FileHandle
@@ -931,6 +932,8 @@ hle_dos_read:
         dex
         bpl @d3
 @ga:    jsr dosio_xfer_setup
+        bcc @loop
+        jmp dosio_failm1        ; buffer in an I/O bank: no DMA
 @loop:  jsr dosio_chunk         ; Z=1: nothing left
         beq @done
         lda dosio_req           ; dosio_len = chunk request (1-256)
@@ -999,6 +1002,8 @@ hle_dos_write:
         bcc @ok
 @full:  jmp dosio_failm1
 @ok:    jsr dosio_xfer_setup
+        bcc @loop
+        jmp dosio_failm1        ; buffer in an I/O bank: no DMA
 @loop:  jsr dosio_chunk
         beq @done
         lda dosio_req           ; dosio_buf <- guest (FETCH)
@@ -1055,7 +1060,17 @@ dosio_grow:
 ; ---------------------------------------------------------------------------
 ; Transfer loop helpers
 ; ---------------------------------------------------------------------------
-dosio_xfer_setup:               ; ga = D2, tot = 0
+; dosio_xfer_setup — ga = D2, tot = 0; C=1 (dosio_err =
+; ERROR_OBJECT_WRONG_TYPE) when the guest bytes the transfer will touch,
+; D2 .. D2+rem-1, touch bank $BF or $DF (W10-V fix round 1, F2; rem = the
+; length the loop moves: Read min(size - pos, D3), Write D3, set by the
+; callers before this).  The transfers program the REC
+; directly, so without this a buffer there would reach the REU bytes under
+; the trapped I/O banks (the CIAs' and custom chips' shadow: the palette
+; LUT disp_lut lives at $DF0000).  The span is taken in 24-bit guest
+; addresses: one past $FFFFFF wraps to 0, and rem >= 16 MB covers every bank.
+; Clobbers dosio_arg (free here: the callers reload it).
+dosio_xfer_setup:
         ldx #3
 @c:     lda r_d2,x
         sta dosio_ga,x
@@ -1063,7 +1078,60 @@ dosio_xfer_setup:               ; ga = D2, tot = 0
         sta dosio_tot,x
         dex
         bpl @c
+        lda dosio_rem+3
+        bne @bad                ; >= 16 MB: every bank
+        lda dosio_rem
+        ora dosio_rem+1
+        ora dosio_rem+2
+        beq @ok                 ; nothing to move
+        clc                     ; arg = D2 (24 bits) + rem - 1: the last byte
+        lda r_d2
+        adc dosio_rem
+        sta dosio_arg
+        lda r_d2+1
+        adc dosio_rem+1
+        sta dosio_arg+1
+        lda r_d2+2
+        adc dosio_rem+2
+        sta dosio_arg+2
+        lda #0
+        adc #0
+        sta dosio_arg+3         ; 1: the span wraps past $FFFFFF
+        lda dosio_arg           ; arg -= 1 (25 bits; D2 + rem >= 1)
+        bne @d0
+        lda dosio_arg+1
+        bne @d1
+        lda dosio_arg+2
+        bne @d2
+        dec dosio_arg+3
+@d2:    dec dosio_arg+2
+@d1:    dec dosio_arg+1
+@d0:    dec dosio_arg
+        ldx #1
+@bank:  lda dosio_iob,x         ; B = $BF / $DF
+        ldy dosio_arg+3
+        bne @wrap
+        cmp r_d2+2              ; no wrap: first <= B <= last
+        bcc @next
+        cmp dosio_arg+2
+        beq @bad
+        bcc @bad
+        bcs @next
+@wrap:  cmp r_d2+2              ; wrap: B >= first or B <= last
+        bcs @bad
+        cmp dosio_arg+2
+        beq @bad
+        bcc @bad
+@next:  dex
+        bpl @bank
+@ok:    clc
         rts
+@bad:   lda #ERROR_OBJECT_WRONG_TYPE
+        sta dosio_err
+        sec
+        rts
+dosio_iob:
+        .byte $BF, $DF          ; the trapped I/O banks (docs/CONTRACTS.md "I/O trap")
 
 ; req = min(rem, 256 - (ga & $FF)); Z=1 when rem == 0
 dosio_chunk:

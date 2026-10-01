@@ -167,7 +167,7 @@ def pack_args(src: list[int], lut_addr: int, pal: list[int]) -> bytes:
 # ===========================================================================
 
 DISP_LUT = 0xDF0000             # rc guest.inc disp_lut: REU under the trapped $DF bank
-DISP_ST_LEN = 104               # C1: +0 gen ... +39 color[32] (u16 LE each), +103 valid
+DISP_ST_LEN = 105               # C1: +0 gen ... +39 color[32] (u16 LE each), +103 valid, +104 dirty
 COP_VALID = 0xA5                # disp_st+103 once W10-P's cop_reset ran
 MODE_NONE, MODE_MC2, MODE_HIRES, MODE_BLANK = 0xFF, 1, 2, 0
 (WHY_OK, WHY_DMA, WHY_HAMDPF, WHY_DEPTH, WHY_DIW, WHY_DDF, WHY_STRADDLE,
@@ -202,7 +202,8 @@ def lut_inc(lut: bytes | None = None) -> str:
 
 
 def pack_disp_st(st: dict) -> bytes:
-    """A C1 disp_st block from a dict (missing fields 0, valid COP_VALID)."""
+    """A C1 disp_st block from a dict (missing fields 0, valid COP_VALID,
+    dirty 0)."""
     def u16(k):
         return struct.pack("<H", st.get(k, 0) & 0xFFFF)
     out = bytes([st.get("gen", 0) & 0xFF]) + u16("dmacon")
@@ -213,7 +214,7 @@ def pack_disp_st(st: dict) -> bytes:
     out += u16("diwstrt") + u16("diwstop") + u16("ddfstrt") + u16("ddfstop")
     cols = list(st.get("color", [])) + [0] * 32
     out += struct.pack("<32H", *[c & 0xFFFF for c in cols[:32]])
-    out += bytes([st.get("valid", COP_VALID) & 0xFF])
+    out += bytes([st.get("valid", COP_VALID) & 0xFF, st.get("dirty", 0) & 0xFF])
     assert len(out) == DISP_ST_LEN
     return out
 
@@ -226,7 +227,8 @@ def unpack_disp_st(b: bytes) -> dict:
                       for i in range(6)],
             "bpl1mod": u(27), "bpl2mod": u(29), "diwstrt": u(31),
             "diwstop": u(33), "ddfstrt": u(35), "ddfstop": u(37),
-            "color": list(struct.unpack_from("<32H", b, 39)), "valid": b[103]}
+            "color": list(struct.unpack_from("<32H", b, 39)), "valid": b[103],
+            "dirty": b[104]}
 
 
 def _s16(v: int) -> int:

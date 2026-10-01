@@ -536,26 +536,35 @@ module grew from 4 to 5 pages, so the loops' page-crossing reads moved,
 inside the ±1.5% band `docs/C2V.md` "Performance" documents. The
 interpreter is unaffected: `perf_cycles --max-delta 0`.
 
-**Duty budget `DISP_N` = 20 frames.** Inside `mach_run`, a conversion
-starts only if ≥ N guest frames passed since the last one started. Both
-the conversion and the frame are counted in φ2 on the same CIA clock, so
-the worst-case duty (`gen` changing every frame) is conv / (N × 14188 ×
-2^s), independent of PAL/NTSC:
+**Duty budget `DISP_N` = 20 frames of guest E-time, from a conversion's
+END** (fix round 1, F3). Inside `mach_run`, a conversion starts only when
+N × 14188 E ticks have passed since the previous conversion ended
+(`mach_etime` at its end). The round-0 budget counted `mach_frames` from a
+conversion's start. A conversion longer than N frames (mc2 ≈ 30 frames at
+s = 0) used the whole budget up itself, so the next one could start at once,
+and the guest livelocked at s ≤ 1 with an edit every frame (review
+`pf_live_s0edit`: no HALT in 900 s; now `tests/run_pf.py` leg `live`).
+Both quantities are φ2 on the same CIA clock, so the worst-case duty
+(`gen` changing every frame) is conv / (conv + N × 14188 × 2^s),
+independent of PAL/NTSC, and the guest always keeps the rest:
 
 | s | frame (φ2) | mc2 duty, N = 20 | hires4 duty, N = 20 |
 |---|---|---|---|
-| 4 (default) | 227,008 | 9.3% | **17.0%** |
-| 3 | 113,504 | 18.6% | 33.9% |
-| 2 or less | ≤ 56,752 | ≥ 37% | ≥ 68% |
+| 4 (default) | 227,008 | 8.5% | **14.5%** |
+| 3 | 113,504 | 15.7% | 25.3% |
+| 2 | 56,752 | 27.1% | 40.4% |
+| 1 | 28,376 | 42.7% | 57.6% |
+| 0 | 14,188 | 59.8% | 73.1% |
 
-N = 20 is the smallest round value that keeps hires4 under S3_PLAN §2.3's
-20% duty at the default s = 4 (N = 17 would give 19.96%), with margin for
-badlines (+2–4% with the display on) and for layout (±1.5%). At s ≤ 3 a
-display that changes every frame exceeds 20%. The v0 budget counts frames,
-not φ2, as the brief specifies, so a time-based duty limit is the fix if
-small s matters (backlog). On the U64E at 48 MHz the CIAs count φ2 at
-1 MHz [MEASURED HW, W8-H], so the same conversion is ~40× shorter in guest
-frames: ≤ 0.5%.
+N = 20 keeps hires4 under S3_PLAN §2.3's 20% duty at the default s = 4,
+with margin for badlines (+2–4% with the display on) and for layout (±1.5%).
+At s ≤ 3 a display that changes every frame exceeds 20%, but the guest is
+never starved: at s = 0 it keeps ≥ 27% (hires4). Measured live
+(`run_pf` leg `live`, mc2, an edit every delivered VERTB): s = 4 loses
+5.2% of guest progress to the display, against 7% on the round-0
+frame-counted budget (review), and s = 0 reaches HALT. On the U64E at
+48 MHz the CIAs count φ2 at 1 MHz [MEASURED HW, W8-H], so the same
+conversion is ~40× shorter in guest time: ≤ 0.5%.
 
 ## (e) Caveats
 

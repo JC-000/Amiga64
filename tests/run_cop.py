@@ -36,6 +36,10 @@ Legs:
            at its end marker or a danger MOVE stays there (re-enable reruns
            only that);
            the copper's own DMACON writes start no run
+  gen      gen moves at most once per copper run, on a net change; the
+           dirty byte (disp_st+104, W10-V F1) follows every bump and
+           stays 0 when nothing changes (every case checks it against
+           the model)
   frame    mach_run: cop_reset registered lazily by the guest's first
            display write; the copper re-runs from COP1LC every frame with
            DMAEN+COPEN (an edited list takes effect), not after COPEN is
@@ -196,15 +200,28 @@ class CopRig:
     def hookn(self) -> int:
         return struct.unpack("<H", self.rig.r(HOOKN, 2))[0]
 
+    def wram(self, addr: int, data: bytes) -> None:
+        """Write RAM under the ROMs ($01 = $34 around the write)."""
+        t = self.rig.t
+        port = self.rig.r(1, 1)
+        t.write_memory(0x0001, bytes([PORT_RAM]), override="cop: RAM under ROM")
+        try:
+            self.rig.w(addr, data)
+        finally:
+            t.write_memory(0x0001, port, override="cop: RAM under ROM")
+
     def reset(self) -> int:
-        """chip_reset + cop_reset; returns gen after them."""
+        """chip_reset + cop_reset, then dirty := 0 as a reader would (W10-V
+        F1); returns gen after them."""
         self.rig.call(self.lab("chip_reset"))
         if self.cop:
             self.rig.call(self.lab("cop_reset"))
+            self.wram(DISP_ST + cr.DISP_DIRTY, b"\0")
         return self.ram(DISP_ST, 1)[0]
 
     def state(self) -> dict:
         r = {"disp": self.ram(DISP_ST, cr.DISP_SZ),
+             "dirty": self.ram(DISP_ST + cr.DISP_DIRTY, 1)[0],
              "shd": self.rig.r(self.lab("chip_shd"), 512)}
         if self.cop:
             for k in ("cop_n", "cop_nrun", "cop_nfr", "cop_nskip"):
@@ -262,6 +279,9 @@ def run_case(cr_: CopRig, case: Case) -> list[str]:
         f.append(f"{tag}: INTREQR ${got:04X}, model ${m.paula.intreq:04X}")
     if not cr_.cop:
         return f
+    if st["dirty"] != m.disp.dirty:
+        f.append(f"{tag}: dirty = {st['dirty']}, model {m.disp.dirty} (gen "
+                 f"{gen0}->{st['disp'][0]})")
     want = {"cop_nrun": m.runs, "cop_nskip": m.cop.skips}
     if m.runs:
         want.update(cop_n=m.n, cop_why=m.cop.why)
@@ -584,7 +604,11 @@ def leg_gen(c: CopRig) -> list[str]:
                                                   ("w", COPJMP1, 0)]),
         Case("alias", {"a": l255 + END}, strobe1() + [("w", COPJMP1, 0),
                                                       ("w", BPLCON0, 0x1200),
-                                                      ("w", COPJMP1, 0)])])
+                                                      ("w", COPJMP1, 0)]),
+        # W10-V F1: no change -> dirty stays as the reader left it (0); a
+        # strobe with copper DMA off and a same-value write change nothing
+        Case("dirty0", {"a": bars}, [("l", COP1LC, "a"), ("w", COPJMP1, 0),
+                                     ("w", BPLCON0, 0x0000)])])
 
 
 CATCH_TO = 150.0            # s: a run that cannot finish is a livelock
@@ -755,6 +779,13 @@ MUTANTS = {
     "nofstep": ("runtime/ops/mach.s",
                 [("        lda #1                  ; W10-P cop: forced step after the hook\n"
                   "        sta mach_fs             ; W10-P cop\n", "")]),
+    # W10-V F1: the dirty byte is never set
+    "nodirty": (COP, [("        lda #1                  ; F1: a change, even if gen wrapped back\n"
+                       "        sta disp_st+DISP_DIRTY\n", "")]),
+    # W10-V F1: dirty set on every display write, changed or not
+    "dirtyall": (COP, [(".proc cop_fld2\n        lda cop_v+1\n",
+                        ".proc cop_fld2\n        lda #1\n        sta disp_st+DISP_DIRTY\n"
+                        "        lda cop_v+1\n")]),
     # F2: gen bumped per changing write inside a copper run
     "genwrite": (COP, [("        lda cop_busy\n        bne done\n        inc cop_sh+DISP_GEN\n",
                         "        inc cop_sh+DISP_GEN\n")]),
@@ -800,6 +831,7 @@ MUTANT_LEGS = {"waitstop": ["model"], "danger": ["model"], "cdang": ["model"],
                "ungated": ["enable"], "noenable": ["sync"], "copself": ["enable"],
                "pcstay": ["enable"], "nopcok": ["enable"],
                "fhookframe": ["catchup"], "nofstep": ["catchup"], "genwrite": ["gen"],
+               "nodirty": ["cpu", "gen"], "dirtyall": ["gen"],
                "dmaraw": ["cpu"], "nosave": ["cpu"], "nodhook": ["dhook"],
                "limit": ["model"], "ptswap": ["sync"]}
 

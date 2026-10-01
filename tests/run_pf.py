@@ -71,11 +71,20 @@ VARIANTS = {
     "clr": ["DISP_MUT_CLR=1"],
     "budget": ["DISP_MUT_BUDGET=1"],
     "bank": ["DISP_MUT_BANK=1"],         # caught once disp_st is under BASIC ROM (W10-P)
+    "dirty": ["DISP_MUT_DIRTY=1"],       # F1: the dirty byte ignored
+    "efrom": ["DISP_MUT_EFROM=1"],       # F3: the budget measured from the start
     # red for the LUT-trap leg: the LUT in guest-visible REU (the first proposal)
     "lutram": ["disp_lut=0x800000"],
 }
 NOT_TEETH = ("stub", "lutram")
 TEETH = [k for k in VARIANTS if k not in NOT_TEETH]
+ALL_LEGS = ["shim", "fixture", "wrap", "dosbuf", "live"]
+# the legs each mutant runs (--teeth): the ones meant to catch it
+MUTANT_LEGS = {"bitorder": ["shim", "fixture"], "pal": ["shim", "fixture"],
+               "gen": ["shim"], "ppord": ["shim", "fixture"],
+               "mod": ["shim", "fixture"], "straddle": ["shim"], "clr": ["shim"],
+               "budget": ["shim"], "bank": ["shim", "fixture"],
+               "dirty": ["shim", "wrap"], "efrom": ["live:s0"]}
 
 
 def build(prg: str, name: str, defines: list[str], shim: bool) -> str:
@@ -144,7 +153,9 @@ REGIONS = [(0x100000, 0x4000, 1), (0x110000, 0x10000, 2),
 def steps() -> list[dict]:
     """The scripted sequence.  Each: name, st (the C1 fields; gen given),
     action (kick | refresh), optional pre (host writes before it: 'restage'
-    a region with a seed, 'frames' = mach_frames relative to disp_lastf,
+    a region with a seed, 'ebud' = the E-time budget reference: 'now'
+    (just converted: defer), 'due' (a full budget ago) or 'future' (E
+    restarted),
     'mach_in'), and what the model expects ('conv': True/False)."""
     mc2 = dict(STD, bplpt=[0x100000, 0x102000], color=pal(10))
     s = []
@@ -158,6 +169,9 @@ def steps() -> list[dict]:
               "pre": {"restage": (0x100000, 0x4000, 11)}})
     s.append({"name": "gen-gate", "st": dict(mc2, gen=3, color=pal(12)),
               "conv": False})
+    # F1: gen equal to the last one seen (it wrapped), but the dirty byte set
+    s.append({"name": "dirty-gen-same", "st": dict(mc2, gen=3, dirty=1,
+                                                   color=pal(23)), "conv": True})
     s.append({"name": "mc2-mod-crop", "conv": True, "st": dict(
         STD, gen=4, bplpt=[0x110001, 0x118000], bpl1mod=40, bpl2mod=9,
         ddfstrt=0x30, diwstrt=0x2C81, diwstop=0x2CC1, color=pal(13))})
@@ -181,18 +195,19 @@ def steps() -> list[dict]:
     s.append({"name": "blank-ddf", "conv": False, "st": dict(
         mc2, gen=11, ddfstop=0xC8, color=pal(20))})
     s.append({"name": "budget-defer", "conv": False, "st": dict(
-        mc2, gen=12, color=pal(21)),
-        "pre": {"mach_in": 1, "frames": R_DISP_N - 1}})
+        mc2, gen=12, color=pal(21)), "pre": {"mach_in": 1, "ebud": "now"}})
     s.append({"name": "budget-due", "conv": True, "st": dict(
-        mc2, gen=12, color=pal(21)),
-        "pre": {"mach_in": 1, "frames": R_DISP_N}})
+        mc2, gen=12, color=pal(21)), "pre": {"mach_in": 1, "ebud": "due"}})
+    s.append({"name": "budget-restart", "conv": True, "st": dict(
+        mc2, gen=13, color=pal(24)), "pre": {"mach_in": 1, "ebud": "future"}})
     s.append({"name": "refresh", "conv": True, "action": "refresh",
               "st": dict(mc2, gen=12, color=pal(21)),
               "pre": {"mach_in": 0, "restage": (0x100000, 0x4000, 22)}})
     return s
 
 
-R_DISP_N = 16      # replaced from the PRG's DISP_N label at run time
+R_DISP_N = 20      # replaced from the PRG's DISP_N label at run time
+FRAME_E = 14188    # E ticks per guest frame
 
 
 # --- VICE ------------------------------------------------------------------------
@@ -214,7 +229,8 @@ class Pf(C.Session):
         self.lab["disp_st"] = rc_equate("disp_st")
         for k in ("disp_init", "disp_frame", "disp_refresh",
                   "cop_dhook", "shim_kick", "disp_mode", "disp_why",
-                  "disp_nconv", "disp_nblank", "disp_lastf", "mach_in",
+                  "disp_nconv", "disp_nblank", "disp_laste", "disp_bud",
+                  "mach_in", "mach_s", "mach_init", "mach_etime", "mach_et",
                   "mem_rec_dirty", "DISP_N", "mem_write8", "mem_write16",
                   "mem_write32", "chip_nopen", "disp_lut"):
             self.lab[k] = lookup_label(labels, k)
@@ -343,6 +359,10 @@ def run_shim(prg: str, perf: bool = False) -> list[str]:
             fails += [f"init: {x}" for x in f]
             f = lut_guarded(s, lut)
             fails += [f"lut-trap: {x}" for x in f]
+            # the budget steps read guest E: a time base at s = 16 (1 tick
+            # per 65536 phi2) keeps it still across host round trips
+            s.wr(s.lab["mach_s"], b"\x10")
+            s.call(s.lab["mach_init"])
             shown = False
             for step in steps():
                 f, shown = run_step(s, step, mem, lut, shown)
@@ -398,9 +418,15 @@ def run_step(s: Pf, step: dict, mem: Mem, lut: bytes, shown: bool):
         mem.put(base, data)
     if "mach_in" in pre:
         s.wr(s.lab["mach_in"], bytes([pre["mach_in"]]))
-    if "frames" in pre:
-        last = struct.unpack("<I", s.rd(s.lab["disp_lastf"], 4))[0]
-        s.wr(MACH_FRAMES, struct.pack("<I", (last + pre["frames"]) & 0xFFFFFFFF))
+    if "ebud" in pre:
+        # E at s = 16 (set before these steps) moves 1 tick per 65536 phi2,
+        # so "now" stays within the budget across the host round trips
+        s.call(s.lab["mach_etime"])
+        now = struct.unpack("<I", s.rd(s.lab["mach_et"], 4))[0]
+        ebud = R_DISP_N * FRAME_E
+        ref = {"now": now, "due": now - ebud, "future": now + 1000}[pre["ebud"]]
+        s.wr(s.lab["disp_laste"], struct.pack("<I", ref & 0xFFFFFFFF))
+        s.wr(s.lab["disp_bud"], b"\1")
     st = dict(step["st"])
     before = state(s)
     vic0 = s.vic()
@@ -432,7 +458,7 @@ def run_step(s: Pf, step: dict, mem: Mem, lut: bytes, shown: bool):
         if d["mode"] == R.MODE_BLANK:
             f.append(f"TEST BUG: the model blanks (why {d['why']})")
         # the VIC registers change on purpose: checked against the model below
-        f += check_outputs(s, g, want, R.pack_disp_st(st))
+        f += check_outputs(s, g, want, R.pack_disp_st({**st, "dirty": 0}))
         vic = s.vic()
         exp = dict(want["vic"])
         exp[0xDD00] = 0
@@ -594,6 +620,336 @@ def run_fixture(prg: str, budget: int = 0) -> list[str]:
     return fails
 
 
+# --- legs from the W10-V review (fix round 1) -------------------------------------
+
+CUSTOM = 0xDFF000
+
+
+def wrap_prog(la: int, lb: int, k: int) -> list[int]:
+    """F1 (review pf_wrap): list A shows a playfield with COLOR00 = $000
+    (COP1LC, COPJMP1, DMACON on: one run, one conversion); then K CPU
+    writes of distinct COLOR00 values ending at $F00 (gen += K), then
+    COP2LC := B (just the end marker) and COPJMP2: the run changes nothing,
+    gen does not move, the hook runs.  K = 256 or 512 brings gen back to
+    the value the driver saw: only the dirty byte tells it."""
+    from tests.run_mach import G, HALT, mv_imm_abs_w
+    g = G()
+    g(0x23FC, la >> 16, la & 0xFFFF, *g.abs(CUSTOM + 0x080))   # COP1LC
+    mv_imm_abs_w(g, 0, CUSTOM + 0x088)                        # COPJMP1
+    mv_imm_abs_w(g, 0x8380, CUSTOM + 0x096)                   # DMACON on: runs A
+    g(0x23FC, lb >> 16, lb & 0xFFFF, *g.abs(CUSTOM + 0x084))   # COP2LC
+    g(0x323C, 0xF00 - (k - 1))                                # move.w #first,d1
+    g(0x343C, k - 2)                                          # move.w #k-2,d2
+    g.label("lp")
+    g(0x33C1, *g.abs(CUSTOM + 0x180))                         # move.w d1,COLOR00
+    g(0x5241)                                                 # addq.w #1,d1
+    g.dbra(2, "lp")
+    mv_imm_abs_w(g, 0x0F00, CUSTOM + 0x180)
+    mv_imm_abs_w(g, 0, CUSTOM + 0x08A)                        # COPJMP2: runs B
+    g(HALT)
+    return g.words()
+
+
+def leg_wrap(prg: str) -> list[str]:
+    """F1: after K = 255 / 256 / 512 net COLOR00 changes and a no-op copper
+    run, $D021 shows LUT[COLOR00] and the driver converted again (red on
+    498ab52: K = 256 and 512 stay stale)."""
+    from tests import run_mach as M
+    from tests.run_mach import BASE
+    lut = R.build_lut()
+
+    def body(rig):
+        f = []
+        for k in (255, 256, 512):
+            rig.call(rig.lab("chip_reset"))
+            rig.call(rig.lab("cop_reset"))
+            rig.call(rig.lab("disp_init"))
+            a0, a1 = 0x100000, 0x102000
+            la_w = [0x0E0, a0 >> 16, 0x0E2, a0 & 0xFFFF, 0x0E4, a1 >> 16,
+                    0x0E6, a1 & 0xFFFF, 0x108, 0, 0x10A, 0, 0x08E, 0x2C81,
+                    0x090, 0xF4C1, 0x092, 0x38, 0x094, 0xD0, 0x180, 0x000,
+                    0x182, 0xFFF, 0x100, 0x2200, 0xFFFF, 0xFFFE]
+            lb_w = [0xFFFF, 0xFFFE]
+            n0 = len(wrap_prog(0, 0, k))
+            la = BASE + 2 * n0
+            lb = la + 2 * len(la_w)
+            pc, x, y = rig.stage(wrap_prog(la, lb, k), la_w, lb_w)
+            assert (x, y) == (la, lb)
+            res = rig.sess.run_program(pc, BASE + 0x8000, 3_000_000)
+            nconv = struct.unpack("<H", rig.r(rig.lab("disp_nconv"), 2))[0]
+            d021 = rig.r(0xD021, 1)[0] & 0x0F
+            want = lut[0xF00]
+            ok = res.halt == 1 and res.reason == 0 and d021 == want and nconv == 2
+            print(f"  wrap K={k:3d}: halt {res.halt}/{res.reason} nconv {nconv} "
+                  f"$D021={d021} want LUT[$F00]={want} -> {'OK' if ok else 'STALE'}")
+            if not ok:
+                f.append(f"K={k}: $D021={d021} (want {want}), nconv {nconv} (want 2)")
+        return f
+    return [f"wrap: {x}" for x in M.session(prg, body)]
+
+
+DOSBUF_FILES = {"lut.bin": bytes([0x77]) * 0x10200}
+
+
+def leg_dosbuf(prg: str) -> list[str]:
+    """F2: Read/Write with a buffer touching bank $BF/$DF fail (-1, IoErr
+    212) and move nothing: the LUT stays intact; normal buffers work (red
+    on 498ab52: the Read lands 4096 x $77 in the LUT)."""
+    import re
+    from c64_test_harness import Labels, UnifiedManager, ViceConfig, read_bytes
+    from tests import run_vbcc as V
+    from tests.harness_util import REU_VICE_ARGS, lookup_label
+    from tests.run_program import Session as PSession
+    from tests.run_vectors import prepare_target
+    from tests.run_dos import Guest
+    from types import SimpleNamespace
+    labels = Labels.from_file(os.path.splitext(prg)[0] + ".lbl")
+    out = os.path.join(ROOT, "build", "vbcc")
+    os.makedirs(out, exist_ok=True)
+    blob = V.compile_c("pf_dosbuf", out)
+    lut = R.build_lut()
+    want = ["R DF0000 -1 212", "R DEFF00 -1 212", "R BFE000 -1 212",
+            "R BEFFF0 -1 212", r"R [0-9A-F]{6} 16 0",
+            "W DF0800 -1 212", "W BEFFF0 -1 212", r"W [0-9A-F]{6} 8 0", "BUF 77"]
+    f: list[str] = []
+    cfg = ViceConfig(prg_path=prg, warp=True, sound=False,
+                     extra_args=list(REU_VICE_ARGS))
+    with UnifiedManager(backend="vice", vice_config=cfg) as mgr:
+        t = mgr.acquire()
+        try:
+            prepare_target(t, prg)
+            ps = PSession(target=t, labels=labels, timeout=600.0)
+            ps._call("disp_init")
+            gr = Guest(SimpleNamespace(target=t, timeout=600.0), labels)
+            la = lookup_label(labels, "disp_lut")
+            if gr.read(la, 4096) != lut:
+                f.append("LUT not stashed before the run")
+            res, _m, why = V.stage_and_run(ps, "pf_dosbuf", blob, 0, True,
+                                           files=DOSBUF_FILES)
+            if not (res.halt and not res.timeout and res.reason == 0
+                    and res.regs["D0"] == 0):
+                f.append(f"no clean exit 0: {why} D0=${res.regs['D0']:08X}")
+            scr = bytes(read_bytes(t.transport, V.SCREEN, 1000))
+            rows = [V.screen_to_text(scr[r * 40:(r + 1) * 40]).upper() for r in range(25)]
+            for i, w in enumerate(want):
+                ok = re.fullmatch(w, rows[i]) is not None
+                print(f"  {'  ' if ok else '!!'} {rows[i]:24s} want {w}")
+                if not ok:
+                    f.append(f"row {i}: {rows[i]!r}, want {w!r}")
+            got = gr.read(la, 4096)
+            bad = sum(a != b for a, b in zip(got, lut))
+            print(f"  LUT after the run: {bad}/4096 bytes changed")
+            if bad:
+                f.append(f"LUT: {bad}/4096 bytes changed by DOS DMA")
+        finally:
+            mgr.release(t)
+    print(f"  dosbuf {'OK' if not f else 'FAIL'}")
+    return [f"dosbuf: {x}" for x in f]
+
+
+# live: the display under mach_run (review pf_live), with the REAL CIA
+# callbacks (chip_reset -> cia_reset), so CIA-A's TOD counts the VERTBs
+LIVE_FINAL = 0x0F0F
+LIVE_PAL0 = [0x0000, 0x0F00, 0x00F0, 0x000F]
+LIVE_CONV_PHI2 = 380_000    # a lower bound on one mc2 refresh (PERF (j): 422,505)
+LIVE_NV = 60                # handler runs before the final colour (the review's)
+LIVE_TO = float(os.environ.get("PF_LIVE_TO", "900"))  # s: one guest run (a livelock = a failure)
+# (s, edit, rig): "mach" = tests/mach/drv.s with the real CIA callbacks
+# (the TOD check); "irq" = tests/irq/drv.s, the review's rig (no CIA: its
+# fake slot callbacks), where the round-0 frame budget livelocks at s = 0
+LIVE_CASES = [(4, False, "mach"), (4, True, "mach"), (2, True, "mach"),
+              (0, True, "irq")]
+
+
+def live_list(a0: int, a1: int) -> tuple[list[int], int]:
+    w = [0x0E0, a0 >> 16, 0x0E2, a0 & 0xFFFF, 0x0E4, a1 >> 16, 0x0E6, a1 & 0xFFFF,
+         0x108, 0, 0x10A, 0, 0x08E, 0x2C81, 0x090, 0xF4C1, 0x092, 0x38, 0x094, 0xD0]
+    col1 = len(w) + 2 + 1                      # value word of the COLOR01 MOVE
+    for i, c in enumerate(LIVE_PAL0):
+        w += [0x180 + 2 * i, c]
+    return w + [0x100, 0x2200, 0xFFFF, 0xFFFE], col1
+
+
+def live_prog(lst: int, colw: int, nv: int, n_after: int, edit: bool):
+    """Exception mode: a level-3 VERTB handler counts (and with EDIT bumps
+    COLOR01 in the list, a display change every delivered frame); the main
+    program counts in d0 until NV handler runs, writes the final colour,
+    waits n_after more, reads CIA-A's TOD into d2, the count into d3, HALT."""
+    from tests import run_irq as I
+    from tests.run_mach import G, HALT, mv_imm_abs_w
+    flag = I.DATA + 4
+    g = G()
+    I.vec(g, 27, "h3")
+    I.clr_l(g, I.CNT)
+    I.mv_l_imm_abs(g, 0 if edit else 1, flag)
+    g(0x7000)                                   # moveq #0,d0
+    mv_imm_abs_w(g, 0x7FFF, I.INTENA)
+    mv_imm_abs_w(g, 0x7FFF, I.INTREQ)
+    I.mv_l_imm_abs(g, lst, CUSTOM + 0x080)      # COP1LC
+    mv_imm_abs_w(g, 0, CUSTOM + 0x088)          # COPJMP1 (load)
+    mv_imm_abs_w(g, 0x8380, CUSTOM + 0x096)     # DMACON: copper + planes on
+    mv_imm_abs_w(g, 0xC020, I.INTENA)
+    I.move_sr(g, 0x2000)
+    g.label("spin")
+    g(0x5280)                                   # addq.l #1,d0
+    g(0x0CB9, nv >> 16, nv & 0xFFFF, *g.abs(I.CNT))
+    g.bcc(0x6D00, "spin")                       # blt.w
+    I.mv_l_imm_abs(g, 1, flag)
+    mv_imm_abs_w(g, LIVE_FINAL, colw)
+    g(0x2239, *g.abs(I.CNT))                    # move.l CNT,d1
+    g(0x0681, n_after >> 16, n_after & 0xFFFF)  # addi.l #n,d1
+    g.label("w2")
+    g(0xB2B9, *g.abs(I.CNT))                    # cmp.l CNT,d1
+    g.bcc(0x6E00, "w2")                         # bgt.w
+    g(0x7400)                                   # moveq #0,d2
+    g(0x1439, *g.abs(0xBFEA01))                 # TOD hi (latches)
+    g(0xE18A)                                   # lsl.l #8,d2
+    g(0x1439, *g.abs(0xBFE901))
+    g(0xE18A)
+    g(0x1439, *g.abs(0xBFE801))                 # lo (unlatches)
+    g(0x2639, *g.abs(I.CNT))                    # move.l CNT,d3
+    g(HALT)
+    g.label("h3")
+    I.addq_l_abs(g, I.CNT)
+    g(0x4AB9, *g.abs(flag))                     # tst.l flag
+    g.bcc(0x6600, "noed")                       # bne.w
+    g(0x5279, *g.abs(colw))                     # addq.w #1,colw
+    g.label("noed")
+    mv_imm_abs_w(g, 0x0020, I.INTREQ)
+    g(0x4E73)                                   # rte
+    return g
+
+
+def leg_live(prg: str, cases=None, nohook: bool = False) -> list[str]:
+    cases = cases or LIVE_CASES
+    f: list[str] = []
+    for kind in ("mach", "irq"):
+        sel = [(s, e) for s, e, k in cases if k == kind]
+        if sel:
+            f += live_rig(prg, sel, kind, nohook)
+    return f
+
+
+def live_rig(prg: str, cases, kind: str, nohook: bool) -> list[str]:
+    """F3 + the TOD check: the display under the live mach_run.  s = 4
+    static / edit-every-frame and s = 0 edit-every-frame must HALT (red on
+    498ab52: s = 0 edit livelocks, the frame budget eaten by the catch-up);
+    the picture is byte-exact; deliveries = handler runs; CIA-A's TOD (the
+    real CIA installed) = mach_frames; with editing, conversions stay
+    within the E-time budget (<= frames / DISP_N + 2)."""
+    from c64_test_harness import read_bytes
+    from tests import run_irq as I
+    from tests import run_mach as M
+    from tests.run_mach import BASE, F_INIT, F_SUPER, clean
+    lut = R.build_lut()
+
+    def body(rig):
+        orig = rig.call
+        rig.call = lambda addr, timeout=LIVE_TO: orig(addr, timeout)
+        if kind == "irq":
+            od = rig.dcall
+            rig.dcall = lambda name, timeout=LIVE_TO: od(name, timeout)
+        f: list[str] = []
+        n_dn = rig.lab("DISP_N")
+        progress = {}
+        for s, edit in cases:
+            tag = f"live s={s} {'edit' if edit else 'static'}"
+            rig.call(rig.lab("chip_reset"))         # also cia_reset (callbacks)
+            rig.call(rig.lab("cop_reset"))
+            rig.call(rig.lab("disp_init"))
+            if nohook:                              # diagnostics: no display
+                rig.w(rig.lab("cop_dhook"), b"\0\0")
+            pl0, pl1 = rnd(100 + s, 8000), rnd(101 + s, 8000)
+            n0 = len(I.link(live_prog(0, 0, LIVE_NV, n_dn + 4, edit), BASE))
+            lw, col1 = live_list(0, 0)
+            lst = BASE + 2 * n0
+            a0 = lst + 2 * len(lw)
+            a1 = a0 + 8000
+            lw, col1 = live_list(a0, a1)
+            colw = lst + 2 * col1
+            words = I.link(live_prog(lst, colw, LIVE_NV, n_dn + 4, edit), BASE)
+            assert len(words) == n0
+            pc, l2, b0, b1 = rig.stage(words, lw, list(struct.unpack(">4000H", pl0)),
+                                       list(struct.unpack(">4000H", pl1)))
+            assert (l2, b0, b1) == (lst, a0, a1)
+            nirq0 = struct.unpack("<I", rig.r(rig.lab("mach_nirq"), 4))[0]
+            try:
+                if kind == "irq":
+                    res = rig.run(pc, s=s, flags=I.F_INIT | I.F_SUPER, sr=0x27)
+                    res["timeout"] = 0
+                else:
+                    res = rig.run(pc, s=s, flags=F_INIT | F_SUPER)
+            except Exception as e:
+                f.append(f"{tag}: no HALT within {LIVE_TO:.0f} s ({type(e).__name__})")
+                print(f"  {tag}: NO HALT ({type(e).__name__})")
+                break                               # the machine state is unknown
+            if not clean(res, tag, f):
+                continue
+            d0, d1, d2, d3 = res["d"]
+            frames = res["frames"]
+            nirq = (struct.unpack("<I", rig.r(rig.lab("mach_nirq"), 4))[0] - nirq0) & 0xFFFFFFFF
+            nconv = struct.unpack("<H", rig.r(rig.lab("disp_nconv"), 2))[0]
+            why, mode = rig.r(rig.lab("disp_why"), 1)[0], rig.r(rig.lab("disp_mode"), 1)[0]
+            progress[(s, edit)] = d0 / max(frames, 1)
+            print(f"  {tag}: frames {frames} handler runs {d3} deliveries {nirq} "
+                  f"TOD {d2} nconv {nconv} progress/frame {d0 / max(frames, 1):.1f}")
+            if nirq != d3:
+                f.append(f"{tag}: deliveries {nirq} != handler runs {d3}")
+            # one TOD tick per VERTB.  Exact where the guest runs several
+            # instructions per frame; at s = 0 the loop itself starves the
+            # guest (it gets ~1 instruction per many frames even with no
+            # display: review pf_live_nohook, here nohook=True), so frames
+            # pass between its TOD read and the HALT: only TOD <= frames
+            if kind == "mach" and ((s >= 2 and not frames - 1 <= d2 <= frames)
+                                   or d2 > frames):
+                f.append(f"{tag}: CIA-A TOD {d2}, mach_frames {frames} (one tick per VERTB)")
+            if why != 0 or mode != R.MODE_MC2:
+                f.append(f"{tag}: disp_why {why} mode {mode}")
+            # the budget runs from a conversion's END: each conversion takes
+            # its own length (c frames, at least LIVE_CONV_PHI2) plus N
+            # frames, so nconv <= frames / (N + c) + 2 (the start-anchored
+            # mutant efrom: back-to-back conversions, ~frames / c)
+            c_fr = LIVE_CONV_PHI2 // (FRAME_E << s)
+            bound = frames // (n_dn + c_fr) + 2
+            if edit and nconv > bound:
+                f.append(f"{tag}: {nconv} conversions in {frames} frames, budget "
+                         f"<= {bound} (N {n_dn} + {c_fr} frames per conversion)")
+            pal = list(LIVE_PAL0)
+            pal[1] = LIVE_FINAL
+            st = {"dmacon": 0x0380, "bplcon0": 0x2200, "bplcon1": 0, "bplcon2": 0,
+                  "bplpt": [a0, a1, 0, 0, 0, 0], "bpl1mod": 0, "bpl2mod": 0,
+                  "diwstrt": 0x2C81, "diwstop": 0xF4C1, "ddfstrt": 0x38,
+                  "ddfstop": 0xD0, "color": pal + [0] * 28}
+            mem = Mem()
+            mem.put(a0, pl0)
+            mem.put(a1, pl1)
+            want = R.disp_convert(st, mem.read, lut)
+            cs = C.Session(rig.tg, rig.labels if hasattr(rig, "labels") else LABELS[0])
+            f += [f"{tag}: {x}" for x in C.diff("bitmap", cs.read_ram(cs.bitmap, 8000),
+                                                 want["bitmap"], cs.bitmap)]
+            f += [f"{tag}: {x}" for x in C.diff("matrix", cs.read_ram(cs.screen, 1000),
+                                                 want["screen"], cs.screen)]
+            cr_ = bytes(b & 0x0F for b in read_bytes(rig.t, 0xD800, 1000))
+            f += [f"{tag}: {x}" for x in C.diff("colour RAM", cr_, want["colram"], 0xD800)]
+            for a_, v in {**want["vic"], 0xDD00: 0}.items():
+                got = read_bytes(rig.t, a_, 1)[0] & VIC_MASK[a_]
+                if got != v & VIC_MASK[a_]:
+                    f.append(f"{tag}: VIC ${a_:04X} = ${got:02X}, want ${v & VIC_MASK[a_]:02X}")
+            if rig.guest_read(rig.lab("disp_lut"), 4096) != lut:
+                f.append(f"{tag}: LUT changed")
+        for s in sorted({s for s, _ in cases}):
+            if (s, False) in progress and (s, True) in progress:
+                lost = 1 - progress[(s, True)] / max(progress[(s, False)], 1e-9)
+                print(f"  live s={s}: guest progress lost to the display {100 * lost:.1f}%")
+        return f
+    from c64_test_harness import Labels
+    LABELS[0] = Labels.from_file(os.path.splitext(os.path.abspath(prg))[0] + ".lbl")
+    return (I.session if kind == "irq" else M.session)(prg, body)
+
+
+LABELS = [None]
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--prg", required=True)
@@ -602,14 +958,14 @@ def main(argv=None) -> int:
     ap.add_argument("--expect-fail", action="store_true")
     ap.add_argument("--perf", action="store_true",
                     help="shim leg: also time disp_refresh / disp_frame")
-    ap.add_argument("--leg", choices=["shim", "fixture", "all"], default="all",
-                    help="default all: the shim leg, then pf_static (the "
-                    "fixture leg needs W10-P's copper: cop_reset)")
+    ap.add_argument("--leg", default="all",
+                    help="comma list of " + ", ".join(ALL_LEGS) + " (live:s0 = "
+                    "only the s = 0 edit case); default all")
     a = ap.parse_args(argv)
     prg = os.path.abspath(a.prg)
-    legs = ["shim", "fixture"] if a.leg == "all" else [a.leg]
+    legs = ALL_LEGS if a.leg == "all" else a.leg.split(",")
 
-    def run_legs(p: str) -> list[str]:
+    def run_legs(p: str, legs: list[str] = legs) -> list[str]:
         fails = []
         if "shim" in legs:
             sp = p if has_label(p, "shim_kick") else build(p, "shim", [], True)
@@ -618,13 +974,26 @@ def main(argv=None) -> int:
         if "fixture" in legs:
             print(f"run_pf fixture leg: {p}")
             fails += [f"pf_static: {x}" for x in run_fixture(p)]
+        if "wrap" in legs:
+            print(f"run_pf wrap leg: {p}")
+            fails += leg_wrap(p)
+        if "dosbuf" in legs:
+            print(f"run_pf dosbuf leg: {p}")
+            fails += leg_dosbuf(p)
+        if "live" in legs or "live:s0" in legs:
+            print(f"run_pf live leg: {p}")
+            cases = ([(0, True, "irq")] if "live:s0" in legs and "live" not in legs
+                     else None)
+            fails += [f"live: {x}" for x in leg_live(p, cases)]
         return fails
 
     if a.teeth:
         caught = {}
         for name in TEETH:
-            print(f"variant {name} ({' '.join(VARIANTS[name])}):")
-            caught[name] = len(run_legs(build(prg, name, VARIANTS[name], True)))
+            print(f"variant {name} ({' '.join(VARIANTS[name])}), legs "
+                  f"{','.join(MUTANT_LEGS[name])}:")
+            caught[name] = len(run_legs(build(prg, name, VARIANTS[name], True),
+                                        MUTANT_LEGS[name]))
         print("teeth: " + ", ".join(f"{k} {'CAUGHT' if v else 'MISSED'} ({v})"
                                     for k, v in caught.items()))
         return 0 if all(caught.values()) else 1

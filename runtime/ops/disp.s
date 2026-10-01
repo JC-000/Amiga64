@@ -19,12 +19,15 @@
 ; must be $A5 (cop_reset ran), else the state is ignored (blank, why 7).
 ;
 ; Refresh policy v0 (docs/PERF.md "Display refresh"):
-;   * convert only when disp_st's gen changed AND the copied fields differ
+;   * convert only when disp_st's gen changed or its dirty byte (+104,
+;     F1: set by W10-P's every bump, cleared here) is set, AND the fields differ
 ;     from the last ones taken (the copper rewriting equal values costs one
 ;     70-byte compare, no conversion);
-;   * inside mach_run (mach_in <> 0) at most one conversion per DISP_N
-;     guest frames (mach_frames since the last conversion's start); a
-;     deferred change is not consumed, so a later call converts it;
+;   * inside mach_run (mach_in <> 0) a conversion starts only when
+;     DISP_N frames' worth of guest E-time (DISP_N * 14188 ticks) passed
+;     since the last one ENDED (fix round 1, F3: frame counts were eaten by
+;     the catch-up after a long conversion); a deferred change is not
+;     consumed, so a later call converts it;
 ;   * outside mach_run (HLE runners) every gen change converts at once;
 ;   * disp_refresh converts unconditionally (no gen, compare or budget);
 ;   * no dirty tracking of bitplane writes (backlog).
@@ -42,7 +45,9 @@
 ; from color[i+1]), DISP_MUT_PPORD (plane pointers 0/1 and 2/3 swapped),
 ; DISP_MUT_MOD (BPLxMOD ignored), DISP_MUT_STRADDLE (no 512 KB line check),
 ; DISP_MUT_CLR (lines below DIWSTOP not cleared), DISP_MUT_BUDGET (no
-; duty budget), DISP_MUT_BANK (BASIC ROM left in: disp_st read as ROM).
+; duty budget), DISP_MUT_BANK (BASIC ROM left in: disp_st read as ROM),
+; DISP_MUT_DIRTY (the dirty byte ignored), DISP_MUT_EFROM (the budget
+; measured from a conversion's start).
 ;
 ; Link layout: CODE and BSS are each padded to whole pages, no RODATA or
 ; DATA, so modules linked after this one move by whole pages only.
@@ -52,16 +57,18 @@
 
 .export disp_init, disp_frame, disp_refresh
 .export disp_mode, disp_why, disp_nconv, disp_nblank, disp_seen, disp_ok
-.export disp_cur, disp_lastf, disp_lines, disp_crop
+.export disp_cur, disp_laste, disp_bud, disp_lines, disp_crop
 .export DISP_N, disp_lut       ; disp_lut: the rc equate, for the host
 .import c2v_init, c2v_pal_mc2, c2v_pal_hires, c2v_mc2s, c2v_hiress
-.import mem_rec_dirty, mach_in
+.import mem_rec_dirty, mach_in, mach_etime, mach_et
 .import cop_dhook               ; cop.s BSS (consumer -> provider, as cia.s
                                 ; imports mach_cbv); disp_st: rc equate (cop)
 
 .ifndef DISP_N
 DISP_N     = 20                 ; duty budget: frames per conversion (PERF (j))
 .endif
+DISP_FRAME_E = 14188            ; @value E ticks per guest frame (CONTRACTS "Machine loop")
+DISP_EBUD  = DISP_N * DISP_FRAME_E ; E ticks from a conversion's end to the next start
 .ifndef C2V_ROWS
 C2V_ROWS   = 25                 ; must match c2v.s (both take the same -D)
 .endif
@@ -94,6 +101,7 @@ DISP_S_COLOR    = 38                 ; colours 0-15 (u16 LE)
 DISP_S_VALID    = 70                 ; copy of disp_st + DISP_ST_VALID
 DISP_ST_VALID   = 103                ; @value W10-P: valid byte offset in disp_st
 DISP_COPVALID   = $A5                ; @value W10-P: valid once cop_reset ran
+DISP_ST_DIRTY   = 104                ; @value W10-P: dirty byte offset in disp_st (F1)
 
 ; c2v argument block (docs/C2V.md "Argument block", "Row skip")
 DISP_A_SRC     = c2v_args + 0       ; 4 x u24
@@ -114,6 +122,7 @@ DISP_VMC       = $18              ; multicolour, 40 columns
 DISP_VHI       = $08              ; hires, 40 columns
 
 .assert DISP_N >= 1 .and DISP_N <= 255, error, "DISP_N must fit a byte"
+.assert DISP_EBUD < $1000000, error, "the E budget must fit 24 bits"
 .assert (c2v_screen >> 14) = (c2v_bitmap >> 14), error, "matrix and bitmap must share a VIC bank"
 .assert (c2v_bitmap & DISP_BMALIGN) = 0, error, "VIC bitmap must sit at bank + $0000 or + $2000"
 .assert (c2v_screen & $3FF) = 0, error, "VIC screen matrix must be 1 KB aligned"
@@ -147,7 +156,8 @@ disp_mode:  .res 1              ; DISP_NONE / BLANK / MC2 / HIRES
 disp_why:   .res 1              ; last decision: 0 shown, else DISP_WHY_*
 disp_nconv: .res 2              ; conversions (u16, wraps)
 disp_nblank: .res 2             ; blank decisions (u16, wraps)
-disp_lastf: .res 4              ; mach_frames at the last conversion
+disp_laste: .res 4              ; E (mach_et) when the last conversion ended
+disp_bud:   .res 1              ; nonzero: disp_laste is a budget reference
 disp_lines: .res 1              ; lines shown (<= DISP_LINES)
 disp_crop:  .res 1              ; rows skipped at the top (centre crop)
 disp_dm:    .res 1              ; candidate mode
@@ -246,19 +256,8 @@ disp_init:
         sta disp_nblank+1
         lda #DISP_NONE
         sta disp_mode
-        sec                     ; the first conversion is never deferred
-        lda mach_frames
-        sbc #DISP_N
-        sta disp_lastf
-        lda mach_frames+1
-        sbc #0
-        sta disp_lastf+1
-        lda mach_frames+2
-        sbc #0
-        sta disp_lastf+2
-        lda mach_frames+3
-        sbc #0
-        sta disp_lastf+3
+        lda #0                  ; the first conversion is never deferred
+        sta disp_bud
         lda #0                  ; the hook: high byte last (0 = none)
         sta cop_dhook+1
         lda #<disp_frame
@@ -276,38 +275,48 @@ disp_frame:
         DISP_ENTER              ; disp_st is RAM under BASIC ROM
         lda disp_ok
         beq @go                 ; first call: always decide
+.ifndef DISP_MUT_GEN
         lda disp_st             ; C1 +0 gen
         cmp disp_seen
-.ifdef DISP_MUT_GEN
-        jmp @rts                ; mutant: a gen change is never seen
-.else
-        beq @rts                ; unchanged
+        bne @chg
 .endif
+.ifndef DISP_MUT_DIRTY
+        lda disp_st + DISP_ST_DIRTY ; F1: set by every bump, even one that
+        bne @chg                ; wrapped gen back to disp_seen
+.endif
+        jmp disp_leave          ; unchanged
+@chg:
 .ifdef DISP_MUT_BUDGET
         jmp @go                 ; mutant: no duty budget
 .else
         lda mach_in
         beq @go                 ; HLE: no budget
-        sec                     ; frames since the last conversion
-        lda mach_frames
-        sbc disp_lastf
+        lda disp_bud
+        beq @go                 ; no conversion inside mach_run yet
+        jsr mach_etime          ; E ticks since the last conversion ENDED
+        sec
+        lda mach_et
+        sbc disp_laste
         sta disp_t
-        lda mach_frames+1
-        sbc disp_lastf+1
+        lda mach_et+1
+        sbc disp_laste+1
         sta disp_t+1
-        lda mach_frames+2
-        sbc disp_lastf+2
+        lda mach_et+2
+        sbc disp_laste+2
         sta disp_t+2
-        lda mach_frames+3
-        sbc disp_lastf+3
-        ora disp_t+1
-        ora disp_t+2
-        bne @go                 ; >= 256
+        lda mach_et+3
+        sbc disp_laste+3
+        bmi @go                 ; negative: E restarted (mach_init)
+        bne @go                 ; >= 2^24 ticks
         lda disp_t
-        cmp #DISP_N
+        cmp #<DISP_EBUD
+        lda disp_t+1
+        sbc #>DISP_EBUD
+        lda disp_t+2
+        sbc #^DISP_EBUD
         bcs @go
 .endif
-@rts:   jmp disp_leave          ; deferred: gen stays unseen
+@rts:   jmp disp_leave          ; deferred: the change stays unseen
 @go:    lda disp_st
         sta disp_seen
         jsr disp_snap
@@ -343,6 +352,9 @@ disp_take:
         sta disp_ok
         jsr disp_decide
         bcs @blank
+.ifdef DISP_MUT_EFROM
+        jsr disp_stamp          ; mutant: budget measured from the START
+.endif
         jsr disp_args
         lda disp_dm
         cmp #DISP_MC2
@@ -361,14 +373,10 @@ disp_take:
         inc disp_nconv
         bne :+
         inc disp_nconv+1
-:       lda mach_frames
-        sta disp_lastf
-        lda mach_frames+1
-        sta disp_lastf+1
-        lda mach_frames+2
-        sta disp_lastf+2
-        lda mach_frames+3
-        sta disp_lastf+3
+:
+.ifndef DISP_MUT_EFROM
+        jsr disp_stamp          ; F3: the budget runs from the END
+.endif
         jmp @out
 @blank: inc disp_nblank
         bne :+
@@ -386,7 +394,8 @@ disp_leave:
         sta CPU_PORT
         rts
 
-; disp_snap — disp_new := disp_st + 1 .. + 70, then disp_st's valid byte.
+; disp_snap — disp_new := disp_st + 1 .. + 70, then disp_st's valid byte;
+; then dirty := 0 (F1: the change is taken).
 disp_snap:
         ldx #DISP_S_VALID - 1
 :       lda disp_st + 1,x
@@ -395,6 +404,23 @@ disp_snap:
         bpl :-
         lda disp_st + DISP_ST_VALID
         sta disp_new + DISP_S_VALID
+        lda #0
+        sta disp_st + DISP_ST_DIRTY
+        rts
+
+; disp_stamp — the budget's reference: inside mach_run, E now and the
+; budget armed; outside it (HLE), no budget.
+disp_stamp:
+        lda mach_in
+        beq @off
+        jsr mach_etime
+        ldx #3
+:       lda mach_et,x
+        sta disp_laste,x
+        dex
+        bpl :-
+        lda #1
+@off:   sta disp_bud
         rts
 
 ; ---------------------------------------------------------------------------

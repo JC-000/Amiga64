@@ -18,6 +18,9 @@
 ;   +27 bpl1mod/bpl2mod   +31 diwstrt, diwstop, ddfstrt, ddfstop
 ;   +39 color[32] u16 (as written)            (u16 fields little-endian)
 ;   +103 valid u8 = COP_VALID once cop_reset ran (undefined RAM before)
+;   +104 dirty u8 := 1 by every gen bump (W10-V fix round 1, F1: the
+;        reader clears it after its snapshot, so a gen that wrapped back to
+;        the reader's last value is still seen as a change)
 ; Inside a copper run (frame or synchronous) gen moves at most once, at the
 ; end of the run, and only if the block differs from its state at the
 ; start (a raster-bar list rewriting COLOR00 costs the reader nothing).
@@ -104,7 +107,8 @@ DISP_BPLMOD  = 27       ; @value disp_st: bpl1mod, bpl2mod
 DISP_DIW     = 31       ; @value disp_st: diwstrt, diwstop, ddfstrt, ddfstop
 DISP_COLOR   = 39       ; @value disp_st: color[32]
 DISP_VALID   = 103      ; @value disp_st: valid
-DISP_SZ      = 104      ; @value disp_st size
+DISP_SZ      = 104      ; @value disp_st size (cop_sh; dirty is not mirrored)
+DISP_DIRTY   = 104      ; @value disp_st: dirty (set by cop_bump, cleared by the reader)
 
 .segment "BSS"
 cop_ok:    .res 1       ; nonzero once cop_reset ran
@@ -313,6 +317,8 @@ same:   rts
         inc cop_sh+DISP_GEN
         lda cop_sh+DISP_GEN
         sta disp_st+DISP_GEN
+        lda #1                  ; F1: a change, even if gen wrapped back
+        sta disp_st+DISP_DIRTY
 done:   rts
 .endproc
 

@@ -355,7 +355,12 @@ is the custom chips; `$800000`, the first proposal, is Zorro-II fast RAM
 there). The shim leg's `lut-trap` step checks it: 30 guest stores through
 `mem_write8/16/32` across and around the range leave the stashed LUT intact
 and count as open-bus accesses (red: a variant with `disp_lut=$800000`
-loses 12 bytes and counts none). `disp_init` unpacks the 2 KB in-PRG table into `c2v_stage` 256 bytes at a
+loses 12 bytes and counts none). The HLE DOS moves bulk data with the REC
+directly, so it refuses Read/Write buffers that touch bank `$BF`/`$DF`
+(fix round 1, F2: IoErr 212, no DMA; leg `dosbuf`). The CPU's `$BF`/`$DF`
+trap and the DOS buffer check together keep the guest out.
+
+`disp_init` unpacks the 2 KB in-PRG table into `c2v_stage` 256 bytes at a
 time and stashes it there (16 DMAs, BASIC banked out). `c2v_pal_*` and the
 blank border look it up with one byte DMA each.
 
@@ -406,16 +411,19 @@ blank border look it up with one byte DMA each.
 
 - `disp_st` is RAM under BASIC ROM (W10-P's claim at `$B800`). Every entry
   banks BASIC out (`$37 → $36`) before it reads the block.
-- `disp_frame` returns at once (55 cycles) when `gen` equals the last
-  value it saw.
-- On a `gen` change it copies `disp_st+1..+70` (DMACON through COLOR15)
-  and the valid byte. If the copy equals the previous one, nothing more
-  happens. W10-P bumps `gen` only on a real value change, so this costs one
-  71-byte compare at most.
+- `disp_frame` returns at once when `gen` equals the last value it saw
+  **and** the `dirty` byte (`disp_st+104`) is 0. W10-P sets `dirty` on
+  every `gen` bump, so a `gen` that wrapped back to the old value (256 net
+  changes) is still a change (fix round 1, F1; leg `wrap`).
+- On a change it copies `disp_st+1..+70` (DMACON through COLOR15) and the
+  valid byte, then clears `dirty`. If the copy equals the previous one,
+  nothing more happens. W10-P bumps `gen` only on a net value change, so
+  this costs one 71-byte compare at most.
 - Inside `mach_run` (`mach_in` ≠ 0) a conversion is **deferred** until
-  `mach_frames` − (the frame count at the last conversion) ≥ `DISP_N`
-  (20, see `docs/PERF.md` (j)). A deferred change leaves `gen` unseen, so
-  a later frame converts it.
+  `DISP_N` × 14188 guest E ticks (20 frames' worth; `docs/PERF.md` (j))
+  have passed since the previous conversion **ended** (F3: the round-0
+  frame count from the start livelocked the guest at s ≤ 1). A deferred
+  change leaves `gen`/`dirty` unseen, so a later frame converts it.
 - Outside `mach_run` (the HLE runners never call it), every change converts
   at once: one conversion per COPJMP strobe.
 - `disp_refresh` converts unconditionally.
@@ -427,7 +435,9 @@ blank border look it up with one byte DMA each.
 
 `disp_mode` (`$FF` none / 0 blank / 1 mc2 / 2 hires), `disp_why` (1–7),
 `disp_nconv` / `disp_nblank` (u16), `disp_seen`, `disp_ok`, `disp_cur` (the
-70-byte snapshot), `disp_lastf` (u32), `disp_lines`, `disp_crop`; `DISP_N`.
+71-byte snapshot), `disp_laste` (u32: E when the last conversion ended),
+`disp_bud` (nonzero: that reference applies), `disp_lines`, `disp_crop`;
+`DISP_N`, `disp_lut`.
 
 ### Tests (`tests/run_pf.py`)
 
@@ -449,11 +459,23 @@ blank border look it up with one byte DMA each.
   need the shim leg's dedicated steps.
 - **Red**: `--variant stub`, and the base PRG (no `disp.s`): the bitmap is
   left intact and the VIC is untouched.
-- **Teeth** (`--teeth`, both legs): `C2V_MUT_BITORDER`, `DISP_MUT_PAL`,
-  `DISP_MUT_GEN`, `DISP_MUT_PPORD`, `DISP_MUT_MOD`, `DISP_MUT_STRADDLE`,
-  `DISP_MUT_CLR`, `DISP_MUT_BUDGET`, `DISP_MUT_BANK` (BASIC ROM left in;
-  caught once `disp_st` is under ROM, i.e. with W10-P). Red variants:
-  `stub`, `lutram`.
+- **Review legs (fix round 1):** `wrap` (F1: 255/256/512 CPU COLOR00
+  changes, then a no-op COPJMP2: the display follows), `dosbuf` (F2:
+  `fixtures/c/pf_dosbuf.c`, Read/Write with `$BF`/`$DF` buffers fail with
+  IoErr 212 and the LUT stays intact), and `live` (F3 + TOD: a level-3
+  handler edits COLOR01 every delivered VERTB under the live `mach_run`.
+  At s = 4 static/edit and s = 2 edit, with the real CIA callbacks: the
+  picture is byte-exact, deliveries = handler runs, CIA-A's TOD =
+  `mach_frames`. At s = 0 edit, on the review's irq-driver rig, it must
+  HALT. With editing, conversions ≤ frames / (`DISP_N` + c) + 2, c = one
+  conversion in frames (≥ 380,000 φ2), because the budget runs from each
+  conversion's end). Each is red on 498ab52.
+- **Teeth** (`--teeth`, each mutant on the legs meant to catch it):
+  `C2V_MUT_BITORDER`, `DISP_MUT_PAL`, `DISP_MUT_GEN`, `DISP_MUT_PPORD`,
+  `DISP_MUT_MOD`, `DISP_MUT_STRADDLE`, `DISP_MUT_CLR`, `DISP_MUT_BUDGET`,
+  `DISP_MUT_BANK` (BASIC ROM left in), `DISP_MUT_DIRTY` (F1),
+  `DISP_MUT_EFROM` (F3: the budget from the start). Red variants: `stub`,
+  `lutram`.
 
 ### Link layout
 

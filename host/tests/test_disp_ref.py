@@ -57,7 +57,8 @@ def test_disp_st_layout_c1():
                         "bpl2mod": 8, "diwstrt": 0x2C81, "diwstop": 0xF4C1,
                         "ddfstrt": 0x38, "ddfstop": 0xD0,
                         "color": [0x0FFF] + [0] * 30 + [0x0123]})
-    assert len(b) == R.DISP_ST_LEN == 104 and b[103] == R.COP_VALID == 0xA5
+    assert len(b) == R.DISP_ST_LEN == 105 and b[103] == R.COP_VALID == 0xA5
+    assert b[104] == 0                           # dirty (F1)
     assert b[0] == 0x5A and b[1:3] == b"\x34\x12" and b[3:5] == b"\x00\x22"
     assert b[9:12] == b"\x56\x34\x12" and b[12:15] == b"\xEF\xCD\xAB"
     assert b[27:29] == b"\xD8\xFF" and b[29:31] == b"\x08\x00"
@@ -220,3 +221,27 @@ def test_cop_valid_matches_w10p():
     m = re.search(r"^disp_st\s*=\s*\$([0-9A-Fa-f]+)", ram, re.M)
     assert m, "W10-P's disp_st claim"
     assert int(m.group(1), 16) + e["DISP_ST_VALID"] < int(m.group(1), 16) + 0x100
+
+
+def test_dirty_offset_matches_w10p():
+    """F1: disp.s reads/clears the dirty byte where cop.s sets it."""
+    from host import chipset_ref
+    e = equates(DISP_S)
+    assert e["DISP_ST_DIRTY"] == chipset_ref.DISP_DIRTY == 104
+    cop = (ROOT / "runtime" / "ops" / "cop.s").read_text()
+    assert re.search(r"^DISP_DIRTY\s*=\s*104\b", cop, re.M)
+    assert e["DISP_FRAME_E"] == 14188
+
+
+def test_display_state_dirty_model():
+    from host import chipset_ref as cr
+    d = cr.DisplayState()
+    assert d.dirty == 0
+    d.write(0x180, 0x0F00)
+    assert d.dirty == 1
+    d.take()
+    d.write(0x180, 0x0F00)                       # same value: no bump
+    assert d.dirty == 0
+    for k in range(256):                         # 256 bumps: gen wraps back
+        d.write(0x180, k)
+    assert d.dirty == 1
