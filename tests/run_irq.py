@@ -1221,7 +1221,6 @@ def leg_haltrace(rig: Rig) -> list[str]:
     return f
 
 
-MACH_MINW = 0x0800
 
 
 def prog_raiseev() -> G:
@@ -1275,10 +1274,10 @@ def leg_raiseev(rig: Rig) -> list[str]:
 
 
 def leg_progress(rig: Rig) -> list[str]:
-    """W9-C review (fix round 1): a client whose callback re-arms its slot
-    in the past every time (always due) must not livelock the guest: after
-    a pass that fired a slot the one-shot waits >= MACH_MINW phi2, so the
-    guest loop finishes and the pass rate is bounded (s = 0: E = phi2)."""
+    """W9-C review / fix round 2: a client whose callback re-arms its slot
+    in the past every time (always due) must not livelock the guest: a
+    pass that leaves a slot due now is followed by one emu_step, so the
+    guest runs one instruction per pass and its loop finishes."""
     f = need_seam(rig, "progress")
     if f:
         return f
@@ -1292,9 +1291,42 @@ def leg_progress(rig: Rig) -> list[str]:
         print(f"    progress: {fires} firings in {span} phi2")
     if fires < 10:
         f.append(f"progress: only {fires} firings (the client never re-fired)")
-    if fires > span // MACH_MINW + 2:
-        f.append(f"progress: {fires} firings in {span} phi2: closer than "
-                 f"MACH_MINW = {MACH_MINW} phi2 apart")
+    if fires > 2 * 801 + 2:
+        f.append(f"progress: {fires} firings for 801 guest instructions: "
+                 "passes ran without a guest instruction between them")
+    return f
+
+
+def leg_lag(rig: Rig) -> list[str]:
+    """Review N1 (fix round 2): a periodic client re-arming from its own
+    deadline (CIA timers' no-drift pattern) at s = 0.  P = 3000 phi2 keeps
+    a bounded lateness (<= SLACK_PHI2).  P = 1500 is below what a 1 MHz
+    6502 can serve (a pass with a callback plus the guaranteed guest
+    instruction, ~2.9k phi2), so no scheme keeps it bounded; its lateness
+    may grow by at most GROW phi2 per period (round 0 ~800 with no
+    progress guarantee, this ~1450, MACH_MINW ~3150)."""
+    f = need_seam(rig, "lag")
+    if f:
+        return f
+    grow = 1600
+    for p in (3000, 1500):
+        (pc,) = rig.stage(prog_busy(3000))
+        res = rig.run(pc, s=0, slots={4: Slot(1000, period=p, rearms=30)})
+        lates = [l for k, e, l in res["log"] if k == 4]
+        if VERBOSE:
+            print(f"    lag P={p}: fires {res['fires'][4]} late first/last/max "
+                  f"{lates[:1]}/{lates[-1:]}/{max(lates) if lates else None}")
+        if not clean(res, f"lag P={p}", f):
+            continue
+        if res["fires"][4] != 31 or len(lates) < 31:
+            f.append(f"lag P={p}: {res['fires'][4]} firings, {len(lates)} logged")
+            continue
+        if p == 3000 and max(lates) > SLACK_PHI2:
+            f.append(f"lag P=3000: max lateness {max(lates)} phi2 > {SLACK_PHI2} "
+                     "(the lateness grows: the client drifts)")
+        if p == 1500 and (lates[-1] - lates[0]) / 30 > grow:
+            f.append(f"lag P=1500: lateness grows {(lates[-1] - lates[0]) / 30:.0f} "
+                     f"phi2 per period (> {grow})")
     return f
 
 
@@ -1305,7 +1337,8 @@ LEGS = {"setclr": leg_setclr, "etime": leg_etime, "etlive": leg_etlive,
         "nest": leg_nest, "storm": leg_storm, "stop": leg_stop,
         "oddvec": leg_oddvec, "haltrace": leg_haltrace,
         "stoplost": leg_stoplost, "starve": leg_starve, "kick": leg_kick,
-        "ustop": leg_ustop, "progress": leg_progress, "raiseev": leg_raiseev}
+        "ustop": leg_ustop, "progress": leg_progress, "raiseev": leg_raiseev,
+        "lag": leg_lag}
 
 
 def session(prg: str, fn) -> object:
@@ -1382,9 +1415,7 @@ MUTANTS = {
                       "        sbc mach_dl+3,y\n        lda mach_bit,x\n")]),
     # a slot is not disarmed before its callback (fires every pass)
     "once": (MACH, [("        bmi next\n        lda mach_bit,x\n        eor #$FF\n"
-                     "        and mach_am\n        sta mach_am\n"
-                     "        lda #1                  ; client work this pass (MACH_MINW)\n"
-                     "        sta mach_wf\n        jsr mach_cb\n",
+                     "        and mach_am\n        sta mach_am\n        jsr mach_cb\n",
                      "        bmi next\n        jsr mach_cb\n")]),
     # INTREQ writes ignore mach_hold
     "hold": (CHIP, [("        lda mach_hold           ; a level source still asserting re-raises\n"
@@ -1436,8 +1467,9 @@ MUTANTS = {
                        "        lda #0\n")]),
     # reviewer's: the STOP wake ignores a VERTB enabled above the IPL
     "wkvb": (MACH, [("        and #1 << MACH_VERTB_BIT\n        bne yes\n", "")]),
-    # W9-C review: no least wait after a pass that did client work
-    "nominw": (MACH, [("        jsr mach_wmin           ; fired/posted/delivering: >= MACH_MINW\n", "")]),
+    # fix round 2: no forced guest instruction when a slot is due now
+    "nostep": (MACH, [("loop:   lda mach_fs             ; W9-I: a slot is due now (fix round 2)\n"
+                       "        bne step\n", "loop:\n")]),
 }
 MUTANT_LEGS = {"noslot": ["arm"], "nokick": ["trap"], "kickout": ["out"],
                "disarm": ["arm"], "wrap": ["etime"], "eshift": ["etime"],
@@ -1449,7 +1481,7 @@ MUTANT_LEGS = {"noslot": ["arm"], "nokick": ["trap"], "kickout": ["out"],
                "wkslot": ["stop"], "haltguard": ["haltrace"],
                "stopev": ["stoplost"], "nopoll": ["starve", "kick", "storm"],
                "dropb7": ["stoplost", "kick", "raiseev"], "wkvb": ["stop"],
-               "nominw": ["progress"]}
+               "nostep": ["progress"]}
 
 
 def build_mutant(name: str, out_dir: str) -> str:

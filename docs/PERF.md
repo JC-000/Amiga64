@@ -493,18 +493,19 @@ nothing polls; the case is a request pending under a higher running level
 `mach.s`; at 1 MHz a larger value trades latency for throughput. Exact
 recognition at the SR write would need a core.s SR-write hook (backlog).
 
-**`MACH_MINW` = `$0800` phi2 (forward progress, W9-C review).** After a
-pass that fired a client slot or leaves an interrupt to deliver, the next
-one-shot waits at least 2048 phi2. At 1 MHz that covers the rest of the
-pass after the one-shot is armed (`mach_dlv`: ~100 cycles, or a frame
-build of two API writes and a vector read when it delivers, ~1000–1500)
-plus at least one guest instruction (~380–700 cycles in window, ~1100
-with a refill, tables (a)/(c)) [EST]; measured with an always-due slot at
-s = 0: 181–182 passes in ~828,000 phi2, ~4,560 phi2 per pass, the 800-
-instruction guest loop completes (~4 instructions per pass) [MEASURED
-VICE, `run_irq` leg `progress`]. At 48 MHz the CIAs still count phi2 at
-~1 MHz, so 2048 phi2 is ~98,000 6502 cycles: ~100+ guest instructions per
-pass; the minimum costs nothing unless a client over-arms.
+**Forward progress: one forced guest instruction (fix round 2).** A pass
+that leaves a client slot due now is followed by one `emu_step` before
+the next pass (no time floor; round 1b's `MACH_MINW` floor made periodic
+clients drift and is gone). Cost: one single-step call (~+15 cycles over
+the instruction itself, `emu_step` vs `dispatch_go`) per such pass, and
+only when a client is at or behind its deadline. Measured [VICE, s = 0,
+`run_irq` legs `progress`/`lag`]: an always-due slot gives 802 passes for
+the 801-instruction loop, ~2,830 phi2 per pass+instruction at 1 MHz (a
+callback that logs and re-arms included); a period of 3000 phi2 keeps its
+lateness bounded (max 2,333); 1500 phi2 is below that service time on a
+1 MHz 6502, so its lateness grows ~1,430 phi2 per period (round 0, which
+guaranteed no instruction, ~800; round 1b ~3,150). At 48 MHz the same
+pass is ~60 phi2, so client periods down to ~100 phi2 stay bounded [EST].
 
 ## (e) Caveats
 

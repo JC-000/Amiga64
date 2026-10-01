@@ -484,13 +484,23 @@ no link dependency on any client.
   (the first phi2 of tick d is `d << s`), at least 1 (a deadline at or
   before the snapshot gives 1), at most
   `$FFFF` (a farther one is reached through the VERTB wake-ups).
-  **Forward progress** (fix round 1, W9-C review): when the pass fired a
-  client slot, or leaves an interrupt to deliver, the wait is at least
-  `MACH_MINW` = `$0800` phi2 (`mach_wmin`), so the guest runs before the
-  next pass even if a client re-arms "now" (`run_irq` leg `progress`: an
-  always-due slot, ~180 firings in ~830 k phi2 at s = 0, the guest loop
-  finishes; round 0 livelocked). A firing may therefore come up to
-  `MACH_MINW` later than its deadline when another slot fired just before;
+  **Forward progress** (fix round 2, replaces round 1b's `MACH_MINW`
+  floor): when a pass leaves an armed slot due now (`mach_wake` chose the
+  wait 1 for it), it sets `mach_fs`, and `mach_run` then runs exactly ONE
+  guest instruction with `emu_step` (core.s's single-step entry, under
+  `sei`, `st_halt` cleared first so the step really runs; `ev_pend` keeps
+  any event, which the event path then services) before the next pass. So
+  a client that re-arms "now" cannot livelock the guest (`run_irq`
+  `progress`: an always-due slot, 802 passes for the 801-instruction loop,
+  one instruction each), and there is no time floor, so a periodic client
+  re-arming from its own deadline keeps a bounded lateness when its period
+  exceeds a pass plus one instruction (`lag`: P = 3000 phi2 at s = 0,
+  max 2333 late; the round-1b floor drifted to 50k). A halt in that step
+  (HALT, STOP, an odd vector) leaves through the normal halt path, and every
+  `mach_run` exit rule holds. A delivery does not force a step: a higher
+  level pending after a delivery nests before the handler's first
+  instruction, as on a 68000 (`raiseev`), and deliveries raise the IPL, so
+  at most 6 can follow without an instruction.
   the VERTB count is unaffected (it counts boundaries). Latency
   [MEASURED VICE, `run_irq` `arm`/`periodic`/`trap`]: a firing comes at
   most `4096 >> s` E ticks late (an IRQ, the instruction in flight and one
