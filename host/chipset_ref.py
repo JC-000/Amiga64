@@ -274,6 +274,17 @@ class CIA:
                 self.icr_data |= 4
         self.update()
 
+    def tod_ticks(self, n):
+        """tod_tick(n) in O(1) (W9-C, S3.4): the alarm bit is set iff one of
+        the n ticks lands on the alarm, i.e. k' <= n with
+        k' = ((alarm - tod - 1) mod 2^24) + 1 (``cia_tod_kprime``)."""
+        if self.tod_halt:
+            return
+        if cia_tod_kprime(self.tod, self.alarm) <= n:
+            self.icr_data |= 4
+        self.tod = (self.tod + n) & 0xFFFFFF
+        self.update()
+
     def update(self):
         if self.icr_data & self.icr_mask & 0x1F and self.irq is not None:
             self.irq()
@@ -367,6 +378,33 @@ class CIA:
             if v & 0x10:
                 self.tb = self.tb_latch
             self.crb = v & 0xEF
+
+
+# ---------------------------------------------------------------------------
+# S3.4 guest CIA timing on the C64 (W9-C, runtime/ops/cia.s): CIA-B's TOD
+# counts PAL lines from guest E time on one fixed grid (line k starts at
+# colour clock 227 k, 5 colour clocks per E tick, 15625 Hz); CIA-A's TOD
+# counts VERTBs (MACH_FRAME_E E ticks, 50 Hz).  docs/CONTRACTS.md
+# "CIA-A/B (S3.4)".
+# ---------------------------------------------------------------------------
+
+CIA_LINE_CC = 227           # colour clocks per line
+CIA_CC_PER_E = 5            # colour clocks per E tick
+
+
+def cia_lines(e: int) -> int:
+    """Line starts passed after *e* E ticks of the grid (0 at e = 0)."""
+    return CIA_CC_PER_E * e // CIA_LINE_CC
+
+
+def cia_line_e(k: int) -> int:
+    """First E tick at which cia_lines() reaches *k*: ceil(227 k / 5)."""
+    return -(-CIA_LINE_CC * k // CIA_CC_PER_E)
+
+
+def cia_tod_kprime(tod: int, alarm: int) -> int:
+    """Ticks until the TOD next equals the alarm (1..2^24)."""
+    return ((alarm - tod - 1) & 0xFFFFFF) + 1
 
 
 def _s16(v):

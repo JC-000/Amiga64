@@ -31,13 +31,20 @@
 ;   and VHPOSR = V7-V0 : H from the machine loop's time base (mach_beam,
 ;   docs/CONTRACTS.md "Machine loop (S3.2)"); a long read keeps the beam
 ;   of its first word, so move.l VPOSR is one coherent position.  An
-;   INTREQ write sets or clears INTREQR bit 5 (VERTB, SET/CLR by bit 15);
-;   the other INTREQ bits stay as S3.1 left them (S3.3).  CIA registers read their shadow,
-;   except CIA-A PRA = (PRA & DDRA) | ($EB & ~DDRA): the port inputs of an
-;   A500 with DF0 present and empty, both mouse buttons up.
+;   INTREQ write sets or clears INTREQR bit 5 (VERTB, SET/CLR by bit 15).
+; S3.3 (W9-I): every INTENA/INTREQ write applies the SET/CLR rule (bit 15
+;   set: OR in bits 0-14, else clear them) to INTENAR/INTREQR (chip_shd
+;   $01C/$01E, bit 15 reads 0), mach_on or not; after an INTREQ write the
+;   bits a level source holds (mach_hold, mach.s) are ORed back; a SET
+;   write then calls mach_ichk (a pass at the next instruction boundary if
+;   an interrupt became deliverable, S3.3 delivery).  The raw
+;   written word still lands in the write-only slot.
+; CIA registers (W9-C, S3.4): every decoded CIA byte goes to
+;   runtime/ops/cia.s (cia_read/cia_write: timers, ICR, TOD, ports as
+;   host/chipset_ref.CIA; docs/CONTRACTS.md "CIA-A/B (S3.4)").
 ; Writes: every decoded write is appended to chip_log; write-only
 ;   registers also land in chip_shd (a write to a read-only slot is
-;   ignored there, as on the chip), CIA writes land in chip_cia, and a
+;   ignored there, as on the chip), CIA writes go to cia.s, and a
 ;   SERDAT write appends its low byte to the chip_ser ring.
 ;
 ; Host-visible state (labels in build/runner.lbl; all LE; cleared by the
@@ -45,7 +52,6 @@
 ; it is machine state, like guest RAM):
 ;   chip_shd   512 B  custom register image, big-endian words, index =
 ;                     register offset ($DFF000 + i)
-;   chip_cia    32 B  CIA-A registers 0-15, then CIA-B registers 0-15
 ;   chip_log   256 B  ring of 64 entries {u16 id, u16 value}; id = custom
 ;                     offset $000-$1FE, CIA-A $0A00+reg, CIA-B $0B00+reg;
 ;                     entry k lives at 4 * (k mod 64)
@@ -59,27 +65,28 @@
 
 .export chip_r8, chip_r16, chip_r32, chip_w8, chip_w16, chip_w32
 .export chip_split, chip_reset
-.export chip_shd, chip_cia, chip_log, chip_logn, chip_ser, chip_sern
+.export chip_shd, chip_log, chip_logn, chip_ser, chip_sern
 .export chip_nopen
 .import m_scmd                  ; core.s mio_split: REC command of the split
 .import mach_on, mach_beam, mach_bv, mach_bh    ; W8-L mach.s: S3.2 beam
+.import cia_read, cia_write, cia_reset          ; W9-C cia.s: S3.4 CIA-A/B
+.import mach_hold, mach_ichk                    ; W9-I irq: level hold, delivery kick
 
 CHIP_LOGN_MASK = 63     ; @value log ring entries - 1
 CHIP_SERDAT    = $30    ; @value SERDAT register offset
 CHIP_RO_END    = $20    ; @value read-only slots are $000-$01E
 CHIP_DENISEID  = $7C    ; @value DENISEID (read-only, OCS: floats $FFFF)
-CHIP_PRA_IN    = $EB    ; @value CIA-A PRA input pins (docs/S3_PLAN.md §3.4)
 CHIP_ID_CIAA   = $0A    ; @value log id high byte, CIA-A
 CHIP_ID_CIAB   = $0B    ; @value log id high byte, CIA-B
 CHIP_INTREQR   = $1E    ; @value INTREQR (read-only) register offset
 CHIP_INTREQ    = $9C    ; @value INTREQ (write) register offset
-CHIP_VERTB     = $20    ; @value INTREQ bit 5, low byte
+CHIP_INTENAR   = $1C    ; @value INTENAR (read-only) register offset; W9-I irq
+CHIP_INTENA    = $9A    ; @value INTENA (write) register offset; W9-I irq
 
 .segment "BSS"
 chip_shd:   .res 512
 chip_log:   .res 256
 chip_ser:   .res 256
-chip_cia:   .res 32
 chip_logn:  .res 2
 chip_sern:  .res 2
 chip_nopen: .res 2
@@ -89,7 +96,6 @@ chip_vh:    .res 1              ; word value, high byte
 chip_li:    .res 1              ; log id, low byte
 chip_lh:    .res 1              ; log id, high byte
 chip_n:     .res 1              ; byte counter (long CIA accesses)
-chip_t:     .res 1              ; scratch
 chip_sx:    .res 1              ; caller's X
 chip_bk:    .res 1              ; beam latch: $80 armed (long read), 1 held
 
@@ -263,13 +269,13 @@ lp:     sta chip_shd,x
         sta chip_ser,x
         inx
         bne lp
-        ldx #32 + 6 - 1         ; chip_cia .. chip_nopen are contiguous
-lp2:    sta chip_cia,x
+        ldx #6 - 1              ; chip_logn .. chip_nopen are contiguous
+lp2:    sta chip_logn,x
         dex
         bpl lp2
-        rts
+        jmp cia_reset           ; W9-C: the CIAs to power-up
 .endproc
-.assert chip_logn = chip_cia + 32 .and chip_nopen = chip_cia + 36, error, "chip_reset: BSS layout"
+.assert chip_nopen = chip_logn + 4, error, "chip_reset: BSS layout"
 
 ; ---------------------------------------------------------------------------
 ; Internals.  Address in chip_a; A/X clobbered, Y untouched.
@@ -480,21 +486,45 @@ p0:     lda #0
         sta chip_shd+1,x
         cpx #CHIP_SERDAT
         beq ser
+        ; --- W9-I irq: INTENA/INTREQ SET/CLR (bit 15) into INTENAR/INTREQR
+        cpx #CHIP_INTENA
+        beq paula
         cpx #CHIP_INTREQ
         bne done
-        and #CHIP_VERTB         ; W8-L: INTREQ SET/CLR of the VERTB bit only,
-        beq done                ; once the machine loop runs (mach_on)
-        lda mach_on
-        beq done
-        lda chip_shd+CHIP_INTREQR+1
+paula:  txa
+        sec
+        sbc #CHIP_INTENA - CHIP_INTENAR ; $09A -> $01C, $09C -> $01E
+        tax
         bit chip_vh
         bmi set
-        and #<~CHIP_VERTB
+        lda chip_vl             ; CLR: reg &= ~val
+        eor #$FF
+        and chip_shd+1,x
+        sta chip_shd+1,x
+        lda chip_vh
+        eor #$FF
+        and chip_shd,x
+        jmp hi
+set:    lda chip_vl             ; SET: reg |= val
+        ora chip_shd+1,x
+        sta chip_shd+1,x
+        lda chip_vh
+        ora chip_shd,x
+hi:     and #$7F                ; bit 15 always reads 0
+        sta chip_shd,x
+        cpx #CHIP_INTREQR
+        bne kick
+        lda mach_hold           ; a level source still asserting re-raises
+        ora chip_shd+CHIP_INTREQR+1
         sta chip_shd+CHIP_INTREQR+1
-        rts
-set:    ora #CHIP_VERTB
-        sta chip_shd+CHIP_INTREQR+1
-        rts
+        lda mach_hold+1
+        and #$7F
+        ora chip_shd+CHIP_INTREQR
+        sta chip_shd+CHIP_INTREQR
+kick:   bit chip_vh             ; a SET may make an interrupt deliverable:
+        bpl done                ; act at the next instruction boundary
+        jmp mach_ichk
+        ; --- end W9-I irq
 ser:    ldx chip_sern           ; SERDAT: low byte -> the serial ring
         sta chip_ser,x
         inc chip_sern
@@ -504,7 +534,7 @@ done:   rts
 .endproc
 
 ; c_cia — select the CIA register of the byte at chip_a.
-; Out: C = 0, X = chip_cia index (CIA-A reg / CIA-B 16+reg), A = log id
+; Out: C = 0, X = CIA register index (CIA-A reg / CIA-B 16+reg), A = log id
 ; high byte; C = 1: neither CIA decodes this byte (open bus).
 .proc c_cia
         lda chip_a+1
@@ -531,23 +561,12 @@ none:   sec
         rts
 .endproc
 
-; c_ciard — A := the CIA byte at chip_a.
+; c_ciard — A := the CIA byte at chip_a (W9-C: runtime/ops/cia.s).
 .proc c_ciard
         jsr c_cia
         bcc sel
         jmp c_open
-sel:    txa
-        bne shadow              ; X = 0: CIA-A PRA, the input pins mix in
-        lda chip_cia+2          ; DDRA
-        eor #$FF
-        and #CHIP_PRA_IN
-        sta chip_t
-        lda chip_cia+2
-        and chip_cia
-        ora chip_t
-        rts
-shadow: lda chip_cia,x
-        rts
+sel:    jmp cia_read            ; X = register index; keeps Y
 .endproc
 
 ; c_ciawr — write byte A to the CIA register at chip_a.
@@ -557,12 +576,12 @@ shadow: lda chip_cia,x
         bcc sel
         jmp c_open
 sel:    sta chip_lh
-        lda chip_vl
-        sta chip_cia,x
         txa
         and #$0F
         sta chip_li
         lda #0
         sta chip_vh
+        lda chip_vl
+        jsr cia_write           ; W9-C: X = register index, A = value; keeps Y
         jmp c_log
 .endproc

@@ -361,7 +361,8 @@ Tests: `tests/run_mach.py` (+ `tests/mach/drv.s`), `host/tests/test_mach.py`.
   `win` (NMI swept over the prologue, poisoned vector), `c2vnmi` (NMI swept
   over c2v's store and fill at `$35`).
 - **Race-free clear.** After `emu_run` returns, under `sei`: `st_halt &=
-  $7F`; nonzero → a real halt → exit with `ev_pend` untouched (a halt
+  $7F`; nonzero → a real halt (S3.3: `HALT_STOP` in exception mode stops
+  the CPU instead, see "Interrupt delivery (S3.3)") → exit with `ev_pend` untouched (a halt
   racing an event, `st_halt` = `$81`, returns `$01`, `ev_pend` set). Zero
   → `ev_pend` is copied to `mach_ev` and cleared, `cli`, service,
   re-enter `emu_run`. The next `mach_run` takes a kept `ev_pend` on entry
@@ -413,9 +414,10 @@ Tests: `tests/run_mach.py` (+ `tests/mach/drv.s`), `host/tests/test_mach.py`.
   2^31 (a longer absence). The pass then posts one VERTB and restarts the
   frame at C (next = C + frame): the lost frames are not counted, but time
   never stalls, so there is no re-entry bound (the round-0 ~36 min bound is
-  gone; test `catch`: 2^31 + 1 frame of absence). No interrupt delivery (S3.3), no CIA-A/B guest
-  timers (S3.4), no copper/refresh (S3.5). `HALT_STOP` returns to the
-  caller like any halt (idle skip needs S3.3).
+  gone; test `catch`: 2^31 + 1 frame of absence). S3.3 (W9-I) adds the
+  client slots, the VERTB hook and delivery after each pass ("Event seam",
+  "Interrupt delivery"); no CIA-A/B guest timers (S3.4), no copper/refresh
+  (S3.5).
 - **Beam** (`mach_beam`, from `chip.s` VPOSR/VHPOSR reads once `mach_on`):
   t = C − frame start (φ2 into the frame; t ≥ frame length, i.e. the
   boundary passed but not serviced yet, reads the last tick), e = t >> s,
@@ -424,10 +426,12 @@ Tests: `tests/run_mach.py` (+ `tests/mach/drv.s`), `host/tests/test_mach.py`.
   **VHPOSR = `(V & $FF) << 8 | H`**. A long read (`move.l VPOSR`) latches
   one beam for both words. Before `mach_init` (`mach_on` = 0) both return
   the S3.1 values (VPOSR `$8000`, VHPOSR its shadow word).
-- **INTREQ VERTB** (only once `mach_on`): an INTREQ (`$09C`) write with bit
-  5 set sets (bit 15 = 1) or clears INTREQR bit 5. Every other INTREQ bit
-  keeps the S3.1 behaviour (S3.3).
-- **Claims.** rc zp s3 `$95–$99`: `ev_pend` (bit 0 = CIA #1 timer A),
+- **INTREQ VERTB** (S3.2; **superseded by S3.3**, W9-I): INTENA/INTREQ
+  writes now apply the full SET/CLR rule to every bit, `mach_on` or not,
+  and VERTB is posted through `mach_post` (see "Interrupt delivery
+  (S3.3)").
+- **Claims.** rc zp s3 `$95–$99`: `ev_pend` (bit 0 = CIA #1 timer A; S3.3
+  adds bit 1 = a trap-context kick, "Event seam"),
   `mach_frames` (u32 LE); none is written by the KERNAL IRQ. rc ram s3
   `$FFFA–$FFFF`: `mach_vnmi`, `mach_vrst`, `mach_virq`. CIA #1/#2 register
   equates in the rc sys block. Linker state in `runner.lbl`: `mach_s`
@@ -435,3 +439,275 @@ Tests: `tests/run_mach.py` (+ `tests/mach/drv.s`), `host/tests/test_mach.py`.
   `mach_next`/`mach_now` and the entry `mach_rdc` (test visibility).
 - **Link order.** `mach.s` links after `chip.s` (Makefile), so no other
   module's code moves; `core.s` is unchanged.
+
+## Event seam (S3.3/S3.4) (W9-I)
+
+Owner: s3 (`runtime/ops/mach.s`). Design: `docs/WAVE9_BRIEF.md` C1,
+`docs/S3_PLAN.md` §1.5. Tests: `tests/run_irq.py` legs `etime`, `etlive`,
+`arm`, `periodic`, `trap`, `race`, `post`, `out` (+ `tests/irq/drv.s`, a
+fake event source) and `--mutants`. Clients: `cia.s` (S3.4); `mach.s` has
+no link dependency on any client.
+
+- **Guest time.** `mach_etime` (JSR; clobbers A, X; keeps Y) → `mach_et`
+  (u32 LE) = the low 32 bits of `(chi:C) >> s`, where C is the S3.2 phi2
+  counter and `mach_chi` (u16) counts its wraps (`mach_rdc` compares C's top
+  byte with the previous read's: lower = a wrap). It is THE time base of
+  every guest clock. It wraps at 2^32 E ticks, so compare E times by signed
+  difference. A wrap is counted only if C is read at least once per 2^31
+  phi2 (~36 min): `mach_run` reads it at every pass (at least every 65536
+  phi2); a caller that stays away from `mach_run` longer loses the wrap
+  (as S3.2's frame count does). `mach_init` restarts E at 0 (`chi` := 0).
+- **Slots.** `MACH_NSLOT` = 8 (exported). Slot 0 is VERTB (mach-internal,
+  in phi2, as S3.2); slots 1–7 belong to the client (`cia.s` assigns them).
+  State: `mach_dl` (u32 deadline per slot, 4 bytes × slot), `mach_am`
+  (armed mask, bit n = slot n).
+- **`mach_arm`** (A = slot 1–7, `mach_at` = absolute E deadline u32 LE;
+  clobbers A, X; keeps Y): arms or re-arms (replaces the deadline). Slot 0
+  and A ≥ 8 are ignored. **`mach_disarm`** (A = slot; clobbers A, X):
+  disarms, a no-op when not armed. Both are callable from the trap context
+  (inside `emu_run` under `mach_run`, IRQ enabled), from callbacks, and
+  outside `mach_run` (no kick; the next `mach_run`'s entry pass sees it).
+  `mach_init` disarms every slot (callbacks are kept): init the time base
+  before the client arms.
+- **Firing.** Every service pass (`mach_svc`: the entry pass of
+  `mach_run`, and the pass after each event or kick) first counts VERTBs,
+  then takes ONE E snapshot and fires every armed slot 1..7 (in slot order)
+  whose deadline is ≤ the snapshot: the slot is disarmed, then its callback
+  runs. Each slot fires at most once per pass, so a callback that re-arms
+  in the past is fired by the next pass, not this one (no livelock). A
+  deadline never fires early. The comparison uses the pass's private copy
+  of that snapshot (`mach_es`): a callback's own `mach_etime` moves
+  `mach_et`, not the firing decision (fix round 1, W9-C review). Then the
+  pass programs CIA #1 timer A
+  (one-shot) for the earliest of the next frame boundary and every armed
+  deadline: wait = `(d − et) << s` − the phi2 already spent in tick `et`
+  (the first phi2 of tick d is `d << s`), at least 1 (a deadline at or
+  before the snapshot gives 1), at most
+  `$FFFF` (a farther one is reached through the VERTB wake-ups).
+  **Forward progress** (fix round 2, replaces round 1b's `MACH_MINW`
+  floor): when a pass leaves an armed slot due now (`mach_wake` chose the
+  wait 1 for it), it sets `mach_fs`, and `mach_run` then runs exactly ONE
+  guest instruction with `emu_step` (core.s's single-step entry, under
+  `sei`, `st_halt` cleared first so the step really runs; `ev_pend` keeps
+  any event, which the event path then services) before the next pass. So
+  a client that re-arms "now" cannot livelock the guest (`run_irq`
+  `progress`: an always-due slot, 802 passes for the 801-instruction loop,
+  one instruction each), and there is no time floor, so a periodic client
+  re-arming from its own deadline keeps a bounded lateness when its period
+  exceeds a pass plus one instruction (`lag`: P = 3000 phi2 at s = 0,
+  max 2333 late; the round-1b floor drifted to 50k). A halt in that step
+  (HALT, STOP, an odd vector) leaves through the normal halt path, and every
+  `mach_run` exit rule holds. A delivery does not force a step: a higher
+  level pending after a delivery nests before the handler's first
+  instruction, as on a 68000 (`raiseev`), and deliveries raise the IPL, so
+  at most 6 can follow without an instruction.
+  the VERTB count is unaffected (it counts boundaries). Latency
+  [MEASURED VICE, `run_irq` `arm`/`periodic`/`trap`]: a firing comes at
+  most `4096 >> s` E ticks late (an IRQ, the instruction in flight and one
+  pass).
+- **Trap-context kick.** `mach_arm` called while `mach_run` runs the
+  guest (`mach_in` ≠ 0) and no pass runs (`mach_insv` = 0) **kicks**
+  (`mach_post` and a SET write to INTENA/INTREQ kick only when they make an
+  interrupt deliverable, `mach_ichk`, see "Interrupt delivery"): under `php`/`sei`, `ev_pend |= 2` (bit 1, `MACH_EV_KICK`)
+  and `st_halt |= $80` — exactly what `mach_irq` does — so `emu_run`
+  returns at the next instruction boundary and the pass re-programs the
+  one-shot. Race-free against `mach_irq` by construction: the IRQ handler
+  touches only `ev_pend`, `st_halt` and the CIA #1 ICR, the slot state is
+  never touched in the IRQ, and both read-modify-writes run under `sei`.
+  A kick costs one pass (~400 cycles [EST, static]) per arm. Outside
+  `mach_run`, `mach_in` = 0, so a client's direct-API use (tests) never
+  sets `st_halt`.
+- **Register convention (supervisor R4).** Every seam routine clobbers
+  A/X/Y unless stated here; the exceptions are `mach_etime`, `mach_arm`,
+  `mach_post` (keep Y). Callbacks may clobber A/X/Y.
+- **`mach_cbv` lifetime (R1).** Zero at boot (BSS); never cleared by
+  `mach_init` or `mach_run`'s lazy `mach_init`, so a client fills it once at
+  its own init.
+- **E is a true u32 (R3)** at every s (tested at s = 0, 4, 8, 9, 16 across a
+  C wrap, `run_irq` leg `etime`).
+- **Callbacks.** `mach_cbv`: 2 bytes per slot (LE address; high byte 0 =
+  none), RAM, filled by the client at its own init. A callback runs in the
+  service pass, never in the IRQ, with `$01` = `$35`; it may call
+  `mach_etime`, `mach_arm`, `mach_disarm`, `mach_post` (no kick inside a
+  pass), must not call `emu_*` or `mach_run`, and returns with `rts`
+  (A/X/Y clobbered). It must not use `mach_t`/`mach_c` (beam scratch).
+- **VERTB hook.** Slot 0's callback runs after every VERTB the pass posts
+  (catch-up passes call it once per frame), so CIA-A's TOD can count
+  vsyncs. Default none.
+- **`mach_post`** (A = INTREQ bit 0–14; clobbers A, X; keeps Y): sets that
+  bit in INTREQR (`chip_shd+$1E`, big-endian) at once (a guest INTREQR read
+  sees it). Delivery (S3.3) happens at the next pass; from the trap context
+  a post that makes an interrupt deliverable kicks (`mach_ichk`), so it is
+  taken at the next instruction boundary. VERTB uses the same path (inside
+  the pass).
+- **`mach_hold`** (u16 LE, RAM): the INTREQ bits a **level** source still
+  asserts. Every INTREQ write (`chip.s`) ORs it back after the SET/CLR, so
+  a guest CLR of a held bit leaves it set — `chipset_ref.Chipset.
+  custom_write`'s `ciaa.update()`/`ciab.update()` re-raise. The client keeps
+  bit 3 (CIA-A) / bit 13 (CIA-B) of `mach_hold` equal to its ICR `IR`
+  condition (data & mask ≠ 0) and `mach_post`s on the rising edge.
+- **Host-visible** (`runner.lbl`): `mach_et`, `mach_at`, `mach_dl`,
+  `mach_am`, `mach_cbv`, `mach_hold`, `mach_chi`, `mach_in`, `mach_insv`;
+  entries `mach_etime`, `mach_arm`, `mach_disarm`, `mach_post`,
+  `mach_kick`. All BSS (no rc claim): cleared at boot, not by `emu_reset`.
+
+## Interrupt delivery (S3.3) (W9-I)
+
+Owner: s3 (`runtime/ops/mach.s`; the INTENA/INTREQ paths of
+`runtime/ops/chip.s`). Design: `docs/WAVE9_BRIEF.md` C2, `docs/S3_PLAN.md`
+§1.5 and §4 "S3.3". Reference: `host/chipset_ref.Paula` (`setclr`,
+`level`, `IRQ_LEVELS`). Tests: `tests/run_irq.py` legs `setclr`,
+`deliver`, `masked`, `levels`, `nest`, `storm`, `stop`, `oddvec` and
+`--mutants`; `host/tests/test_irq.py` (the level tables vs the model).
+
+- **INTENA/INTREQ** (`chip.s`, every write, `mach_on` or not): the SET/CLR
+  rule (bit 15 set: OR in bits 0–14, else clear them) applied to INTENAR
+  (`chip_shd+$1C`) / INTREQR (`$1E`); bit 15 reads 0. A byte write lands
+  on both halves (OCS), so it is a SET/CLR of `v:v`. After an INTREQ write
+  `mach_hold` is ORed back (level sources). The raw word still lands in the
+  write-only slot (`$09A`/`$09C`) and the log. Reads: INTENAR/INTREQR
+  return the shadow (S3.1 read-only rule). This replaces S3.2's
+  VERTB-only, `mach_on`-gated INTREQ rule; VERTB is posted with
+  `mach_post` (bit 5).
+- **IPL** (`mach_lvl`): 0 unless INTEN (INTENA bit 14); else the level of
+  the highest source in `INTENA & INTREQ & $3FFF` by
+  `chipset_ref.IRQ_LEVELS` (13 → 6; 12, 11 → 5; 10–7 → 4; 6–4 → 3; 3 → 2;
+  2–0 → 1).
+- **Delivery** (`mach_dlv`, exception mode only: `st_exl` ≠ 0): after the
+  entry pass and after every service pass, if IPL > SR's I2–I0, raise
+  autovector 24 + IPL: stacked SR = SR, stacked PC = `r_pc` (the next
+  instruction), S := 1, T := 0 (A7 switches to the SSP from user mode),
+  frame at SSP − 6, PC := (vector × 4); then I2–I0 := IPL. Through core.s's
+  `exc_group2`/`exc_raise` unchanged (no core.s change): `mach_raise`
+  stores the 6502 SP in `st_sp6` (the depth `emu_run`'s step loop runs at,
+  one `jsr` below `mach_run`) and jumps to `exc_group2`; `st_halt` is preset
+  to `$40` so `dispatch_next` returns right after the frame instead of
+  running the handler. Back in `mach_dlv` (under `sei`): `st_halt & $7F` =
+  `$40` → keep only bit 7 (an event that came meanwhile) and go on; = 1 →
+  an odd vector halted `HALT_ADDRESS` (frame written): `mach_run` exits with
+  it. One interrupt per pass; a higher level arriving in a handler nests
+  (I2–I0 = the running level masks equal and lower ones: the compare is
+  `>`). `mach_nirq` (u32) counts deliveries.
+- **Recognition latency.** A pass happens at every event and kick. A SET
+  write to INTENA/INTREQ, or a post from the trap context, calls
+  `mach_ichk`: when it makes an interrupt deliverable now (exception mode,
+  IPL > I2–I0) it kicks, so the interrupt is taken at the next instruction
+  boundary, as on a 68000 (`levels` pins the stacked PC = the instruction
+  after the write). It costs the trap path only (`chip.s`, never the hot
+  path); CLR writes never kick. **An IPL drop** by MOVE to SR / RTE / ANDI
+  to SR (core.s, frozen, no SR-write hook) **is recognised within
+  `MACH_POLL` phi2 while an interrupt is pending** (fix round 1, review
+  F2): every pass in exception mode that finds `mach_lvl` ≠ 0 — pending and
+  enabled, whether masked by I2–I0 or queued behind the one this pass
+  delivers — clamps the CIA #1 one-shot to `MACH_POLL` = `$0400` phi2
+  (`mach_pclamp`). With nothing pending it is recognised at the next event,
+  which is harmless: nothing can be delivered. So a lower level is never
+  starved by a recurring higher one (`starve`, `kick`), and a handler that
+  never acknowledges its request is re-entered right after its RTE, as on a
+  68000 (`storm`: 20 re-entries within 2 frames at s = 4). Cost: one pass
+  per `MACH_POLL` phi2 while something is pending, `docs/PERF.md` (i).
+  Exact recognition at the RTE/MOVE-to-SR instruction would need a core.s
+  SR-write hook: backlog, not Wave 9.
+- **STOP** (exception mode): `emu_run` halts `HALT_STOP`; `mach_run`
+  marks the CPU stopped (`mach_stp`), clears `st_halt`, and delivers at
+  once if an interrupt is already deliverable. Otherwise, if one can still
+  come (`mach_wk`: INTEN and a source enabled above I2–I0 that VERTB posts
+  (bit 5), or any source enabled above I2–I0 while a client slot is armed or
+  the slot-0 hook is installed), it **waits** with `cli` for the next event
+  (no fast-forward: guest time runs at the dilated rate while stopped) and
+  services it; a delivery resumes the CPU (stacked PC = the instruction
+  after STOP). If nothing can wake it (IPL 7, nothing enabled above the
+  IPL, or only client sources with nothing armed and no hook), `mach_run`
+  returns `HALT_STOP` (`st_halt` = 1, `st_reason` = 4) at once, as in S3.2.
+  To resume, the caller must clear `st_halt` (`mach_run`'s entry
+  precondition is `st_halt` = 0) and call `mach_run` again: execution goes
+  on after the STOP. **Unbounded STOP (review F4, intended):** while any
+  client slot is armed or the slot-0 hook is installed (S3.4's `cia_init`
+  always installs it), a STOP with an enabled source above I2–I0 returns
+  only through a delivered interrupt; `mach_run` does not give the host
+  control back meanwhile. That is what a 68000 does: STOP ends only on an
+  interrupt (or reset). On entry the halt path goes through the event path
+  (fix round 1, review F1): a one-shot that fired during the STOP or
+  between `halt_now` and the `sei` is serviced, never dropped
+  (`stoplost`).
+- **Plain mode** (`st_exl` = 0): nothing is delivered and `HALT_STOP`
+  cannot occur; the INTENA/INTREQ registers behave as above.
+
+## CIA-A/B (S3.4) (W9-C)
+
+Owner: cia (`runtime/ops/cia.s`; the CIA path of `runtime/ops/chip.s`
+routes to it). Design: `docs/S3_PLAN.md` §1.5, §4 "S3.4";
+`docs/WAVE9_BRIEF.md` C3. Reference: `host/chipset_ref.CIA` (wired as
+`Chipset`), plus `cia_lines`/`cia_line_e`/`cia_tod_kprime`/`CIA.tod_ticks`.
+Tests: `tests/run_cia.py` (+ `tests/cia/shim.s`), `host/tests/test_cia.py`.
+
+- **Decode** is unchanged (CONTRACTS "I/O trap"): CIA-A = odd bytes with
+  A12 = 0, CIA-B = even bytes with A13 = 0, register = `(m_addr+1) & $0F`,
+  every access byte-wise, writes logged (`$0A00`/`$0B00` + reg). chip.s
+  hands the byte to `cia_read` (X = register index 0–15 CIA-A, 16–31
+  CIA-B → A) / `cia_write` (X = index, A = value); both keep Y, clobber X.
+  The `chip_cia` shadow is gone.
+- **Semantics** = `chipset_ref.CIA`, byte for byte: ports (CIA-A PRA pins
+  `$EB`, CIA-B PRA and both PRB `$FF`, `(PR & DDR) | (pins & ~DDR)`),
+  timers A/B (continuous / one-shot, force load = CR bit 4 (never read
+  back), a TxHI write loads a stopped timer and loads + starts a one-shot,
+  underflow on the tick after 0 then reload, latch 0 underflows every tick,
+  TB INMODE 0 = E ticks, 1 = CNT (nothing), 2/3 = TA underflows), ICR (data
+  bits 0–4, read = data | IR bit 7 then clear; write bit 7 SET / else CLR
+  of the mask), TOD (TODHI read latches until TODLO; TODHI write halts until
+  TODLO; CRB bit 7 directs TOD writes to the alarm; the alarm bit is set
+  when a tick lands on the alarm), SDR plain, reg 11 reads `$FF`. PB6/PB7
+  timer outputs and the serial shift are not modelled (nor in chipset_ref).
+- **Time is lazy.** Each chip keeps the guest E time of its last sync
+  (`CIA_T`). A register access first syncs the chip to `mach_etime`:
+  `eclock(now − CIA_T)` in O(1) (one 32/16 division only when a continuous
+  timer underflows more than once), CIA-B's TOD advanced by the lines in
+  between. `eclock` is split-invariant (host test), so when syncs happen
+  does not change the state. Before `mach_init` (`mach_on` = 0) time is
+  frozen at 0; a gap read as negative (a later `mach_init` restarted the
+  counter) counts 0 ticks and re-anchors. The VERTB hook syncs both chips
+  every 256 frames, so no chip goes 2^31 E ticks unsynced.
+- **TOD clocks.** CIA-A: +1 per VERTB (mach slot-0 callback, one call per
+  frame: 50 Hz guest time). **Power-up:** `cia_reset` (which stores the
+  callbacks, the VERTB hook included) first runs at the guest's first CIA
+  access or at `chip_reset`; VERTBs before that are not counted, whereas
+  chipset_ref counts from power-up. S3.7's machine-profile init must call
+  `chip_reset` (after `mach_init`). CIA-B: PAL lines on one grid anchored at
+  `cia_reset`: line k starts at colour clock 227 k = E tick ⌈227 k / 5⌉
+  (15625 Hz, 312.5 lines per 14188-E frame); the grid runs while the TOD is
+  halted. Neither is ever an event per tick.
+- **Events** (mach slots, callbacks in `mach_cbv`, filled by `cia_reset`):
+  1 CIA-A TA, 2 CIA-A TB, 3 CIA-B TA, 4 CIA-B TB, 5 CIA-B TOD alarm; slot 0
+  is the VERTB hook. A timer slot is armed at `CIA_T + count + 1` (its next
+  underflow) only while the timer is started, counts E ticks, and its ICR
+  mask bit is set (TA also when TB counts TA underflows with mask TB). Slot
+  5 is armed at the alarm's line while CIA-B's TOD runs and mask ALRM is
+  set. Only an event that can still raise IR is armed: a timer's own slot
+  only while its ICR data bit is clear (the ICR read re-arms it), and TB
+  counting TA underflows arms TB's slot at TB's own underflow, `CIA_T +
+  (TA+1) + TB·(TAL+1)` (capped at 2^30 E ahead; a one-shot TA gives one
+  pulse: `CIA_T + TA + 1` if TB = 0, else never) — never one event per TA
+  underflow, so a timer faster than a service pass cannot starve the guest
+  (review F1; test `run_cia` `cost`). The seam's `mach_am`/`mach_dl` are the truth: `mach_arm` is called
+  only when the slot is not armed at the wanted deadline, `mach_disarm`
+  only when it is armed (so `mach_init` disarming every slot, or a firing,
+  is seen at once). A callback syncs its chip (which posts) and re-arms.
+- **Interrupts** (the seam's level hold). After every sync, ICR access and
+  TOD-A tick, each chip keeps its `mach_hold` bit (CIA-A PORTS = bit 3,
+  CIA-B EXTER = bit 13) equal to its IR condition (`ICR data & mask ≠ 0`)
+  and calls `mach_post` on the rising edge. chip.s ORs `mach_hold` back
+  after every guest INTREQ write, so PORTS/EXTER cannot be cleared while
+  the ICR asserts (chipset_ref `update()` after every `eclock` and INTREQ
+  write); the ICR read-clear releases the hold.
+- **Host-visible state** (`runner.lbl`): `cia_st` (2 × `CIA_SZ` bytes, the
+  `CIA_*` field layout in cia.s; `CIA_T` = the chip's last sync time),
+  `cia_now` (u32, E time of the last sync), `cia_ok` (0 until the first
+  access or `chip_reset`). `chip_reset` ends in `cia_reset` (both chips to
+  power-up, anchored at now, slots 1–5 disarmed, `mach_hold` bits 3/13
+  released, callbacks stored in `mach_cbv` slots 0–5).
+- **Test build.** `CIA_HOSTTIME` (an `--asm-define`, used only by
+  `tests/run_cia.py --build-shim` with `tests/cia/shim.s`) makes `getnow`
+  read the host-written `shim_t` instead of `mach_etime`, so a test can put
+  guest time anywhere (the u32 wrap). The runtime build never defines it.
+- **Link order.** `cia.s` links after `chip.s` and before `mach.s`
+  (Makefile); no module before it moves; `core.s` is unchanged.

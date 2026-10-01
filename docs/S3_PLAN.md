@@ -215,14 +215,23 @@ ceiling [MEASURED HW]), so `rec_budget` stays bit-identical.
   fill; the invariant is in `docs/CONTRACTS.md` "Machine loop (S3.2)"). S3.2 claims them in `runtime/rc/ram.inc` as
   `@region s3 $FFFA-$FFFF 6502 NMI/RESET/IRQ vectors in RAM under KERNAL`
   (the bitmap of §2.4 ends at $FF3F), and restores `$01` on exit.
-- **Recognition latency.** A CPU write to INTENA/INTREQ or an IPL drop
+- **Recognition latency (as built, W9-I; `docs/CONTRACTS.md` "Interrupt
+  delivery").** A SET write to INTENA/INTREQ that makes an interrupt
+  deliverable is taken at the next instruction boundary. An IPL drop by
+  RTE/MOVE to SR is recognised within `MACH_POLL` ($0400 φ2) while an
+  interrupt is pending; exact recognition would need a `core.s` SR-write
+  hook (backlog). A slot that is due at once gets one forced guest
+  instruction per pass (forward progress without a time floor).
+  Original plan text: a CPU write to INTENA/INTREQ or an IPL drop
   acts only at the next event. The reviewer's `defer_irq.py` defers every
   CPU-originated raise in the model and still reaches the no-media frame
   at 3,328,539 [MODEL]. If needed later, the chip handler can force an
   early `mach_run` pass via `st_halt`.
-- **STOP.** As built in S3.2, `HALT_STOP` returns to the caller unchanged.
-  Idle skip waits for S3.3, which can wake a stopped CPU: then `mach_run`
-  waits for `ev_pend` or fast-forwards guest time to the next armed event. The ROM
+- **STOP.** As built in S3.3 (W9-I): `mach_run` delivers at once if an
+  interrupt is pending, else waits in real time (no fast-forward) for the
+  next event, and returns `HALT_STOP` only when nothing can ever wake the
+  CPU. With the CIA package installed (its VERTB hook), a STOP returns only
+  on a delivered interrupt. The ROM
   idles only 0.15 s of 5.5 s before the screen [MODEL].
 - **Time dilation, a key design parameter.** Guest E-clock = φ2 counter
   >> *s*.

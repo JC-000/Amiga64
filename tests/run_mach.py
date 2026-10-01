@@ -29,7 +29,8 @@ Legs:
   nmi     CIA2 timer-A NMIs during mach_run are acknowledged (all counted)
   nmi34   the same with $01 = $34 (all RAM): the handler maps I/O in
   stop    STOP #$2700 (exception mode) after a VERTB: HALT_STOP comes back
-          unchanged (st_halt $01, reason 4)
+          unchanged (st_halt $01, reason 4; S3.3: nothing can wake a CPU
+          stopped at IPL 7, tests/run_irq.py leg stop)
   c2vnmi  c2v_pal_mc2 at $01 = $35 (as inside mach_run), an NMI swept over
           its vector store and fill: every NMI counted by mach_nmi, none
           through a torn vector (review F1)
@@ -858,8 +859,8 @@ MUTANTS = {
     # st_halt compared with = $80 instead of & $7F: $81 comes back as $81
     "eq80": ("runtime/ops/mach.s",
              [("        lda st_halt\n        and #$7F\n        sta st_halt\n"
-               "        bne exit\n",
-               "        lda st_halt\n        cmp #$80\n        bne exit\n"
+               "        bne halt\n",
+               "        lda st_halt\n        cmp #$80\n        bne halt\n"
                "        lda #0\n        sta st_halt\n")]),
     # the exit leaves the CIA1 timer-A IRQ unmasked and unacknowledged
     "irqexit": ("runtime/ops/mach.s",
