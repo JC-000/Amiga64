@@ -729,7 +729,7 @@ with a `valid` byte, `cop_dhook` in BSS, copper DMA gating). Reference:
 
   | Off | Field |
   |---|---|
-  | +0 | `gen` u8: +1 (wraps) per write that changes a field's value, after the field |
+  | +0 | `gen` u8: +1 (wraps) after a change (rule below) |
   | +1 | `dmacon` u16: DMACON SET/CLR (bit 15) of bits 0–14 |
   | +3 | `bplcon0`, `bplcon1`, `bplcon2` u16 |
   | +9 | `bplpt[6]` u24: BPLxPTH's low byte (bits 23–16) : BPLxPTL, as written |
@@ -740,8 +740,13 @@ with a `valid` byte, `cop_dhook` in BSS, copper DMA gating). Reference:
 
   Every display-register write, by the CPU or by the copper (word, long =
   two words, byte = both halves, the I/O trap's decode), updates its field.
-  A write of the value already there does not bump `gen` (so a copper list
-  rewriting the same values every frame costs the reader nothing). cop.s
+  **`gen`** (fix round 1, F2): a CPU write outside a copper run bumps it
+  once per write that changes a field's value, after the field. Inside a
+  copper run (frame or synchronous) it moves **at most once, at the end of
+  the run**, and only if the block differs from its state at the start of
+  the run (a snapshot): a list rewriting the same values every frame, or a
+  raster-bar list writing COLOR00 several times per run with the same end
+  state, costs the reader nothing. cop.s
   never reads `disp_st`: it compares against a private copy (`cop_sh`), so
   it writes under any `$01`. **Readers** bank BASIC out (`$36`, or `$35`
   inside `mach_run`), check `valid`, and copy what they need when `gen`
@@ -772,11 +777,18 @@ with a `valid` byte, `cop_dhook` in BSS, copper DMA gating). Reference:
   until the next restart); after the limit `cop_pc` is the next one.
   `cop_why` = 1 end, 2 danger, 3 limit, 4 I/O bank.
 - **When it runs** ("copper DMA on" = `dmacon` DMAEN (bit 9) and COPEN (bit
-  7)). (1) `cop_frame`, the frame hook: `mach.s` calls `mach_fhook` (2
-  bytes, BSS, LE, high byte 0 = none; never cleared by `mach_init`) right
-  after slot 0's VERTB callback, once per VERTB (a catch-up pass: once per
-  counted frame), under the callback rules. With copper DMA on it loads the
-  PC from COP1LC and runs; then it calls `cop_dhook`, every frame. (2) A
+  7)). (1) `cop_frame`, the frame hook `mach_fhook` (2 bytes, BSS, LE, high
+  byte 0 = none; never cleared by `mach_init`), under the callback rules.
+  **Once per service pass** (fix round 1, F1): the pass counts every frame
+  boundary passed (`mach_frames`, INTREQ VERTB and slot 0's callback stay
+  per frame) and sets `mach_fdue`; after the count loop, if a VERTB was
+  posted, it calls `mach_fhook` once, re-reads the counter (`mach_rdc`) and
+  counts the frames the hook took, which do **not** call the hook again (the
+  copper skips frames it is too slow for); then it arms the one-shot. A pass
+  that ran the hook sets `mach_fs`, so exactly one guest instruction runs
+  before the next pass (W9's forced step; `mach_nfs` counts forced steps).
+  With copper DMA on, `cop_frame` loads the PC from COP1LC and runs; then it
+  calls `cop_dhook`, every hook pass. (2) A
   **CPU** COPJMP1/COPJMP2 strobe always loads the PC from COP1LC/COP2LC;
   with copper DMA on, the copper runs synchronously in the trap, then
   `cop_dhook`. (3) A **CPU** DMACON write that turns copper DMA on (off
@@ -800,15 +812,21 @@ with a `valid` byte, `cop_dhook` in BSS, copper DMA gating). Reference:
   (IRQ possibly enabled under `mach_run`); in the frame hook, in the
   service pass. No call without a run: a strobe with copper DMA off and
   plain register writes call nothing.
-- **Cost** [EST, static]: a display-register write +~60 cycles over S3.4
-  (dispatch, compare, two stores, gen); a copper instruction ~250 + its
-  write; a synchronous run ~120 plus the instructions. Per frame with the
-  copper off: ~40. A runaway list (no end marker, looping by COPJMP) costs
-  `COP_LIMIT` instructions (~1 M cycles) per run.
+- **Cost**: a copper instruction ~545 6502 cycles including its write
+  [MEASURED VICE, review W10-P], so a 4000-step run (`COP_LIMIT`, a runaway
+  list looping by COPJMP) costs ~2.2 M cycles, ~10 guest frames at s = 4.
+  A display-register write +~60 cycles over S3.4 [EST, static]; the gen
+  snapshot +~2 × 103 × 10 cycles per run; per frame with the copper off
+  ~40 [EST]. **Throughput limit:** a copper list costing more than a guest
+  frame slows the guest roughly in proportion (the hook runs once per pass
+  and skips the frames it overran), but never stops it: every hook pass is
+  followed by at least one guest instruction (`run_cop` `catchup`: 450
+  MOVEs/frame cost 2.4 × the guest time of no copper; a runaway loop ~70 ×;
+  both reach HALT).
 - **Host-visible** (`runner.lbl`): `cop_ok`, `cop_sh` (the private copy),
   `cop_dhook`, `cop_pc` (u24), `cop_n`, `cop_nrun` (runs), `cop_nfr`
   (frame-hook calls), `cop_nskip` (u16 each), `cop_why`; entries
-  `cop_reset`, `cop_frame`; `mach_fhook`; exports `c_wrw`, `chip_a`,
+  `cop_reset`, `cop_frame`; `mach_fhook`, `mach_nfs` (u16 forced steps); exports `c_wrw`, `chip_a`,
   `chip_vl`, `chip_vh` (chip.s: the copper's write path).
 - **Deliberate deviation (supervisor-approved):** a DMACON turn-on with no
   copper PC loaded since `cop_reset` (no strobe, no frame restart) runs

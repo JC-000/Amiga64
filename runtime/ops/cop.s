@@ -18,6 +18,9 @@
 ;   +27 bpl1mod/bpl2mod   +31 diwstrt, diwstop, ddfstrt, ddfstop
 ;   +39 color[32] u16 (as written)            (u16 fields little-endian)
 ;   +103 valid u8 = COP_VALID once cop_reset ran (undefined RAM before)
+; Inside a copper run (frame or synchronous) gen moves at most once, at the
+; end of the run, and only if the block differs from its state at the
+; start (a raster-bar list rewriting COLOR00 costs the reader nothing).
 ;
 ; Copper (chipset_ref.Copper, non-strict).  An instruction is two guest
 ; words read with mem_read32.  MOVE (w1 bit 0 = 0): register w1 & $1FE; a
@@ -33,9 +36,9 @@
 ; (cop_pc points at it), as the hardware's does until the next restart.
 ;
 ; When it runs ("copper DMA on" = DMACON DMAEN and COPEN):
-;   cop_frame  mach.s's frame hook (mach_fhook, after slot 0's VERTB
-;              callback, once per VERTB): with copper DMA on, PC := COP1LC
-;              and run; then cop_dhook, every frame.
+;   cop_frame  mach.s's frame hook (mach_fhook, once per service pass that
+;              posted a VERTB, then one forced guest instruction): with
+;              copper DMA on, PC := COP1LC and run; then cop_dhook.
 ;   COPJMP1/2  a CPU strobe loads PC from COP1LC/COP2LC; with copper DMA
 ;              on it runs synchronously in the trap, then cop_dhook.
 ;   DMACON     a CPU write that turns copper DMA on (off before, on after)
@@ -122,6 +125,7 @@ cop_r:     .res 1       ; scratch: register offset
 cop_pg:    .res 1       ; scratch: MOVE register page (0/1)
 cop_t:     .res 1       ; scratch: danger threshold
 cop_sv:    .res 10      ; trap state around a synchronous run
+cop_snap:  .res DISP_SZ ; cop_sh at the start of a run (gen once per run)
 .assert cop_why = cop_n + 8, error, "cop_reset: counter layout"
 
 .segment "CODE"
@@ -302,11 +306,14 @@ same:   rts
 .endproc
 
 ; cop_bump — gen += 1, after the field (the reader copies on a gen change).
+; Inside a copper run nothing: cop_run bumps once at its end (cop_gen1).
 .proc cop_bump
+        lda cop_busy
+        bne done
         inc cop_sh+DISP_GEN
         lda cop_sh+DISP_GEN
         sta disp_st+DISP_GEN
-        rts
+done:   rts
 .endproc
 
 ; ---------------------------------------------------------------------------
@@ -432,6 +439,11 @@ none:   rts
 .proc cop_run
         lda #1
         sta cop_busy
+        ldx #DISP_SZ - 1        ; the block at the start (gen once per run)
+sn:     lda cop_sh,x
+        sta cop_snap,x
+        dex
+        bne sn
         lda #0
         sta cop_n
         sta cop_n+1
@@ -534,7 +546,14 @@ stop:   sta cop_why
 :       dec cop_pc+1
 done:   lda #0
         sta cop_busy
+        ldx #DISP_SZ - 1        ; gen: once, if the run changed the block
+same:   lda cop_sh,x
+        cmp cop_snap,x
+        bne bump
+        dex
+        bne same
         rts
+bump:   jmp cop_bump
 wait:   lda m_val
         lsr                     ; C = w2 bit 0: SKIP
         bcc nxt                 ; WAIT: satisfied at once

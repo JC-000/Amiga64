@@ -208,3 +208,28 @@ def test_runner_cases_build():
     lim = next(c for c in cases if c.name == "limit")
     m = lim.model(lim.image()[2], 0)
     assert (m.n, m.cop.why) == (cr.COP_LIMIT, cr.COP_LIMITED)
+
+
+def test_gen_once_per_copper_run():
+    """F2 (fix round 1): a run bumps gen at most once, and only when the
+    block differs from its state at the run's start; CPU writes outside a
+    run still bump per change."""
+    mem = cr.Ram()
+    bars = []
+    for i in range(4):
+        bars += [0x0180, 0x0F00, ((0x40 + i) << 8) | 1, 0xFFFE, 0x0180, 0x000F]
+    for i, x in enumerate(bars + [0xFFFF, 0xFFFE]):
+        mem.w16(0x1000 + 2 * i, x)
+    m = cr.DisplayChipset(mem)
+    m.cpu_write(0x082, 0x1000)                   # COP1LCL: no field
+    m.cpu_write(0x088, 0)
+    g0 = m.disp.gen
+    m.cpu_write(0x096, 0x8280)                   # dmacon change (+1), run (+1)
+    assert m.disp.gen == (g0 + 2) & 0xFF
+    m.cpu_write(0x088, 0)                        # same end state: no bump
+    m.cpu_write(0x088, 0)
+    assert m.disp.gen == (g0 + 2) & 0xFF
+    m.cpu_write(0x180, 0x0123)                   # CPU change: +1
+    assert m.disp.gen == (g0 + 3) & 0xFF
+    m.cpu_write(0x088, 0)                        # the run restores $000F: +1
+    assert m.disp.gen == (g0 + 4) & 0xFF

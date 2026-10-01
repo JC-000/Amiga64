@@ -883,7 +883,10 @@ class CopperAt(Copper):
 
 class DisplayState:
     """The disp_st block: every display-register write lands in its field;
-    ``gen`` (u8) is bumped once per write that changes a field's value.
+    ``gen`` (u8) is bumped once per write that changes a field's value --
+    except inside a copper run (``begin_run``/``end_run``): there it is
+    bumped at most once, at the end, if the block differs from its state at
+    the start of the run (fix round 1, F2).
     DMACON follows the SET/CLR rule (bits 0-14); BPLxPTH keeps its low
     byte (bits 23-16); every other field is the word as written.  ``valid``
     is COP_VALID (the state after cop_reset)."""
@@ -892,6 +895,15 @@ class DisplayState:
         self.gen = gen & 0xFF
         self.f = bytearray(DISP_SZ)
         self.f[DISP_VALID] = COP_VALID
+        self.snap = None                # the block at the start of a run
+
+    def begin_run(self) -> None:
+        self.snap = bytes(self.f)
+
+    def end_run(self) -> None:
+        snap, self.snap = self.snap, None
+        if bytes(self.f) != snap:
+            self._bump()
 
     def reset(self) -> None:
         """cop_reset: fields := 0, valid, gen bumped."""
@@ -905,7 +917,8 @@ class DisplayState:
     def _put(self, off: int, data: bytes) -> None:
         if self.f[off:off + len(data)] != data:
             self.f[off:off + len(data)] = data
-            self._bump()
+            if self.snap is None:
+                self._bump()
 
     @staticmethod
     def field(reg: int):
@@ -983,7 +996,9 @@ class DisplayChipset(Chipset):
 
     def _run(self) -> int:
         self.runs += 1
+        self.disp.begin_run()
         self.n = self.cop.run_at(self.mem, self.regs, self.copper_write, self.cop.pc)
+        self.disp.end_run()
         return self.n
 
     def frame(self) -> int:

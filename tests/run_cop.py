@@ -548,8 +548,8 @@ def leg_frame(c: CopRig) -> list[str]:
     if not c.cop:
         return f
     fr = res["frames"]
-    if st["cop_nfr"] != fr & 0xFFFF:
-        f.append(f"frame: cop_nfr {st['cop_nfr']} != mach_frames {fr}")
+    if not fr - 1 <= st["cop_nfr"] <= fr:      # one hook per pass with a frame
+        f.append(f"frame: cop_nfr {st['cop_nfr']} vs mach_frames {fr}")
     if not 5 <= st["cop_nrun"] < st["cop_nfr"]:
         f.append(f"frame: cop_nrun {st['cop_nrun']} (want >= 5 runs with COPEN, "
                  f"none after it, of {st['cop_nfr']} frames)")
@@ -561,9 +561,134 @@ def leg_frame(c: CopRig) -> list[str]:
     return f
 
 
+def bars_list(n: int = 4) -> list[int]:
+    """Raster bars: COLOR00 written twice per bar (red, WAIT, blue)."""
+    w = []
+    for i in range(n):
+        w += mv(COLOR, 0x0F00) + wait(0x40 + i) + mv(COLOR, 0x000F)
+    return w + END
+
+
+def leg_gen(c: CopRig) -> list[str]:
+    """F2 (fix round 1): gen moves at most once per copper run, and only if
+    the block's end state differs from its start; re-runs with the same end
+    state leave it alone (red: 14 bumps per run).  CPU writes outside a run
+    still bump per change."""
+    bars = bars_list()
+    l255 = []
+    for i in range(255):
+        l255 += mv(COLOR, (0x111, 0x222, 0x333)[i % 3])
+    return run_cases(c, [
+        Case("bars", {"a": bars}, strobe1() + [("w", COPJMP1, 0)] * 4),
+        Case("barscpu", {"a": bars}, strobe1() + [("w", COLOR, 0x0123), ("w", COPJMP1, 0),
+                                                  ("w", COPJMP1, 0)]),
+        Case("alias", {"a": l255 + END}, strobe1() + [("w", COPJMP1, 0),
+                                                      ("w", BPLCON0, 0x1200),
+                                                      ("w", COPJMP1, 0)])])
+
+
+CATCH_TO = 150.0            # s: a run that cannot finish is a livelock
+CATCH_K = 3000              # guest loop iterations (2 instructions each)
+CATCH_BOUND = 6             # frames(450 MOVEs) / frames(no copper) at most
+
+
+def prog_catch(lst: int, k: int) -> list[int]:
+    """COP1LC := lst, COPJMP1, copper DMA on, then a k-iteration register
+    loop, HALT (mach_frames at the HALT = guest time used)."""
+    g = G()
+    g(0x23FC, lst >> 16, lst & 0xFFFF, *g.abs(CUSTOM + COP1LC))
+    mv_imm_abs_w(g, 0, CUSTOM + COPJMP1)
+    mv_imm_abs_w(g, 0x8280, CUSTOM + DMACON)
+    g(0x203C, k >> 16, k & 0xFFFF)                  # move.l #k,d0
+    g(0x5380, 0x66FC)                               # subq.l #1,d0 ; bne.s *-2
+    g(HALT)
+    return g.words()
+
+
+def mrun(rig: run_mach.Rig, pc: int, s: int, timeout: float) -> dict:
+    """run_mach.Rig.run's mach path (F_INIT) with a call timeout."""
+    blk = struct.pack("<IIBBBIBB", pc, BASE + 0x8000, s, run_mach.F_INIT, 0x37,
+                      0, 0, 0)
+    rig.w(run_mach.P, blk)
+    rig.w(run_mach.P + 21, bytes([0x80]))
+    rig.call(rig.dl["drv_run"], timeout)
+    r = rig.r(run_mach.R, 48)
+    if r[0] != 0xFF:
+        raise RuntimeError("drv_run did not complete")
+    return {"halt": r[1], "reason": r[2], "frames": struct.unpack_from("<I", r, 6)[0]}
+
+
+def catch_run(c: CopRig, name: str, lst: list[int], f: list[str]) -> dict | None:
+    rig = c.rig
+    c.reset()
+    c.hook(False)
+    n0 = len(prog_catch(0, CATCH_K))
+    chunks, (pc, la) = build_image(prog_catch(BASE + 2 * n0, CATCH_K), lst)
+    rig.sess.stage(chunks)
+    rig.w(run_mach.DRV_ORG, rig.drv)
+    try:
+        res = mrun(rig, pc, 4, CATCH_TO)
+    except Exception as e:
+        f.append(f"catchup {name}: no HALT within {CATCH_TO:.0f} s "
+                 f"({type(e).__name__}): the guest is starved")
+        raise
+    if res["halt"] != 1 or res["reason"] != 0:
+        f.append(f"catchup {name}: halt=${res['halt']:02X} reason={res['reason']}")
+        return None
+    st = c.state() if c.cop else {}
+    try:
+        st["nfs"] = struct.unpack("<H", rig.r(c.lab("mach_nfs"), 2))[0]
+    except KeyError:
+        st["nfs"] = None
+    st["frames"] = res["frames"]
+    if c.cop:
+        if st["nfs"] is None:
+            f.append(f"catchup {name}: no mach_nfs (forced-step count)")
+        elif st["nfs"] < st["cop_nfr"]:
+            f.append(f"catchup {name}: {st['nfs']} forced steps < {st['cop_nfr']} "
+                     "frame-hook passes (one guest instruction after each)")
+        if st["cop_nfr"] > st["frames"]:
+            f.append(f"catchup {name}: cop_nfr {st['cop_nfr']} > frames {st['frames']}")
+    print(f"    catchup {name}: frames {st['frames']} nfr {st.get('cop_nfr')} "
+          f"nrun {st.get('cop_nrun')} nfs {st['nfs']} cop_n {st.get('cop_n')}")
+    return st
+
+
+def moves(n: int) -> list[int]:
+    w = []
+    for i in range(n):
+        w += mv(COLOR + 2 * (i % 32), i)
+    return w + END
+
+
+def leg_catchup(c: CopRig) -> list[str]:
+    """F1 (fix round 1): a copper run costing more than a guest frame must
+    not starve the guest (mach_fhook once per pass, then one forced guest
+    instruction).  A runaway 2-instruction COPJMP1 loop (COP_LIMIT steps
+    per run, ~10 frames) and a 520-MOVE list reach HALT; a 450-MOVE list
+    slows the guest at most CATCH_BOUND x (r0: 175 x)."""
+    f: list[str] = []
+    if not c.rig.mach:
+        return ["catchup: no mach_run"]
+    try:
+        base = catch_run(c, "none", END, f)
+        m450 = catch_run(c, "450", moves(450), f)
+        catch_run(c, "520", moves(520), f)
+        catch_run(c, "loop", mv(COLOR, 1) + mv(COPJMP1, 0), f)
+    except Exception:
+        return f
+    if base and m450:
+        ratio = m450["frames"] / max(base["frames"], 1)
+        if ratio > CATCH_BOUND:
+            f.append(f"catchup: 450 MOVEs cost {ratio:.1f} x the guest time of no "
+                     f"copper ({m450['frames']} vs {base['frames']} frames; bound "
+                     f"{CATCH_BOUND})")
+    return f
+
+
 LEGS = {"nohook": leg_nohook, "sync": leg_sync, "model": leg_model,
         "cpu": leg_cpu, "dhook": leg_dhook, "enable": leg_enable,
-        "frame": leg_frame}
+        "gen": leg_gen, "frame": leg_frame, "catchup": leg_catchup}
 
 
 def run_all(prg: str, legs: list[str]) -> list[str]:
@@ -619,8 +744,20 @@ MUTANTS = {
                       "        cmp cop_sh,y\n        nop\n        nop\nchg:")]),
     # the frame hook is never called
     "nofhook": ("runtime/ops/mach.s",
-                [("        lda mach_fhook+1        ; W10-P cop: the frame hook (the copper),\n",
+                [("        lda mach_fhook+1        ; W10-P cop: none installed: nothing\n",
                   "        lda #0                  ; MUTANT\n")]),
+    # F1: the frame hook runs for every counted frame (the r0 catch-up)
+    "fhookframe": ("runtime/ops/mach.s",
+                   [("        lda #1                  ; W10-P cop: the frame hook is due (it runs\n"
+                     "        sta mach_fdue           ; W10-P cop: once, after the count: fhk)\n",
+                     "        jsr fhook               ; MUTANT\n")]),
+    # F1: no forced guest instruction after a frame-hook pass
+    "nofstep": ("runtime/ops/mach.s",
+                [("        lda #1                  ; W10-P cop: forced step after the hook\n"
+                  "        sta mach_fs             ; W10-P cop\n", "")]),
+    # F2: gen bumped per changing write inside a copper run
+    "genwrite": (COP, [("        lda cop_busy\n        bne done\n        inc cop_sh+DISP_GEN\n",
+                        "        inc cop_sh+DISP_GEN\n")]),
     # the frame copper ignores COPEN
     "copen": (COP, [("        and #$80                ; COPEN (bit 7)\n        beq off\n", "")]),
     # a strobe with copper DMA off runs the copper (ungated)
@@ -662,6 +799,7 @@ MUTANT_LEGS = {"waitstop": ["model"], "danger": ["model"], "cdang": ["model"],
                "nofhook": ["frame"], "copen": ["frame"], "skipcnt": ["model"],
                "ungated": ["enable"], "noenable": ["sync"], "copself": ["enable"],
                "pcstay": ["enable"], "nopcok": ["enable"],
+               "fhookframe": ["catchup"], "nofstep": ["catchup"], "genwrite": ["gen"],
                "dmaraw": ["cpu"], "nosave": ["cpu"], "nodhook": ["dhook"],
                "limit": ["model"], "ptswap": ["sync"]}
 
