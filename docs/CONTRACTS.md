@@ -711,3 +711,60 @@ Tests: `tests/run_cia.py` (+ `tests/cia/shim.s`), `host/tests/test_cia.py`.
   guest time anywhere (the u32 wrap). The runtime build never defines it.
 - **Link order.** `cia.s` links after `chip.s` and before `mach.s`
   (Makefile); no module before it moves; `core.s` is unchanged.
+
+## Display refresh (S3.5) (W10-V)
+
+Owner: disp (`runtime/ops/disp.s`) and c2v (`runtime/ops/c2v.s`, row skip).
+Design: `docs/WAVE10_BRIEF.md` C1/C3, `docs/S3_PLAN.md` §2, §4 "S3.5";
+spec: `docs/C2V.md` "Row skip", "Display refresh (S3.5)". Reference:
+`host/c2v_ref.disp_decide` / `disp_convert`. Tests: `tests/run_pf.py`
+(+ `tests/pf/shim.s`, `fixtures/c/pf_static.c`), `host/tests/test_disp_ref.py`.
+
+- **Inputs.** `disp_st` (C1, W10-P's rc claim, RAM under BASIC ROM),
+  read only, always with BASIC banked out. `disp_frame` reads `gen` (+0)
+  first and then copies +1..+70 (DMACON through COLOR15) and `valid`
+  (+103). It never writes the block. `valid` ≠ `$A5` (W10-P's `cop_reset`
+  never ran) means "no display state": blank, reason 7. `cop_dhook` is a
+  cop.s BSS export that disp.s imports (consumer → provider, as cia.s
+  imports `mach_cbv`). It is written only by `disp_init`: high byte first
+  to 0, then low, then high. Before W10-P, `tests/pf/shim.s` provides both.
+- **Entries** (JSR; clobber A/X/Y; any `$01` that maps I/O in: `$37`,
+  `$36`, `$35`; BASIC banked out inside, the caller's `$01` restored; the
+  I flag preserved; every REC use ends with `mem_rec_dirty`, and a call
+  that uses no REC leaves `m_rok` alone):
+  - `disp_init`: `c2v_init`, stashes the LUT at guest `disp_lut`, resets
+    the state (`disp_mode` = `$FF`, counters 0, budget open), stores
+    `disp_frame` in `cop_dhook`. Call it after `cop_reset`.
+  - `disp_frame`: the hook. Valid in the service pass (`$01` = `$35`, IRQ
+    enabled: `mach_irq` never touches the REC) and in the trap context of a
+    synchronous COPJMP run (inside `emu_run`, or outside `mach_run` in HLE).
+    The caller (W10-P) must preserve whatever the trap ABI needs (the chip
+    ABI keeps X/Y) around it.
+  - `disp_refresh`: converts now from `disp_st`, ignoring `gen`, the
+    snapshot compare and the budget.
+- **Policy v0:** convert on a `gen` change whose fields differ from the
+  last snapshot. Inside `mach_run` (`mach_in` ≠ 0), at most one conversion
+  per `DISP_N` (20) `mach_frames`; a deferred change stays unseen.
+  Outside, convert at once. No dirty tracking of bitplane writes.
+- **Modes:** 2-plane lores → `c2v_mc2s` (exact); 4-plane hires →
+  `c2v_hiress` (silhouette); anything else, DMA off, an empty DIW, a
+  short DDF or a row crossing a 512 KB line → blank (`disp_why` 1–6). Once
+  a picture has been shown, a blank sets `$D011` = `$0B` and `$D020` =
+  LUT[COLOR00]. Before that, a blank only logs.
+- **C64 resources:** writes the c2v regions (bitmap, matrix under I/O,
+  colour RAM, `c2v_stage` during `disp_init`, `c2v_args`), `$D011`,
+  `$D016`, `$D018`, `$D020`, `$D021`, and `$DD00` bits 1–0 (bits 7–2 and
+  the DDR kept; `mach.s` never writes port A, "Machine loop"). State is in
+  disp.s's BSS (whole page), host-visible in `runner.lbl`.
+- **Guest resources:** `disp_lut` `$DF0000-$DF0FFF` (rc `guest.inc`,
+  owner disp): the REU bytes under the trapped custom-chip bank. Every
+  guest access to bank `$DF` goes to `chip.s` (open bus), never the REU,
+  so the table is invisible to the guest. disp.s reads it by REU DMA
+  only; `disp_init` writes it. **Known hole:** HLE DOS bulk transfers
+  program the REC directly ("I/O trap", "Other bypass"), so a guest DOS
+  buffer pointer in `$DF0000-$DF0FFF` would overwrite the LUT. Only a
+  misbehaving guest does that; the existing backlog fix applies (hle_dos
+  rejects `$BF`/`$DF` buffers).
+- **Link order:** `disp.s` after `cia.s`, before `mach.s`. CODE and BSS
+  are padded to whole pages, and there is no RODATA or DATA. `core.s` is
+  unchanged.

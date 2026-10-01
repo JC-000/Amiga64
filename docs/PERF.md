@@ -507,6 +507,56 @@ lateness bounded (max 2,333); 1500 phi2 is below that service time on a
 guaranteed no instruction, ~800; round 1b ~3,150). At 48 MHz the same
 pass is ~60 phi2, so client periods down to ~100 phi2 stay bounded [EST].
 
+## (j) S3.5 display refresh (W10-V)
+
+`runtime/ops/disp.s` (`docs/C2V.md` "Display refresh (S3.5)"). Measured with
+`python3 -m tests.run_pf --prg … --leg shim --perf`: CIA2 TA→TB 32-bit φ2
+count, screen blanked (no badlines), VICE x64sc PAL [MEASURED VICE];
+evidence `build/evidence/w10-disp/perf/`.
+
+| Entry | φ2 cycles |
+|---|---|
+| `disp_frame`, `gen` unchanged (the per-frame cost while static) | 55 |
+| `disp_frame`, `gen` changed, fields equal (copper rewrote the same values) | 2,185 |
+| `disp_refresh`, blank (DMA off, border lookup) | 2,265 |
+| `disp_refresh`, mc2, 200 lines | 422,505 |
+| `disp_refresh`, hires4, 200 lines | 770,377 |
+
+A full refresh = palette (~23k) + kernel (mc2 365,991 / hires 683,591, as
+`run_c2v --perf` measures on this build) + the decision (~34k mc2 / ~64k
+hires). The decision is dominated by the 512 KB line walk: every fetched row
+of every plane, ~50 cycles per row. That is 8% of a hires refresh; a
+two-endpoint fast path is possible (backlog).
+
+**Kernel change (row skip).** On the same VICE, `run_c2v --perf` gives
+mc2 365,991 vs 362,679 on the base (+3,312, +0.9%) and hires 683,591 vs
+673,880 (+9,711, +1.4%). The added cost is +4 cycles per plane row
+(+1,600 / +3,200 per frame). The rest is the kernels' placement: the
+module grew from 4 to 5 pages, so the loops' page-crossing reads moved,
+inside the ±1.5% band `docs/C2V.md` "Performance" documents. The
+interpreter is unaffected: `perf_cycles --max-delta 0`.
+
+**Duty budget `DISP_N` = 20 frames.** Inside `mach_run`, a conversion
+starts only if ≥ N guest frames passed since the last one started. Both
+the conversion and the frame are counted in φ2 on the same CIA clock, so
+the worst-case duty (`gen` changing every frame) is conv / (N × 14188 ×
+2^s), independent of PAL/NTSC:
+
+| s | frame (φ2) | mc2 duty, N = 20 | hires4 duty, N = 20 |
+|---|---|---|---|
+| 4 (default) | 227,008 | 9.3% | **17.0%** |
+| 3 | 113,504 | 18.6% | 33.9% |
+| 2 or less | ≤ 56,752 | ≥ 37% | ≥ 68% |
+
+N = 20 is the smallest round value that keeps hires4 under S3_PLAN §2.3's
+20% duty at the default s = 4 (N = 17 would give 19.96%), with margin for
+badlines (+2–4% with the display on) and for layout (±1.5%). At s ≤ 3 a
+display that changes every frame exceeds 20%. The v0 budget counts frames,
+not φ2, as the brief specifies, so a time-based duty limit is the fix if
+small s matters (backlog). On the U64E at 48 MHz the CIAs count φ2 at
+1 MHz [MEASURED HW, W8-H], so the same conversion is ~40× shorter in guest
+frames: ≤ 0.5%.
+
 ## (e) Caveats
 
 - Every number above comes from **hand-written cycle comments**, not

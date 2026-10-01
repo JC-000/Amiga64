@@ -82,6 +82,24 @@ VIC_COLRAM  = $D800     ; W7-V c2v: VIC colour RAM (low nibbles), written by run
 .ifndef CIA2_ICR
 CIA2_ICR    = $DD0D     ; W7-V c2v: CIA 2 interrupt control; read = acknowledge (releases /NMI)
 .endif
+.ifndef VIC_CTRL1
+VIC_CTRL1   = $D011     ; W10-V disp: VIC control 1 (bitmap mode, display enable, 25 rows)
+.endif
+.ifndef VIC_CTRL2
+VIC_CTRL2   = $D016     ; W10-V disp: VIC control 2 (multicolour, 40 columns)
+.endif
+.ifndef VIC_MEMPTR
+VIC_MEMPTR  = $D018     ; W10-V disp: VIC screen matrix / bitmap base within the bank
+.endif
+.ifndef VIC_BORDER
+VIC_BORDER  = $D020     ; W10-V disp: VIC border colour (Amiga colour 0)
+.endif
+.ifndef VIC_BG0
+VIC_BG0     = $D021     ; W10-V disp: VIC background colour 0 (Amiga colour 0)
+.endif
+.ifndef CIA2_PRA
+CIA2_PRA    = $DD00     ; W10-V disp: CIA 2 port A; bits 1-0 = NOT VIC bank (disp.s sets bank 3, other bits kept)
+.endif
 .ifndef CIA1_TALO
 CIA1_TALO   = $DC04     ; W8-L mach: CIA 1 timer A latch low (the event one-shot)
 .endif

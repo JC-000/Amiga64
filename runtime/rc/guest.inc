@@ -105,7 +105,12 @@ HEAP_CTL  = $100000     ; heap control block, 8 bytes BE: +0 free-list head, +4 
 HEAP_FIRST = $100008    ; first block header; every block = 8-byte header + payload
 .endif
 
-; @region free $800000-$DFFFFF UNALLOCATED guest space - claim via this file + rescheck green
+; @region free $800000-$DEFFFF UNALLOCATED guest space - claim via this file + rescheck green
+; @region disp $DF0000-$DF0FFF palette LUT in the REU under the trapped $DF bank (never guest-visible; S3.1 trap)
+.ifndef disp_lut
+disp_lut  = $DF0000     ; W10-V disp: OCS-RGB -> VIC LUT, 4096 bytes (index = $0RGB), stashed by disp_init
+.endif
+; @region free $DF1000-$DFFFFF UNALLOCATED guest space - claim via this file + rescheck green
 
 ; @region hle $E00000-$FFFFFF HLE DOS RAMDISK - dos.library file store, 2 MB (WS-B2, docs/HLE_DOS.md: header + 32-entry directory, data from +$1000)
 .ifndef dosio_rd_base

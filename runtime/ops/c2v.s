@@ -48,12 +48,17 @@
 ;   c2v_pal_hires  colours 0-1 -> screen nibbles (fg = colour 1, bg = colour 0)
 ;   c2v_mc2        convert one frame from planes 0-1
 ;   c2v_hires      convert one frame from planes 0-3
+;   c2v_mc2s, c2v_hiress  (W10-V disp) the same, but row n+1 of plane p
+;                  starts width + c2v_a_skip[p] bytes after row n (BPLxMOD;
+;                  docs/C2V.md "Row skip"); the two entries above zero
+;                  c2v_a_skip first
 ; Arguments (c2v_args block, little-endian; docs/C2V.md):
 ;   c2v_a_src  4 x u24  REU address of each plane's first converted row;
 ;                       rows are contiguous (BPLxMOD = 0): 40 B lores, 80 B hires
 ;   c2v_a_lut  u24      REU address of the 4096-byte OCS-RGB -> VIC LUT
 ;   c2v_a_pal  16 x u16 OCS colours $0RGB (COLOR00-15; bits 15-12 ignored)
 ;   c2v_a_bgc  u8 out   VIC colour for $D021 (colour 0)
+;   c2v_a_skip 4 x s16  (+72, W10-V) bytes skipped after each row of plane p
 ; Precondition: no plane and no LUT crosses a 512 KB REU line (docs/C2V.md).
 ; C1 (docs/WAVE4_BRIEF.md): every entry ends with jsr mem_rec_dirty.
 ;
@@ -71,6 +76,7 @@
 .include "../macros.inc"
 
 .export c2v_init, c2v_pal_mc2, c2v_pal_hires, c2v_mc2, c2v_hires
+.export c2v_mc2s, c2v_hiress                ; W10-V disp: per-plane row skip
 .export c2v_args, c2v_bitmap, c2v_screen   ; labels for the host (runner.lbl)
 .export C2V_ROWS
 .import mem_rec_dirty, mach_nmi
@@ -95,8 +101,14 @@ c2v_v_band = c2v_args + 55      ; u8 screen byte, blank rows
 c2v_v_pp   = c2v_args + 56      ; 4 x u24 working plane pointers
 c2v_v_line = c2v_args + 68      ; u8 output line 0..C2V_LINES-1
 c2v_v_port = c2v_args + 69      ; u8 $01 saved around the under-I/O fill
-c2v_v_adv  = c2v_args + 70      ; u8 source row advance
+; (+70 unused since W10-V: was the u8 row advance, now c2v_v_adl..adb)
 c2v_v_tmp  = c2v_args + 71      ; u8 scratch / LUT byte target
+c2v_a_skip = c2v_args + 72      ; W10-V disp: 4 x s16 bytes skipped after each
+                                ; converted row (BPLxMOD + DDF width - row);
+                                ; zeroed by c2v_mc2 / c2v_hires
+c2v_v_adl  = c2v_args + 80      ; W10-V disp: 4 x u8 row advance, bits 7-0
+c2v_v_adh  = c2v_args + 84      ; 4 x u8 bits 15-8
+c2v_v_adb  = c2v_args + 88      ; 4 x u8 bits 23-16 (sign extension)
 
 P0 = c2v_stage
 P1 = c2v_stage + $100
@@ -135,6 +147,8 @@ c2v_pal_mc2:
 c2v_pal_hires:
 c2v_mc2:
 c2v_hires:
+c2v_mc2s:
+c2v_hiress:
         rts
 .else
 
@@ -322,7 +336,7 @@ c2v_setup:
 .ifdef C2V_MUT_ROW
         dex                     ; mutant: rows advance one byte short
 .endif
-        stx c2v_v_adv
+        stx c2v_v_tmp
         lda #0
         sta REC_LENHI
         sta REC_C64LO
@@ -333,10 +347,41 @@ c2v_setup:
         sta c2v_v_pp,x
         dex
         bpl @cp
+        ldx #3                  ; W10-V: advance[p] = width + skip[p], s24
+@ad:    txa
+        asl
+        tay                     ; Y = 2 * plane
+        clc
+        lda c2v_v_tmp
+        adc c2v_a_skip,y
+        sta c2v_v_adl,x
+        lda c2v_a_skip+1,y
+        pha
+        adc #0
+        sta c2v_v_adh,x
+        pla                     ; sign of skip, then the carry out of hi
+        and #$80
+        beq :+
+        lda #$FF
+:       adc #0
+        sta c2v_v_adb,x
+        dex
+        bpl @ad
+        rts
+
+; c2v_noskip — c2v_a_skip := 0 (contiguous rows: the W7-V entries).  The
+; block is under BASIC ROM; a store lands in RAM whatever $01 is.
+c2v_noskip:
+        lda #0
+        ldx #7
+:       sta c2v_a_skip,x
+        dex
+        bpl :-
         rts
 
 ; C2V_FETCH n — fetch the next row of planes 0..n-1 into P0.. (one page
-; each) and advance each plane pointer by c2v_v_adv.  Unrolled, inline: it
+; each) and advance each plane pointer by its c2v_v_adl/adh/adb (W10-V:
+; row width + c2v_a_skip[p], sign-extended).  Unrolled, inline: it
 ; runs once per line.  C2V_PERF_NOFETCH (perf variant only) leaves it out
 ; so tests/run_c2v.py --perf can separate the kernel from the fetch.
 .macro C2V_FETCH n
@@ -347,15 +392,15 @@ c2v_setup:
         clc
         lda c2v_v_pp + p * 3
         sta REC_REULO
-        adc c2v_v_adv
+        adc c2v_v_adl + p
         sta c2v_v_pp + p * 3
         lda c2v_v_pp + p * 3 + 1
         sta REC_REUHI
-        adc #0
+        adc c2v_v_adh + p
         sta c2v_v_pp + p * 3 + 1
         lda c2v_v_pp + p * 3 + 2
         sta REC_REUBANK
-        adc #0
+        adc c2v_v_adb + p
         sta c2v_v_pp + p * 3 + 2
         lda #REU_CMD_FETCH_AL
         sta REC_COMMAND
@@ -384,6 +429,8 @@ c2v_setln:
 ; c2v_hires — 4-plane hires 640 -> 320 hires silhouette, one frame.
 ; ---------------------------------------------------------------------------
 c2v_hires:
+        jsr c2v_noskip          ; W7-V entry: contiguous rows
+c2v_hiress:                     ; W10-V: rows skip c2v_a_skip[p] bytes
         C2V_ENTER
         ldx #80
         jsr c2v_setup
@@ -455,6 +502,8 @@ MC_LO = P0                      ; plane 0 -> MC bit 0 of each pixel
 MC_HI = P1                      ; plane 1 -> MC bit 1
 .endif
 c2v_mc2:
+        jsr c2v_noskip          ; W7-V entry: contiguous rows
+c2v_mc2s:                       ; W10-V: rows skip c2v_a_skip[p] bytes
         C2V_ENTER
         ldx #40
         jsr c2v_setup
