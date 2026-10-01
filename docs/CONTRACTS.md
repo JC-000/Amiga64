@@ -712,6 +712,135 @@ Tests: `tests/run_cia.py` (+ `tests/cia/shim.s`), `host/tests/test_cia.py`.
 - **Link order.** `cia.s` links after `chip.s` and before `mach.s`
   (Makefile); no module before it moves; `core.s` is unchanged.
 
+## Copper and display state (S3.5) (W10-P)
+
+Owner: cop (`runtime/ops/cop.s`; the display/copper write paths of
+`runtime/ops/chip.s` route to it; the frame hook `mach_fhook` in
+`runtime/ops/mach.s`). Design: `docs/S3_PLAN.md` §4 "S3.5";
+`docs/WAVE10_BRIEF.md` C1–C3 (+ supervisor rulings: `disp_st` at `$B800`
+with a `valid` byte, `cop_dhook` in BSS, copper DMA gating). Reference:
+`host/chipset_ref.CopperAt`, `DisplayState`, `DisplayChipset` (additive to
+`Copper`/`Chipset`). Tests: `tests/run_cop.py` (+ `--mutants`),
+`host/tests/test_cop.py`.
+
+- **Display-state block `disp_st`** (rc ram claim `cop $B800-$B8FF`, RAM
+  under BASIC ROM; 104 bytes, all fields little-endian; fields may be
+  appended up to `$B8FF`, never reordered):
+
+  | Off | Field |
+  |---|---|
+  | +0 | `gen` u8: +1 (wraps) after a change (rule below) |
+  | +1 | `dmacon` u16: DMACON SET/CLR (bit 15) of bits 0–14 |
+  | +3 | `bplcon0`, `bplcon1`, `bplcon2` u16 |
+  | +9 | `bplpt[6]` u24: BPLxPTH's low byte (bits 23–16) : BPLxPTL, as written |
+  | +27 | `bpl1mod`, `bpl2mod` u16 (s16) |
+  | +31 | `diwstrt`, `diwstop`, `ddfstrt`, `ddfstop` u16 |
+  | +39 | `color[32]` u16, as written (no 12-bit mask) |
+  | +103 | `valid` u8: `$A5` once `cop_reset` has run (undefined RAM before) |
+
+  Every display-register write, by the CPU or by the copper (word, long =
+  two words, byte = both halves, the I/O trap's decode), updates its field.
+  **`gen`** (fix round 1, F2): a CPU write outside a copper run bumps it
+  once per write that changes a field's value, after the field. Inside a
+  copper run (frame or synchronous) it moves **at most once, at the end of
+  the run**, and only if the block differs from its state at the start of
+  the run (a snapshot): a list rewriting the same values every frame, or a
+  raster-bar list writing COLOR00 several times per run with the same end
+  state, costs the reader nothing. cop.s
+  never reads `disp_st`: it compares against a private copy (`cop_sh`), so
+  it writes under any `$01`. **Readers** bank BASIC out (`$36`, or `$35`
+  inside `mach_run`), check `valid`, and copy what they need when `gen`
+  differs from their copy, from `cop_dhook` or their own explicit refresh
+  (no writer runs concurrently: writes happen in the trap or the service
+  pass, never in an IRQ).
+- **`cop_reset`** (host entry; clobbers A/X/Y): fields := 0 (both copies),
+  `valid` := `$A5`, `gen` bumped, counters and the copper PC := 0,
+  `mach_fhook` := `cop_frame`; `cop_dhook` untouched. Runs at the first
+  display/copper register write (`cop_ok` = 0), lazily like `cia_reset`.
+  `chip_reset` does not call it (it clears `chip_shd`; call `cop_reset`
+  after it). Neither `emu_reset` nor `mach_init` touches it.
+- **Copper** = `chipset_ref.Copper` non-strict (`CopperAt.run_at`): an
+  instruction is two guest words (`mem_read32`). MOVE (w1 bit 0 = 0) of
+  register `w1 & $1FE`: below `$80` (below `$40` with COPCON bit 1, CDANG,
+  read from `chip_shd`) the copper **stops**; COPJMP1/COPJMP2 jump to
+  COP1LC/COP2LC (`chip_shd`, read at the jump); any other register is
+  written through `c_wrw`, i.e. exactly as a CPU word write (logged, shadow,
+  INTENA/INTREQ SET/CLR with `mach_hold` and `mach_ichk`, `disp_st`).
+  `$FFFF,$FFFE` ends the list; else w2 bit 0 = SKIP (counted in
+  `cop_nskip`, a no-op), else WAIT (satisfied at once; no beam). A run
+  stops after `COP_LIMIT` = 4000 instructions (the model's default limit;
+  `cop_n` counts every instruction fetched, the stopping one included), or
+  before a fetch from bank `$BF`/`$DF` (`COP_IOBANK`). Pointers are 24-bit
+  with bit 0 clear (bits 31–24 ignored); the model masks `$1FFFFE`, equal
+  below 2 MB. A copper stopped by the end marker or the danger rule **stays
+  on that instruction** (`cop_pc` points at it, as the hardware waits there
+  until the next restart); after the limit `cop_pc` is the next one.
+  `cop_why` = 1 end, 2 danger, 3 limit, 4 I/O bank.
+- **When it runs** ("copper DMA on" = `dmacon` DMAEN (bit 9) and COPEN (bit
+  7)). (1) `cop_frame`, the frame hook `mach_fhook` (2 bytes, BSS, LE, high
+  byte 0 = none; never cleared by `mach_init`), under the callback rules.
+  **Once per service pass** (fix round 1, F1): the pass counts every frame
+  boundary passed (`mach_frames`, INTREQ VERTB and slot 0's callback stay
+  per frame) and sets `mach_fdue`; after the count loop, if a VERTB was
+  posted, it calls `mach_fhook` once, re-reads the counter (`mach_rdc`) and
+  counts the frames the hook took, which do **not** call the hook again (the
+  copper skips frames it is too slow for); then it arms the one-shot. A pass
+  that ran the hook sets `mach_fs`, so exactly one guest instruction runs
+  before the next pass (W9's forced step; `mach_nfs` counts forced steps).
+  With copper DMA on, `cop_frame` loads the PC from COP1LC and runs; then it
+  calls `cop_dhook`, every hook pass. (2) A
+  **CPU** COPJMP1/COPJMP2 strobe always loads the PC from COP1LC/COP2LC;
+  with copper DMA on, the copper runs synchronously in the trap, then
+  `cop_dhook`. (3) A **CPU** DMACON write that turns copper DMA on (off
+  before the write, on after) runs the copper synchronously from the loaded
+  PC, then `cop_dhook`; with no PC loaded since `cop_reset` (no strobe, no
+  frame restart yet) it runs nothing (so COP1LC, COPJMP1, DMACON — the HLE
+  fixture's order — runs the list once; DMAEN and COPEN may come in either
+  order; COP1LC, DMACON, COPJMP1 runs it once, at the strobe). The copper's
+  own DMACON writes never start a run (`cop_busy`), and a copper that turns
+  its own DMA off keeps running to its stop (Copper.run). The trap state
+  (`chip_a`, `m_addr`, `m_val`, Y) is saved around a synchronous run and the
+  hook, so the second word of a long write (`move.l` to `$DFF086`/`$DFF088`)
+  still lands; the chip ABI (X/Y kept) holds. `chipset_ref.Chipset` has no
+  CPU-strobe semantics (its copper only runs per frame); `DisplayChipset`
+  adds (2)/(3) as above.
+- **`cop_dhook`** (BSS in cop.s, exported, cleared by the boot BSS clear;
+  LE, high byte 0 = none): the refresh driver's vector (W10-V's `disp_init`
+  stores `disp_frame`; disp.s imports it). Called by `jmp (cop_dhook)` from
+  a `jsr` after every run outside the frame and at the end of every
+  `cop_frame`; it may clobber A/X/Y. In the trap it runs inside `emu_run`
+  (IRQ possibly enabled under `mach_run`); in the frame hook, in the
+  service pass. No call without a run: a strobe with copper DMA off and
+  plain register writes call nothing.
+- **Cost**: a copper instruction ~545 6502 cycles including its write
+  [MEASURED VICE, review W10-P], so a 4000-step run (`COP_LIMIT`, a runaway
+  list looping by COPJMP) costs ~2.2 M cycles, ~10 guest frames at s = 4.
+  A display-register write +~60 cycles over S3.4 [EST, static]; the gen
+  snapshot +~2 × 103 × 10 cycles per run; per frame with the copper off
+  ~40 [EST]. **Throughput limit:** a copper list costing more than a guest
+  frame slows the guest roughly in proportion (the hook runs once per pass
+  and skips the frames it overran), but never stops it: every hook pass is
+  followed by at least one guest instruction (`run_cop` `catchup`: 450
+  MOVEs/frame cost 2.4 × the guest time of no copper; a runaway loop ~70 ×;
+  both reach HALT).
+- **Host-visible** (`runner.lbl`): `cop_ok`, `cop_sh` (the private copy),
+  `cop_dhook`, `cop_pc` (u24), `cop_n`, `cop_nrun` (runs), `cop_nfr`
+  (frame-hook calls), `cop_nskip` (u16 each), `cop_why`; entries
+  `cop_reset`, `cop_frame`; `mach_fhook`, `mach_nfs` (u16 forced steps); exports `c_wrw`, `chip_a`,
+  `chip_vl`, `chip_vh` (chip.s: the copper's write path).
+- **Deliberate deviation (supervisor-approved):** a DMACON turn-on with no
+  copper PC loaded since `cop_reset` (no strobe, no frame restart) runs
+  nothing. Real hardware would run from an undefined PC; nothing legitimate
+  depends on it, and running guest address 0 would only write garbage
+  (`run_cop` case `nopc`, mutant `nopcok`).
+- **Not modelled:** WAIT/SKIP beam timing (the model's limit), copper DMA
+  cycles, the copper stopping when its own DMA goes off mid-list, DMACONR
+  (still reads its slot), BPLCON3+, the blitter's response to copper
+  writes (S3.6). `mach_wk` does not count `mach_fhook` as a wake source
+  (backlog; the CIA's slot-0 hook already keeps a STOPped CPU waiting).
+- **Link order.** `cop.s` links after `cia.s` and before `mach.s`
+  (Makefile); no module before it moves; `core.s` is unchanged.
+
 ## Display refresh (S3.5) (W10-V)
 
 Owner: disp (`runtime/ops/disp.s`) and c2v (`runtime/ops/c2v.s`, row skip).

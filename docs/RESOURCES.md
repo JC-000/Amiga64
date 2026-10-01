@@ -67,6 +67,7 @@ registered as-is (no renames: `build/runner.lbl` consumers exist).
 | `chip_` | chip (W7-T I/O trap stub, `runtime/ops/chip.s`) | `chip_split`, `chip_cia` |
 | `c2v_` `C2V_` | c2v (W7-V VIC converter, `runtime/ops/c2v.s`) | `c2v_bitmap`, `C2V_ROWS` |
 | `cia_` `CIA_` | cia (W9-C guest CIA-A/B, `runtime/ops/cia.s`) | `cia_read`, `cia_st`, `CIA_SZ`, `CIA_TOD` |
+| `cop_` `COP_` + the single name `disp_st` (a cop-owned exception in the `disp_` family) | cop (W10-P copper + display state, `runtime/ops/cop.s`) | `cop_reset`, `cop_dhook`, `COP_LIMIT`, `disp_st` |
 | `disp_` `DISP_` | disp (W10-V display refresh, `runtime/ops/disp.s`); `disp_st` is cop-owned (W10-P's C1 block) | `disp_frame`, `disp_lut`, `DISP_N` |
 | `rc_` | the resource contract itself | reserved for future contract symbols |
 

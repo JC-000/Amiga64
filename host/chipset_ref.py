@@ -812,3 +812,198 @@ class MachTime:
         cc = v * MACH_LINE_CCK + h
         return (0 <= h < MACH_LINE_CCK and cc % MACH_CCK_PER_E == 0
                 and cc < MACH_FRAME_E * MACH_CCK_PER_E)
+
+
+# ---------------------------------------------------------------------------
+# S3.5 copper + display-register state (W10-P).  The C64 side
+# (runtime/ops/cop.s, docs/CONTRACTS.md "Copper and display state (S3.5)")
+# is tested against these by tests/run_cop.py.  Additive: Copper.run above
+# is unchanged; run_at is the same interpreter started at a given PC (the
+# PC a strobe loaded), with the C64's 24-bit pointer mask.
+# ---------------------------------------------------------------------------
+
+COP_LIMIT = 4000            # cop.s COP_LIMIT = Copper.run's default limit
+COP_PC_MASK = 0xFFFFFE      # cop.s: 24-bit guest bus (Copper.run: $1FFFFE)
+COP_END, COP_DANGER, COP_LIMITED, COP_IOBANK = 1, 2, 3, 4   # cop.s cop_why
+COP_VALID = 0xA5            # disp_st+DISP_VALID once cop_reset ran
+
+# disp_st (WAVE10_BRIEF C1 + the appended valid byte): field offsets,
+# little-endian u16/u24 fields
+DISP_GEN, DISP_DMACON, DISP_BPLCON, DISP_BPLPT = 0, 1, 3, 9
+DISP_BPLMOD, DISP_DIW, DISP_COLOR, DISP_VALID, DISP_SZ = 27, 31, 39, 103, 104
+
+
+class CopperAt(Copper):
+    """``Copper`` (non-strict by default) run from a given PC:
+    ``run_at(mem, regs, write, pc, limit, mask) -> n`` interprets exactly as
+    ``Copper.run`` does from COP1LC (COPJMP1/2 pointers masked with *mask*).
+    After it, ``why`` is the stop reason (COP_*) and ``pc`` the copper's PC:
+    a copper stopped by the end marker or the danger rule stays on that
+    instruction (the hardware waits there until the next restart); after
+    the limit it points at the next one.  A PC in bank $BF/$DF stops it
+    before the fetch (COP_IOBANK, cop.s: the C64 has no RAM there)."""
+
+    def __init__(self, strict: bool = False):
+        super().__init__(strict)
+        self.why = 0
+        self.pc = 0
+
+    def run_at(self, mem, regs, write, pc, limit=COP_LIMIT, mask=COP_PC_MASK):
+        def lc(r):
+            return ((regs[r >> 1] << 16) | regs[(r + 2) >> 1]) & mask
+        self.pc = pc & mask
+        n = 0
+        self.why = COP_LIMITED
+        while n < limit:
+            if (self.pc >> 16) & 0xFF in (0xBF, 0xDF):
+                self.why = COP_IOBANK
+                break
+            w1, w2 = mem.r16(self.pc), mem.r16(self.pc + 2)
+            here, self.pc = self.pc, (self.pc + 4) & 0xFFFFFF
+            n += 1
+            if not w1 & 1:                      # MOVE
+                reg = w1 & 0x1FE
+                floor = 0x040 if regs[0x02E >> 1] & 2 else 0x080
+                if reg < floor:                 # the danger rule: stop on it
+                    self.why, self.pc = COP_DANGER, here
+                    break
+                if reg in (0x088, 0x08A):
+                    self.pc = lc(0x080 if reg == 0x088 else 0x084)
+                    continue
+                write(reg, w2)
+            elif (w1, w2) == (0xFFFF, 0xFFFE):  # the end: stay on it
+                self.why, self.pc = COP_END, here
+                break
+            elif w2 & 1:                        # SKIP
+                if self.strict:                 # (as Copper.run)
+                    raise CopperSkipError(f"copper SKIP ${w1:04X},${w2:04X} at ${here:06X}")
+                self.skips += 1
+        return n
+
+
+class DisplayState:
+    """The disp_st block: every display-register write lands in its field;
+    ``gen`` (u8) is bumped once per write that changes a field's value --
+    except inside a copper run (``begin_run``/``end_run``): there it is
+    bumped at most once, at the end, if the block differs from its state at
+    the start of the run (fix round 1, F2).
+    DMACON follows the SET/CLR rule (bits 0-14); BPLxPTH keeps its low
+    byte (bits 23-16); every other field is the word as written.  ``valid``
+    is COP_VALID (the state after cop_reset)."""
+
+    def __init__(self, gen: int = 0):
+        self.gen = gen & 0xFF
+        self.f = bytearray(DISP_SZ)
+        self.f[DISP_VALID] = COP_VALID
+        self.snap = None                # the block at the start of a run
+
+    def begin_run(self) -> None:
+        self.snap = bytes(self.f)
+
+    def end_run(self) -> None:
+        snap, self.snap = self.snap, None
+        if bytes(self.f) != snap:
+            self._bump()
+
+    def reset(self) -> None:
+        """cop_reset: fields := 0, valid, gen bumped."""
+        self.f = bytearray(DISP_SZ)
+        self.f[DISP_VALID] = COP_VALID
+        self._bump()
+
+    def _bump(self) -> None:
+        self.gen = (self.gen + 1) & 0xFF
+
+    def _put(self, off: int, data: bytes) -> None:
+        if self.f[off:off + len(data)] != data:
+            self.f[off:off + len(data)] = data
+            if self.snap is None:
+                self._bump()
+
+    @staticmethod
+    def field(reg: int):
+        """(disp offset, size) of display register *reg*, or None."""
+        if 0x08E <= reg <= 0x094:
+            return DISP_DIW + reg - 0x08E, 2
+        if reg == 0x096:
+            return DISP_DMACON, 2
+        if 0x0E0 <= reg < 0x0F8:
+            i, lo = divmod(reg - 0x0E0, 4)
+            return (DISP_BPLPT + 3 * i, 2) if lo else (DISP_BPLPT + 3 * i + 2, 1)
+        if 0x100 <= reg <= 0x104:
+            return DISP_BPLCON + reg - 0x100, 2
+        if reg in (0x108, 0x10A):
+            return DISP_BPLMOD + reg - 0x108, 2
+        if 0x180 <= reg < 0x1C0:
+            return DISP_COLOR + reg - 0x180, 2
+        return None
+
+    def write(self, reg: int, val: int) -> None:
+        fs = self.field(reg & 0x1FE)
+        if fs is None:
+            return
+        off, n = fs
+        if off == DISP_DMACON:
+            val = setclr(self.dmacon, val)
+        self._put(off, (val & 0xFFFF).to_bytes(2, "little")[:n])
+
+    @property
+    def dmacon(self) -> int:
+        return int.from_bytes(self.f[DISP_DMACON:DISP_DMACON + 2], "little")
+
+    def block(self) -> bytes:
+        return bytes([self.gen]) + bytes(self.f[1:])
+
+
+class DisplayChipset(Chipset):
+    """Chipset + DisplayState + the S3.5 copper triggers of cop.s ("copper
+    DMA on" = DMACON DMAEN and COPEN).  A CPU COPJMP1/COPJMP2 strobe loads
+    the copper PC from COP1LC/COP2LC and, with copper DMA on, runs it at
+    once; a CPU DMACON write that turns copper DMA on (off before, on after)
+    runs it from the loaded PC (none loaded since reset: no run);
+    ``frame()`` restarts it from COP1LC with
+    copper DMA on (Chipset.run_copper's gate).  The copper's own writes
+    start nothing.  ``runs`` counts copper runs, ``n`` is the last run's."""
+
+    def __init__(self, mem, gen: int = 0):
+        super().__init__(mem)
+        self.cop = CopperAt()
+        self.disp = DisplayState(gen)
+        self.runs = 0
+        self.n = 0
+        self.loaded = False                      # a PC loaded since reset
+
+    def custom_write(self, off, val):
+        super().custom_write(off, val)
+        self.disp.write(off & 0x1FE, val)
+
+    def copper_on(self) -> bool:
+        return self.paula.dmacon & 0x0280 == 0x0280
+
+    def cpu_write(self, off, val):
+        """A CPU word write (with the copper triggers)."""
+        r = off & 0x1FE
+        was = self.copper_on()
+        self.custom_write(r, val)
+        if r in (0x088, 0x08A):
+            lc = 0x080 if r == 0x088 else 0x084
+            self.cop.pc = ((self.regs[lc >> 1] << 16) | self.regs[(lc + 2) >> 1]) & COP_PC_MASK
+            self.loaded = True
+            if self.copper_on():
+                self._run()
+        elif r == 0x096 and not was and self.copper_on() and self.loaded:
+            self._run()
+
+    def _run(self) -> int:
+        self.runs += 1
+        self.disp.begin_run()
+        self.n = self.cop.run_at(self.mem, self.regs, self.copper_write, self.cop.pc)
+        self.disp.end_run()
+        return self.n
+
+    def frame(self) -> int:
+        if not self.copper_on():
+            return 0
+        self.cop.pc = ((self.regs[0x080 >> 1] << 16) | self.regs[0x082 >> 1]) & COP_PC_MASK
+        self.loaded = True
+        return self._run()
