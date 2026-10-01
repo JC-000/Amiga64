@@ -23,7 +23,7 @@
 ;   (F_PRESET, after mach_init)   P+26 u16 INTREQR preset (F_IEN, LE)
 ;   P+$40 + 16 k, slot k = 1-7:
 ;     +0 u8 armed at start   +1 u8 post bit ($FF none)   +2 u16 period
-;     +4 u32 deadline relative to E0 (signed)   +8 u8 re-arms left
+;     +4 u32 deadline relative to E0 (signed)   +8 u8 re-arms left ($FF: forever)
 ;     +9 u8 slot to disarm on fire (0 none)   +10 u8 hold op (1 = set)
 ;     +11 u16 hold value
 ;   flags: F_INIT mach_init first   F_SUPER exception mode (st_exc = 1)
@@ -373,7 +373,10 @@ cbrec:  stx q_k
         ldx q_k
         lda left,x
         beq @done
+        cmp #$FF                ; $FF: re-arm forever
+        beq :+
         dec left,x
+:
         txa
         asl a
         asl a

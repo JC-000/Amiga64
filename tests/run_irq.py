@@ -1221,6 +1221,83 @@ def leg_haltrace(rig: Rig) -> list[str]:
     return f
 
 
+MACH_MINW = 0x0800
+
+
+def prog_raiseev() -> G:
+    """An event that arrives DURING a raise must be serviced before the
+    handler's first instruction.  The SSP is $DFF0A2, so the level-3
+    frame's SR word lands on INTREQ ($DFF09C); the stacked SR is $A008
+    (T = 1, stored only; S = 1; N from the MOVE), i.e. an INTREQ SET of
+    EXTER, which kicks from inside exc_raise (st_halt bit 7).  Correct:
+    the pass runs at once and level 6 nests before h3's first instruction
+    (d1 = 0, d0 = 6); an implementation that drops that bit runs h3's
+    first instruction (d1 = 3) before a later pass nests level 6.  h6
+    HALTs (the frames are in chip space: no RTE)."""
+    g = G()
+    vec(g, 27, "h3")
+    vec(g, 30, "h6")
+    moveq(g, 0, 0)
+    moveq(g, 0, 1)
+    mv_imm_abs_w(g, 0x7FFF, INTENA)
+    mv_imm_abs_w(g, 0x7FFF, INTREQ)
+    mv_imm_abs_w(g, 0xE020, INTENA)             # INTEN | EXTER | VERTB
+    g(0x2E7C, 0x00DF, 0xF0A2)                   # movea.l #$DFF0A2,a7
+    move_sr(g, 0xA000)                          # T (stored), S, IPL 0
+    mv_imm_abs_w(g, 0x8020, INTREQ)             # VERTB: kick -> level 3
+    g(HALT)
+    g.label("h3")
+    moveq(g, 3, 1)
+    g.label("h3spin")
+    g.bcc(0x6000, "h3spin")                     # bra.w: wait to be nested
+    g.label("h6")
+    moveq(g, 6, 0)
+    g(HALT)
+    return g
+
+
+def leg_raiseev(rig: Rig) -> list[str]:
+    """Review F3 (dropb7): mach_dlv keeps an event that came during the
+    raise (st_halt bit 7)."""
+    f = need_seam(rig, "raiseev")
+    if f:
+        return f
+    (pc,) = rig.stage(link(prog_raiseev(), BASE))
+    res = rig.run(pc, s=4, flags=F_INIT | F_SUPER, sr=0x27)
+    if not clean(res, "raiseev", f):
+        return f
+    if res["d"][0] != 6 or res["d"][1] != 0 or res["nirq"] != 2:
+        f.append(f"raiseev: d0 = {res['d'][0]}, d1 = {res['d'][1]}, "
+                 f"{res['nirq']} deliveries; want 6, 0, 2 (the event raised "
+                 "inside the frame write was serviced only after the "
+                 "level-3 handler started)")
+    return f
+
+
+def leg_progress(rig: Rig) -> list[str]:
+    """W9-C review (fix round 1): a client whose callback re-arms its slot
+    in the past every time (always due) must not livelock the guest: after
+    a pass that fired a slot the one-shot waits >= MACH_MINW phi2, so the
+    guest loop finishes and the pass rate is bounded (s = 0: E = phi2)."""
+    f = need_seam(rig, "progress")
+    if f:
+        return f
+    (pc,) = rig.stage(prog_busy(400))
+    res = rig.run(pc, s=0, slots={4: Slot(0, period=1, rearms=0xFF)})
+    if not clean(res, "progress", f):
+        return f
+    span = (res["e1"] - res["e0"]) & M32
+    fires = res["fires"][4]
+    if VERBOSE:
+        print(f"    progress: {fires} firings in {span} phi2")
+    if fires < 10:
+        f.append(f"progress: only {fires} firings (the client never re-fired)")
+    if fires > span // MACH_MINW + 2:
+        f.append(f"progress: {fires} firings in {span} phi2: closer than "
+                 f"MACH_MINW = {MACH_MINW} phi2 apart")
+    return f
+
+
 LEGS = {"setclr": leg_setclr, "etime": leg_etime, "etlive": leg_etlive,
         "arm": leg_arm, "periodic": leg_periodic, "trap": leg_trap,
         "race": leg_race, "post": leg_post, "out": leg_out,
@@ -1228,7 +1305,7 @@ LEGS = {"setclr": leg_setclr, "etime": leg_etime, "etlive": leg_etlive,
         "nest": leg_nest, "storm": leg_storm, "stop": leg_stop,
         "oddvec": leg_oddvec, "haltrace": leg_haltrace,
         "stoplost": leg_stoplost, "starve": leg_starve, "kick": leg_kick,
-        "ustop": leg_ustop}
+        "ustop": leg_ustop, "progress": leg_progress, "raiseev": leg_raiseev}
 
 
 def session(prg: str, fn) -> object:
@@ -1305,7 +1382,9 @@ MUTANTS = {
                       "        sbc mach_dl+3,y\n        lda mach_bit,x\n")]),
     # a slot is not disarmed before its callback (fires every pass)
     "once": (MACH, [("        bmi next\n        lda mach_bit,x\n        eor #$FF\n"
-                     "        and mach_am\n        sta mach_am\n        jsr mach_cb\n",
+                     "        and mach_am\n        sta mach_am\n"
+                     "        lda #1                  ; client work this pass (MACH_MINW)\n"
+                     "        sta mach_wf\n        jsr mach_cb\n",
                      "        bmi next\n        jsr mach_cb\n")]),
     # INTREQ writes ignore mach_hold
     "hold": (CHIP, [("        lda mach_hold           ; a level source still asserting re-raises\n"
@@ -1357,6 +1436,8 @@ MUTANTS = {
                        "        lda #0\n")]),
     # reviewer's: the STOP wake ignores a VERTB enabled above the IPL
     "wkvb": (MACH, [("        and #1 << MACH_VERTB_BIT\n        bne yes\n", "")]),
+    # W9-C review: no least wait after a pass that did client work
+    "nominw": (MACH, [("        jsr mach_wmin           ; fired/posted/delivering: >= MACH_MINW\n", "")]),
 }
 MUTANT_LEGS = {"noslot": ["arm"], "nokick": ["trap"], "kickout": ["out"],
                "disarm": ["arm"], "wrap": ["etime"], "eshift": ["etime"],
@@ -1367,7 +1448,8 @@ MUTANT_LEGS = {"noslot": ["arm"], "nokick": ["trap"], "kickout": ["out"],
                "noichk": ["levels"], "nostop": ["stop"], "nowk": ["stop"],
                "wkslot": ["stop"], "haltguard": ["haltrace"],
                "stopev": ["stoplost"], "nopoll": ["starve", "kick", "storm"],
-               "dropb7": ["stoplost", "kick"], "wkvb": ["stop"]}
+               "dropb7": ["stoplost", "kick", "raiseev"], "wkvb": ["stop"],
+               "nominw": ["progress"]}
 
 
 def build_mutant(name: str, out_dir: str) -> str:

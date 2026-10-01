@@ -86,6 +86,7 @@ MACH_PRESET    = $40     ; @value st_halt preset while mach_dlv raises
 MACH_AUTOVEC  = 24      ; @value autovector base: vector 24 + level
 MACH_STOPCODE = $04     ; @value HALT_STOP (core.s; asserted at link)
 MACH_POLL     = $0400   ; @value phi2 between passes while an interrupt is pending
+MACH_MINW     = $0800   ; @value least one-shot wait after a pass that did client work
 
 .segment "DATA"
 mach_s:    .byte MACH_S_DEF     ; E-clock shift, read by mach_init (0-16)
@@ -126,6 +127,8 @@ mach_stp:  .res 1       ; nonzero while the guest CPU is stopped (STOP)
 mach_lv:   .res 1       ; level being delivered
 mach_iq:   .res 1       ; scratch: mach_ichk's level
 mach_act:  .res 1       ; scratch: mach_lvl / mach_wk
+mach_wf:   .res 1       ; this pass fired/posted/leaves a delivery (MACH_MINW)
+mach_es:   .res 4       ; mach_slots' E snapshot (callbacks move mach_et)
 mach_nirq: .res 4       ; interrupts delivered (u32 LE, wraps; tests)
 
 .segment "CODE"
@@ -314,6 +317,8 @@ exit:   lda #$7F                ; mask every CIA1 source
 .proc mach_svc
         lda #1                  ; W9-I: arms/posts in here need no kick
         sta mach_insv
+        lda #0                  ; no client work yet (MACH_MINW)
+        sta mach_wf
         jsr mach_rdc
 chk:    sec                     ; t = next - now
         lda mach_next
@@ -390,6 +395,7 @@ short:  lda mach_t                ; W9-I: the VERTB wait, then the slots
         jsr mach_slots          ; fire the due client slots
         jsr mach_wake           ; mach_w := min(VERTB, armed slots)
         jsr mach_pclamp         ; pending interrupt: poll every MACH_POLL
+        jsr mach_wmin           ; fired/posted/delivering: >= MACH_MINW
         lda CIA1_CRA
         and #$C0
         sta CIA1_CRA            ; timer A stopped (TOD 50/60 Hz, SP kept)
@@ -571,6 +577,11 @@ none:   rts
         lda mach_am
         beq done
         jsr mach_etime
+        ldx #3                  ; the pass's own snapshot: a callback's
+cp:     lda mach_et,x           ; mach_etime overwrites mach_et
+        sta mach_es,x
+        dex
+        bpl cp
         ldx #1
 lp:     stx mach_sx
         lda mach_am
@@ -580,20 +591,22 @@ lp:     stx mach_sx
         asl a
         asl a
         tay
-        sec                     ; et - deadline >= 0 (signed): due
-        lda mach_et
+        sec                     ; es - deadline >= 0 (signed): due
+        lda mach_es
         sbc mach_dl,y
-        lda mach_et+1
+        lda mach_es+1
         sbc mach_dl+1,y
-        lda mach_et+2
+        lda mach_es+2
         sbc mach_dl+2,y
-        lda mach_et+3
+        lda mach_es+3
         sbc mach_dl+3,y
         bmi next
         lda mach_bit,x
         eor #$FF
         and mach_am
         sta mach_am
+        lda #1                  ; client work this pass (MACH_MINW)
+        sta mach_wf
         jsr mach_cb
         ldx mach_sx
 next:   inx
@@ -999,7 +1012,14 @@ halted: sta st_halt             ; = 1: halt_now's (an IRQ's bit 7 dropped,
         beq done
         jsr mach_lvl
         beq done
-        lda mach_w              ; mach_w > MACH_POLL: mach_w := MACH_POLL
+        sta mach_iq
+        lda r_sr+1              ; deliverable after this pass: the guest must
+        and #7                  ; still run (MACH_MINW)
+        cmp mach_iq
+        bcs clamp
+        lda #1
+        sta mach_wf
+clamp:        lda mach_w              ; mach_w > MACH_POLL: mach_w := MACH_POLL
         cmp #<(MACH_POLL + 1)
         lda mach_w+1
         sbc #>(MACH_POLL + 1)
@@ -1007,6 +1027,28 @@ halted: sta st_halt             ; = 1: halt_now's (an IRQ's bit 7 dropped,
         lda #<MACH_POLL
         sta mach_w
         lda #>MACH_POLL
+        sta mach_w+1
+done:   rts
+.endproc
+
+; mach_wmin — forward progress (W9-C review): when this pass fired a
+; client slot (its callback may post or re-arm) or leaves an interrupt to
+; deliver (the VERTB post alone does not count: frames are >= 14188 apart),
+; the one-shot waits at least MACH_MINW phi2, so the guest runs at least
+; one instruction before the next pass even if a client re-arms "now"
+; (a wait of 1 would re-enter the pass with zero instructions between).
+; The VERTB count stays exact (it counts boundaries, not wake-ups).
+.proc mach_wmin
+        lda mach_wf
+        beq done
+        lda mach_w              ; mach_w < MACH_MINW: mach_w := MACH_MINW
+        cmp #<MACH_MINW
+        lda mach_w+1
+        sbc #>MACH_MINW
+        bcs done
+        lda #<MACH_MINW
+        sta mach_w
+        lda #>MACH_MINW
         sta mach_w+1
 done:   rts
 .endproc

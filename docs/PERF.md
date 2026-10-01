@@ -493,6 +493,19 @@ nothing polls; the case is a request pending under a higher running level
 `mach.s`; at 1 MHz a larger value trades latency for throughput. Exact
 recognition at the SR write would need a core.s SR-write hook (backlog).
 
+**`MACH_MINW` = `$0800` phi2 (forward progress, W9-C review).** After a
+pass that fired a client slot or leaves an interrupt to deliver, the next
+one-shot waits at least 2048 phi2. At 1 MHz that covers the rest of the
+pass after the one-shot is armed (`mach_dlv`: ~100 cycles, or a frame
+build of two API writes and a vector read when it delivers, ~1000–1500)
+plus at least one guest instruction (~380–700 cycles in window, ~1100
+with a refill, tables (a)/(c)) [EST]; measured with an always-due slot at
+s = 0: 181–182 passes in ~828,000 phi2, ~4,560 phi2 per pass, the 800-
+instruction guest loop completes (~4 instructions per pass) [MEASURED
+VICE, `run_irq` leg `progress`]. At 48 MHz the CIAs still count phi2 at
+~1 MHz, so 2048 phi2 is ~98,000 6502 cycles: ~100+ guest instructions per
+pass; the minimum costs nothing unless a client over-arms.
+
 ## (e) Caveats
 
 - Every number above comes from **hand-written cycle comments**, not

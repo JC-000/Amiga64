@@ -475,12 +475,23 @@ no link dependency on any client.
   whose deadline is ≤ the snapshot: the slot is disarmed, then its callback
   runs. Each slot fires at most once per pass, so a callback that re-arms
   in the past is fired by the next pass, not this one (no livelock). A
-  deadline never fires early. Then the pass programs CIA #1 timer A
+  deadline never fires early. The comparison uses the pass's private copy
+  of that snapshot (`mach_es`): a callback's own `mach_etime` moves
+  `mach_et`, not the firing decision (fix round 1, W9-C review). Then the
+  pass programs CIA #1 timer A
   (one-shot) for the earliest of the next frame boundary and every armed
   deadline: wait = `(d − et) << s` − the phi2 already spent in tick `et`
   (the first phi2 of tick d is `d << s`), at least 1 (a deadline at or
-  before the snapshot gives 1: the next pass comes at once), at most
-  `$FFFF` (a farther one is reached through the VERTB wake-ups). Latency
+  before the snapshot gives 1), at most
+  `$FFFF` (a farther one is reached through the VERTB wake-ups).
+  **Forward progress** (fix round 1, W9-C review): when the pass fired a
+  client slot, or leaves an interrupt to deliver, the wait is at least
+  `MACH_MINW` = `$0800` phi2 (`mach_wmin`), so the guest runs before the
+  next pass even if a client re-arms "now" (`run_irq` leg `progress`: an
+  always-due slot, ~180 firings in ~830 k phi2 at s = 0, the guest loop
+  finishes; round 0 livelocked). A firing may therefore come up to
+  `MACH_MINW` later than its deadline when another slot fired just before;
+  the VERTB count is unaffected (it counts boundaries). Latency
   [MEASURED VICE, `run_irq` `arm`/`periodic`/`trap`]: a firing comes at
   most `4096 >> s` E ticks late (an IRQ, the instruction in flight and one
   pass).
