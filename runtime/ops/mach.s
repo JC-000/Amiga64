@@ -85,6 +85,7 @@ MACH_VERTB_BIT = 5      ; @value INTREQ bit number of VERTB
 MACH_PRESET    = $40     ; @value st_halt preset while mach_dlv raises
 MACH_AUTOVEC  = 24      ; @value autovector base: vector 24 + level
 MACH_STOPCODE = $04     ; @value HALT_STOP (core.s; asserted at link)
+MACH_POLL     = $0400   ; @value phi2 between passes while an interrupt is pending
 
 .segment "DATA"
 mach_s:    .byte MACH_S_DEF     ; E-clock shift, read by mach_init (0-16)
@@ -289,7 +290,8 @@ halt:   cmp #1                  ; W9-I: STOP in exception mode stops the CPU
         sta mach_stp
         lda #0
         sta st_halt
-        beq deliv               ; always: a pending interrupt wakes it now
+        jmp event               ; take ev_pend (the one-shot may have fired
+                                ; during the STOP), pass, then deliver
 exit:   lda #$7F                ; mask every CIA1 source
         sta CIA1_ICR
         lda CIA1_ICR            ; and acknowledge
@@ -387,6 +389,7 @@ short:  lda mach_t                ; W9-I: the VERTB wait, then the slots
         sta mach_w+1
         jsr mach_slots          ; fire the due client slots
         jsr mach_wake           ; mach_w := min(VERTB, armed slots)
+        jsr mach_pclamp         ; pending interrupt: poll every MACH_POLL
         lda CIA1_CRA
         and #$C0
         sta CIA1_CRA            ; timer A stopped (TOD 50/60 Hz, SP kept)
@@ -932,7 +935,9 @@ done:   rts
         lda r_sr+1
         and #7
         cmp mach_lv
-        bcs none                ; I2-I0 >= level: masked
+        bcs none                ; I2-I0 >= level: masked (Paula levels are
+                                ; 1-6, never 7, so >= is exact: a level-7
+                                ; source would need NMI semantics)
         lda #0
         sta mach_stp            ; a stopped CPU resumes
         sei
@@ -980,6 +985,30 @@ halted: sta st_halt             ; = 1: halt_now's (an IRQ's bit 7 dropped,
         tsx
         stx st_sp6
         jmp exc_group2
+.endproc
+
+; mach_pclamp — in exception mode, while an interrupt is pending and enabled
+; (mach_lvl != 0) but not yet taken (masked by I2-I0, or a second one
+; behind the one this pass delivers), clamp the one-shot to MACH_POLL phi2:
+; an IPL drop by RTE / MOVE to SR (core.s, no hook) is then recognised
+; within MACH_POLL instead of at the next VERTB, and a lower level is never
+; starved by a recurring higher one.  Nothing pending: no cost but this
+; test.  Clobbers A, X.
+.proc mach_pclamp
+        lda st_exl
+        beq done
+        jsr mach_lvl
+        beq done
+        lda mach_w              ; mach_w > MACH_POLL: mach_w := MACH_POLL
+        cmp #<(MACH_POLL + 1)
+        lda mach_w+1
+        sbc #>(MACH_POLL + 1)
+        bcc done
+        lda #<MACH_POLL
+        sta mach_w
+        lda #>MACH_POLL
+        sta mach_w+1
+done:   rts
 .endproc
 
 ; mach_wk — C = 1 when a stopped CPU can still be woken: INTEN and an

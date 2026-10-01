@@ -573,11 +573,20 @@ Owner: s3 (`runtime/ops/mach.s`; the INTENA/INTREQ paths of
   IPL > I2–I0) it kicks, so the interrupt is taken at the next instruction
   boundary, as on a 68000 (`levels` pins the stacked PC = the instruction
   after the write). It costs the trap path only (`chip.s`, never the hot
-  path); CLR writes never kick. An IPL drop by MOVE to SR / RTE / ANDI to SR
-  (core.s, frozen) is recognised at the next event (≤ 65536 phi2 later,
-  S3_PLAN §1.5); so a handler that never acknowledges its request is
-  re-entered at every pass, not after every RTE (`storm`: 40 deliveries in
-  10 frames at s = 4 vs one per frame with the acknowledge).
+  path); CLR writes never kick. **An IPL drop** by MOVE to SR / RTE / ANDI
+  to SR (core.s, frozen, no SR-write hook) **is recognised within
+  `MACH_POLL` phi2 while an interrupt is pending** (fix round 1, review
+  F2): every pass in exception mode that finds `mach_lvl` ≠ 0 — pending and
+  enabled, whether masked by I2–I0 or queued behind the one this pass
+  delivers — clamps the CIA #1 one-shot to `MACH_POLL` = `$0400` phi2
+  (`mach_pclamp`). With nothing pending it is recognised at the next event,
+  which is harmless: nothing can be delivered. So a lower level is never
+  starved by a recurring higher one (`starve`, `kick`), and a handler that
+  never acknowledges its request is re-entered right after its RTE, as on a
+  68000 (`storm`: 20 re-entries within 2 frames at s = 4). Cost: one pass
+  per `MACH_POLL` phi2 while something is pending, `docs/PERF.md` (i).
+  Exact recognition at the RTE/MOVE-to-SR instruction would need a core.s
+  SR-write hook: backlog, not Wave 9.
 - **STOP** (exception mode): `emu_run` halts `HALT_STOP`; `mach_run`
   marks the CPU stopped (`mach_stp`), clears `st_halt`, and delivers at
   once if an interrupt is already deliverable. Otherwise, if one can still
@@ -588,8 +597,18 @@ Owner: s3 (`runtime/ops/mach.s`; the INTENA/INTREQ paths of
   services it; a delivery resumes the CPU (stacked PC = the instruction
   after STOP). If nothing can wake it (IPL 7, nothing enabled above the
   IPL, or only client sources with nothing armed and no hook), `mach_run`
-  returns `HALT_STOP` (`st_halt` = 1, `st_reason` = 4) at once, as in S3.2;
-  calling `mach_run` again resumes after the STOP.
+  returns `HALT_STOP` (`st_halt` = 1, `st_reason` = 4) at once, as in S3.2.
+  To resume, the caller must clear `st_halt` (`mach_run`'s entry
+  precondition is `st_halt` = 0) and call `mach_run` again: execution goes
+  on after the STOP. **Unbounded STOP (review F4, intended):** while any
+  client slot is armed or the slot-0 hook is installed (S3.4's `cia_init`
+  always installs it), a STOP with an enabled source above I2–I0 returns
+  only through a delivered interrupt; `mach_run` does not give the host
+  control back meanwhile. That is what a 68000 does: STOP ends only on an
+  interrupt (or reset). On entry the halt path goes through the event path
+  (fix round 1, review F1): a one-shot that fired during the STOP or
+  between `halt_now` and the `sei` is serviced, never dropped
+  (`stoplost`).
 - **Plain mode** (`st_exl` = 0): nothing is delivered and `HALT_STOP`
   cannot occur; the INTENA/INTREQ registers behave as above.
 

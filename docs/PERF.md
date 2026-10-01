@@ -473,8 +473,25 @@ each kick), never per instruction.
 `trap`, `race`; bound `SLACK_PHI2`), never early. A SET write to
 INTENA/INTREQ that makes an interrupt deliverable is taken at the next
 instruction boundary (leg `levels`: stacked PC = the next instruction for
-all 14 sources). An IPL drop by MOVE to SR/RTE waits for the next event
-(at most 65536 phi2; `storm`).
+all 14 sources). An IPL drop by MOVE to SR/RTE is seen within
+`MACH_POLL` phi2 while an interrupt is pending (`storm`, `starve`,
+`kick`), else at the next event (nothing to deliver then).
+
+**`MACH_POLL` poll cost (fix round 1, review F2) [MEASURED VICE, PAL,
+`python3 -m tests.run_irq --perf`, `build/evidence/W9-I/fix1/green/
+pollcost.json`]:** the same register-only guest loop at s = 0, IPL 7,
+with nothing pending vs VERTB enabled and pending but masked (a pass
+every `MACH_POLL` = `$0400` phi2): 23.12 M vs 37.66 M phi2, i.e. **+63%
+wall time at 1 MHz; 39% of the time goes to passes**, ~640 cycles per
+pass (IRQ, `emu_run` exit/re-entry, `mach_svc` with `mach_pclamp`,
+`mach_dlv`'s level test) [EST from share = c / (1024 + c)]. At 48 MHz the
+CIAs still count phi2 at ~1 MHz, so the pass rate stays ~980/s and the
+share is **~1.3%** [EST]. The poll runs only in exception mode and only
+while `mach_lvl` ≠ 0: AROS's Disable() clears INTEN, so `mach_lvl` = 0 and
+nothing polls; the case is a request pending under a higher running level
+(a handler) or under an SR mask. `MACH_POLL` is one named constant in
+`mach.s`; at 1 MHz a larger value trades latency for throughput. Exact
+recognition at the SR write would need a core.s SR-write hook (backlog).
 
 ## (e) Caveats
 

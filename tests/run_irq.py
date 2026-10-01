@@ -584,7 +584,7 @@ def link(g: G, base: int) -> list[int]:
 
 
 def prog_deliver(sr0: int, ien: int = 0xC020, n: int = 5, ack: bool = True,
-                 bound: int = 20000) -> tuple[G, int]:
+                 bound: int = 20000, ack_after: int = 0) -> tuple[G, int]:
     """S3_PLAN §4 S3.3: a level-3 handler counts VERTBs.  Main: vector 27,
     INTENA = ien, IPL dropped to sr0, spin until CNT = n (d5 = 1 and HALT
     after *bound* passes).  The handler records SR, the stacked SR/PC and
@@ -615,8 +615,12 @@ def prog_deliver(sr0: int, ien: int = 0xC020, n: int = 5, ack: bool = True,
     g(0x33D7, *g.abs(SSR))                      # move.w (a7),SSR
     g(0x23EF, 2, *g.abs(SPC))                   # move.l 2(a7),SPC
     g(0x23CF, *g.abs(HSP))                      # move.l a7,HSP
+    if ack_after:                               # acknowledge from entry n on
+        g(0x0CB9, ack_after >> 16, ack_after & 0xFFFF, *g.abs(CNT))
+        g.bcc(0x6D00, "noack")                  # blt.w
     if ack:
         mv_imm_abs_w(g, 0x0020, INTREQ)
+    g.label("noack")
     g(0x4E73)                                   # rte
     return g, 0
 
@@ -691,13 +695,19 @@ def leg_masked(rig: Rig) -> list[str]:
 
 
 def leg_storm(rig: Rig) -> list[str]:
-    """A handler that never acknowledges INTREQ is re-entered at every pass
-    (a storm, as on the chip); one that does runs once per VERTB."""
+    """A handler that does not acknowledge its request is re-entered right
+    after its RTE, as on a 68000 (the request stays asserted): with the
+    MACH_POLL poll the IPL drop is seen within MACH_POLL phi2, so N entries
+    come within a few frames (round 0: 5 at s = 4, now 2).  This handler acknowledges from entry N
+    on, so the storm ends; one that acknowledges at once runs once per
+    VERTB."""
     f = need_seam(rig, "storm")
     if f:
         return f
+    n = 20
     for ack in (True, False):
-        g, _ = prog_deliver(0x2000, n=40 if not ack else 6, ack=ack)
+        g, _ = (prog_deliver(0x2000, n=6) if ack else
+                prog_deliver(0x2000, n=n, ack_after=n))
         res, m = run_deliver(rig, g, s=4)
         t = f"storm ack={ack}"
         if not clean(res, t, f):
@@ -708,9 +718,267 @@ def leg_storm(rig: Rig) -> list[str]:
         if ack and not res["nirq"] <= fr + 1:
             f.append(f"{t}: {res['nirq']} deliveries for {fr} frames (re-entry "
                      "without a new request)")
-        if not ack and not res["nirq"] > 2 * max(fr, 1):
-            f.append(f"{t}: storm not detected: {res['nirq']} deliveries for "
-                     f"{fr} frames")
+        if not ack:
+            if m["cnt"] < n or not n <= res["nirq"] <= n + 1:
+                f.append(f"{t}: {m['cnt']} entries / {res['nirq']} deliveries, "
+                         f"want {n} (+1 for a VERTB after the acknowledge)")
+            if fr > 3:                          # round 0 (no poll): 5
+                f.append(f"{t}: {n} re-entries took {fr} frames: the IPL drop "
+                         "at RTE waited for VERTB (no MACH_POLL poll)")
+    return f
+
+
+# --- review w9-irq-review legs (fix round 1; programs from its stress.py) --
+
+CNT2, MISS, LOST = DATA + 28, DATA + 32, DATA + 36
+
+
+def prog_stoplost(nvb: int, bound: int) -> G:
+    """Loop: IPL 7, post SOFT (level 1), STOP #$2000 (the STOP's halt path
+    delivers SOFT at once).  VERTB (level 3) counts frames into CNT.  Ends
+    when CNT = nvb (d5 = 0) or after *bound* STOPs (d5 = 1: VERTB stopped:
+    an event taken during STOP was lost and nothing re-armed the one-shot)."""
+    g = G()
+    vec(g, 27, "hv")
+    vec(g, 25, "hs")
+    clr_l(g, CNT)
+    clr_l(g, CNT2)
+    moveq(g, 0, 5)
+    moveq(g, 0, 0)
+    mv_imm_abs_w(g, 0x7FFF, INTENA)
+    mv_imm_abs_w(g, 0x7FFF, INTREQ)
+    mv_imm_abs_w(g, 0xC024, INTENA)             # INTEN | VERTB | SOFT
+    g.label("top")
+    move_sr(g, 0x2700)
+    mv_imm_abs_w(g, 0x8004, INTREQ)             # SOFT pending (masked)
+    g(0x4E72, 0x2000)                           # stop #$2000
+    g(0x5280)                                   # addq.l #1,d0
+    g(0x0CB9, nvb >> 16, nvb & 0xFFFF, *g.abs(CNT))
+    g.bcc(0x6C00, "done")                       # bge.w
+    g(0x0C80, bound >> 16, bound & 0xFFFF)
+    g.bcc(0x6D00, "top")                        # blt.w
+    moveq(g, 1, 5)
+    g.label("done")
+    g(0x2239, *g.abs(CNT))                      # move.l CNT,d1
+    g(0x2439, *g.abs(CNT2))                     # move.l CNT2,d2
+    g(HALT)
+    g.label("hv")
+    addq_l_abs(g, CNT)
+    mv_imm_abs_w(g, 0x0020, INTREQ)
+    g(0x4E73)
+    g.label("hs")
+    addq_l_abs(g, CNT2)
+    mv_imm_abs_w(g, 0x0004, INTREQ)
+    g(0x4E73)
+    return g
+
+
+def leg_stoplost(rig: Rig) -> list[str]:
+    """Review F1: STOPs back to back at s = 0 (frame 14188 phi2), so the
+    one-shot often fires during a STOP: VERTB must keep coming."""
+    f = need_seam(rig, "stoplost")
+    if f:
+        return f
+    nvb, bound = 150, 6000
+    (pc,) = rig.stage(link(prog_stoplost(nvb, bound), BASE))
+    res = rig.run(pc, s=0, flags=F_INIT | F_SUPER, sr=0x27)
+    d = res["d"]
+    if VERBOSE:
+        print(f"    stoplost: stops {d[0]} vertb {d[1]} soft {d[2]} "
+              f"frames {res['frames'] - res['frames0']}")
+    if not clean(res, "stoplost", f):
+        return f
+    if d[1] < nvb:
+        f.append(f"stoplost: VERTB stopped after {d[1]} frames; {d[0]} STOPs "
+                 "ran with no timer event (an event taken at STOP was lost)")
+    if d[2] != d[0]:
+        f.append(f"stoplost: {d[2]} SOFT deliveries for {d[0]} STOPs")
+    return f
+
+
+def prog_starve(nvb: int, src: int) -> G:
+    """IPL 7: VERTB and a level-1/2 source (INTREQ bit 2 SOFT / 3 PORTS)
+    pending and enabled, then MOVE #$2000,SR.  A 68000 takes VERTB, then the
+    low level right after the VERTB handler's RTE.  Spin until nvb VERTBs;
+    d2 = the low level's count (must be 1)."""
+    g = G()
+    vec(g, 27, "hv")
+    vec(g, 24 + (1 if src == 2 else 2), "hs")
+    clr_l(g, CNT)
+    clr_l(g, CNT2)
+    moveq(g, 0, 5)
+    moveq(g, 0, 0)
+    mv_imm_abs_w(g, 0x7FFF, INTENA)
+    mv_imm_abs_w(g, 0x7FFF, INTREQ)
+    mv_imm_abs_w(g, 0xC020 | (1 << src), INTENA)
+    mv_imm_abs_w(g, 0x8020 | (1 << src), INTREQ)
+    move_sr(g, 0x2000)
+    g.label("spin")
+    g(0x5280)
+    g(0x0CB9, nvb >> 16, nvb & 0xFFFF, *g.abs(CNT))
+    g.bcc(0x6D00, "spin")                       # blt.w
+    g(0x2239, *g.abs(CNT))
+    g(0x2439, *g.abs(CNT2))
+    g(HALT)
+    g.label("hv")
+    addq_l_abs(g, CNT)
+    mv_imm_abs_w(g, 0x0020, INTREQ)
+    g(0x4E73)
+    g.label("hs")
+    addq_l_abs(g, CNT2)
+    mv_imm_abs_w(g, 1 << src, INTREQ)
+    g(0x4E73)
+    return g
+
+
+def leg_starve(rig: Rig) -> list[str]:
+    """Review F2: a pending lower level is not starved by a recurring VERTB."""
+    f = need_seam(rig, "starve")
+    if f:
+        return f
+    for src in (2, 3):
+        (pc,) = rig.stage(link(prog_starve(30, src), BASE))
+        res = rig.run(pc, s=2, flags=F_INIT | F_SUPER, sr=0x27)
+        if not clean(res, f"starve bit {src}", f):
+            continue
+        d = res["d"]
+        if d[2] != 1:
+            f.append(f"starve: INTREQ bit {src} (enabled, pending, IPL 0) "
+                     f"delivered {d[2]}x during {d[1]} VERTBs; want 1")
+    return f
+
+
+def prog_kick(k: int, polls: int = 1000) -> G:
+    """k x {SET SOFT at IPL 0 (a trap-context kick), wait for its handler,
+    an LFSR-random busy gap}; VERTB (level 3) races it.  LOST counts SETs
+    not delivered within *polls* polls, MISS deliveries whose stacked PC is
+    not the instruction after the write."""
+    g = G()
+    vec(g, 27, "hv")
+    vec(g, 25, "hs")
+    for a in (CNT, CNT2, MISS, LOST):
+        clr_l(g, a)
+    moveq(g, 0, 5)
+    moveq(g, 0, 0)
+    moveq(g, 0x5A, 7)
+    mv_imm_abs_w(g, 0x7FFF, INTENA)
+    mv_imm_abs_w(g, 0x7FFF, INTREQ)
+    mv_imm_abs_w(g, 0xC024, INTENA)
+    move_sr(g, 0x2000)
+    g.label("top")
+    clr_l(g, SPC)
+    g(0x2239, *g.abs(CNT2))                     # move.l CNT2,d1
+    mv_imm_abs_w(g, 0x8004, INTREQ)             # the kick
+    g.label("after")
+    g(0x383C, polls - 1)                        # move.w #polls-1,d4
+    g.label("wt")
+    g(0xB2B9, *g.abs(CNT2))                     # cmp.l CNT2,d1
+    g.bcc(0x6600, "got")
+    g.dbra(4, "wt")
+    addq_l_abs(g, LOST)
+    g.bcc(0x6000, "gap")
+    g.label("got")
+    g.fix_abs = getattr(g, "fix_abs", [])
+    g.fix_abs.append((len(g.w) + 1, "after"))
+    g(0x0CB9, 0, 0, *g.abs(SPC))                # cmpi.l #after,SPC
+    g.bcc(0x6700, "gap")
+    addq_l_abs(g, MISS)
+    g.label("gap")
+    g(0x2607)                                   # move.l d7,d3
+    g(0x0243, 0x007F)                           # andi.w #$7F,d3
+    g.label("bz")
+    g.dbra(3, "bz")
+    g(0xDE47)                                   # add.w d7,d7
+    g.bcc(0x6400, "nx")                         # bcc.w
+    g(0x0A47, 0x002D)                           # eori.w #$2D,d7
+    g.label("nx")
+    g(0x5280)                                   # addq.l #1,d0
+    g(0x0C80, k >> 16, k & 0xFFFF)
+    g.bcc(0x6D00, "top")
+    g(0x2239, *g.abs(CNT))
+    g(0x2439, *g.abs(CNT2))
+    g(0x2639, *g.abs(MISS))                     # move.l MISS,d3
+    g(HALT)
+    g.label("hv")
+    addq_l_abs(g, CNT)
+    mv_imm_abs_w(g, 0x0020, INTREQ)
+    g(0x4E73)
+    g.label("hs")
+    addq_l_abs(g, CNT2)
+    g(0x23EF, 2, *g.abs(SPC))
+    mv_imm_abs_w(g, 0x0004, INTREQ)
+    g(0x4E73)
+    return g
+
+
+def leg_kick(rig: Rig) -> list[str]:
+    """Review F2/F3: 200 kicked SETs racing VERTB at s = 0: every one is
+    delivered, VERTB keeps being handled."""
+    f = need_seam(rig, "kick")
+    if f:
+        return f
+    k = 200
+    (pc,) = rig.stage(link(prog_kick(k), BASE))
+    res = rig.run(pc, s=0, flags=F_INIT | F_SUPER, sr=0x27)
+    d = res["d"]
+    lost = struct.unpack(">I", rig.guest_read(LOST, 4))[0]
+    fr = res["frames"] - res["frames0"]
+    if VERBOSE:
+        print(f"    kick: soft {d[2]} lost {lost} miss {d[3]} vertb {d[1]} frames {fr}")
+    if not clean(res, "kick", f):
+        return f
+    if lost or d[2] != k:
+        f.append(f"kick: {lost} SETs not delivered in time, {d[2]} of {k} handled")
+    if d[1] < fr - 1:
+        f.append(f"kick: {d[1]} VERTBs handled of {fr} frames")
+    return f
+
+
+def prog_ustop(lvl_bit: int, vecn: int) -> G:
+    """STOP #$0000 (to user mode, IPL 0); the handler records SR, the
+    stacked SR/PC and A7; after the RTE the user code halts."""
+    g = G()
+    vec(g, vecn, "h")
+    for a in (CNT, HSR, SSR, SPC, HSP):
+        clr_l(g, a)
+    mv_imm_abs_w(g, 0x7FFF, INTENA)
+    mv_imm_abs_w(g, 0x7FFF, INTREQ)
+    mv_imm_abs_w(g, 0xC000 | (1 << lvl_bit), INTENA)
+    g(0x4E72, 0x0000)                           # stop #$0000
+    g.label("after")
+    g(0x2039, *g.abs(CNT))
+    g(HALT)
+    g.label("h")
+    addq_l_abs(g, CNT)
+    g(0x40F9, *g.abs(HSR))
+    g(0x33D7, *g.abs(SSR))
+    g(0x23EF, 2, *g.abs(SPC))
+    g(0x23CF, *g.abs(HSP))
+    mv_imm_abs_w(g, 0x7FFF, INTENA)
+    g(0x4E73)
+    return g
+
+
+def leg_ustop(rig: Rig) -> list[str]:
+    """STOP into user mode, woken by VERTB (level 3) and by a client post
+    (bit 13, level 6): the frame goes on the SSP, A7 is the USP after RTE."""
+    f = need_seam(rig, "ustop")
+    if f:
+        return f
+    for tag, bit, vecn, slots in (("vertb", 5, 27, None),
+                                  ("exter", 13, 30, {2: Slot(3000, post=13)})):
+        g = prog_ustop(bit, vecn)
+        (pc,) = rig.stage(link(g, BASE))
+        res = rig.run(pc, s=2, flags=F_INIT | F_SUPER, sr=0x27, slots=slots)
+        cnt, hsr, ssr, spc, hsp = struct.unpack(">IHxxHxxII", rig.guest_read(DATA, 20))
+        after = pc + 2 * g.labels["after"]
+        lvl = 3 if bit == 5 else 6
+        want = (1, 0x2000 | lvl << 8, 0x0000, after, SSP0 - 6)
+        if (res["halt"], res["reason"]) != (1, 0) or (cnt, hsr, ssr, spc, hsp) != want \
+                or res["a7"] != USP0 or res["osp"] != SSP0 or res["sr"] & 0x2000:
+            f.append(f"ustop {tag}: (count, SR, stacked SR, PC, A7) = ({cnt}, "
+                     f"${hsr:04X}, ${ssr:04X}, ${spc:06X}, ${hsp:06X}), A7 "
+                     f"${res['a7']:06X} osp ${res['osp']:06X}; want {want}")
     return f
 
 
@@ -882,9 +1150,11 @@ def leg_stop(rig: Rig) -> list[str]:
     f = need_seam(rig, "stop")
     if f:
         return f
+    # client: the deadline lies well after the STOP (20000 E at s = 2), so
+    # the CPU really waits on the slot (at 3000 E it fired before the STOP)
     cases = [("vertb", [(0xC020, INTENA)], 0x2000, None, True),
              ("pending", [(0xC020, INTENA), (0x8020, INTREQ)], 0x2000, None, True),
-             ("client", [(0xC008, INTENA)], 0x2000, {3: Slot(3000, post=3)}, True),
+             ("client", [(0xC008, INTENA)], 0x2000, {3: Slot(20000, post=3)}, True),
              ("ipl7", [(0xC020, INTENA)], 0x2700, None, False),
              ("noenable", [], 0x2000, None, False),
              ("noclient", [(0xC008, INTENA)], 0x2000, None, False)]
@@ -956,7 +1226,9 @@ LEGS = {"setclr": leg_setclr, "etime": leg_etime, "etlive": leg_etlive,
         "race": leg_race, "post": leg_post, "out": leg_out,
         "deliver": leg_deliver, "masked": leg_masked, "levels": leg_levels,
         "nest": leg_nest, "storm": leg_storm, "stop": leg_stop,
-        "oddvec": leg_oddvec, "haltrace": leg_haltrace}
+        "oddvec": leg_oddvec, "haltrace": leg_haltrace,
+        "stoplost": leg_stoplost, "starve": leg_starve, "kick": leg_kick,
+        "ustop": leg_ustop}
 
 
 def session(prg: str, fn) -> object:
@@ -1047,7 +1319,7 @@ MUTANTS = {
     "levelmap": (MACH, [("mach_lvlo: .byte $07, $08, $70, $80\n",
                          "mach_lvlo: .byte $07, $08, $00, $F0\n")]),
     # IPL compare >= instead of > (a level re-enters its own handler)
-    "iplge": (MACH, [("        cmp mach_lv\n        bcs none                ; I2-I0 >= level: masked\n",
+    "iplge": (MACH, [("        cmp mach_lv\n        bcs none                ; I2-I0 >= level: masked (Paula levels are\n",
                       "        cmp mach_lv\n        beq go\n        bcs none\ngo:\n")]),
     # INTEN (the master enable) ignored
     "inten": (MACH, [("        lda chip_shd+MACH_INTENAR\n        and #$40                ; INTEN, the master enable\n"
@@ -1074,6 +1346,17 @@ MUTANTS = {
     "haltguard": (MACH, [("        lda st_halt             ; a real halt pending (st_halt = $81 on\n"
                           "        and #$7F                ; entry): emu_run returns it, no frame\n"
                           "        bne none\n", "")]),
+    # --- fix round 1 (review w9-irq-review) ---
+    # F1: the STOP halt path delivers without taking ev_pend (round 0)
+    "stopev": (MACH, [("        jmp event               ; take ev_pend (the one-shot may have fired\n",
+                       "        jmp deliv\n")]),
+    # F2: no poll while an interrupt is pending (round 0)
+    "nopoll": (MACH, [("        jsr mach_pclamp         ; pending interrupt: poll every MACH_POLL\n", "")]),
+    # F3 (reviewer's): mach_dlv drops an event that came during the raise
+    "dropb7": (MACH, [("        and #$80                ; keep an event that came meanwhile\n",
+                       "        lda #0\n")]),
+    # reviewer's: the STOP wake ignores a VERTB enabled above the IPL
+    "wkvb": (MACH, [("        and #1 << MACH_VERTB_BIT\n        bne yes\n", "")]),
 }
 MUTANT_LEGS = {"noslot": ["arm"], "nokick": ["trap"], "kickout": ["out"],
                "disarm": ["arm"], "wrap": ["etime"], "eshift": ["etime"],
@@ -1082,7 +1365,9 @@ MUTANT_LEGS = {"noslot": ["arm"], "nokick": ["trap"], "kickout": ["out"],
                "levelmap": ["levels"], "iplge": ["nest"], "inten": ["masked"],
                "noipl": ["levels"], "vecbase": ["levels"], "group1": ["levels"],
                "noichk": ["levels"], "nostop": ["stop"], "nowk": ["stop"],
-               "wkslot": ["stop"], "haltguard": ["haltrace"]}
+               "wkslot": ["stop"], "haltguard": ["haltrace"],
+               "stopev": ["stoplost"], "nopoll": ["starve", "kick", "storm"],
+               "dropb7": ["stoplost", "kick"], "wkvb": ["stop"]}
 
 
 def build_mutant(name: str, out_dir: str) -> str:
@@ -1134,6 +1419,42 @@ def teeth(prg: str, only: list[str] | None) -> int:
     return 1 if bad else 0
 
 
+def perf(prg: str, json_out: str | None) -> int:
+    """Cost of the MACH_POLL poll: the same register-only guest loop at
+    s = 0 (E = phi2) with nothing pending, then with VERTB enabled and
+    pending but masked by IPL 7 (the AROS Disable()-with-a-request case
+    when INTEN stays set): phi2 elapsed, passes, phi2 per pass."""
+    import json
+
+    def body(rig: Rig) -> dict:
+        (pc,) = rig.stage(prog_busy(20000))
+        out = {}
+        for tag, ien, ireq in (("idle", 0x0000, 0x0000),
+                               ("pending", 0xC020, 0x0020)):
+            ts = []
+            for _ in range(3):
+                res = rig.run(pc, s=0, flags=F_INIT | F_SUPER | F_IEN,
+                              sr=0x27, ien=ien, ireq=ireq)
+                assert res["halt"] == 1 and res["reason"] == 0, res
+                ts.append((res["e1"] - res["e0"]) & M32)
+            out[tag] = min(ts)
+        d = out["pending"] - out["idle"]
+        share = d / out["pending"]              # time in passes, 1 MHz
+        # period = MACH_POLL + c (+ the instruction in flight, ignored):
+        # share = c / (MACH_POLL + c)  ->  c = share * MACH_POLL / (1 - share)
+        c = share * 0x0400 / (1 - share)
+        out.update(delta=d, slowdown_1mhz=d / out["idle"], share_1mhz=share,
+                   pass_cycles_est=round(c),
+                   share_48mhz_est=(1e6 / 0x0400) * c / 48e6)
+        return out
+    out = session(prg, body)
+    print(json.dumps(out, indent=1))
+    if json_out:
+        with open(json_out, "w") as f:
+            json.dump(out, f, indent=1)
+    return 0
+
+
 def main(argv=None) -> int:
     global VERBOSE
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -1142,7 +1463,11 @@ def main(argv=None) -> int:
     ap.add_argument("--mutants", action="store_true")
     ap.add_argument("--only")
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--perf", action="store_true")
+    ap.add_argument("--json-out")
     a = ap.parse_args(argv)
+    if a.perf:
+        return perf(a.prg, a.json_out)
     VERBOSE = a.verbose
     if a.mutants:
         return teeth(a.prg, a.only.split(",") if a.only else None)
