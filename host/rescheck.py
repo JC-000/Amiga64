@@ -76,6 +76,7 @@ FILE_OWNERS = {
     "runtime/ops/chip.s": "chip",       # W7-T I/O trap stub (S3.1)
     "runtime/ops/mach.s": "s3",         # W8-L machine loop (S3.2)
     "runtime/ops/cia.s": "cia",         # W9-C guest CIA-A/B (S3.4)
+    "runtime/ops/cop.s": "cop",         # W10-P copper + display state (S3.5)
     "tests/runner/runner.s": "run",
     "tests/runner/run_program.s": "run",
 }

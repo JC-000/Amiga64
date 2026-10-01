@@ -65,6 +65,7 @@
 .export mach_etime, mach_arm, mach_disarm, mach_post, mach_kick
 .export mach_et, mach_at, mach_cbv, mach_hold, mach_am, mach_dl, mach_chi
 .export mach_in, mach_insv
+.export mach_fhook, mach_nfs    ; W10-P cop: the frame hook (cop_frame), forced steps
 .export MACH_NSLOT
 ; W9-I: S3.3 interrupt delivery (docs/CONTRACTS.md "Interrupt delivery (S3.3)")
 .export mach_lvl, mach_ichk, mach_nirq, mach_stp
@@ -129,6 +130,10 @@ mach_act:  .res 1       ; scratch: mach_lvl / mach_wk
 mach_fs:   .res 1       ; a slot is due now: run one emu_step before emu_run
 mach_es:   .res 4       ; mach_slots' E snapshot (callbacks move mach_et)
 mach_nirq: .res 4       ; interrupts delivered (u32 LE, wraps; tests)
+mach_fhook: .res 2      ; W10-P cop: frame hook (LE; high byte 0 = none), once per pass with a VERTB
+mach_fdue: .res 1       ; W10-P cop: a VERTB was posted since the frame hook last ran
+mach_fran: .res 1       ; W10-P cop: the frame hook ran in this pass
+mach_nfs:  .res 2       ; W10-P cop: forced steps taken (u16, wraps; tests)
 
 .segment "CODE"
 
@@ -299,7 +304,10 @@ halt:   cmp #1                  ; W9-I: STOP in exception mode stops the CPU
         jmp event               ; take ev_pend (the one-shot may have fired
                                 ; during the STOP), pass, then deliver
 step:   sei                     ; forward progress: ONE guest instruction
-        lda #0                  ; before the next pass, even if a client
+        inc mach_nfs            ; W10-P cop: forced steps (tests)
+        bne :+                  ; W10-P cop
+        inc mach_nfs+1          ; W10-P cop
+:       lda #0                  ; before the next pass, even if a client
         sta mach_fs             ; re-arms "now".  Under sei, with st_halt's
         sta st_halt             ; event bit cleared (ev_pend keeps the event,
         jsr emu_step            ; the event path below takes it), so the
@@ -326,6 +334,8 @@ exit:   lda #$7F                ; mask every CIA1 source
 .proc mach_svc
         lda #1                  ; W9-I: arms/posts in here need no kick
         sta mach_insv
+        lda #0                  ; W10-P cop: the frame hook has not run in
+        sta mach_fran           ; W10-P cop: this pass
         jsr mach_rdc
 chk:    sec                     ; t = next - now
         lda mach_next
@@ -344,7 +354,7 @@ chk:    sec                     ; t = next - now
         ora mach_t+2
         ora mach_t+1
         ora mach_t
-        bne arm
+        bne fhk                 ; W10-P cop (was: bne arm)
 due:    jsr post
         clc
         lda mach_next
@@ -360,6 +370,15 @@ due:    jsr post
         adc mach_flen+3
         sta mach_next+3
         jmp chk
+fhk:    lda mach_fdue           ; W10-P cop: a VERTB was posted: the frame
+        beq arm                 ; W10-P cop: hook, ONCE per pass, after the
+        lda mach_fran           ; W10-P cop: count (a copper run costing more
+        bne skip                ; W10-P cop: than a frame cannot livelock the
+        jsr fhook               ; W10-P cop: catch-up); its run took time:
+        jsr mach_rdc            ; W10-P cop: re-read the counter, count the
+        jmp chk                 ; W10-P cop: frames it took, then arm
+skip:   lda #0                  ; W10-P cop: VERTBs that passed during the
+        sta mach_fdue           ; W10-P cop: hook are counted, not hooked
 arm:    lda mach_flen           ; t > flen: aliased (see above)
         cmp mach_t
         lda mach_flen+1
@@ -426,8 +445,27 @@ post:   inc mach_frames         ; one VERTB
         inc mach_frames+3
 :       lda #MACH_VERTB_BIT     ; INTREQ bit 5 (W9-I: via the post path)
         jsr mach_pset
+        lda #1                  ; W10-P cop: the frame hook is due (it runs
+        sta mach_fdue           ; W10-P cop: once, after the count: fhk)
         ldx #0                  ; slot 0's hook (CIA-A TOD), if any
         jmp mach_cb
+
+; W10-P cop: fhook — the frame hook (callback rules), then force ONE guest
+; instruction before the next pass (mach_fs: instructions, not time), so a
+; copper run longer than a frame slows the guest but never stops it.
+fhook:  lda #0                  ; W10-P cop
+        sta mach_fdue           ; W10-P cop
+        lda #1                  ; W10-P cop
+        sta mach_fran           ; W10-P cop
+        lda mach_fhook+1        ; W10-P cop: none installed: nothing
+        beq :+                  ; W10-P cop
+        sta mach_jv+1           ; W10-P cop
+        lda #1                  ; W10-P cop: forced step after the hook
+        sta mach_fs             ; W10-P cop
+        lda mach_fhook          ; W10-P cop
+        sta mach_jv             ; W10-P cop
+        jmp (mach_jv)           ; W10-P cop
+:       rts                     ; W10-P cop
 .endproc
 
 ; ===========================================================================
