@@ -19,11 +19,12 @@
 ; E tick, 15625 Hz at 709379 E ticks/s), on one grid that runs whether or
 ; not the TOD is halted.
 ;
-; Interrupts: whenever a sync or an ICR write leaves ICR data & mask != 0,
-; the chip posts its INTREQ bit (mach_post: CIA-A PORTS = 3, CIA-B EXTER =
-; 13), so a source that stays asserted raises the bit again (chipset_ref
-; calls update() after every eclock).  cia_intreq re-posts both after a
-; guest INTREQ write (chipset_ref custom_write $09C).
+; Interrupts: each chip keeps its mach_hold bit (CIA-A PORTS = 3, CIA-B
+; EXTER = 13) equal to its IR condition (ICR data & mask != 0) after every
+; sync, ICR access and TOD-A tick, and mach_posts the bit on the rising
+; edge; chip.s ORs mach_hold back after every guest INTREQ write, so a held
+; bit cannot be cleared (chipset_ref: update() after every eclock and
+; INTREQ write).
 ;
 ; Before mach_init (mach_on = 0) guest time is frozen at 0; mach_init
 ; starts the counter near 0, so time is continuous across it.  A time that
@@ -34,14 +35,11 @@
 ;               Y preserved, X clobbered (chip.s ABI).
 ;   cia_write   X = register index, A = value.  Y preserved, X clobbered.
 ;   cia_reset   both chips to power-up (chipset_ref.CIA()), callbacks
-;               registered in mach_cbv (slots 0-5) and mach_ihook, slots
-;               1-5 disarmed.  Run by the first access and by chip_reset.
-;               Clobbers A/X/Y.
-;   cia_intreq  (mach_ihook: chip.s calls it after a guest INTREQ write)
-;               re-post the INTREQ bit of every chip whose ICR data & mask
-;               is nonzero.  Clobbers A/X/Y.
+;               registered in mach_cbv (slots 0-5), slots 1-5 disarmed,
+;               mach_hold bits 3/13 released.  Run by the first access and
+;               by chip_reset.  Clobbers A/X/Y.
 ;
-; Host-visible state (runner.lbl): cia_st (2 x CIA_SZ bytes, layout C_*
+; Host-visible state (runner.lbl): cia_st (2 x CIA_SZ bytes, layout CIA_*
 ; below), cia_now (u32 E time of the last sync), cia_ok.
 ;
 ; Link layout: after chip.s, before mach.s (Makefile).
@@ -49,10 +47,13 @@
 
 .include "../macros.inc"
 
-.export cia_read, cia_write, cia_reset, cia_intreq
+.export cia_read, cia_write, cia_reset
 .export cia_st, cia_now, cia_ok
 .import mach_on, mach_etime, mach_et, mach_arm, mach_disarm, mach_at
-.import mach_post, mach_cbv, mach_ihook
+.import mach_post, mach_cbv, mach_hold, mach_am, mach_dl
+.ifdef CIA_HOSTTIME
+.import shim_t
+.endif
 
 ; per-chip state block (offsets into cia_st + chip offset)
 CIA_PRA   = 0         ; @value port A output register
@@ -81,13 +82,10 @@ CIA_TDY   = 35        ; @value nonzero: TOD alarm deadline must be recomputed
 CIA_SLA   = 36        ; @value mach slot of TA
 CIA_SLB   = 37        ; @value mach slot of TB
 CIA_SLT   = 38        ; @value mach slot of the TOD alarm (0: VERTB hook)
-CIA_ARA   = 39        ; @value nonzero: TA slot armed at CIA_DLA
-CIA_ARB   = 40        ; @value
-CIA_ART   = 41        ; @value
-CIA_DLA   = 42        ; @value u32 armed TA deadline
-CIA_DLB   = 46        ; @value
-CIA_DLT   = 50        ; @value u32 TOD alarm deadline (valid unless CIA_TDY)
-CIA_SZ  = 54        ; @value bytes per chip
+CIA_HOF   = 39        ; @value byte of mach_hold holding the chip's bit
+CIA_HMK   = 40        ; @value its mask in that byte
+CIA_DLT   = 41        ; @value u32 TOD alarm deadline (valid unless CIA_TDY)
+CIA_SZ  = 45        ; @value bytes per chip
 CIA_B   = CIA_SZ    ; @value chip offset of CIA-B
 
 CIA_PRA_IN_A  = $EB ; @value CIA-A PRA input pins (docs/S3_PLAN.md §3.4)
@@ -270,6 +268,7 @@ rd_icr: lda cia_st+CIA_ICR,x      ; data | IR, then clear the data
         pha
         lda #0
         sta cia_st+CIA_ICR,x
+        jsr post                ; IR is 0 now: release the hold
         pla
         jmp rdone
 rd_cra: lda cia_st+CIA_CRA,x
@@ -865,19 +864,33 @@ add:    clc
 .endproc
 
 ; ---------------------------------------------------------------------------
-; post — if ICR data & mask (chip X), set the chip's INTREQ bit.
-; Preserves X.
+; post — chip X's /INT: keep its mach_hold bit equal to IR = (ICR data &
+; mask != 0) and mach_post its INTREQ bit on the rising edge (the seam's
+; level-hold: a guest INTREQ CLR of a held bit is ORed back, chipset_ref
+; Chipset.custom_write's ciaa/ciab.update()).  Preserves X; clobbers Y.
 ; ---------------------------------------------------------------------------
 .proc post
+        ldy cia_st+CIA_HOF,x
         lda cia_st+CIA_ICR,x
         and cia_st+CIA_MSK,x
         and #$1F
-        beq done
+        beq low
+        lda mach_hold,y
+        and cia_st+CIA_HMK,x
+        bne done                ; held already: no edge
+        lda mach_hold,y
+        ora cia_st+CIA_HMK,x
+        sta mach_hold,y
         stx cia_x
         lda cia_st+CIA_BIT,x
         jsr mach_post
         ldx cia_x
 done:   rts
+low:    lda cia_st+CIA_HMK,x
+        eor #$FF
+        and mach_hold,y
+        sta mach_hold,y
+        rts
 .endproc
 
 ; ---------------------------------------------------------------------------
@@ -891,10 +904,16 @@ done:   rts
         sta cia_now+2
         sta cia_now+3
         rts
+.ifdef CIA_HOSTTIME
+on:     stx cia_x               ; run_cia's host-time test PRG only
+        ldx #3                  ; (tests/cia/shim.s)
+:       lda shim_t,x
+.else
 on:     stx cia_x
         jsr mach_etime
         ldx #3
 :       lda mach_et,x
+.endif
         sta cia_now,x
         dex
         bpl :-
@@ -908,7 +927,10 @@ on:     stx cia_x
 ;       with mask bit 1): at CIA_T + TA + 1
 ;   TB  started, INMODE 0, mask bit 1: at CIA_T + TB + 1
 ;   TOD CIA-B, not halted, mask bit 2: the alarm's line (CIA_DLT)
-; mach_arm/mach_disarm are called only when the wish changed.  Preserves X.
+; The seam's own state (mach_am, mach_dl) is the truth: mach_arm is called
+; only when the slot is not armed at that deadline, mach_disarm only when
+; it is armed (so a mach_init, which disarms every slot, or a firing,
+; which disarms its slot, is seen at once).  Preserves X.
 ; ---------------------------------------------------------------------------
 .proc rearm
         ; --- TA
@@ -926,14 +948,12 @@ on:     stx cia_x
         cmp #$41
         bne aoff
 aon:    lda cia_st+CIA_TA,x
-        sta cia_k
-        lda cia_st+CIA_TA+1,x
-        sta cia_k+1
-        lda #CIA_ARA
-        ldy #CIA_DLA
+        ldy cia_st+CIA_TA+1,x
+        jsr dlk
+        lda cia_st+CIA_SLA,x
         jsr want
         jmp tb
-aoff:   lda #CIA_ARA
+aoff:   lda cia_st+CIA_SLA,x
         jsr unwant
         ; --- TB
 tb:     lda cia_st+CIA_CRB,x
@@ -944,14 +964,12 @@ tb:     lda cia_st+CIA_CRB,x
         and #$02
         beq boff
         lda cia_st+CIA_TB,x
-        sta cia_k
-        lda cia_st+CIA_TB+1,x
-        sta cia_k+1
-        lda #CIA_ARB
-        ldy #CIA_DLB
+        ldy cia_st+CIA_TB+1,x
+        jsr dlk
+        lda cia_st+CIA_SLB,x
         jsr want
         jmp tod
-boff:   lda #CIA_ARB
+boff:   lda cia_st+CIA_SLB,x
         jsr unwant
         ; --- TOD alarm (CIA-B only)
 tod:    lda cia_st+CIA_SLT,x
@@ -964,131 +982,97 @@ tod:    lda cia_st+CIA_SLT,x
         lda cia_st+CIA_TDY,x
         beq tarm
         jsr alarmdl
-tarm:   lda cia_st+CIA_ART,x      ; armed at CIA_DLT already?
-        bne done
-        lda #1
-        sta cia_st+CIA_ART,x
-        lda #CIA_SLT
-        ldy #CIA_DLT
-        jmp arm
-toff:   lda #CIA_ART
-        jsr unwant
+tarm:   lda cia_st+CIA_DLT,x
+        sta cia_k
+        lda cia_st+CIA_DLT+1,x
+        sta cia_k+1
+        lda cia_st+CIA_DLT+2,x
+        sta cia_k+2
+        lda cia_st+CIA_DLT+3,x
+        sta cia_k+3
+        lda cia_st+CIA_SLT,x
+        jmp want
+toff:   lda cia_st+CIA_SLT,x
+        jmp unwant
 done:   rts
 .endproc
 
-; want — slot wish "armed at CIA_T + cia_k(u16) + 1".  A = CIA_AR* field,
-; Y = CIA_DL* field (the slot field is CIA_AR* - 3).  Preserves X.
-.proc want
-        sta cia_dd              ; field offsets
-        sty cia_dd+1
-        txa
-        clc
-        adc cia_dd+1
-        tay                     ; Y = chip + CIA_DL*
-        sec                     ; t = CIA_T + k + 1
-        lda cia_st+CIA_T,x
-        adc cia_k
-        sta cia_k
-        lda cia_st+CIA_T+1,x
-        adc cia_k+1
-        sta cia_k+1
-        lda cia_st+CIA_T+2,x
-        adc #0
-        sta cia_k+2
-        lda cia_st+CIA_T+3,x
-        adc #0
-        sta cia_k+3
-        txa
-        clc
-        adc cia_dd
-        sta cia_dr              ; chip + CIA_AR*
-        stx cia_x
-        tax
-        lda cia_st,x
-        beq new                 ; not armed
-        lda cia_k               ; armed: same deadline?
-        cmp cia_st,y
-        bne new
-        lda cia_k+1
-        cmp cia_st+1,y
-        bne new
-        lda cia_k+2
-        cmp cia_st+2,y
-        bne new
-        lda cia_k+3
-        cmp cia_st+3,y
-        bne new
-        ldx cia_x
-        rts
-new:    lda #1
-        sta cia_st,x
-        lda cia_k
-        sta cia_st,y
-        lda cia_k+1
-        sta cia_st+1,y
-        lda cia_k+2
-        sta cia_st+2,y
-        lda cia_k+3
-        sta cia_st+3,y
-        ldx cia_x
-        lda cia_dd
+; dlk — cia_k := CIA_T + (Y:A) + 1, the next underflow of a counter
+; holding Y:A at CIA_T.  Preserves X.
+.proc dlk
         sec
-        sbc #CIA_ARA - CIA_SLA
-        ldy cia_dd+1
-        jmp arm
+        adc cia_st+CIA_T,x
+        sta cia_k
+        tya
+        adc cia_st+CIA_T+1,x
+        sta cia_k+1
+        lda #0
+        adc cia_st+CIA_T+2,x
+        sta cia_k+2
+        lda #0
+        adc cia_st+CIA_T+3,x
+        sta cia_k+3
+        rts
 .endproc
 
-; arm — mach_arm(slot field A, deadline field Y) of chip X.  Preserves X.
-.proc arm
-        sta cia_dd
-        sty cia_dd+1
-        stx cia_x
-        txa
-        clc
-        adc cia_dd+1
+; want — slot A armed at cia_k: mach_arm unless mach_am/mach_dl already
+; say so.  Preserves X.
+.proc want
+        sta cia_dd              ; slot
         tay
-        lda cia_st,y
+        lda bit8,y
+        and mach_am
+        beq arm                 ; not armed
+        lda cia_dd
+        asl
+        asl
+        tay                     ; Y = 4 * slot
+        lda cia_k
+        cmp mach_dl,y
+        bne arm
+        lda cia_k+1
+        cmp mach_dl+1,y
+        bne arm
+        lda cia_k+2
+        cmp mach_dl+2,y
+        bne arm
+        lda cia_k+3
+        cmp mach_dl+3,y
+        bne arm
+        rts
+arm:    lda cia_k
         sta mach_at
-        lda cia_st+1,y
+        lda cia_k+1
         sta mach_at+1
-        lda cia_st+2,y
+        lda cia_k+2
         sta mach_at+2
-        lda cia_st+3,y
+        lda cia_k+3
         sta mach_at+3
-        txa
-        clc
-        adc cia_dd
-        tay
-        lda cia_st,y            ; the slot
+        stx cia_x
+        lda cia_dd
         jsr mach_arm
         ldx cia_x
         rts
 .endproc
 
-; unwant — A = CIA_AR* field: disarm its slot if armed.  Preserves X.
+; unwant — slot A disarmed (mach_disarm only if mach_am has it).
+; Preserves X.
 .proc unwant
-        sta cia_dd
-        txa
-        clc
-        adc cia_dd
         tay
-        lda cia_st,y
+        lda bit8,y
+        and mach_am
         beq done
-        lda #0
-        sta cia_st,y
         tya
-        sec
-        sbc #CIA_ARA - CIA_SLA
-        tay
-        lda cia_st,y
         stx cia_x
         jsr mach_disarm
         ldx cia_x
 done:   rts
 .endproc
 
+bit8:   .byte 1, 2, 4, 8, 16, 32, 64, 128
+
 ; alarmdl — CIA_DLT := CIA_T + ceil((227 k' - ph) / 5), the E time at which
-; the TOD reaches the alarm; CIA_TDY := 0, CIA_ART := 0 (re-arm).  Preserves X.
+; the TOD reaches the alarm; CIA_TDY := 0.  Preserves X.
 .proc alarmdl
         jsr kprime              ; cia_d = k' (<= 2^24)
         ldy #3                  ; cia_k := 227 k' (< 2^32)
@@ -1163,7 +1147,6 @@ mnext:  dey
         sta cia_st+CIA_DLT+3,x
         lda #0
         sta cia_st+CIA_TDY,x
-        sta cia_st+CIA_ART,x
         rts
 .endproc
 
@@ -1185,6 +1168,8 @@ mnext:  dey
         sta cia_st+CIA_PIN
         lda #CIA_IRQ_A
         sta cia_st+CIA_BIT
+        lda #1 << CIA_IRQ_A     ; mach_hold byte 0
+        sta cia_st+CIA_HMK
         lda #1
         sta cia_st+CIA_SLA
         lda #2
@@ -1195,6 +1180,10 @@ mnext:  dey
         sta cia_st+CIA_B+CIA_PIN
         lda #CIA_IRQ_B
         sta cia_st+CIA_B+CIA_BIT
+        lda #1
+        sta cia_st+CIA_B+CIA_HOF
+        lda #1 << (CIA_IRQ_B - 8)
+        sta cia_st+CIA_B+CIA_HMK
         lda #3
         sta cia_st+CIA_B+CIA_SLA
         lda #4
@@ -1211,10 +1200,12 @@ mnext:  dey
         sta mach_cbv
         lda #>cb_vbl
         sta mach_cbv+1
-        lda #<cia_intreq        ; INTREQ-write hook (chip.s, after SET/CLR)
-        sta mach_ihook
-        lda #>cia_intreq
-        sta mach_ihook+1
+        lda mach_hold           ; neither chip holds PORTS/EXTER
+        and #<~(1 << CIA_IRQ_A)
+        sta mach_hold
+        lda mach_hold+1
+        and #<~(1 << (CIA_IRQ_B - 8))
+        sta mach_hold+1
         lda #1                  ; slots 1-5 disarmed
 :       pha
         jsr mach_disarm
@@ -1249,27 +1240,16 @@ one:    lda #$FF                ; latches and counters $FFFF
 cbtab:  .word cb_ata, cb_atb, cb_bta, cb_btb, cb_btod
 
 ; ---------------------------------------------------------------------------
-; Event callbacks (service pass, $01 = $35; clobber A/X/Y).  The fired slot
-; is forgotten first, so the sync's rearm arms it again if still wanted.
+; Event callbacks (service pass, $01 = $35; clobber A/X/Y).  The seam has
+; disarmed the fired slot; the sync's rearm arms it again if still wanted.
 ; ---------------------------------------------------------------------------
-cb_ata: lda #0
-        sta cia_st+CIA_ARA
-        ldx #0
+cb_ata:
+cb_atb: ldx #0
         beq cbsync
-cb_atb: lda #0
-        sta cia_st+CIA_ARB
-        ldx #0
-        beq cbsync
-cb_bta: lda #0
-        sta cia_st+CIA_B+CIA_ARA
-        beq cbb
-cb_btb: lda #0
-        sta cia_st+CIA_B+CIA_ARB
-        beq cbb
+cb_bta:
+cb_btb:
 cb_btod:
-        lda #0
-        sta cia_st+CIA_B+CIA_ART
-cbb:    ldx #CIA_B
+        ldx #CIA_B
 cbsync: jsr sync
         jmp rearm
 
@@ -1308,19 +1288,5 @@ tod:    ldx #0
         ora #$04
         sta cia_st+CIA_ICR
 chk:    jmp post
-done:   rts
-.endproc
-
-; ---------------------------------------------------------------------------
-; cia_intreq — the guest wrote INTREQ: a chip still asserting /INT raises
-; its bit again (chipset_ref custom_write $09C).  Clobbers A/X/Y.
-; ---------------------------------------------------------------------------
-.proc cia_intreq
-        lda cia_ok
-        beq done
-        ldx #0
-        jsr post
-        ldx #CIA_B
-        jmp post
 done:   rts
 .endproc

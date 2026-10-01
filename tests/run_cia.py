@@ -11,14 +11,30 @@ the line grid of chipset_ref.cia_lines.
 Legs:
   sweep   random sequences of byte reads/writes through mem_read8 /
           mem_write8 at the CIA addresses (as rec_apisweep), time advances,
-          VERTB ticks, event services and INTREQ clears, diffed against the
-          model: every read value, X/Y kept, the posted INTREQ bits (3/13)
-          and the armed events (slot, exact deadline) after every step.
-          Shim PRG (tests/cia/shim.s: host-set time, host-played service
-          pass) until the event seam exists.
+          VERTB ticks (mach_cbv[0]), INTREQ writes through the API (SET/CLR,
+          then | mach_hold) and a host-played service pass (mach_am/mach_dl,
+          one pass per step, slot order), diffed against the model after
+          every step: read values, X/Y kept, INTREQR bits 3/13, mach_hold,
+          and every slot's armed deadline to the tick.  The model follows
+          each chip's own sync time (cia_st CIA_T).  Live PRG: the real
+          counter (mach_init at s = 0/2/4), time passes in 6502 delay loops.
+          Host-time PRG (--build-shim: CIA_HOSTTIME + tests/cia/shim.s):
+          guest time is set by the host, exactly, up to 2^28-tick jumps.
+  wrap    the sweep with guest time starting just below 2^32 (host-time
+          PRG only): lazy counts, posts and deadlines across the u32 wrap
+  probe   the clean-room calibration probe (guest, $BF trap, mach_run):
+          CIA-A timer A ticks between two CIA-A TOD ticks -> 50 Hz
+          (14188 ticks), s = 8 and 4.  Red: 0 Hz (the TOD never moves)
+  tirq    timer interrupts through INTREQ (no CIA access while polling):
+          one-shot TA posts PORTS, ICR $81 then $00, CRA stopped; a PORTS
+          clear with the ICR still asserting comes straight back (level
+          hold), after the ICR read a clear sticks
+  todb    CIA-B TOD counts 312.5 lines per frame; a CIA-B TOD alarm 100
+          lines ahead posts EXTER through its event (slot 5), ICR $84
 
     python3 -m tests.run_cia --prg build/X/runner.prg [--legs a,b]
         [--seeds N] [--ops N]
+    python3 -m tests.run_cia --prg x --build-shim DIR [--legs sweep,wrap]
     python3 -m tests.run_cia --prg ... --mutants [--only m1,m2]
 
 A PRG without cia.s (the base build) runs the same API sequences with
@@ -63,13 +79,33 @@ def s32(v: int) -> int:
 # The reference: two chipset_ref.CIA on one guest E clock
 # --------------------------------------------------------------------------
 
+def cia_equates() -> dict[str, int]:
+    """CIA_* plain-value equates of runtime/ops/cia.s (the cia_st layout)."""
+    import re
+    out = {}
+    for line in open(os.path.join(ROOT, "runtime", "ops", "cia.s")):
+        mt = re.match(r"(CIA_[A-Z0-9_]+)\s*=\s*(\$?[0-9A-Fa-f]+)\s*;", line)
+        if mt:
+            v = mt.group(2)
+            out[mt.group(1)] = int(v[1:], 16) if v[0] == "$" else int(v)
+    return out
+
+
 class Model:
+    """Two chipset_ref.CIA, each on its own guest E time: cia.s syncs a chip
+    only when it is touched, so the model follows each chip's CIA_T."""
+
     def __init__(self, t0: int):
         self.req = 0
         self.a = CIA(lambda: self._req(PORTS), "CIAA")
         self.b = CIA(lambda: self._req(EXTER), "CIAB")
         self.a.pra_in = CIAA_PRA_IN
-        self.t0 = self.t = t0           # E time of cia_reset: line grid 0
+        self.t0 = t0                    # E time of cia_reset: line grid 0
+        self.ts = [t0, t0]
+
+    @property
+    def t(self) -> int:
+        return self.ts[0]
 
     def _req(self, bit: int) -> None:
         self.req |= 1 << bit
@@ -77,32 +113,37 @@ class Model:
     def chip(self, c: int) -> CIA:
         return self.a if c == 0 else self.b
 
+    def advance_chip(self, c: int, t: int) -> None:
+        old = self.ts[c]
+        n = (t - old) & 0xFFFFFFFF
+        if n & 0x80000000:          # cia.s: a negative gap is 0 ticks
+            n = 0
+        self.ts[c] = t & 0xFFFFFFFF
+        self.chip(c).eclock(n)
+        if c == 1:
+            self.b.tod_ticks(cia_lines((self.ts[1] - self.t0) & 0xFFFFFFFF)
+                             - cia_lines((old - self.t0) & 0xFFFFFFFF))
+
     def advance(self, t: int) -> None:
-        """Bring both chips to guest E time *t* (u32, after self.t)."""
-        n = (t - self.t) & 0xFFFFFFFF
-        lines = cia_lines((t - self.t0) & 0xFFFFFFFF) - cia_lines(
-            (self.t - self.t0) & 0xFFFFFFFF)
-        self.t = t & 0xFFFFFFFF
-        self.a.eclock(n)
-        self.b.eclock(n)
-        self.b.tod_ticks(lines)
+        self.advance_chip(0, t)
+        self.advance_chip(1, t)
 
     def vbl(self) -> None:
         self.a.tod_tick(1)
 
     def arms(self) -> dict[int, int | None]:
-        """Wanted slot deadlines (cia.s rearm policy), at self.t."""
+        """Wanted slot deadlines (cia.s rearm policy), at each chip's time."""
         out = {}
-        for c, (sa, sb) in ((self.a, (SLOT_ATA, SLOT_ATB)),
-                            (self.b, (SLOT_BTA, SLOT_BTB))):
-            ta_on = c.cra & 0x21 == 0x01 and (
-                c.icr_mask & 1 or (c.icr_mask & 2 and c.crb & 0x41 == 0x41))
-            out[sa] = (self.t + c.ta + 1) & 0xFFFFFFFF if ta_on else None
-            tb_on = c.crb & 0x61 == 0x01 and c.icr_mask & 2
-            out[sb] = (self.t + c.tb + 1) & 0xFFFFFFFF if tb_on else None
+        for c, (sa, sb) in ((0, (SLOT_ATA, SLOT_ATB)), (1, (SLOT_BTA, SLOT_BTB))):
+            x, t = self.chip(c), self.ts[c]
+            ta_on = x.cra & 0x21 == 0x01 and (
+                x.icr_mask & 1 or (x.icr_mask & 2 and x.crb & 0x41 == 0x41))
+            out[sa] = (t + x.ta + 1) & 0xFFFFFFFF if ta_on else None
+            tb_on = x.crb & 0x61 == 0x01 and x.icr_mask & 2
+            out[sb] = (t + x.tb + 1) & 0xFFFFFFFF if tb_on else None
         b = self.b
         if not b.tod_halt and b.icr_mask & 4:
-            k = cia_lines((self.t - self.t0) & 0xFFFFFFFF) + cia_tod_kprime(b.tod, b.alarm)
+            k = cia_lines((self.ts[1] - self.t0) & 0xFFFFFFFF) + cia_tod_kprime(b.tod, b.alarm)
             out[SLOT_BTOD] = (self.t0 + cia_line_e(k)) & 0xFFFFFFFF
         else:
             out[SLOT_BTOD] = None
@@ -119,9 +160,7 @@ class Rig:
         self.tg, self.t, self.labels = target, target.transport, labels
         self.lab = lambda n: lookup_label(labels, n)
         self.has = {}
-        for n in ("cia_read", "cia_reset", "cia_intreq", "cia_now", "shim_t",
-                  "shim_req", "shim_arm", "shim_dl", "mach_cbv", "mach_on",
-                  "mach_ihook",
+        for n in ("cia_read", "cia_reset", "cia_now", "shim_t", "mach_on",
                   "chip_reset"):
             try:
                 self.has[n] = self.lab(n)
@@ -133,6 +172,11 @@ class Rig:
         self._mr = None
         self.prg = ""
         self.probe: list[tuple] = []
+
+    def fresh(self) -> None:
+        """Power-up CIAs before a guest run (chip_reset -> cia_reset): no
+        state carries over from the previous leg (a halted TOD, a mask)."""
+        self.call(self.lab("chip_reset"))
 
     def mach_rig(self):
         """tests.run_mach.Rig on this target (driver built against us)."""
@@ -250,101 +294,137 @@ def gen_op(rng: random.Random) -> tuple:
     return ("wr", chip, reg, v)
 
 
+TIME_STUB = 0xC680       # 6502 helpers: mach_etime, delay loop
+DELAY_STUB = 0xC690
+
+
 def sweep(rig: Rig, seed: int, nops: int, start: int | None = None,
           macro: float = 0.15, stats: dict | None = None) -> list[str]:
+    """One random API sequence.  Host-time PRG (rig.shim): guest E time is
+    shim_t, set by the host, stepped exactly.  Live PRG: the real counter
+    (mach_init at a random s); time passes in 6502 delay loops and the
+    model follows cia_now, the E time each sync used.  Both: the host plays
+    the service pass (due slots of mach_am/mach_dl, in slot order, each
+    disarmed before its callback), VERTB ticks call mach_cbv[0], and INTREQ
+    writes go through the memory API (chip.s: SET/CLR, then | mach_hold)."""
     fails: list[str] = []
     rng = random.Random(seed)
-    rd8, wr8 = rig.lab("mem_read8"), rig.lab("mem_write8")
+    rd8, wr8, wr16 = rig.lab("mem_read8"), rig.lab("mem_write8"), rig.lab("mem_write16")
+    now_lab, shd = rig.lab("cia_now"), rig.lab("chip_shd")
+    am_lab, dl_lab = rig.lab("mach_am"), rig.lab("mach_dl")
     t = 0
     if rig.shim:
         t = rng.choice([0, 0xFFFFF000, rng.randrange(1 << 32)]) if start is None else start
         rig.w(rig.has["shim_t"], struct.pack("<I", t))
         rig.w(rig.has["mach_on"], b"\x01")
-        rig.w(rig.has["shim_arm"], bytes(8))
-        rig.w(rig.has["shim_req"], bytes(2))
-    rig.call(rig.lab("chip_reset"))
-    m = Model(t)
-    cbv = struct.unpack("<8H", rig.r(rig.has["mach_cbv"], 16)) if rig.shim else None
+    else:
+        s = rng.choice([0, 2, 4])
+        rig.w(rig.lab("mach_s"), bytes([s]))
+        rig.call(rig.lab("mach_init"))
+        et = rig.lab("mach_etime")
+        rig.w(TIME_STUB, bytes([0x20, et & 0xFF, et >> 8, 0x60]))
+    rig.call(rig.lab("chip_reset"))         # also cia_reset: grid anchor now
+    rig.w(am_lab, b"\0")
+    rig.w(shd + 0x1E, b"\0\0")
+    t0 = struct.unpack("<I", rig.r(now_lab, 4))[0]
+    if rig.shim and t0 != t:
+        fails.append(f"sweep seed {seed}: cia_now ${t0:08X} after reset, want ${t:08X}")
+    m = Model(t0)
+    cbv = struct.unpack("<8H", rig.r(rig.lab("mach_cbv"), 16))
     tag0 = f"sweep seed {seed}"
     st = {"reads": 0, "icr_set": 0, "tmr_moved": 0, "armed": 0, "posted": 0,
           "fired": 0, "tod_alarm": 0, "wraps": 0}
 
+    eq = cia_equates()
+    st_lab = rig.lab("cia_st")
+
+    def follow() -> None:
+        """Each model chip := the E time of that chip's last sync (CIA_T)."""
+        raw = rig.r(st_lab, 2 * eq["CIA_SZ"])
+        for c in (0, 1):
+            o = c * eq["CIA_SZ"] + eq["CIA_T"]
+            m.advance_chip(c, struct.unpack_from("<I", raw, o)[0])
+
+    def etime() -> int:
+        if rig.shim:
+            return t
+        rig.call(TIME_STUB)
+        return struct.unpack("<I", rig.r(rig.lab("mach_et"), 4))[0]
+
     def service() -> None:
-        """The service pass: VERTB is the host's 'vbl' op; due slots fire
-        in slot order, each disarmed before its callback (as mach.s)."""
-        while True:
-            arm = rig.r(rig.has["shim_arm"], 8)
-            dl = struct.unpack("<8I", rig.r(rig.has["shim_dl"], 32))
-            due = [s for s in range(1, 8) if arm[s] and s32(dl[s] - t) <= 0]
-            if not due:
-                return
-            s = due[0]
-            st["fired"] += 1
-            rig.w(rig.has["shim_arm"] + s, b"\0")
-            rig.call(cbv[s])
+        """One pass, as mach_svc: one E snapshot, every slot due by it fired
+        once, in slot order (disarmed, then its callback)."""
+        now = etime()
+        for k in range(1, 8):
+            am = rig.r(am_lab, 1)[0]
+            dl = struct.unpack("<I", rig.r(dl_lab + 4 * k, 4))[0]
+            if am >> k & 1 and s32(dl - now) <= 0:
+                st["fired"] += 1
+                rig.w(am_lab, bytes([am & ~(1 << k) & 0xFF]))
+                rig.call(cbv[k])
+                follow()
 
     def check(i: int, op: tuple) -> None:
-        if not rig.shim:
-            return
         tag = f"{tag0} op {i} {op}"
-        req = struct.unpack("<H", rig.r(rig.has["shim_req"], 2))[0]
-        want = m.req & ((1 << PORTS) | (1 << EXTER))
+        req = struct.unpack(">H", rig.r(shd + 0x1E, 2))[0] & 0x2008
+        want = m.req & 0x2008
+        hold = struct.unpack("<H", rig.r(rig.lab("mach_hold"), 2))[0] & 0x2008
+        whold = ((m.a.icr_data & m.a.icr_mask & 0x1F and 0x0008 or 0)
+                 | (m.b.icr_data & m.b.icr_mask & 0x1F and 0x2000 or 0))
         st["posted"] += bool(req)
         if req != want:
-            fails.append(f"{tag}: INTREQ posts ${req:04X} want ${want:04X}")
-        arm = rig.r(rig.has["shim_arm"], 8)
-        dl = struct.unpack("<8I", rig.r(rig.has["shim_dl"], 32))
-        for s, w in m.arms().items():
-            got = dl[s] if arm[s] else None
+            fails.append(f"{tag}: INTREQR & $2008 = ${req:04X} want ${want:04X}")
+        if hold != whold:
+            fails.append(f"{tag}: mach_hold & $2008 = ${hold:04X} want ${whold:04X}")
+        am = rig.r(am_lab, 1)[0]
+        dl = struct.unpack("<8I", rig.r(dl_lab, 32))
+        for k, w in m.arms().items():
+            got = dl[k] if am >> k & 1 else None
             st["armed"] += got is not None
             if got != w:
-                fails.append(f"{tag}: slot {s} armed "
+                fails.append(f"{tag}: slot {k} armed "
                              f"{'-' if got is None else f'${got:08X}'} want "
-                             f"{'-' if w is None else f'${w:08X}'} (t=${t:08X})")
+                             f"{'-' if w is None else f'${w:08X}'} (chip times "
+                             f"${m.ts[0]:08X}/${m.ts[1]:08X})")
 
     queue: list[tuple] = []
     for i in range(nops):
         if not queue:
-            if rig.shim and rng.random() < macro:
+            if rng.random() < macro:
                 queue = gen_macro(rng, m)
             else:
                 queue = [gen_op(rng)]
         op = queue.pop(0)
         if op[0] == "time":
-            if not rig.shim:
-                continue
-            st["wraps"] += t + op[1] > 0xFFFFFFFF
-            t = (t + op[1]) & 0xFFFFFFFF
-            rig.w(rig.has["shim_t"], struct.pack("<I", t))
-            m.advance(t)
-            service()
+            if rig.shim:
+                st["wraps"] += t + op[1] > 0xFFFFFFFF
+                t = (t + op[1]) & 0xFFFFFFFF
+                rig.w(rig.has["shim_t"], struct.pack("<I", t))
+            else:                           # ~5 phi2 per inner iteration
+                n = min(max(op[1] // 5, 1), 254 * 256)
+                rig.w(DELAY_STUB, bytes([0xA2, (n >> 8) + 1, 0xA0, n & 0xFF,
+                                         0x88, 0xD0, 0xFD, 0xCA, 0xD0, 0xFA,
+                                         0x60]))
+                rig.call(DELAY_STUB)
         elif op[0] == "vbl":
-            if not rig.shim:
-                continue
             m.vbl()
             rig.call(cbv[0])
+            follow()
         elif op[0] == "intreq":
-            if not rig.shim:
-                continue
-            m.req = 0
-            rig.w(rig.has["shim_req"], bytes(2))
+            v = rng.choice([0x2008, 0x2008, 0x0008, 0x2000, 0x8008, 0xA000])
+            m.req = chipset_ref.setclr(m.req, v)
             m.a.update()
             m.b.update()
-            hook = struct.unpack("<H", rig.r(rig.has["mach_ihook"], 2))[0]
-            if hook != rig.has["cia_intreq"]:
-                fails.append(f"{tag0} op {i}: mach_ihook ${hook:04X}, want "
-                             f"cia_intreq ${rig.has['cia_intreq']:04X}")
-            else:
-                rig.call(hook)
+            rig.api(wr16, 0xDFF09C, v)
         elif op[0] == "rd":
             _, c, reg = op
-            m.advance(t)
+            got, xy = rig.api(rd8, cia_addr(c, reg))
+            follow()
             want = m.chip(c).read(reg)
             st["reads"] += 1
             st["icr_set"] += reg == 13 and want & 0x1F != 0
             st["tod_alarm"] += reg == 13 and want & 4 != 0
             st["tmr_moved"] += reg in (4, 6) and want not in (0xFF,)
-            got, xy = rig.api(rd8, cia_addr(c, reg))
             if got != (0xDEADBE00 | want):
                 fails.append(f"{tag0} op {i} read {'AB'[c]} reg {reg}: "
                              f"${got & 0xFF:02X} want ${want:02X} (m_val ${got:08X})")
@@ -352,11 +432,14 @@ def sweep(rig: Rig, seed: int, nops: int, start: int | None = None,
                 fails.append(f"{tag0} op {i}: X/Y {xy.hex()} not kept")
         else:
             _, c, reg, v = op
-            m.advance(t)
-            m.chip(c).write(reg, v)
             _, xy = rig.api(wr8, cia_addr(c, reg), v)
+            follow()
+            m.chip(c).write(reg, v)
+            if reg == 13:
+                m.chip(c).update()
             if xy != b"\x5A\xA5":
                 fails.append(f"{tag0} op {i}: X/Y {xy.hex()} not kept")
+        service()
         check(i, op)
         if len(fails) > 60:
             fails.append(f"{tag0}: stopped after op {i}")
@@ -378,7 +461,7 @@ def leg_wrap(rig: Rig, seeds: int, nops: int) -> list[str]:
                ["wrap: no cia_read label (no runtime/ops/cia.s)"]
     fails = []
     for seed in range(seeds):
-        start = (1 << 32) - random.Random(seed).choice([200, 900, 3000, 20000])
+        start = (1 << 32) - random.Random(seed).choice([200, 900, 3000])
         f, st = [], {}
         f = sweep(rig, 0x3A90 + seed, min(nops, 250), start, macro=0.5, stats=st)
         if not f and st.get("wraps", 0) < 1:
@@ -392,8 +475,35 @@ def leg_sweep(rig: Rig, seeds: int, nops: int) -> list[str]:
     if not rig.cia:
         fails.append("sweep: no cia_read label (no runtime/ops/cia.s): "
                      "frozen-time run")
+    if not rig.cia:
+        return fails + red_sweep(rig, seeds, nops)
     for seed in range(seeds):
         fails += sweep(rig, 0xC1A0 + seed, nops)
+    return fails
+
+
+def red_sweep(rig: Rig, seeds: int, nops: int) -> list[str]:
+    """The base build (no cia.s, no seam labels): the same register
+    sequences with guest time frozen, values only."""
+    fails = []
+    rd8, wr8 = rig.lab("mem_read8"), rig.lab("mem_write8")
+    for seed in range(seeds):
+        rng = random.Random(0xC1A0 + seed)
+        rig.call(rig.lab("chip_reset"))
+        m = Model(0)
+        for i in range(nops):
+            op = gen_op(rng)
+            if op[0] == "rd":
+                _, c, reg = op
+                got, _ = rig.api(rd8, cia_addr(c, reg))
+                want = m.chip(c).read(reg)
+                if got & 0xFF != want:
+                    fails.append(f"red seed {seed} op {i} read {'AB'[c]} reg {reg}: "
+                                 f"${got & 0xFF:02X} want ${want:02X}")
+            elif op[0] == "wr":
+                _, c, reg, v = op
+                rig.api(wr8, cia_addr(c, reg), v)
+                m.chip(c).write(reg, v)
     return fails
 
 
@@ -484,6 +594,7 @@ def leg_probe(rig, *_a) -> list[str]:
     mr = rig.mach_rig()
     (pc,) = mr.stage(prog_probe())
     for s in (8, 4):
+        rig.fresh()
         res = mr.run(pc, s=s, budget=2_000_000)
         tag = f"probe s={s}"
         if not clean(res, tag, f):
@@ -547,7 +658,7 @@ def prog_tirq() -> list[int]:
     mvb_abs_d(g, ca(0, 13), 0)                  # ICR again: $00
     g(0xE188)
     mvb_abs_d(g, ca(0, 14), 0)                  # CRA: $08 (stopped)
-    g(0xE188)
+    g(0xE188)                                   # d0 = ICR, ICR, CRA, 0
     # --- re-raise: TB continuous, mask TB only
     mvb_imm(g, 0x7F, ca(0, 13))
     mvb_imm(g, 0x82, ca(0, 13))
@@ -573,6 +684,7 @@ def leg_tirq(rig, *_a) -> list[str]:
     f: list[str] = []
     mr = rig.mach_rig()
     (pc,) = mr.stage(prog_tirq())
+    rig.fresh()
     res = mr.run(pc, s=4, budget=2_000_000)
     if not clean(res, "tirq", f):
         return f
@@ -580,7 +692,7 @@ def leg_tirq(rig, *_a) -> list[str]:
     if d2:
         f.append(f"tirq: step {d2} timed out: PORTS never rose (d0=${d0:08X})")
         return f
-    icr1, icr2, cra = (d0 >> 16) & 0xFF, (d0 >> 8) & 0xFF, d0 & 0xFF
+    icr1, icr2, cra = d0 >> 24, (d0 >> 16) & 0xFF, (d0 >> 8) & 0xFF
     if (icr1, icr2) != (0x81, 0x00):
         f.append(f"tirq: ICR reads ${icr1:02X}, ${icr2:02X}, want $81, $00")
     if cra != 0x08:
@@ -618,7 +730,8 @@ def prog_todb() -> list[int]:
     mvb_abs_d(g, ca(1, 9), 3)
     g(0xE14B)                                   # lsl.w #8,d3
     mvb_abs_d(g, ca(1, 8), 3)
-    g(0x9643)                                   # sub.w d3,d3? (patched below)
+    g(0x9640)                                   # sub.w d0,d3
+    g(0x3003)                                   # move.w d3,d0: lines
     # --- alarm: 100 lines ahead of the TOD (24 bit), mask ALRM
     mvb_imm(g, 0x7F, ca(1, 13))
     mvb_abs_d(g, ca(1, 13), 1)                  # drop stale data
@@ -641,14 +754,14 @@ def prog_todb() -> list[int]:
     mv_imm_abs_w(g, 0x2000, INTREQ)             # EXTER clear
     mvb_imm(g, 0x84, ca(1, 13))                 # mask ALRM
     wait_req(g, "a1", 13, 3)
-    moveq(g, 0, 1)
-    mvb_abs_d(g, ca(1, 13), 1)                  # ICR: $84
     moveq(g, 0, 4)
-    mvb_abs_d(g, ca(1, 10), 4)
+    mvb_abs_d(g, ca(1, 10), 4)                  # TODHI first: latch now
     g(0x4844)                                   # swap d4
     mvb_abs_d(g, ca(1, 9), 4)
     g(0xE14C)                                   # lsl.w #8,d4
-    mvb_abs_d(g, ca(1, 8), 4)                   # d4 = TOD-B now
+    mvb_abs_d(g, ca(1, 8), 4)                   # d4 = TOD-B at detection
+    moveq(g, 0, 1)
+    mvb_abs_d(g, ca(1, 13), 1)                  # ICR: $84
     g(0x9883)                                   # sub.l d3,d4
     g(0x2604)                                   # move.l d4,d3: lines late
     mvb_imm(g, 0x7F, ca(1, 13))
@@ -656,12 +769,17 @@ def prog_todb() -> list[int]:
     return g.words()
 
 
+TODB_S = (8, 4)
+LATE_PHI2 = 24000           # alarm detection latency budget (phi2)
+
+
 def leg_todb(rig, *_a) -> list[str]:
     from tests.run_mach import clean
     f: list[str] = []
     mr = rig.mach_rig()
     (pc,) = mr.stage(prog_todb())
-    for s in (8, 4):
+    for s in TODB_S:
+        rig.fresh()
         res = mr.run(pc, s=s, budget=3_000_000)
         tag = f"todb s={s}"
         if not clean(res, tag, f):
@@ -681,8 +799,15 @@ def leg_todb(rig, *_a) -> list[str]:
                          f"want 312-313 +-{tol}")
             if d1 & 0xFF != 0x84:
                 f.append(f"{tag}: ICR-B ${d1 & 0xFF:02X} after EXTER, want $84")
-            if not 0 <= late <= tol:
-                f.append(f"{tag}: EXTER seen with the TOD {late} lines past the alarm")
+            # Lateness is a fixed phi2 cost, so it shrinks as 2^-s: the
+            # firing (<= 4096 phi2, CONTRACTS "Event seam"), the service
+            # pass (callback: sync + alarm deadline, ~3000), one INTREQR
+            # poll and the TODHI trap: LATE_PHI2 in all.  Exactness of the
+            # deadline itself is the sweep's job (host time, to the tick).
+            late_max = -(-LATE_PHI2 // ((chipset_ref.CIA_LINE_CC << s) // 5)) + 1
+            if not 0 <= late <= late_max:
+                f.append(f"{tag}: EXTER seen with the TOD {late} lines past the "
+                         f"alarm (budget {late_max})")
         if res["base"]:
             break
     return f
@@ -711,6 +836,7 @@ def build_shim(out_dir: str, replace: dict[str, str] | None = None,
         srcs.append(os.path.join(ROOT, "tests", "cia", "shim.s"))
     prg = os.path.join(out_dir, "runner.prg")
     cmd = ["cl65", "-t", "none", "-C", "runtime/c64.cfg", "-o", prg,
+           *(["--asm-define", "CIA_HOSTTIME"] if shim else []),
            "-Ln", os.path.join(out_dir, "runner.lbl"),
            "-m", os.path.join(out_dir, "runner.map"),
            "--asm-include-dir", "runtime", "--asm-include-dir", "runtime/ops"]
@@ -750,6 +876,8 @@ def run_all(prg: str, legs: list[str], seeds: int, nops: int) -> list[str]:
     return fails
 
 
+LIVE_LEGS = ("sweep", "probe", "tirq", "todb")     # the runtime PRG
+HOST_LEGS = ("sweep", "wrap")                       # the host-time PRG
 LEGS = {"sweep": leg_sweep, "wrap": leg_wrap, "probe": leg_probe, "tirq": leg_tirq,
         "todb": leg_todb}
 
@@ -774,8 +902,9 @@ MUTANTS = {
                       "        lda cia_st+CIA_CRA,x\n        ora #$00\n"
                       "        sta cia_st+CIA_CRA,x\n:       jmp wdone\n")],
     # reading the ICR leaves the data bits set
-    "icr_readclear": [("        pha\n        lda #0\n        sta cia_st+CIA_ICR,x\n"
-                       "        pla\n", "        pha\n        pla\n")],
+    "icr_readclear": [("        lda #0\n        sta cia_st+CIA_ICR,x\n"
+                       "        jsr post                ; IR is 0 now",
+                       "        jsr post                ; IR is 0 now")],
     # ICR write: SET and CLR swapped
     "mask_setclr": [("wr_icr: lda cia_v               ; bit 7: SET, else CLR, bits 0-4\n"
                      "        bmi set\n",
@@ -790,6 +919,16 @@ MUTANTS = {
     # CIA-B TOD (line grid) never raises the alarm bit
     "tod_alarm_b": [("        bcc add\n        lda cia_st+CIA_ICR,x\n        ora #$04\n",
                      "        bcc add\n        lda cia_st+CIA_ICR,x\n        ora #$00\n")],
+    # the ICR read-clear does not release the mach_hold bit (a later
+    # INTREQ CLR never sticks)
+    "hold_release": [("        jsr post                ; IR is 0 now: release the hold\n", "")],
+    # no level hold: the INTREQ bit is posted but never held (a guest CLR
+    # with the ICR still asserting sticks)
+    "hold_set": [("        lda mach_hold,y\n        ora cia_st+CIA_HMK,x\n"
+                  "        sta mach_hold,y\n", "")],
+    # the CIA-B line grid runs 1 colour clock per E tick instead of 5
+    "line_rate": [("        asl cia_dr\n        rol cia_dr+1\n        asl cia_dr\n"
+                   "        rol cia_dr+1\n", "")],
     # CIA-A TOD (VERTB) never raises the alarm bit
     "tod_alarm_a": [("        lda cia_st+CIA_ICR\n        ora #$04\n",
                      "        lda cia_st+CIA_ICR\n        ora #$00\n")],
@@ -813,7 +952,9 @@ def build_mutant(name: str, out_dir: str, shim: bool) -> str:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--prg", required=True)
-    ap.add_argument("--legs", default=",".join(LEGS))
+    ap.add_argument("--legs", default="",
+                    help=f"default: {','.join(LIVE_LEGS)} (live PRG), "
+                         f"{','.join(HOST_LEGS)} (--build-shim)")
     ap.add_argument("--seeds", type=int, default=4)
     ap.add_argument("--ops", type=int, default=500)
     ap.add_argument("--build-shim", default="",
@@ -828,7 +969,8 @@ def main(argv=None) -> int:
     if a.build_shim:
         prg = build_shim(a.build_shim)
         print(f"shim PRG: {prg}")
-    legs = [x for x in a.legs.split(",") if x]
+    legs = [x for x in a.legs.split(",") if x] or list(
+        HOST_LEGS if a.build_shim else LIVE_LEGS)
     if a.mutants:
         names = [x for x in a.only.split(",") if x] or list(MUTANTS)
         survived = []

@@ -561,17 +561,26 @@ Tests: `tests/run_cia.py` (+ `tests/cia/shim.s`), `host/tests/test_cia.py`.
   underflow) only while the timer is started, counts E ticks, and its ICR
   mask bit is set (TA also when TB counts TA underflows with mask TB). Slot
   5 is armed at the alarm's line while CIA-B's TOD runs and mask ALRM is
-  set. `mach_arm`/`mach_disarm` are called only when that wish changes. A
-  callback syncs its chip (which posts) and re-arms.
-- **Interrupts.** Whenever a sync, an ICR write or a TOD-A tick leaves
-  `ICR data & mask ≠ 0`, the chip calls `mach_post` (CIA-A PORTS = 3,
-  CIA-B EXTER = 13): level semantics, as chipset_ref's `update()`. A guest
-  INTREQ write must call `cia_intreq` (re-posts each chip still asserting:
-  chipset_ref `custom_write($09C)`).
+  set. The seam's `mach_am`/`mach_dl` are the truth: `mach_arm` is called
+  only when the slot is not armed at the wanted deadline, `mach_disarm`
+  only when it is armed (so `mach_init` disarming every slot, or a firing,
+  is seen at once). A callback syncs its chip (which posts) and re-arms.
+- **Interrupts** (the seam's level hold). After every sync, ICR access and
+  TOD-A tick, each chip keeps its `mach_hold` bit (CIA-A PORTS = bit 3,
+  CIA-B EXTER = bit 13) equal to its IR condition (`ICR data & mask ≠ 0`)
+  and calls `mach_post` on the rising edge. chip.s ORs `mach_hold` back
+  after every guest INTREQ write, so PORTS/EXTER cannot be cleared while
+  the ICR asserts (chipset_ref `update()` after every `eclock` and INTREQ
+  write); the ICR read-clear releases the hold.
 - **Host-visible state** (`runner.lbl`): `cia_st` (2 × `CIA_SZ` bytes, the
-  `CIA_*` field layout in cia.s), `cia_now` (u32, E time of the last sync),
-  `cia_ok` (0 until the first access or `chip_reset`). `chip_reset` ends in
-  `cia_reset` (both chips to power-up, anchored at now, slots 1–5
-  disarmed, callbacks stored).
+  `CIA_*` field layout in cia.s; `CIA_T` = the chip's last sync time),
+  `cia_now` (u32, E time of the last sync), `cia_ok` (0 until the first
+  access or `chip_reset`). `chip_reset` ends in `cia_reset` (both chips to
+  power-up, anchored at now, slots 1–5 disarmed, `mach_hold` bits 3/13
+  released, callbacks stored in `mach_cbv` slots 0–5).
+- **Test build.** `CIA_HOSTTIME` (an `--asm-define`, used only by
+  `tests/run_cia.py --build-shim` with `tests/cia/shim.s`) makes `getnow`
+  read the host-written `shim_t` instead of `mach_etime`, so a test can put
+  guest time anywhere (the u32 wrap). The runtime build never defines it.
 - **Link order.** `cia.s` links after `chip.s` and before `mach.s`
   (Makefile); no module before it moves; `core.s` is unchanged.
