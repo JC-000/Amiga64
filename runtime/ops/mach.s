@@ -65,6 +65,7 @@
 .export mach_etime, mach_arm, mach_disarm, mach_post, mach_kick
 .export mach_et, mach_at, mach_cbv, mach_hold, mach_am, mach_dl, mach_chi
 .export mach_in, mach_insv
+.export mach_fhook              ; W10-P cop: the per-frame hook (cop_frame)
 .export MACH_NSLOT
 ; W9-I: S3.3 interrupt delivery (docs/CONTRACTS.md "Interrupt delivery (S3.3)")
 .export mach_lvl, mach_ichk, mach_nirq, mach_stp
@@ -129,6 +130,7 @@ mach_act:  .res 1       ; scratch: mach_lvl / mach_wk
 mach_fs:   .res 1       ; a slot is due now: run one emu_step before emu_run
 mach_es:   .res 4       ; mach_slots' E snapshot (callbacks move mach_et)
 mach_nirq: .res 4       ; interrupts delivered (u32 LE, wraps; tests)
+mach_fhook: .res 2      ; W10-P cop: frame hook (LE; high byte 0 = none), after slot 0's VERTB callback
 
 .segment "CODE"
 
@@ -426,6 +428,15 @@ post:   inc mach_frames         ; one VERTB
         inc mach_frames+3
 :       lda #MACH_VERTB_BIT     ; INTREQ bit 5 (W9-I: via the post path)
         jsr mach_pset
+        jsr slot0               ; W10-P cop: slot 0's hook, then
+        lda mach_fhook+1        ; W10-P cop: the frame hook (the copper),
+        beq :+                  ; W10-P cop: once per VERTB, callback rules
+        sta mach_jv+1           ; W10-P cop
+        lda mach_fhook          ; W10-P cop
+        sta mach_jv             ; W10-P cop
+        jmp (mach_jv)           ; W10-P cop
+:       rts                     ; W10-P cop
+slot0:                          ; W10-P cop
         ldx #0                  ; slot 0's hook (CIA-A TOD), if any
         jmp mach_cb
 .endproc
