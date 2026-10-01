@@ -496,6 +496,14 @@ no link dependency on any client.
   A kick costs one pass (~400 cycles [EST, static]) per arm. Outside
   `mach_run`, `mach_in` = 0, so a client's direct-API use (tests) never
   sets `st_halt`.
+- **Register convention (supervisor R4).** Every seam routine clobbers
+  A/X/Y unless stated here; the exceptions are `mach_etime`, `mach_arm`,
+  `mach_post` (keep Y). Callbacks may clobber A/X/Y.
+- **`mach_cbv` lifetime (R1).** Zero at boot (BSS); never cleared by
+  `mach_init` or `mach_run`'s lazy `mach_init`, so a client fills it once at
+  its own init.
+- **E is a true u32 (R3)** at every s (tested at s = 0, 4, 8, 9, 16 across a
+  C wrap, `run_irq` leg `etime`).
 - **Callbacks.** `mach_cbv`: 2 bytes per slot (LE address; high byte 0 =
   none), RAM, filled by the client at its own init. A callback runs in the
   service pass, never in the IRQ, with `$01` = `$35`; it may call

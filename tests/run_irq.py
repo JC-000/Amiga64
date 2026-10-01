@@ -376,7 +376,7 @@ def leg_etime(rig: Rig) -> list[str]:
     for cs, chis in (((0xFFFFFF00, 0x00000100, 0x00001000), (0, 1, 1)),
                      ((0x12345678, 0x80000000, 0xFFFFFFFF), (0, 0, 0)),
                      ((0x7FFFFFF0, 0x00000010, 0x00000020), (0, 1, 1))):
-        for s in (0, 4, 9, 16):
+        for s in (0, 4, 8, 9, 16):
             blk = struct.pack("<IIBxxxI", cs[0], cs[1], s, cs[2])
             rig.w(P, blk)
             r = rig.dcall("drv_et")
