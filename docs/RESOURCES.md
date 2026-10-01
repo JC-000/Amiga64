@@ -66,6 +66,7 @@ registered as-is (no renames: `build/runner.lbl` consumers exist).
 | `REC_` `ULT_` `CIA1_` `CIA2_` `VIC_` | sys (hardware regs, declared in `rc/ram.inc`) | `REC_COMMAND` |
 | `chip_` | chip (W7-T I/O trap stub, `runtime/ops/chip.s`) | `chip_split`, `chip_cia` |
 | `c2v_` `C2V_` | c2v (W7-V VIC converter, `runtime/ops/c2v.s`) | `c2v_bitmap`, `C2V_ROWS` |
+| `cia_` `CIA_` | cia (W9-C guest CIA-A/B, `runtime/ops/cia.s`) | `cia_read`, `cia_st`, `CIA_SZ`, `CIA_TOD` |
 | `rc_` | the resource contract itself | reserved for future contract symbols |
 
 New symbols MUST take a registered prefix of their owning module (new
