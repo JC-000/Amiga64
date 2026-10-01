@@ -62,6 +62,7 @@ XY_OUT = 0xC7F0
 VERBOSE = False
 
 PORTS, EXTER = 3, 13
+CASCADE_CAP = 1 << 30     # cia.s caps a cascade deadline at 2^30 E ahead
 SLOT_ATA, SLOT_ATB, SLOT_BTA, SLOT_BTB, SLOT_BTOD = 1, 2, 3, 4, 5
 
 
@@ -102,6 +103,7 @@ class Model:
         self.a.pra_in = CIAA_PRA_IN
         self.t0 = t0                    # E time of cia_reset: line grid 0
         self.ts = [t0, t0]
+        self.ph = 0                     # CIA-B line phase (colour clocks)
 
     @property
     def t(self) -> int:
@@ -120,9 +122,10 @@ class Model:
             n = 0
         self.ts[c] = t & 0xFFFFFFFF
         self.chip(c).eclock(n)
-        if c == 1:
-            self.b.tod_ticks(cia_lines((self.ts[1] - self.t0) & 0xFFFFFFFF)
-                             - cia_lines((old - self.t0) & 0xFFFFFFFF))
+        if c == 1:                  # the grid keeps its phase across a
+            x = chipset_ref.CIA_CC_PER_E * n + self.ph      # re-anchor
+            self.ph = x % chipset_ref.CIA_LINE_CC
+            self.b.tod_ticks(x // chipset_ref.CIA_LINE_CC)
 
     def advance(self, t: int) -> None:
         self.advance_chip(0, t)
@@ -136,15 +139,28 @@ class Model:
         out = {}
         for c, (sa, sb) in ((0, (SLOT_ATA, SLOT_ATB)), (1, (SLOT_BTA, SLOT_BTB))):
             x, t = self.chip(c), self.ts[c]
-            ta_on = x.cra & 0x21 == 0x01 and (
-                x.icr_mask & 1 or (x.icr_mask & 2 and x.crb & 0x41 == 0x41))
-            out[sa] = (t + x.ta + 1) & 0xFFFFFFFF if ta_on else None
-            tb_on = x.crb & 0x61 == 0x01 and x.icr_mask & 2
-            out[sb] = (t + x.tb + 1) & 0xFFFFFFFF if tb_on else None
+            out[sa] = out[sb] = None
+            ta_runs = x.cra & 0x21 == 0x01
+            # a timer's own event only while its interrupt can still rise:
+            # mask bit set and ICR data bit still clear (round-1 F1)
+            if ta_runs and x.icr_mask & 1 and not x.icr_data & 1:
+                out[sa] = (t + x.ta + 1) & 0xFFFFFFFF
+            if not (x.crb & 1 and x.icr_mask & 2 and not x.icr_data & 2):
+                continue
+            if x.crb & 0x60 == 0:                       # TB counts E ticks
+                out[sb] = (t + x.tb + 1) & 0xFFFFFFFF
+            elif x.crb & 0x40 and ta_runs:              # TB counts TA underflows
+                if x.cra & 0x08:                        # one-shot TA: one pulse
+                    d = x.ta + 1 if x.tb == 0 else None
+                else:                                   # TB's own underflow
+                    d = x.ta + 1 + x.tb * (x.ta_latch + 1)
+                if d is not None:
+                    out[sb] = (t + min(d, CASCADE_CAP)) & 0xFFFFFFFF
         b = self.b
         if not b.tod_halt and b.icr_mask & 4:
-            k = cia_lines((self.ts[1] - self.t0) & 0xFFFFFFFF) + cia_tod_kprime(b.tod, b.alarm)
-            out[SLOT_BTOD] = (self.t0 + cia_line_e(k)) & 0xFFFFFFFF
+            k = cia_tod_kprime(b.tod, b.alarm)
+            out[SLOT_BTOD] = (self.ts[1] + -(-(chipset_ref.CIA_LINE_CC * k - self.ph)
+                                             // chipset_ref.CIA_CC_PER_E)) & 0xFFFFFFFF
         else:
             out[SLOT_BTOD] = None
         return out
@@ -222,6 +238,22 @@ def gen_macro(rng: random.Random, m: Model) -> list[tuple]:
     c = rng.randrange(2)
     cia = m.chip(c)
     k = rng.random()
+    big = rng.choice([rng.randrange(1 << 17, 1 << 20), rng.randrange(1 << 20, 1 << 24)])
+    if k < 0.08:                    # round-1 F2: div with a divisor > 32768
+        latch = rng.choice([rng.randrange(0x8000, 0xFFFF), 0x8000, 0xFFFE, 0xFFFF])
+        return [("wr", c, 4, latch & 0xFF), ("wr", c, 5, latch >> 8),
+                ("wr", c, 14, 0x11), ("time", big), ("rd", c, 4), ("rd", c, 5),
+                ("time", rng.randrange(1, 3 * latch)), ("rd", c, 5), ("rd", c, 4),
+                ("wr", c, 14, 0x00)]
+    if k < 0.14:                    # round-1 F2: span 65536, TB cascade
+        tal = rng.choice([0xFFFF, 0, 1, rng.randrange(0x8000, 0x10000)])
+        return [("wr", c, 4, tal & 0xFF), ("wr", c, 5, tal >> 8),
+                ("wr", c, 6, 0xFF), ("wr", c, 7, 0xFF),
+                ("wr", c, 15, rng.choice([0x51, 0x41, 0x59])), ("wr", c, 14, 0x11),
+                ("wr", c, 13, 0x80 | rng.choice([2, 3, 0])),
+                ("time", big), ("rd", c, 6), ("rd", c, 7), ("rd", c, 13),
+                ("time", big), ("rd", c, 7), ("rd", c, 6), ("rd", c, 13),
+                ("wr", c, 14, 0x00), ("wr", c, 15, 0x00)]
     if k < 0.6:
         tb = rng.random() < 0.4
         lo, hi, cr = (6, 7, 15) if tb else (4, 5, 14)
@@ -299,7 +331,8 @@ DELAY_STUB = 0xC690
 
 
 def sweep(rig: Rig, seed: int, nops: int, start: int | None = None,
-          macro: float = 0.15, stats: dict | None = None) -> list[str]:
+          macro: float = 0.15, stats: dict | None = None,
+          script: list[tuple] | None = None) -> list[str]:
     """One random API sequence.  Host-time PRG (rig.shim): guest E time is
     shim_t, set by the host, stepped exactly.  Live PRG: the real counter
     (mach_init at a random s); time passes in 6502 delay loops and the
@@ -387,7 +420,9 @@ def sweep(rig: Rig, seed: int, nops: int, start: int | None = None,
                              f"{'-' if w is None else f'${w:08X}'} (chip times "
                              f"${m.ts[0]:08X}/${m.ts[1]:08X})")
 
-    queue: list[tuple] = []
+    queue: list[tuple] = list(script or [])
+    if script:
+        nops = len(script)
     for i in range(nops):
         if not queue:
             if rng.random() < macro:
@@ -395,7 +430,12 @@ def sweep(rig: Rig, seed: int, nops: int, start: int | None = None,
             else:
                 queue = [gen_op(rng)]
         op = queue.pop(0)
-        if op[0] == "time":
+        if rig.shim and not script and rng.random() < 0.02:    # F3: time backwards
+            op = ("back", rng.choice([1, rng.randrange(1, 5000), rng.randrange(1, 1 << 30)]))
+        if op[0] == "back":
+            t = (t - op[1]) & 0xFFFFFFFF
+            rig.w(rig.has["shim_t"], struct.pack("<I", t))
+        elif op[0] == "time":
             if rig.shim:
                 st["wraps"] += t + op[1] > 0xFFFFFFFF
                 t = (t + op[1]) & 0xFFFFFFFF
@@ -468,6 +508,170 @@ def leg_wrap(rig: Rig, seeds: int, nops: int) -> list[str]:
             f.append(f"wrap seed {seed}: time never crossed 2^32")
         fails += f
     return fails
+
+
+def st_field(rig: Rig, c: int, name: str, n: int = 1) -> int:
+    eq = cia_equates()
+    a = rig.lab("cia_st") + c * eq["CIA_SZ"] + eq[name]
+    return int.from_bytes(rig.r(a, n), "little")
+
+
+def leg_neggap(rig: Rig, *_a) -> list[str]:
+    """A negative E-time gap (a later mach_init restarts the counter) is 0
+    ticks plus a re-anchor (round-1 F3).  Host time only."""
+    if not rig.shim:
+        return ["neggap: needs the host-time PRG"]
+    f: list[str] = []
+    rd8, wr8 = rig.lab("mem_read8"), rig.lab("mem_write8")
+    st = rig.has["shim_t"]
+
+    def at(t):
+        rig.w(st, struct.pack("<I", t & 0xFFFFFFFF))
+
+    def ta(c):
+        lo = rig.api(rd8, cia_addr(c, 4))[0] & 0xFF
+        return (rig.api(rd8, cia_addr(c, 5))[0] & 0xFF) << 8 | lo
+
+    rig.w(rig.has["mach_on"], b"\x01")
+    for c in (0, 1):
+        at(0x40000000)
+        rig.call(rig.lab("chip_reset"))
+        for reg, v in ((4, 0xE8), (5, 0x03), (14, 0x11)):    # 1000, continuous
+            rig.api(wr8, cia_addr(c, reg), v)
+        at(0x40000000 + 100)
+        v1 = ta(c)                                          # 1000 - 100
+        tod1 = rig.api(rd8, cia_addr(c, 8))[0] & 0xFF
+        at(0x40000000 - 7777)                               # backwards
+        v2 = ta(c)
+        t2 = st_field(rig, c, "CIA_T", 4)
+        at(0x40000000 - 7777 + 10)
+        v3 = ta(c)
+        tag = f"neggap {'AB'[c]}"
+        if (v1, v2, v3) != (900, 900, 890):
+            f.append(f"{tag}: TA {v1}, {v2} (after going back), {v3}; want 900, 900, 890")
+        if t2 != 0x40000000 - 7777:
+            f.append(f"{tag}: CIA_T ${t2:08X} after the negative gap, want re-anchored "
+                     f"${0x40000000 - 7777:08X}")
+        if c == 1:
+            tod2 = rig.api(rd8, cia_addr(c, 8))[0] & 0xFF
+            if tod2 != tod1:
+                f.append(f"{tag}: TOD-B {tod1} -> {tod2} over 10 E ticks after the gap")
+    return f
+
+
+def leg_resync(rig: Rig, *_a) -> list[str]:
+    """256 VERTB hooks sync both chips (round-1 F3).  Host time only."""
+    if not rig.shim:
+        return ["resync: needs the host-time PRG"]
+    f: list[str] = []
+    st = rig.has["shim_t"]
+    rig.w(rig.has["mach_on"], b"\x01")
+    rig.w(st, struct.pack("<I", 5000))
+    rig.call(rig.lab("chip_reset"))
+    rig.w(st, struct.pack("<I", 5000 + 12345))
+    cb = struct.unpack("<H", rig.r(rig.lab("mach_cbv"), 2))[0]
+    rig.w(STUB, bytes([0xA9, 0, 0x8D, XY_OUT & 0xFF, XY_OUT >> 8,           # n = 0
+                       0x20, cb & 0xFF, cb >> 8,                           # jsr hook
+                       0xEE, XY_OUT & 0xFF, XY_OUT >> 8,                   # inc n
+                       0xD0, 0xF8, 0x60]))                                 # 256 x
+    rig._tramp = None
+    rig.call(STUB)
+    for c in (0, 1):
+        t = st_field(rig, c, "CIA_T", 4)
+        if t != 5000 + 12345:
+            f.append(f"resync: chip {'AB'[c]} CIA_T ${t:08X} after 256 VERTBs, "
+                     f"want ${5000 + 12345:08X}")
+    tod = st_field(rig, 0, "CIA_TOD", 3)
+    if tod != 256:
+        f.append(f"resync: CIA-A TOD {tod} after 256 VERTBs, want 256")
+    return f
+
+
+COST_CASES = {               # TAL, CRA, CRB, ICR (round-1 F1, the reviewer's)
+    "ta20_mskTA":        (0x0014, 0x11, 0x00, 0x81),
+    "ta0_mskTA":         (0x0000, 0x11, 0x00, 0x81),
+    "ta0_cascade_mskTB": (0x0000, 0x11, 0x51, 0x82),
+    "ta7_cascade_mskTB": (0x0007, 0x11, 0x51, 0x82),
+    "ta63_cascade_mskTB": (0x003F, 0x11, 0x51, 0x82),
+    "ta255_cascade_mskTB": (0x00FF, 0x11, 0x51, 0x82),
+}
+COST_N = 3000
+
+
+def prog_cost(tal: int, cra: int, crb: int, icr: int) -> list[int]:
+    """Program CIA-A, then a register-only dbra loop of COST_N; HALT."""
+    from tests.run_mach import G, HALT, mv_imm_d_w
+    g = G()
+    mvb_imm(g, 0x7F, ca(0, 13))
+    mvb_imm(g, tal & 0xFF, ca(0, 4))
+    mvb_imm(g, tal >> 8, ca(0, 5))
+    mvb_imm(g, 0xFF, ca(0, 6))
+    mvb_imm(g, 0xFF, ca(0, 7))
+    mvb_imm(g, cra, ca(0, 14))
+    mvb_imm(g, crb, ca(0, 15))
+    mvb_imm(g, icr, ca(0, 13))
+    mv_imm_d_w(g, COST_N, 7)
+    g.label("L")
+    g.dbra(7, "L")
+    mvb_imm(g, 0x00, ca(0, 14))
+    mvb_imm(g, 0x00, ca(0, 15))
+    mvb_imm(g, 0x7F, ca(0, 13))
+    g(HALT)
+    return g.words()
+
+
+def leg_cost(rig, *_a) -> list[str]:
+    """A fast timer must not starve the guest (round-1 F1): the same loop
+    with an interrupt-enabled fast timer (ICR never read) or a fast TA
+    cascaded into TB takes at most 2x the frames of the idle loop (+1).
+    Red: no HALT (a pass per underflow is longer than the period)."""
+    from tests.run_mach import clean
+    f: list[str] = []
+    mr = rig.mach_rig()
+    progs = [prog_cost(0, 0, 0, 0)] + [prog_cost(*v) for v in COST_CASES.values()]
+    pcs = mr.stage(*progs)
+    rig.fresh()
+    idle = mr.run(pcs[0], s=4, budget=50_000_000)
+    if not clean(idle, "cost idle", f):
+        return f
+    base = idle["frames"]
+    print(f"    cost idle: {base} frames")
+    for (name, _), pc in zip(COST_CASES.items(), pcs[1:]):
+        rig.fresh()
+        try:
+            res = mr.run(pc, s=4, budget=50_000_000)
+        except Exception as e:               # the machine state is unknown now
+            f.append(f"cost {name}: no HALT ({type(e).__name__}: the guest starved)")
+            break
+        if not clean(res, f"cost {name}", f):
+            continue
+        print(f"    cost {name}: {res['frames']} frames")
+        if res["frames"] > 2 * base + 1:
+            f.append(f"cost {name}: {res['frames']} frames, idle {base}: over 2x")
+    return f
+
+
+def bigdiv_script() -> list[tuple]:
+    """Round-1 F2, directed: continuous TA with a latch > 32768 (the 17-bit
+    division remainder) and $FFFF (span 65536: the shift path), TB counting
+    TA's underflows (latch $FFFF), then gaps of several to 2^24 E ticks;
+    TA, TB and the ICR are read after every gap."""
+    ops: list[tuple] = []
+    for c, tal in ((0, 0xFFFF), (1, 0x8000), (0, 0x9ABC), (1, 0xFFFE), (0, 0xFFFF)):
+        ops += [("wr", c, 13, 0x7F), ("wr", c, 4, tal & 0xFF), ("wr", c, 5, tal >> 8),
+                ("wr", c, 6, 0xFF), ("wr", c, 7, 0xFF), ("wr", c, 15, 0x51),
+                ("wr", c, 14, 0x11)]
+        for dt in (3 * 65536 + 5, 65536 * 5 + 77, 1 << 20, (1 << 24) + 3):
+            ops += [("time", dt), ("rd", c, 4), ("rd", c, 5), ("rd", c, 6),
+                    ("rd", c, 7), ("rd", c, 13)]
+        ops += [("wr", c, 14, 0x00), ("wr", c, 15, 0x00)]
+    return ops
+
+
+def leg_bigdiv(rig: Rig, *_a) -> list[str]:
+    if not rig.cia:
+        return ["bigdiv: no cia_read label (no runtime/ops/cia.s)"]
+    return sweep(rig, 0xB16D, 0, script=bigdiv_script())
 
 
 def leg_sweep(rig: Rig, seeds: int, nops: int) -> list[str]:
@@ -876,9 +1080,11 @@ def run_all(prg: str, legs: list[str], seeds: int, nops: int) -> list[str]:
     return fails
 
 
-LIVE_LEGS = ("sweep", "probe", "tirq", "todb")     # the runtime PRG
-HOST_LEGS = ("sweep", "wrap")                       # the host-time PRG
-LEGS = {"sweep": leg_sweep, "wrap": leg_wrap, "probe": leg_probe, "tirq": leg_tirq,
+LIVE_LEGS = ("sweep", "bigdiv", "probe", "tirq", "todb", "cost")   # runtime PRG
+HOST_LEGS = ("sweep", "bigdiv", "wrap", "neggap", "resync")        # host-time PRG
+LEGS = {"sweep": leg_sweep, "wrap": leg_wrap, "neggap": leg_neggap,
+        "resync": leg_resync, "cost": leg_cost, "bigdiv": leg_bigdiv,
+        "probe": leg_probe, "tirq": leg_tirq,
         "todb": leg_todb}
 
 # --------------------------------------------------------------------------
@@ -929,10 +1135,32 @@ MUTANTS = {
     # the CIA-B line grid runs 1 colour clock per E tick instead of 5
     "line_rate": [("        asl cia_dr\n        rol cia_dr+1\n        asl cia_dr\n"
                    "        rol cia_dr+1\n", "")],
+    # round-1 F1a: TA's own event armed although its ICR bit is already set
+    "own_icr": [("        lda cia_st+CIA_ICR,x    ; mask TA and ICR TA still clear\n"
+                 "        eor #$FF\n",
+                 "        lda #$FF                ; mask TA and ICR TA still clear\n")],
+    # round-1 F1a: the same for TB
+    "own_icr_tb": [("        lda cia_st+CIA_ICR,x\n        eor #$FF\n"
+                    "        and cia_st+CIA_MSK,x\n        and #$02\n",
+                    "        lda #$FF\n"
+                    "        and cia_st+CIA_MSK,x\n        and #$02\n")],
+    # round-1 F1b: a cascaded TB is armed at TA's next underflow, not TB's
+    "casc_first": [("        and #$08\n        beq cont\n", "        and #$08\n        beq first\n")],
+    # round-1 F2 (reviewer): the division drops the 17th remainder bit
+    "div17": [("        bcs sub                 ; bit 16 set: certainly >= divisor\n", "")],
+    # round-1 F2 (reviewer): latch $FFFF takes the 16-bit divisor path
+    "span64k": [("        bne small\n", "        jmp small\n")],
+    # round-1 F3 (reviewer): a negative gap counts as a huge forward one
+    "neg_gap": [("        bpl fwd\n", "        jmp fwd\n")],
+    # round-1 F3 (reviewer): no 256-frame resync in the VERTB hook
+    "no_resync": [("        inc cia_vc\n        bne tod\n", "        inc cia_vc\n        jmp tod\n")],
     # CIA-A TOD (VERTB) never raises the alarm bit
     "tod_alarm_a": [("        lda cia_st+CIA_ICR\n        ora #$04\n",
                      "        lda cia_st+CIA_ICR\n        ora #$00\n")],
 }
+
+
+HOST_ONLY_MUTANTS = ("neg_gap", "no_resync")
 
 
 def build_mutant(name: str, out_dir: str, shim: bool) -> str:
@@ -969,10 +1197,13 @@ def main(argv=None) -> int:
     if a.build_shim:
         prg = build_shim(a.build_shim)
         print(f"shim PRG: {prg}")
+    host = ".shim_t" in open(os.path.splitext(prg)[0] + ".lbl").read()
     legs = [x for x in a.legs.split(",") if x] or list(
-        HOST_LEGS if a.build_shim else LIVE_LEGS)
+        HOST_LEGS if host else LIVE_LEGS)
     if a.mutants:
-        names = [x for x in a.only.split(",") if x] or list(MUTANTS)
+        # neg_gap/no_resync need host-set time (legs neggap, resync)
+        names = [x for x in a.only.split(",") if x] or [
+            m for m in MUTANTS if host or m not in HOST_ONLY_MUTANTS]
         survived = []
         shim = bool(a.build_shim)
         bdir = os.path.relpath(os.path.dirname(os.path.abspath(prg)), ROOT)

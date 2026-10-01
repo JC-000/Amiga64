@@ -12,8 +12,9 @@
 ; two times.  Splitting time anywhere gives the same state as one eclock
 ; (continuous timers are modular, a one-shot stops), so the result does not
 ; depend on when syncs happen.  Nothing runs per E tick: the only armed
-; events are the next underflow of a timer whose interrupt (or TB's
-; cascade) is enabled, and CIA-B's TOD alarm.  CIA-A's TOD counts VERTBs
+; events are a timer's next own underflow (TB counting TA: TB's, not TA's)
+; while its interrupt is enabled and its ICR bit still clear, and CIA-B's
+; TOD alarm.  CIA-A's TOD counts VERTBs
 ; (mach slot-0 hook, one call per frame).  CIA-B's TOD counts lines: line
 ; k starts at colour clock 227 k, i.e. E = 227 k / 5 (5 colour clocks per
 ; E tick, 15625 Hz at 709379 E ticks/s), on one grid that runs whether or
@@ -923,31 +924,31 @@ on:     stx cia_x
 
 ; ---------------------------------------------------------------------------
 ; rearm — keep chip X's slots in step with its state (CIA_T = now):
-;   TA  started, INMODE 0, and (mask bit 0, or TB counting TA underflows
-;       with mask bit 1): at CIA_T + TA + 1
-;   TB  started, INMODE 0, mask bit 1: at CIA_T + TB + 1
+;   TA  started, INMODE 0, mask TA, ICR TA clear: at CIA_T + TA + 1
+;   TB  started, mask TB, ICR TB clear: INMODE 0 at CIA_T + TB + 1;
+;       INMODE 2/3 (TA counting E ticks) at TB's own underflow (cascdl)
 ;   TOD CIA-B, not halted, mask bit 2: the alarm's line (CIA_DLT)
+; Only an event that can still raise IR is armed: once a timer's ICR data
+; bit is set, more underflows change nothing visible until the ICR read
+; (whose rdone re-arms), so a timer faster than a service pass never
+; starves the guest (review W9-C F1).
 ; The seam's own state (mach_am, mach_dl) is the truth: mach_arm is called
 ; only when the slot is not armed at that deadline, mach_disarm only when
 ; it is armed (so a mach_init, which disarms every slot, or a firing,
 ; which disarms its slot, is seen at once).  Preserves X.
 ; ---------------------------------------------------------------------------
 .proc rearm
-        ; --- TA
+        ; --- TA: its own interrupt can still rise
         lda cia_st+CIA_CRA,x
         and #$21
         cmp #$01
         bne aoff
-        lda cia_st+CIA_MSK,x
+        lda cia_st+CIA_ICR,x    ; mask TA and ICR TA still clear
+        eor #$FF
+        and cia_st+CIA_MSK,x
         lsr
-        bcs aon
-        lsr                     ; C = mask bit 1
         bcc aoff
-        lda cia_st+CIA_CRB,x
-        and #$41                ; TB started, INMODE 2/3
-        cmp #$41
-        bne aoff
-aon:    lda cia_st+CIA_TA,x
+        lda cia_st+CIA_TA,x
         ldy cia_st+CIA_TA+1,x
         jsr dlk
         lda cia_st+CIA_SLA,x
@@ -955,18 +956,31 @@ aon:    lda cia_st+CIA_TA,x
         jmp tb
 aoff:   lda cia_st+CIA_SLA,x
         jsr unwant
-        ; --- TB
+        ; --- TB: started, mask TB and ICR TB still clear
 tb:     lda cia_st+CIA_CRB,x
-        and #$61
-        cmp #$01
-        bne boff
-        lda cia_st+CIA_MSK,x
+        lsr
+        bcc boff
+        lda cia_st+CIA_ICR,x
+        eor #$FF
+        and cia_st+CIA_MSK,x
         and #$02
         beq boff
-        lda cia_st+CIA_TB,x
+        lda cia_st+CIA_CRB,x
+        and #$60
+        bne casc
+        lda cia_st+CIA_TB,x     ; INMODE 0: E ticks
         ldy cia_st+CIA_TB+1,x
         jsr dlk
-        lda cia_st+CIA_SLB,x
+        jmp bon
+casc:   and #$40                ; INMODE 1 (CNT): never
+        beq boff
+        lda cia_st+CIA_CRA,x    ; INMODE 2/3: only while TA counts E ticks
+        and #$21
+        cmp #$01
+        bne boff
+        jsr cascdl
+        bcs boff                ; one-shot TA, TB > 0: TB never underflows
+bon:    lda cia_st+CIA_SLB,x
         jsr want
         jmp tod
 boff:   lda cia_st+CIA_SLB,x
@@ -1012,6 +1026,120 @@ done:   rts
         lda #0
         adc cia_st+CIA_T+3,x
         sta cia_k+3
+        rts
+.endproc
+
+; cascdl — TB counting TA underflows: cia_k := the E time of TB's own
+; underflow, CIA_T + (TA + 1) + TB * (TAL + 1) (a continuous TA; the TB+1th
+; TA underflow), capped at CIA_T + 2^30 (the callback then just re-arms).
+; A one-shot TA underflows once: CIA_T + TA + 1 if TB = 0, else C = 1
+; (never).  Out: C = 0, cia_k.  Preserves X.
+.proc cascdl
+        lda cia_st+CIA_CRA,x
+        and #$08
+        beq cont
+        lda cia_st+CIA_TB,x
+        ora cia_st+CIA_TB+1,x
+        beq first
+        sec
+        rts
+first:  lda cia_st+CIA_TA,x
+        ldy cia_st+CIA_TA+1,x
+        jsr dlk
+        clc
+        rts
+cont:   lda cia_st+CIA_TB,x     ; cia_d := TB * TAL
+        sta cia_tv
+        lda cia_st+CIA_TB+1,x
+        sta cia_tv+1
+        lda cia_st+CIA_TAL,x
+        sta cia_tl
+        lda cia_st+CIA_TAL+1,x
+        sta cia_tl+1
+        jsr mul
+        lda #0
+        sta cia_k               ; cia_k (bit 32 of the sum)
+        clc                     ; + TB
+        lda cia_d
+        adc cia_tv
+        sta cia_d
+        lda cia_d+1
+        adc cia_tv+1
+        sta cia_d+1
+        bcc :+
+        inc cia_d+2
+        bne :+
+        inc cia_d+3
+        bne :+
+        inc cia_k
+:       sec                     ; + TA + 1
+        lda cia_d
+        adc cia_st+CIA_TA,x
+        sta cia_d
+        lda cia_d+1
+        adc cia_st+CIA_TA+1,x
+        sta cia_d+1
+        bcc :+
+        inc cia_d+2
+        bne :+
+        inc cia_d+3
+        bne :+
+        inc cia_k
+:       lda cia_d+3             ; >= 2^30 (or carried out): cap
+        and #$C0
+        ora cia_k
+        beq add
+        lda #0
+        sta cia_d
+        sta cia_d+1
+        sta cia_d+2
+        lda #$40
+        sta cia_d+3
+add:    clc                     ; cia_k := CIA_T + cia_d
+        lda cia_st+CIA_T,x
+        adc cia_d
+        sta cia_k
+        lda cia_st+CIA_T+1,x
+        adc cia_d+1
+        sta cia_k+1
+        lda cia_st+CIA_T+2,x
+        adc cia_d+2
+        sta cia_k+2
+        lda cia_st+CIA_T+3,x
+        adc cia_d+3
+        sta cia_k+3
+        clc
+        rts
+.endproc
+
+; mul — cia_d := cia_tv * cia_tl (u16 x u16).  Preserves X; clobbers Y.
+.proc mul
+        lda #0
+        sta cia_d
+        sta cia_d+1
+        sta cia_d+2
+        sta cia_d+3
+        ldy #16
+lp:     asl cia_d
+        rol cia_d+1
+        rol cia_d+2
+        rol cia_d+3
+        asl cia_tl
+        rol cia_tl+1
+        bcc next
+        clc
+        lda cia_d
+        adc cia_tv
+        sta cia_d
+        lda cia_d+1
+        adc cia_tv+1
+        sta cia_d+1
+        bcc next
+        inc cia_d+2
+        bne next
+        inc cia_d+3
+next:   dey
+        bne lp
         rts
 .endproc
 

@@ -551,7 +551,11 @@ Tests: `tests/run_cia.py` (+ `tests/cia/shim.s`), `host/tests/test_cia.py`.
   counter) counts 0 ticks and re-anchors. The VERTB hook syncs both chips
   every 256 frames, so no chip goes 2^31 E ticks unsynced.
 - **TOD clocks.** CIA-A: +1 per VERTB (mach slot-0 callback, one call per
-  frame: 50 Hz guest time). CIA-B: PAL lines on one grid anchored at
+  frame: 50 Hz guest time). **Power-up:** `cia_reset` (which stores the
+  callbacks, the VERTB hook included) first runs at the guest's first CIA
+  access or at `chip_reset`; VERTBs before that are not counted, whereas
+  chipset_ref counts from power-up. S3.7's machine-profile init must call
+  `chip_reset` (after `mach_init`). CIA-B: PAL lines on one grid anchored at
   `cia_reset`: line k starts at colour clock 227 k = E tick ⌈227 k / 5⌉
   (15625 Hz, 312.5 lines per 14188-E frame); the grid runs while the TOD is
   halted. Neither is ever an event per tick.
@@ -561,7 +565,13 @@ Tests: `tests/run_cia.py` (+ `tests/cia/shim.s`), `host/tests/test_cia.py`.
   underflow) only while the timer is started, counts E ticks, and its ICR
   mask bit is set (TA also when TB counts TA underflows with mask TB). Slot
   5 is armed at the alarm's line while CIA-B's TOD runs and mask ALRM is
-  set. The seam's `mach_am`/`mach_dl` are the truth: `mach_arm` is called
+  set. Only an event that can still raise IR is armed: a timer's own slot
+  only while its ICR data bit is clear (the ICR read re-arms it), and TB
+  counting TA underflows arms TB's slot at TB's own underflow, `CIA_T +
+  (TA+1) + TB·(TAL+1)` (capped at 2^30 E ahead; a one-shot TA gives one
+  pulse: `CIA_T + TA + 1` if TB = 0, else never) — never one event per TA
+  underflow, so a timer faster than a service pass cannot starve the guest
+  (review F1; test `run_cia` `cost`). The seam's `mach_am`/`mach_dl` are the truth: `mach_arm` is called
   only when the slot is not armed at the wanted deadline, `mach_disarm`
   only when it is armed (so `mach_init` disarming every slot, or a firing,
   is seen at once). A callback syncs its chip (which posts) and re-arms.
