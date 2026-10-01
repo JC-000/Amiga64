@@ -633,3 +633,81 @@ Owner: s3 (`runtime/ops/mach.s`; the INTENA/INTREQ paths of
 - **Plain mode** (`st_exl` = 0): nothing is delivered and `HALT_STOP`
   cannot occur; the INTENA/INTREQ registers behave as above.
 
+## CIA-A/B (S3.4) (W9-C)
+
+Owner: cia (`runtime/ops/cia.s`; the CIA path of `runtime/ops/chip.s`
+routes to it). Design: `docs/S3_PLAN.md` §1.5, §4 "S3.4";
+`docs/WAVE9_BRIEF.md` C3. Reference: `host/chipset_ref.CIA` (wired as
+`Chipset`), plus `cia_lines`/`cia_line_e`/`cia_tod_kprime`/`CIA.tod_ticks`.
+Tests: `tests/run_cia.py` (+ `tests/cia/shim.s`), `host/tests/test_cia.py`.
+
+- **Decode** is unchanged (CONTRACTS "I/O trap"): CIA-A = odd bytes with
+  A12 = 0, CIA-B = even bytes with A13 = 0, register = `(m_addr+1) & $0F`,
+  every access byte-wise, writes logged (`$0A00`/`$0B00` + reg). chip.s
+  hands the byte to `cia_read` (X = register index 0–15 CIA-A, 16–31
+  CIA-B → A) / `cia_write` (X = index, A = value); both keep Y, clobber X.
+  The `chip_cia` shadow is gone.
+- **Semantics** = `chipset_ref.CIA`, byte for byte: ports (CIA-A PRA pins
+  `$EB`, CIA-B PRA and both PRB `$FF`, `(PR & DDR) | (pins & ~DDR)`),
+  timers A/B (continuous / one-shot, force load = CR bit 4 (never read
+  back), a TxHI write loads a stopped timer and loads + starts a one-shot,
+  underflow on the tick after 0 then reload, latch 0 underflows every tick,
+  TB INMODE 0 = E ticks, 1 = CNT (nothing), 2/3 = TA underflows), ICR (data
+  bits 0–4, read = data | IR bit 7 then clear; write bit 7 SET / else CLR
+  of the mask), TOD (TODHI read latches until TODLO; TODHI write halts until
+  TODLO; CRB bit 7 directs TOD writes to the alarm; the alarm bit is set
+  when a tick lands on the alarm), SDR plain, reg 11 reads `$FF`. PB6/PB7
+  timer outputs and the serial shift are not modelled (nor in chipset_ref).
+- **Time is lazy.** Each chip keeps the guest E time of its last sync
+  (`CIA_T`). A register access first syncs the chip to `mach_etime`:
+  `eclock(now − CIA_T)` in O(1) (one 32/16 division only when a continuous
+  timer underflows more than once), CIA-B's TOD advanced by the lines in
+  between. `eclock` is split-invariant (host test), so when syncs happen
+  does not change the state. Before `mach_init` (`mach_on` = 0) time is
+  frozen at 0; a gap read as negative (a later `mach_init` restarted the
+  counter) counts 0 ticks and re-anchors. The VERTB hook syncs both chips
+  every 256 frames, so no chip goes 2^31 E ticks unsynced.
+- **TOD clocks.** CIA-A: +1 per VERTB (mach slot-0 callback, one call per
+  frame: 50 Hz guest time). **Power-up:** `cia_reset` (which stores the
+  callbacks, the VERTB hook included) first runs at the guest's first CIA
+  access or at `chip_reset`; VERTBs before that are not counted, whereas
+  chipset_ref counts from power-up. S3.7's machine-profile init must call
+  `chip_reset` (after `mach_init`). CIA-B: PAL lines on one grid anchored at
+  `cia_reset`: line k starts at colour clock 227 k = E tick ⌈227 k / 5⌉
+  (15625 Hz, 312.5 lines per 14188-E frame); the grid runs while the TOD is
+  halted. Neither is ever an event per tick.
+- **Events** (mach slots, callbacks in `mach_cbv`, filled by `cia_reset`):
+  1 CIA-A TA, 2 CIA-A TB, 3 CIA-B TA, 4 CIA-B TB, 5 CIA-B TOD alarm; slot 0
+  is the VERTB hook. A timer slot is armed at `CIA_T + count + 1` (its next
+  underflow) only while the timer is started, counts E ticks, and its ICR
+  mask bit is set (TA also when TB counts TA underflows with mask TB). Slot
+  5 is armed at the alarm's line while CIA-B's TOD runs and mask ALRM is
+  set. Only an event that can still raise IR is armed: a timer's own slot
+  only while its ICR data bit is clear (the ICR read re-arms it), and TB
+  counting TA underflows arms TB's slot at TB's own underflow, `CIA_T +
+  (TA+1) + TB·(TAL+1)` (capped at 2^30 E ahead; a one-shot TA gives one
+  pulse: `CIA_T + TA + 1` if TB = 0, else never) — never one event per TA
+  underflow, so a timer faster than a service pass cannot starve the guest
+  (review F1; test `run_cia` `cost`). The seam's `mach_am`/`mach_dl` are the truth: `mach_arm` is called
+  only when the slot is not armed at the wanted deadline, `mach_disarm`
+  only when it is armed (so `mach_init` disarming every slot, or a firing,
+  is seen at once). A callback syncs its chip (which posts) and re-arms.
+- **Interrupts** (the seam's level hold). After every sync, ICR access and
+  TOD-A tick, each chip keeps its `mach_hold` bit (CIA-A PORTS = bit 3,
+  CIA-B EXTER = bit 13) equal to its IR condition (`ICR data & mask ≠ 0`)
+  and calls `mach_post` on the rising edge. chip.s ORs `mach_hold` back
+  after every guest INTREQ write, so PORTS/EXTER cannot be cleared while
+  the ICR asserts (chipset_ref `update()` after every `eclock` and INTREQ
+  write); the ICR read-clear releases the hold.
+- **Host-visible state** (`runner.lbl`): `cia_st` (2 × `CIA_SZ` bytes, the
+  `CIA_*` field layout in cia.s; `CIA_T` = the chip's last sync time),
+  `cia_now` (u32, E time of the last sync), `cia_ok` (0 until the first
+  access or `chip_reset`). `chip_reset` ends in `cia_reset` (both chips to
+  power-up, anchored at now, slots 1–5 disarmed, `mach_hold` bits 3/13
+  released, callbacks stored in `mach_cbv` slots 0–5).
+- **Test build.** `CIA_HOSTTIME` (an `--asm-define`, used only by
+  `tests/run_cia.py --build-shim` with `tests/cia/shim.s`) makes `getnow`
+  read the host-written `shim_t` instead of `mach_etime`, so a test can put
+  guest time anywhere (the u32 wrap). The runtime build never defines it.
+- **Link order.** `cia.s` links after `chip.s` and before `mach.s`
+  (Makefile); no module before it moves; `core.s` is unchanged.

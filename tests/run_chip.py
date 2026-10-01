@@ -45,7 +45,7 @@ import struct
 import subprocess
 import sys
 
-from host import fixturegen, hunk, image
+from host import chipset_ref, fixturegen, hunk, image
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -81,7 +81,10 @@ class ChipRef:
 
     def __init__(self):
         self.shd = bytearray(512)       # BE register image, index = offset
-        self.cia = bytearray(32)        # CIA-A 0-15, CIA-B 16-31
+        # W9-C (S3.4): the CIAs are chipset_ref.CIA (runtime/ops/cia.s);
+        # no guest time passes in these legs (no mach_init)
+        self.cias = (chipset_ref.CIA(), chipset_ref.CIA())
+        self.cias[0].pra_in = CIAA_PRA_IN
         self.log: list[tuple[int, int]] = []
         self.ser = bytearray()
         self.nopen = 0
@@ -128,10 +131,7 @@ class ChipRef:
         if c is None:
             self.nopen += 1
             return 0
-        if c == 0 and r == 0:
-            ddr = self.cia[2]
-            return (self.cia[0] & ddr) | (CIAA_PRA_IN & ~ddr & 0xFF)
-        return self.cia[16 * c + r]
+        return self.cias[c].read(r)
 
     def wb(self, a: int, v: int) -> None:
         a &= 0xFFFFFF
@@ -142,7 +142,7 @@ class ChipRef:
         if c is None:
             self.nopen += 1
             return
-        self.cia[16 * c + r] = v
+        self.cias[c].write(r, v)
         self.log.append((CIA_ID[c] + r, v))
 
 
@@ -362,6 +362,7 @@ def leg_split() -> Leg:
 def leg_carry() -> Leg:
     code = (move_imm_abs(1, 0x5C, 0xBFD000)           # CIA-B PRA := $5C
             + move_abs_d(4, 0xBEFFFE, 3)              # REU, REU, CIA-B, CIA-A
+            # (W9-C: CIA-B PRA reads its input pins, $FF, with DDRA = 0)
             + move_imm_d(4, 0xCAFEBABE, 4)
             + move_d_abs(4, 4, 0xDEFFFE)              # REU, REU, open, open
             + moveq(-1, 5) + move_abs_d(4, 0xDEFFFE, 5) + [HALT])
@@ -377,7 +378,7 @@ def leg_carry() -> Leg:
         c.wb(0xDF0000, 0xBA), c.wb(0xDF0001, 0xBE)
         c.rb(0xDF0000), c.rb(0xDF0001)
     return Leg("carry", code, seeds,
-               {"D3": 0x12345CEB, "D4": 0xCAFEBABE, "D5": 0xCAFE0000},
+               {"D3": 0x1234FFEB, "D4": 0xCAFEBABE, "D5": 0xCAFE0000},
                after, chip)
 
 
@@ -490,13 +491,13 @@ class Rig:
         self.sess = Session(target=target, labels=labels, timeout=120.0)
         self.m_rbk = self.lab("m_rok") + 4       # core.s ZEROPAGE order
         self.chip = {}
-        for n in ("chip_shd", "chip_cia", "chip_log", "chip_logn",
+        for n in ("chip_shd", "chip_log", "chip_logn",
                   "chip_ser", "chip_sern", "chip_nopen", "chip_reset"):
             try:
                 self.chip[n] = self.lab(n)
             except KeyError:
                 pass
-        self.has_chip = len(self.chip) == 8
+        self.has_chip = len(self.chip) == 7
         self.cps = None
 
     def call(self, addr: int, timeout: float = 30.0) -> None:
@@ -552,7 +553,6 @@ class Rig:
         ns = min(sern, 256)
         ser = bytes(ring[(sern - ns + i) % 256] for i in range(ns))
         return {"shd": bytes(read_bytes(self.t, c["chip_shd"], 512)),
-                "cia": bytes(read_bytes(self.t, c["chip_cia"], 32)),
                 "logn": logn, "log": log, "ser": ser, "sern": sern,
                 "nopen": struct.unpack(
                     "<H", read_bytes(self.t, c["chip_nopen"], 2))[0]}
@@ -589,9 +589,6 @@ def check_chip(rig: Rig, want: ChipRef, got: dict | None, fails: list,
         diff = [f"${i:03X}:{got['shd'][i]:02X}/{want.shd[i]:02X}"
                 for i in range(512) if got["shd"][i] != want.shd[i]]
         fails.append(f"{tag}: shadow differs {diff[:8]}")
-    if got["cia"] != bytes(want.cia):
-        fails.append(f"{tag}: CIA shadow {got['cia'].hex()} "
-                     f"want {bytes(want.cia).hex()}")
     if got["nopen"] != want.nopen:
         fails.append(f"{tag}: open-bus count {got['nopen']} want {want.nopen}")
 

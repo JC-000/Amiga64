@@ -74,7 +74,7 @@ def test_cia_decode() -> None:
     c.wb(0xBFD200, 0xC0)                    # CIA-B DDRA (even, A13 = 0)
     c.wb(0xBFE200, 0x77)                    # even, A13 = 1: nothing
     c.wb(0xBFD201, 0x66)                    # odd, A12 = 1: nothing
-    assert c.cia[2] == 0x03 and c.cia[18] == 0xC0
+    assert c.cias[0].ddra == 0x03 and c.cias[1].ddra == 0xC0   # W9-C: chipset_ref.CIA
     assert c.log == [(0x0A02, 0x03), (0x0B02, 0xC0)]
     assert c.nopen == 2
     assert c.rb(0xBF0001) == c.rb(0xBFE001)  # register = (addr >> 8) & 15
@@ -116,7 +116,8 @@ def test_guest_bank_carry() -> None:
     reu = {0xBEFFFE: 0x12, 0xBEFFFF: 0x34, 0xBF0000: 0xA5}
     c = ChipRef()
     c.wb(0xBFD000, 0x5C)                                # CIA-B PRA
-    assert GuestRef(c, reu).read(0xBEFFFE, 4) == (0x12345CEB, 2)
+    # W9-C (S3.4): CIA-B PRA reads its input pins ($FF) with DDRA = 0
+    assert GuestRef(c, reu).read(0xBEFFFE, 4) == (0x1234FFEB, 2)
 
 
 def test_guest_trapped_long_is_two_register_words() -> None:
