@@ -27,7 +27,7 @@ Run a Motorola 68000 Amiga 500 program on Ultimate series C64 hardware. The C64 
 
 - Emulated custom-chip register file at $DFF000 (trapped in S1; compiled to shim calls in S2).
 - Display: convert a single 4–5 bitplane playfield to VIC-II multicolor bitmap with palette quantization. Copper lists interpreted per-frame for palette/scroll changes only.
-- Audio: Paula channel state machine driving SID sample playback; on stock 1 MHz hardware, reduce to best-effort.
+- Audio: Paula channel state machine driving the **U64 sampler** ("Ultimate Audio", `docs/HARDWARE.md` "U64 sampler"): each Paula channel maps to a hardware sample voice playing straight from the REU, where chip RAM already lives, with no CPU per sample. Caveats: no loop-point IRQ (AUDxIRQ on a loop is timed by the 6510), volume max 63, 7 C64-visible voices, REPEAT B == LENGTH hazard. On hardware without the sampler (stock C64, VICE), SID playback is best-effort only. Decision 2026-10-01: sampler, not multi-SID.
 - Blitter: implemented as 6502/REU memory ops — measured bulk REU DMA tops out at ~3.3 MB/s on the U64E (see `HARDWARE.md`), still competitive with the real Blitter's ~4 MB/s peak for copies.
 
 ### S4: High-level emulation of AmigaOS

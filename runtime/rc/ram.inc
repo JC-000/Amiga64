@@ -31,7 +31,12 @@ SCREEN     = $0400      ; 40x25 screen RAM; hle.s cursor offset 0-999
 ; @region core $0900-$0AFF DISPATCH jump tables - two page-aligned 256-byte tables (build/gen/dispatch.s)
 ; @region core $0B00-$9FFF PRG code/rodata/data/bss - CODE onward, incl. page-aligned code_win in BSS
 
-; @region free $A000-$B8FF BASIC ROM / RAM underneath - unclaimed
+; @region free $A000-$B7FF BASIC ROM / RAM underneath - unclaimed
+; W10-P cop: the display-state block (RAM under BASIC ROM; cop.s only writes it, readers bank BASIC out)
+; @region cop $B800-$B8FF disp_st: display-register state for the refresh driver (layout: docs/CONTRACTS.md "Copper and display state (S3.5)"; spare to $B8FF for appended fields)
+.ifndef disp_st
+disp_st    = $B800      ; W10-P cop: display-state block (C1 layout + valid, 104 bytes)
+.endif
 ; W7-V c2v: VIC converter v0 work RAM (RAM under BASIC ROM; runtime/ops/c2v.s, docs/C2V.md)
 ; @region c2v $B900-$BFFF c2v pair-OR tables, one staged plane row per plane, argument block
 .ifndef c2v_pairhi
@@ -81,6 +86,24 @@ VIC_COLRAM  = $D800     ; W7-V c2v: VIC colour RAM (low nibbles), written by run
 .endif
 .ifndef CIA2_ICR
 CIA2_ICR    = $DD0D     ; W7-V c2v: CIA 2 interrupt control; read = acknowledge (releases /NMI)
+.endif
+.ifndef VIC_CTRL1
+VIC_CTRL1   = $D011     ; W10-V disp: VIC control 1 (bitmap mode, display enable, 25 rows)
+.endif
+.ifndef VIC_CTRL2
+VIC_CTRL2   = $D016     ; W10-V disp: VIC control 2 (multicolour, 40 columns)
+.endif
+.ifndef VIC_MEMPTR
+VIC_MEMPTR  = $D018     ; W10-V disp: VIC screen matrix / bitmap base within the bank
+.endif
+.ifndef VIC_BORDER
+VIC_BORDER  = $D020     ; W10-V disp: VIC border colour (Amiga colour 0)
+.endif
+.ifndef VIC_BG0
+VIC_BG0     = $D021     ; W10-V disp: VIC background colour 0 (Amiga colour 0)
+.endif
+.ifndef CIA2_PRA
+CIA2_PRA    = $DD00     ; W10-V disp: CIA 2 port A; bits 1-0 = NOT VIC bank (disp.s sets bank 3, other bits kept)
 .endif
 .ifndef CIA1_TALO
 CIA1_TALO   = $DC04     ; W8-L mach: CIA 1 timer A latch low (the event one-shot)

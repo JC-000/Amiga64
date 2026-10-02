@@ -71,6 +71,8 @@
 .import mach_on, mach_beam, mach_bv, mach_bh    ; W8-L mach.s: S3.2 beam
 .import cia_read, cia_write, cia_reset          ; W9-C cia.s: S3.4 CIA-A/B
 .import mach_hold, mach_ichk                    ; W9-I irq: level hold, delivery kick
+.import cop_w0, cop_w1                          ; W10-P cop: S3.5 display/copper registers
+.export c_wrw, chip_a, chip_vl, chip_vh         ; W10-P cop: the copper's MOVE path
 
 CHIP_LOGN_MASK = 63     ; @value log ring entries - 1
 CHIP_SERDAT    = $30    ; @value SERDAT register offset
@@ -468,7 +470,7 @@ p1:     lda #1                  ; $100-$1FE: all write-only
         sta chip_shd+256,x
         lda chip_vl
         sta chip_shd+257,x
-        rts
+        jmp cop_w1              ; W10-P cop: BPLCON/BPLxMOD/COLOR
 p0:     lda #0
         sta chip_lh
         lda chip_a
@@ -490,7 +492,7 @@ p0:     lda #0
         cpx #CHIP_INTENA
         beq paula
         cpx #CHIP_INTREQ
-        bne done
+        bne cop                 ; W10-P cop
 paula:  txa
         sec
         sbc #CHIP_INTENA - CHIP_INTENAR ; $09A -> $01C, $09C -> $01E
@@ -531,6 +533,7 @@ ser:    ldx chip_sern           ; SERDAT: low byte -> the serial ring
         bne done
         inc chip_sern+1
 done:   rts
+cop:    jmp cop_w0              ; W10-P cop: COPxLC/COPJMP/DIW/DDF/DMACON/BPLxPT
 .endproc
 
 ; c_cia — select the CIA register of the byte at chip_a.
