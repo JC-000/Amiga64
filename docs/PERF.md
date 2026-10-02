@@ -558,8 +558,11 @@ independent of PAL/NTSC, and the guest always keeps the rest:
 
 N = 20 keeps hires4 under S3_PLAN §2.3's 20% duty at the default s = 4,
 with margin for badlines (+2–4% with the display on) and for layout (±1.5%).
-At s ≤ 3 a display that changes every frame exceeds 20%, but the guest is
-never starved: at s = 0 it keeps ≥ 27% (hires4). Measured live
+At s ≤ 3 a display that changes every frame exceeds 20%, but the display
+never takes more than 73% of the guest's time (hires4 at s = 0). That bounds
+the display's share only: at s = 0 the machine loop itself already starves
+the guest with no display at all (W10-V review: one guest loop iteration in
+2,131 frames with the hook off), so s = 0 is not a usable setting either way. Measured live
 (`run_pf` leg `live`, mc2, an edit every delivered VERTB): s = 4 loses
 5.2% of guest progress to the display, against 7% on the round-0
 frame-counted budget (review), and s = 0 reaches HALT. On the U64E at
