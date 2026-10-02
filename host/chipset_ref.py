@@ -831,6 +831,7 @@ COP_VALID = 0xA5            # disp_st+DISP_VALID once cop_reset ran
 # little-endian u16/u24 fields
 DISP_GEN, DISP_DMACON, DISP_BPLCON, DISP_BPLPT = 0, 1, 3, 9
 DISP_BPLMOD, DISP_DIW, DISP_COLOR, DISP_VALID, DISP_SZ = 27, 31, 39, 103, 104
+DISP_DIRTY = 104            # W10-V F1: set by every gen bump, cleared by the reader
 
 
 class CopperAt(Copper):
@@ -889,10 +890,13 @@ class DisplayState:
     the start of the run (fix round 1, F2).
     DMACON follows the SET/CLR rule (bits 0-14); BPLxPTH keeps its low
     byte (bits 23-16); every other field is the word as written.  ``valid``
-    is COP_VALID (the state after cop_reset)."""
+    is COP_VALID (the state after cop_reset).  ``dirty`` (disp_st+104,
+    W10-V fix round 1 F1) is set by every gen bump and cleared only by the
+    reader (``take``), so a gen that wrapped back is still a change."""
 
-    def __init__(self, gen: int = 0):
+    def __init__(self, gen: int = 0, dirty: int = 0):
         self.gen = gen & 0xFF
+        self.dirty = dirty
         self.f = bytearray(DISP_SZ)
         self.f[DISP_VALID] = COP_VALID
         self.snap = None                # the block at the start of a run
@@ -913,6 +917,11 @@ class DisplayState:
 
     def _bump(self) -> None:
         self.gen = (self.gen + 1) & 0xFF
+        self.dirty = 1
+
+    def take(self) -> None:
+        """The reader took its snapshot: dirty := 0."""
+        self.dirty = 0
 
     def _put(self, off: int, data: bytes) -> None:
         if self.f[off:off + len(data)] != data:

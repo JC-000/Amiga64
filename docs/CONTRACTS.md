@@ -262,15 +262,18 @@ Design: `docs/S3_PLAN.md` §1.2–1.3, §3.4. Tests: `tests/run_chip.py`,
   each byte goes to its own bank (REU or chip). The instruction window
   (`fetch_word`) is NOT checked: executing from `$BF`/`$DF` reads the REU
   (in a FETCH_DIRECT variant build, instruction fetch goes through the API
-  and does trap). **Other bypass:** HLE DOS bulk transfers
-  (`hle_dos.s` `dosio_dma1`) program the REC directly, so a guest DOS
-  buffer placed in `$BF`/`$DF` would move its bulk bytes to or from the REU
-  underneath, while the first/last-byte fix-ups go through `mem_write8` and
-  hit the chip stub. This is acceptable for now: the HLE memory map
-  (`rc/guest.inc`) never puts program, heap or RAMDISK memory in those
-  banks, and a program that passes an I/O address as a DOS buffer is
-  already broken on an Amiga. It becomes a risk once the S3.7 machine
-  profile exists; the S3.7 guard is to reject such buffers in `hle_dos`.
+  and does trap). **Other bypass, closed (W10-V fix round 1, F2):** HLE
+  DOS bulk transfers (`hle_dos.s` `dosio_dma1`) program the REC directly,
+  so `dosio_xfer_setup` now refuses a Read/Write whose transfer touches
+  bank `$BF` or `$DF`: the bytes D2 .. D2+n−1 it would move, n = the
+  length the loop moves (Read: min(size − pos, D3), so a Read near EOF is
+  judged by what lands; Write: D3), 24-bit, wrapping past `$FFFFFF`
+  (n ≥ 16 MB covers everything; a wrap that reaches `$BF` needs n > 12 MB,
+  beyond the 2 MB RAMDISK, so it is defensive only): D0 = −1, IoErr = 212
+  (ERROR_OBJECT_WRONG_TYPE), no DMA. run_dos stays 762/762. The CPU's `$BF`/`$DF` trap and this
+  buffer check together keep the guest out of the REU under the I/O
+  banks, where the palette LUT `disp_lut` lives (test: `tests/run_pf.py`
+  leg `dosbuf`).
 - **Where the test sits.** Only where the REC bank is about to be
   programmed: MIO_PROG's bank-changed branch (`cmp #$DF / beq trap / cmp
   #$BF / beq trap`, +8 cycles, never taken for RAM), the cold path
@@ -737,6 +740,7 @@ with a `valid` byte, `cop_dhook` in BSS, copper DMA gating). Reference:
   | +31 | `diwstrt`, `diwstop`, `ddfstrt`, `ddfstop` u16 |
   | +39 | `color[32]` u16, as written (no 12-bit mask) |
   | +103 | `valid` u8: `$A5` once `cop_reset` has run (undefined RAM before) |
+  | +104 | `dirty` u8: := 1 by every `gen` bump; cleared only by the reader (W10-V fix round 1, F1: a `gen` that wrapped back to the reader's last value is still a change) |
 
   Every display-register write, by the CPU or by the copper (word, long =
   two words, byte = both halves, the I/O trap's decode), updates its field.
@@ -840,3 +844,73 @@ with a `valid` byte, `cop_dhook` in BSS, copper DMA gating). Reference:
   (backlog; the CIA's slot-0 hook already keeps a STOPped CPU waiting).
 - **Link order.** `cop.s` links after `cia.s` and before `mach.s`
   (Makefile); no module before it moves; `core.s` is unchanged.
+
+## Display refresh (S3.5) (W10-V)
+
+Owner: disp (`runtime/ops/disp.s`) and c2v (`runtime/ops/c2v.s`, row skip).
+Design: `docs/WAVE10_BRIEF.md` C1/C3, `docs/S3_PLAN.md` §2, §4 "S3.5";
+spec: `docs/C2V.md` "Row skip", "Display refresh (S3.5)". Reference:
+`host/c2v_ref.disp_decide` / `disp_convert`. Tests: `tests/run_pf.py`
+(+ `tests/pf/shim.s`, `fixtures/c/pf_static.c`), `host/tests/test_disp_ref.py`.
+
+- **Inputs.** `disp_st` (C1, W10-P's rc claim, RAM under BASIC ROM),
+  always with BASIC banked out. `disp_frame` reads `gen` (+0) and `dirty`
+  (+104) first, then copies +1..+70 (DMACON through COLOR15) and `valid`
+  (+103), then clears `dirty` (its only write to the block). `valid` ≠ `$A5` (W10-P's `cop_reset`
+  never ran) means "no display state": blank, reason 7. `cop_dhook` is a
+  cop.s BSS export that disp.s imports (consumer → provider, as cia.s
+  imports `mach_cbv`). It is written only by `disp_init`: high byte first
+  to 0, then low, then high. `tests/pf/shim.s` (test builds only) adds
+  `shim_kick`, a fake `cop_frame` end that calls through `cop_dhook`.
+- **Entries** (JSR; clobber A/X/Y; any `$01` that maps I/O in: `$37`,
+  `$36`, `$35`; BASIC banked out inside, the caller's `$01` restored; the
+  I flag preserved; every REC use ends with `mem_rec_dirty`, and a call
+  that uses no REC leaves `m_rok` alone):
+  - `disp_init`: `c2v_init`, stashes the LUT at guest `disp_lut`, resets
+    the state (`disp_mode` = `$FF`, counters 0, budget open), stores
+    `disp_frame` in `cop_dhook`. Call it after `cop_reset`.
+  - `disp_frame`: the hook. Valid in the service pass (`$01` = `$35`, IRQ
+    enabled: `mach_irq` never touches the REC) and in the trap context of a
+    synchronous COPJMP run (inside `emu_run`, or outside `mach_run` in HLE).
+    The caller (W10-P) must preserve whatever the trap ABI needs (the chip
+    ABI keeps X/Y) around it.
+  - `disp_refresh`: converts now from `disp_st`, ignoring `gen`, the
+    snapshot compare and the budget.
+- **Policy v0:** a change is `gen` ≠ the last value seen **or** `dirty` ≠ 0
+  (F1); it converts if the copied fields differ from the last snapshot.
+  Inside `mach_run` (`mach_in` ≠ 0) a conversion starts only when
+  `DISP_N` × 14188 guest E ticks (20 frames' worth) have passed since the
+  previous conversion **ended** (`mach_etime` at its end; F3: a frame count
+  was eaten by the catch-up after each long conversion, livelocking the
+  guest at s ≤ 1). E going backwards (`mach_init`) opens the budget. A
+  deferred change stays unseen (`gen`/`dirty` untouched). Outside
+  `mach_run`, convert at once. No dirty tracking of bitplane writes.
+- **VERTBs during a conversion (F4).** A conversion inside the service
+  pass takes many frames (mc2 ≈ 30 at s = 0, ≈ 2 at s = 4). The pass
+  counts every one of them (`mach_frames`, slot 0's callback: CIA-A's TOD
+  ticks once per frame, tested live at s = 2 and 4), but VERTB is a level
+  held in INTREQ, so the guest's level-3 handler runs once for all the
+  frames that passed during one pass, as in W10-P's copper catch-up
+  ("Machine loop" / "Copper"). A guest that counts VERTB interrupts to
+  keep time sees fewer of them while the display converts.
+- **Modes:** 2-plane lores → `c2v_mc2s` (exact); 4-plane hires →
+  `c2v_hiress` (silhouette); anything else, DMA off, an empty DIW, a
+  short DDF or a row crossing a 512 KB line → blank (`disp_why` 1–6). Once
+  a picture has been shown, a blank sets `$D011` = `$0B` and `$D020` =
+  LUT[COLOR00]. Before that, a blank only logs.
+- **C64 resources:** writes the c2v regions (bitmap, matrix under I/O,
+  colour RAM, `c2v_stage` during `disp_init`, `c2v_args`), `$D011`,
+  `$D016`, `$D018`, `$D020`, `$D021`, and `$DD00` bits 1–0 (bits 7–2 and
+  the DDR kept; `mach.s` never writes port A, "Machine loop"). State is in
+  disp.s's BSS (whole page), host-visible in `runner.lbl`.
+- **Guest resources:** `disp_lut` `$DF0000-$DF0FFF` (rc `guest.inc`,
+  owner disp): the REU bytes under the trapped custom-chip bank. Every
+  guest access to bank `$DF` goes to `chip.s` (open bus), never the REU,
+  so the table is invisible to the guest. disp.s reads it by REU DMA
+  only; `disp_init` writes it. The CPU's `$BF`/`$DF` trap and the HLE DOS
+  buffer check ("I/O trap", F2) together keep the guest out: tests
+  `lut-trap` (30 CPU stores) and `dosbuf` (Read/Write into `$DF`/`$BF`,
+  straddling spans and one covering all of `$BF`).
+- **Link order:** `disp.s` after `cia.s`, before `mach.s`. CODE and BSS
+  are padded to whole pages, and there is no RODATA or DATA. `core.s` is
+  unchanged.
