@@ -741,6 +741,7 @@ with a `valid` byte, `cop_dhook` in BSS, copper DMA gating). Reference:
   | +39 | `color[32]` u16, as written (no 12-bit mask) |
   | +103 | `valid` u8: `$A5` once `cop_reset` has run (undefined RAM before) |
   | +104 | `dirty` u8: := 1 by every `gen` bump; cleared only by the reader (W10-V fix round 1, F1: a `gen` that wrapped back to the reader's last value is still a change) |
+  | +105 | `pix` u8 (Wave 11, supervisor; `docs/WAVE11_BRIEF.md` C3): the pixel epoch. Writers of guest pixel memory store a new value after writing (blt.s: every D-enabled blit); disp.s treats a change like a changed field. Not part of `gen`. Undefined before the first writer; readers snapshot it at `disp_init` |
 
   Every display-register write, by the CPU or by the copper (word, long =
   two words, byte = both halves, the I/O trap's decode), updates its field.
