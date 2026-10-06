@@ -178,10 +178,19 @@ message.
 
 The base runner leaves 1430 B free in MAIN, and blt.s needs about 2.1 KB.
 Supervisor decision (W11-B's option 1): a new ld65 memory area `BHI` at
-$A000–$B5FF, under BASIC ROM, with segment `BCODE`, and MAIN `fill = yes`
+$A000–$B5FF, under BASIC ROM, with segments `BCODE` (and optional `BBSS`), and MAIN `fill = yes`
 so the PRG stays contiguous. ram.inc: `core $A000-$B5FF` BCODE plus W11-B's
 `blt $B600-$B7FF` row buffers. W11-B owns this one c64.cfg/ram.inc edit.
 BCODE is shared: code there runs only with BASIC banked out and is entered
 through a MAIN stub that restores the caller's $01. W11-A puts its bulk
 boot code there after the blitter merges. Existing module addresses must
 not move (map diff, link-swap proof, perf_cycles delta 0).
+
+## Addendum 2 (2026-10-06): BLTBDAT model fix
+
+FS-UAE (3 new oracle DIFFs) shows a CPU BLTBDAT write is shifted on its
+own: `(v << BSH) & $FFFF` descending, `v >> BSH` ascending, never combined
+with the previous B word. Supervisor sign-off for a one-off non-additive
+edit to `host/chipset_ref.Blitter.write_bdat` and the chip_oracle mutant
+`bdat_write_not_shifted`; the boot model's counts must be re-shown
+unchanged. chip_oracle's exact counts change accordingly.
