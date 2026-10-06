@@ -173,3 +173,15 @@ What you built; red → green evidence paths; mutation results; exact gate
 counts; runner wall-clocks; contract deviations (none expected); open
 risks; local-model use; changed files vs your base. Under 60 lines, as a
 message.
+
+## Addendum 1 (2026-10-06): banked code area BCODE
+
+The base runner leaves 1430 B free in MAIN, and blt.s needs about 2.1 KB.
+Supervisor decision (W11-B's option 1): a new ld65 memory area `BHI` at
+$A000–$B5FF, under BASIC ROM, with segment `BCODE`, and MAIN `fill = yes`
+so the PRG stays contiguous. ram.inc: `core $A000-$B5FF` BCODE plus W11-B's
+`blt $B600-$B7FF` row buffers. W11-B owns this one c64.cfg/ram.inc edit.
+BCODE is shared: code there runs only with BASIC banked out and is entered
+through a MAIN stub that restores the caller's $01. W11-A puts its bulk
+boot code there after the blitter merges. Existing module addresses must
+not move (map diff, link-swap proof, perf_cycles delta 0).
