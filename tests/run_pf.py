@@ -72,19 +72,22 @@ VARIANTS = {
     "budget": ["DISP_MUT_BUDGET=1"],
     "bank": ["DISP_MUT_BANK=1"],         # caught once disp_st is under BASIC ROM (W10-P)
     "dirty": ["DISP_MUT_DIRTY=1"],       # F1: the dirty byte ignored
-    "efrom": ["DISP_MUT_EFROM=1"],       # F3: the budget measured from the start
+    "efrom": ["DISP_MUT_EFROM=1", "DISP_TRACE=1"],  # F3: the budget measured from the start
+    # W11-A (supervisor grant, efrom): the real build with the budget trace
+    "trace": ["DISP_TRACE=1"],
     # red for the LUT-trap leg: the LUT in guest-visible REU (the first proposal)
     "lutram": ["disp_lut=0x800000"],
 }
-NOT_TEETH = ("stub", "lutram")
+NOT_TEETH = ("stub", "lutram", "trace")
 TEETH = [k for k in VARIANTS if k not in NOT_TEETH]
-ALL_LEGS = ["shim", "fixture", "wrap", "dosbuf", "live"]
+ALL_LEGS = ["shim", "fixture", "wrap", "dosbuf", "live", "gap"]
 # the legs each mutant runs (--teeth): the ones meant to catch it
 MUTANT_LEGS = {"bitorder": ["shim", "fixture"], "pal": ["shim", "fixture"],
                "gen": ["shim"], "ppord": ["shim", "fixture"],
                "mod": ["shim", "fixture"], "straddle": ["shim"], "clr": ["shim"],
                "budget": ["shim"], "bank": ["shim", "fixture"],
-               "dirty": ["shim", "wrap"], "efrom": ["live:s0"]}
+               "dirty": ["shim", "wrap"],
+               "efrom": ["gap"]}            # W11-A (supervisor grant, efrom)
 
 
 def build(prg: str, name: str, defines: list[str], shim: bool) -> str:
@@ -299,11 +302,18 @@ def run_perf(s: "Pf") -> dict:
     return out
 
 
+PIX_OFF = 105      # W11-A (supervisor grant, WAVE11 C3): disp_st+105, the pixel epoch
+
+
 def check_outputs(s, g: dict, want: dict, st_block: bytes | None) -> list[str]:
     """run_c2v's check_outputs, with its $B800-$B8FF guard made exact: that
     page is now W10-P's disp_st claim.  The block must hold st_block (the
     bytes the host wrote; None: the copper's, not checked here) and the
-    spare tail after it must keep the guard pattern."""
+    spare tail after it must keep the guard pattern.
+    # W11-A (supervisor grant, WAVE11 C3): +105 is the pixel epoch, a block
+    # field that disp.s only reads: it must hold the step's epoch (g["pix"],
+    # restored by run_step after the guard fill; else the guard byte), and
+    # the guard check covers +106..$FF exactly as before."""
     f = [x for x in C.check_outputs(s, g, want, C.read_regs(s.T))
          if not x.startswith("guard $B800-$B8FF")]
     base = rc_equate("disp_st")
@@ -314,6 +324,8 @@ def check_outputs(s, g: dict, want: dict, st_block: bytes | None) -> list[str]:
         exp[base - 0xB800:base - 0xB800 + n] = st_block
     else:
         exp[base - 0xB800:base - 0xB800 + n] = page[base - 0xB800:base - 0xB800 + n]
+    if "pix" in g:                      # W11-A (supervisor grant, WAVE11 C3)
+        exp[base - 0xB800 + PIX_OFF] = g["pix"]
     f += C.diff("$B800-$B8FF (disp_st + spare)", page, bytes(exp), 0xB800)
     return f
 
@@ -430,7 +442,10 @@ def run_step(s: Pf, step: dict, mem: Mem, lut: bytes, shown: bool):
     st = dict(step["st"])
     before = state(s)
     vic0 = s.vic()
+    pix = s.read_ram(s.lab["disp_st"] + PIX_OFF, 1)     # W11-A (supervisor grant,
     g = C.guard_fill(s, zlib.crc32(step["name"].encode()))
+    s.write_ram(s.lab["disp_st"] + PIX_OFF, pix)        # WAVE11 C3): the epoch
+    g["pix"] = pix[0]                                   # moves only on purpose
     s.write_ram(s.lab["disp_st"], R.pack_disp_st(st))   # RAM, whatever maps it
     f: list[str] = []
     entry = "disp_refresh" if step.get("action") == "refresh" else "shim_kick"
@@ -949,6 +964,62 @@ def live_rig(prg: str, cases, kind: str, nohook: bool) -> list[str]:
 
 LABELS = [None]
 
+# --- leg "gap": the duty budget, measured directly ---------------------------
+# W11-A (supervisor grant, efrom).  The old efrom teeth inferred the rule
+# from an AVERAGE conversion count in the live s = 0 leg, whose edit rate is
+# starved there, so it swung with code layout.  This leg checks the rule
+# itself on a DISP_TRACE build: inside mach_run the gap from a conversion's
+# END to the next conversion's START is never below DISP_N x 14188 E (the
+# MINIMUM over the run), with a display change every delivered VERTB at
+# s = GAP_S (an edit rate far above the budget's, so the budget, not the
+# guest, bounds the conversions).
+
+GAP_S = 2
+GAP_NV = 160                # handler runs (edits) before the final colour
+
+
+def leg_gap(prg: str) -> list[str]:
+    from tests import run_irq as I
+    from tests import run_mach as M
+    from tests.run_mach import BASE, F_INIT, F_SUPER, clean
+
+    def body(rig):
+        f: list[str] = []
+        n_dn = rig.lab("DISP_N")
+        rig.call(rig.lab("chip_reset"))
+        rig.call(rig.lab("cop_reset"))
+        rig.call(rig.lab("disp_init"))
+        rig.w(rig.lab("disp_gmin"), b"\xFF" * 4)
+        rig.w(rig.lab("disp_tval"), b"\0")
+        rig.w(rig.lab("disp_ngap"), b"\0\0")
+        pl0, pl1 = rnd(200, 8000), rnd(201, 8000)
+        n0 = len(I.link(live_prog(0, 0, GAP_NV, n_dn + 4, True), BASE))
+        lw, col1 = live_list(0, 0)
+        lst = BASE + 2 * n0
+        a0 = lst + 2 * len(lw)
+        a1 = a0 + 8000
+        lw, col1 = live_list(a0, a1)
+        words = I.link(live_prog(lst, lst + 2 * col1, GAP_NV, n_dn + 4, True), BASE)
+        rig.stage(words, lw, list(struct.unpack(">4000H", pl0)),
+                  list(struct.unpack(">4000H", pl1)))
+        res = rig.run(BASE, s=GAP_S, flags=F_INIT | F_SUPER)
+        if not clean(res, "gap", f):
+            return f
+        gmin = struct.unpack("<I", rig.r(rig.lab("disp_gmin"), 4))[0]
+        ngap = struct.unpack("<H", rig.r(rig.lab("disp_ngap"), 2))[0]
+        nconv = struct.unpack("<H", rig.r(rig.lab("disp_nconv"), 2))[0]
+        need = n_dn * FRAME_E
+        print(f"  gap: frames {res['frames']} conversions {nconv} gaps {ngap} "
+              f"least END->START {gmin} E, budget {need} E "
+              f"({gmin / need:.2f} x the budget)")
+        if ngap < 3:
+            f.append(f"only {ngap} gaps measured (the leg needs >= 3)")
+        if gmin < need:
+            f.append(f"a conversion started {gmin} E after the previous one "
+                     f"ended: the budget is {need} E (DISP_N {n_dn} frames)")
+        return f
+    return M.session(prg, body)
+
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -980,6 +1051,10 @@ def main(argv=None) -> int:
         if "dosbuf" in legs:
             print(f"run_pf dosbuf leg: {p}")
             fails += leg_dosbuf(p)
+        if "gap" in legs:                # W11-A (supervisor grant, efrom)
+            tp = p if has_label(p, "disp_gmin") else build(p, "trace", VARIANTS["trace"], True)
+            print(f"run_pf gap leg: {tp}")
+            fails += [f"gap: {x}" for x in leg_gap(tp)]
         if "live" in legs or "live:s0" in legs:
             print(f"run_pf live leg: {p}")
             cases = ([(0, True, "irq")] if "live:s0" in legs and "live" not in legs
