@@ -306,8 +306,8 @@ Design: `docs/S3_PLAN.md` §1.2–1.3, §3.4. Tests: `tests/run_chip.py`,
   POTINP `$FF00`, SERDATR `$3000`, DENISEID `$FFFF`. The other read-only
   slots (`$000–$01E`) return their shadow word, and write-only registers
   (`$020–$1FE`) return 0. CIA registers return their shadow, except CIA-A
-  PRA = `(PRA & DDRA) | ($EB & ~DDRA)`. Not modelled yet: DMACONR (it
-  reads its slot, 0), timers, ICR and TOD (S3.3/S3.4).
+  PRA = `(PRA & DDRA) | ($EB & ~DDRA)`. DMACONR: see "Blitter (S3.6)"
+  (W11-B; it read its slot, 0, before). Timers, ICR and TOD: S3.3/S3.4.
 - **Writes.** Every decoded write is logged. A write to a write-only
   register also lands in the shadow, while a write to a read-only slot is
   ignored there. CIA writes land in `chip_cia`, and a SERDAT write appends
@@ -602,21 +602,57 @@ Owner: s3 (`runtime/ops/mach.s`; the INTENA/INTREQ paths of
   `MACH_POLL` phi2 while an interrupt is pending** (fix round 1, review
   F2): every pass in exception mode that finds `mach_lvl` ≠ 0 — pending and
   enabled, whether masked by I2–I0 or queued behind the one this pass
-  delivers — clamps the CIA #1 one-shot to `MACH_POLL` = `$0400` phi2
-  (`mach_pclamp`). With nothing pending it is recognised at the next event,
-  which is harmless: nothing can be delivered. So a lower level is never
-  starved by a recurring higher one (`starve`, `kick`), and a handler that
-  never acknowledges its request is re-entered right after its RTE, as on a
+  delivers — clamps the CIA #1 one-shot to the poll interval
+  (`mach_pclamp`). **W11-A (supervisor grant, HIGH-1):** the interval is
+  max(`MACH_POLL` = `$0400`, 256 E << s) phi2, at most `$FFFF` (s ≤ 2:
+  `$0400` as before; s = 4: `$1000`; s = 6: `$4000`; s ≥ 8: `$FFFF`), i.e.
+  a bounded latency in GUEST time (≤ 256 E ticks for s ≥ 2) instead of a
+  fixed phi2 time: a fixed 1024-phi2 poll let a level-3 handler running
+  with a request pending under its IPL lose ~2/3 of a 1 MHz host to passes,
+  outlast the frame and livelock AROS's interrupt dispatcher at s ≤ 6
+  (`tests/aros_boot.py` leg `poll`, "Machine profile and AROS boot").
+  Effect on run_irq at s = 4 (bounds unchanged, before → after, verbose
+  run, `build/evidence/w11-aros/fix1/irq_bounds_*.txt`): `storm` 20
+  re-entries in 2 → 1 frames; `kick` misses 52 → 61 of ~1,370 VERTBs,
+  lost 0 → 0. A "miss" is a SOFTINT delivery whose stacked PC is not the
+  instruction after the SET write, i.e. one that VERTB's racing level 3
+  took first, so SOFTINT came only after the higher handler's RTE, by the
+  poll; "lost" (a SET never delivered) stays 0.
+  With nothing pending it is recognised at the next event, which is
+  harmless: nothing can be delivered. So a lower level is never starved by
+  a recurring higher one **while the higher source's period exceeds the
+  poll interval** (s ≤ 2: 1024 phi2; s = 4: 256 E = 4096 phi2; s = 6: 256 E;
+  s ≥ 8: 65535 phi2, ≤ 128 E at s = 9) (`starve`, `kick`), and a handler that never
+  acknowledges its request is re-entered right after its RTE, as on a
   68000 (`storm`: 20 re-entries within 2 frames at s = 4). Cost: one pass
-  per `MACH_POLL` phi2 while something is pending, `docs/PERF.md` (i).
-  Exact recognition at the RTE/MOVE-to-SR instruction would need a core.s
-  SR-write hook: backlog, not Wave 9.
+  per poll interval while something is pending, `docs/PERF.md` (i).
+  **Which IPL drops are seen at once:** a SET write to INTENA/INTREQ and a
+  post (`mach_ichk` kick, `runtime/ops/chip.s:528`,
+  `runtime/ops/mach.s:559`): next instruction boundary; STOP (the halt path
+  `runtime/ops/mach.s:294`–`304` takes the event path, whose pass is
+  followed by `mach_dlv`, `runtime/ops/mach.s:276`): at once. RTE, MOVE to
+  SR, ANDI/EORI to SR (core.s, no SR-write hook): within one poll interval
+  (≤ 256 E ticks at s ≥ 2, ≤ 1024 phi2 at s ≤ 2) plus the host work of the
+  recognition itself (the pass and the exception frame, fixed in phi2:
+  ~300 E at s = 4 on a 1 MHz host, < 10 E at s = 9 or at 48 MHz), once a
+  pass has seen the request pending (a request POSTED by a pass, VERTB or
+  a CIA, always is; one SET by the CPU while masked is clamped only from
+  the next event on, ≤ one VERTB wait). Pinned by `tests/aros_boot.py`
+  leg `lat` (s = 4: 543–563 E against a TEST bound of 640; s = 9:
+  127–128 E against 320) and its mutant `poll8` (s = 4 entry 8× too long:
+  2031 E). The test bounds are not worst cases: t0 is taken after the guest
+  has seen the posted bit, so an arbitrary drop can come somewhat later
+  than the measured ~560 E; the leg catches a 2× regression of the s = 4
+  interval (~810 E) but not ~1.3×. Exact
+  recognition there would need a core.s SR-write hook: backlog.
 - **STOP** (exception mode): `emu_run` halts `HALT_STOP`; `mach_run`
   marks the CPU stopped (`mach_stp`), clears `st_halt`, and delivers at
   once if an interrupt is already deliverable. Otherwise, if one can still
   come (`mach_wk`: INTEN and a source enabled above I2–I0 that VERTB posts
-  (bit 5), or any source enabled above I2–I0 while a client slot is armed or
-  the slot-0 hook is installed), it **waits** with `cli` for the next event
+  (bit 5), or any source enabled above I2–I0 while a client slot is armed,
+  the slot-0 hook is installed or (W11-A, C4.2) the frame hook `mach_fhook`
+  is installed, since the copper writes INTREQ in it), it **waits** with
+  `cli` for the next event
   (no fast-forward: guest time runs at the dilated rate while stopped) and
   services it; a delivery resumes the CPU (stacked PC = the instruction
   after STOP). If nothing can wake it (IPL 7, nothing enabled above the
@@ -741,6 +777,7 @@ with a `valid` byte, `cop_dhook` in BSS, copper DMA gating). Reference:
   | +39 | `color[32]` u16, as written (no 12-bit mask) |
   | +103 | `valid` u8: `$A5` once `cop_reset` has run (undefined RAM before) |
   | +104 | `dirty` u8: := 1 by every `gen` bump; cleared only by the reader (W10-V fix round 1, F1: a `gen` that wrapped back to the reader's last value is still a change) |
+  | +105 | `pix` u8 (Wave 11, supervisor; `docs/WAVE11_BRIEF.md` C3): the pixel epoch. Writers of guest pixel memory store a new value after writing (blt.s: every D-enabled blit); disp.s treats a change like a changed field. Not part of `gen`. Undefined before the first writer; readers snapshot it at `disp_init` |
 
   Every display-register write, by the CPU or by the copper (word, long =
   two words, byte = both halves, the I/O trap's decode), updates its field.
@@ -839,9 +876,9 @@ with a `valid` byte, `cop_dhook` in BSS, copper DMA gating). Reference:
   (`run_cop` case `nopc`, mutant `nopcok`).
 - **Not modelled:** WAIT/SKIP beam timing (the model's limit), copper DMA
   cycles, the copper stopping when its own DMA goes off mid-list, DMACONR
-  (still reads its slot), BPLCON3+, the blitter's response to copper
-  writes (S3.6). `mach_wk` does not count `mach_fhook` as a wake source
-  (backlog; the CIA's slot-0 hook already keeps a STOPped CPU waiting).
+  (since S3.6: "Blitter (S3.6)"), BPLCON3+, the blitter's response to copper
+  writes (S3.6). (`mach_wk` counts `mach_fhook` as a wake source since
+  W11-A, C4.2: "Interrupt delivery", STOP.)
 - **Link order.** `cop.s` links after `cia.s` and before `mach.s`
   (Makefile); no module before it moves; `core.s` is unchanged.
 
@@ -884,7 +921,17 @@ spec: `docs/C2V.md` "Row skip", "Display refresh (S3.5)". Reference:
   was eaten by the catch-up after each long conversion, livelocking the
   guest at s ≤ 1). E going backwards (`mach_init`) opens the budget. A
   deferred change stays unseen (`gen`/`dirty` untouched). Outside
-  `mach_run`, convert at once. No dirty tracking of bitplane writes.
+  `mach_run`, convert at once. No dirty tracking of CPU bitplane writes.
+  **Pixel epoch (W11-A, C3):** `disp_init` snapshots `disp_st+105`; a
+  value different from the last one taken is a change like `gen`'s (same
+  budget; deferred, it stays unseen), and converts even when the copied
+  fields are equal (the pixels changed). The epoch is taken by every
+  decision (`disp_snap`, also `disp_refresh`). Writers: `blt.s` (W11-B),
+  by a read-modify-write `inc disp_st+105` with BASIC banked out (fix
+  round 1, L5: so the first blit always changes the value `disp_init`
+  snapshotted). Accepted residual: exactly 256 bumps (a multiple of 256)
+  inside one deferred window alias back to the value last taken and are
+  not seen; the next blit heals it.
 - **VERTBs during a conversion (F4).** A conversion inside the service
   pass takes many frames (mc2 ≈ 30 at s = 0, ≈ 2 at s = 4). The pass
   counts every one of them (`mach_frames`, slot 0's callback: CIA-A's TOD
@@ -914,3 +961,302 @@ spec: `docs/C2V.md` "Row skip", "Display refresh (S3.5)". Reference:
 - **Link order:** `disp.s` after `cia.s`, before `mach.s`. CODE and BSS
   are padded to whole pages, and there is no RODATA or DATA. `core.s` is
   unchanged.
+
+## Blitter (S3.6) (W11-B)
+
+Owner: blt (`runtime/ops/blt.s`; in `runtime/ops/chip.s` the blitter write
+paths `$040–$074`, the DMACONR read and `chip_blitirq`, labelled `; W11-B
+blt`). Design: `docs/WAVE11_BRIEF.md` C1/C3, `docs/S3_PLAN.md` §3.4, §3.5,
+§4 "S3.6". Reference: `host/chipset_ref.Blitter` (normal mode) through
+`Chipset` (Paula's DMACONR/BZERO, INTREQ BLIT). Tests: `tests/run_blt.py`
+(+ `--mutants`, `--perf`), `host/tests/test_blt.py`, the blit cases of
+`tests/chip_oracle.py`.
+
+- **Entry.** Every write to `$040–$074` (CPU word/long/byte, or a copper
+  MOVE with COPCON CDANG) is logged and lands in `chip_shd` as before; then
+  c_wrw calls `blt_w` (X = offset; Y kept, A/X clobbered). BLTSIZE (`$058`)
+  runs the whole blit **synchronously, inside the trap**; BLTBDAT (`$072`)
+  loads the B hold register (below). Every other blitter register is read
+  from `chip_shd` at BLTSIZE. OCS size: h = bits 15–6 (0 = 1024), w = bits
+  5–0 (0 = 64). BLTSIZV/BLTSIZH/BLTCON0L (ECS) only land in the shadow.
+- **Normal mode** = `Blitter.blit` except for in-row overlap (below,
+  "Not modelled": blt.s reads a whole row of A/B/C before it writes the D
+  row; the model is word-serial): channels A/B/C/D = BLTCON0 bits 11–8;
+  minterm LF (bit 7 = ABC … bit 0 = ¬A¬B¬C); A masked by AFWM on the first
+  and ALWM on the last word of each row in processing order (both when
+  w = 1), before its shift; ASH/BSH with the old word carried across words
+  **and rows** (0 at the start of each blit); signed modulos added after
+  each row (subtracted when descending); descending (BLTCON1 bit 1):
+  addresses step down, shifts go left; fill (IFE bit 3, EFE bit 4, both =
+  exclusive) per word bits 0–15, carry = FCI (bit 2) at every row start;
+  a channel with DMA off uses BLTADAT/BLTCDAT, B its hold register. After
+  the blit the four pointers are written back as `(p >> 16) & $1F : p &
+  $FFFF` (all four, used or not), BLTADAT/BLTBDAT/BLTCDAT hold the last
+  word their channel fetched (raw), and the B hold register = the last
+  shifted B.
+- **BLTBDAT (CPU write)**: hold := the value shifted **alone** by the
+  current BSH: `(v << BSH) & $FFFF` descending, `v >> BSH` ascending; no
+  previous B word enters. **Model change (Wave 11, supervisor-approved
+  exception to "chipset_ref additive only"):** `Blitter.write_bdat` used to
+  shift against the previous B word (`bprev`); FS-UAE shows otherwise
+  (oracle cases `bdat_desc_bsh`, `bdat_asc_prev_cpu`, `bdat_after_bdma`;
+  `b_stale_hold` pins that a B-off blit after a B-DMA blit uses the last
+  shifted B, unchanged). The old cases missed it (previous B always 0, or
+  BSH 0). `bprev` stays in the model (written by `blit()`, read only by
+  the oracle mutant `bdat_reshifted_per_word`); blt.s keeps no such word.
+  The chip-oracle mutant `bdat_write_not_shifted` was retargeted at the new
+  line. The AROS boot model is unaffected (its blits use no BSH; same
+  instruction and blitter-word counts before and after:
+  `build/evidence/w11-blt/bootmodel/`). Tests: `host/tests/test_blt_ref.py`
+  (31 cases red on the old model).
+- **Line mode** (BLTCON1 bit 0): counted in `blt_nline` (and logged as
+  the BLTSIZE write); memory, pointers, data registers, BZERO and the
+  pixel epoch untouched; completion as below. Deliberate divergence from
+  `Blitter.line` (an unverified approximation). The AROS boot model uses
+  no line blit (76 blits, all `CD lf=CA` / `BCD lf=CA`).
+- **Completion** (both modes): INTREQ BLIT (bit 6) is set by
+  `chip_blitirq`, c_wrw's Paula SET path for `$8040` (mach_hold ORed back,
+  then `mach_ichk`: in exception mode a deliverable level-3 interrupt is
+  taken at the instruction after the BLTSIZE write). Not logged; the raw
+  INTREQ slot is untouched. **DMACONR** = `(DMACON & $07FF) | BZERO`, with
+  DMACON = cop.s's field `cop_sh+1` (C1 +1) and BZERO = no 1 bit in any D
+  word of the last normal blit (D DMA on or off; after fill when filling);
+  BBUSY never reads 1. (This supersedes "DMACONR reads its slot" in "I/O
+  trap" and "Copper and display state", which predate S3.6.)
+- **Memory.** Channel addresses are guest addresses masked to the model's
+  2 MB chip range: `& $1FFFFE` at the start (as `Blitter._ptr`), then
+  24-bit arithmetic, and every REC bank store is `& $1F`. A blit therefore
+  never reads or writes banks `$BF`/`$DF` (the REU under `$DF0000` holds
+  `disp_lut`; test `iobank`). One REU DMA per channel row (two when the row
+  crosses a 512 KB REC line; mod 2 MB past `$1FFFFF`, below 0), combined in
+  the row buffers `blt_abuf`/`blt_cbuf` (rc `blt $B600-$B7FF`, RAM under
+  BASIC ROM; BASIC is banked out for the blit, the caller's `$01`
+  restored), one DMA per D row. The REC use ends with `mem_rec_dirty`.
+- **Instruction window.** A D row that touches the guest page of `r_pc`
+  sets a flag; at the end of the blit blt.s re-stores one byte of that page
+  through `mem_read8`/`mem_write8` (same value), so core.s's WINCHK drops
+  the window (test `smc`). m_addr, m_val and t_tmp are saved around it.
+- **Pixel epoch (C3, Addendum 3).** After every normal blit with D on:
+  `inc disp_st+105`, a read-modify-write of the byte itself (BASIC is out
+  in BCODE), never a private counter (one that happened to equal a
+  reader's `disp_init` snapshot would hide the first blit). Tests `pix`
+  (+1 per D blit, none for D-off or line blits) and `epoch` (byte preset
+  to the old counter's next value: red on the old code,
+  `build/evidence/w11-blt/red/epoch-old-counter.txt`).
+- **Trap ABI.** m_addr, m_val, t_tmp and chip_a survive a blit (the second
+  word of `move.l` to `$DFF056` or `$DFF058` still lands); chip_vl/chip_vh
+  are clobbered by the IRQ raise (c_wrw's callers reload them per word).
+- **Host-visible** (`runner.lbl`): `blt_n` (u16 normal blits), `blt_nline`
+  (u16), `blt_nwd` (u32 words), `blt_bz` (`$20` = BZERO), `blt_bhold` (u16
+  LE); entry `blt_reset` (BZERO, hold registers
+  and counters := 0; host only; `chip_reset` does not call it).
+- **Link order and layout (BCODE).** `blt.s` links after `cop.s`, before
+  `disp.s`. Only `blt_w` (the bank stub), `blt_dmaconr` and `blt_reset` are
+  in CODE (73 bytes); BSS (MAIN) 133 bytes; BBSS 0 bytes. Everything else
+  (dispatch, BLTBDAT, shifter, the blit, window invalidation: 1,998 bytes,
+  `$A000-$A7CD`) is in **BCODE**, the shared banked-code segment (with
+  `BBSS`, optional banked BSS, not cleared at boot): `runtime/c64.cfg`
+  memory area `BHI` = `$A000-$B5FF` (rc `core $A000-$B5FF`), RAM under
+  BASIC ROM, 3,634 bytes still free there; MAIN is `fill = yes`, so the PRG
+  is one contiguous load from `$0801` (40,911 bytes on disk vs 33,824
+  before; loads verified through the harness on VICE and the U64E, BCODE
+  read back with BASIC out). **BCODE rules:**
+  code there runs only with BASIC ROM banked out and is entered only
+  through a MAIN stub that banks BASIC out (`$37` → `$36`; `$36`, `$35`,
+  `$34` unchanged) and restores the caller's `$01` on every exit (blt_w:
+  one return path; test `bank` calls it with `$37`, `$36`, `$35`; mutant
+  `nobank` jams in BASIC ROM). blt.s puts no BSS in BBSS. **IRQ safety:** the I flag is the caller's. A
+  machine-loop IRQ/NMI during a blit (`mach_run`: `$01` = `$35`, handlers
+  and RAM vectors at `$FFFA` in MAIN/RAM under KERNAL) or a KERNAL IRQ in
+  HLE (`$36` keeps KERNAL in) runs code outside BCODE that neither depends
+  on BASIC nor touches the REC, and returns into BCODE with `$01` as it
+  found it. **What moved** (`build/evidence/w11-blt/mapdiff.txt`; CODE grew
+  $6A = chip.s +33 + blt.s MAIN 73): the CODE and BSS of every module
+  linked before chip.s are unchanged (core.s's included); chip.s's CODE
+  grew in place; cia.s and cop.s CODE +$21; disp.s and mach.s CODE +$6A
+  and BSS +$85; the RODATA and DATA of every module (core.s's included)
+  +$6A, since those segments follow CODE. `core.s` is byte-identical
+  modulo that relocation (link-swap: the PRG linked with the base tree's
+  core.s equals the gate PRG, `coreswap.txt`) and `perf_cycles --max-delta
+  0` passes on the final build.
+- **Not modelled:** blitter DMA cycles and BBUSY, BLTPRI/nasty, ECS
+  BLTSIZV/BLTSIZH, line drawing, CPU writes to bitplanes for the pixel
+  epoch (C3 backlog). **In-row overlap** (review W11-B M1): when D lies
+  inside the same row of A/B/C, blt.s's row-wise fetch-then-store differs
+  from the word-serial model and from FS-UAE (which writes D one word
+  late): oracle case `p_overlap_asc2` (D two words ahead of A, 1 x 12) —
+  model = FS-UAE, blt.s differs in 20 bytes; `p_overlap_asc` (distance 1,
+  2 x 8) — blt.s, the model and FS-UAE all differ (the model's own
+  mismatch: 30 bytes). Both are chip_oracle LIMIT/MATCH-pinned and
+  `run_blt` pins blt.s to a row-wise model. Overlaps across rows (the
+  usual scroll/copy cases, modulo-separated) are exact. **Odd modulos**
+  (L1): FS-UAE ignores modulo bit 0; the model and blt.s honour it
+  (`p_odd_mod`, 12 bytes, documented LIMIT). Backlog: a word-serial path
+  for in-row overlap (detectable at setup), FS-UAE's D delay for distance
+  1 in the model, modulo bit 0.
+
+## Machine profile and AROS boot (S3.7) (W11-A)
+
+Owner: aros (`runtime/rc/machine.inc`, `tests/aros/mboot.s`,
+`host/machine.py`, `tests/aros_boot.py`, `tests/aros/model_frames.py`).
+Design: `docs/S3_PLAN.md` §3.2–§3.5, §4 "S3.7"; `docs/WAVE11_BRIEF.md`
+C2–C4. Reference: `tools/s3probe/aros_boot_model.py` (the boot model).
+Tests: `tests/aros_boot.py` (legs `m1`, `m2`, `m3`, `ablate`, `wkhook`,
+`s0`, `pix`, `--mutants`), `host/tests/test_aros_profile.py`.
+
+- **Two guest profiles** (`docs/RESOURCES.md`, `host/rescheck.py` check
+  (g)). `runtime/rc/guest.inc` stays the HLE map; `runtime/rc/machine.inc`
+  is the machine-mode map of the same 16 MB REU, never included by
+  `runtime/macros.inc` (the runtime is profile-agnostic). rescheck checks
+  each profile on its own (overlap, coverage, equates inside their
+  regions), checks that EVERY guest map reserves the trapped banks
+  `$BF0000–$BFFFFF` and `$DF0000–$DFFFFF` (owner `io`, or `disp` for the
+  palette LUT the REU holds under `$DF`), cross-checks the profile's host
+  mirrors (`host/machine.py`) and judges `tests/aros/*.s` literals against
+  the profile. The HLE map's `free` region `$800000–$DEFFFF` became `free
+  $800000–$BEFFFF`, `io $BF0000–$BFFFFF`, `free $C00000–$DEFFFF`, and its
+  `free $DF1000–$DFFFFF` became `io`.
+
+  | Guest range | Machine profile |
+  |---|---|
+  | `$000000–$1FFFFF` | chip RAM, 2 MB (AROS sizes it so on the flat REU) |
+  | `$200000–$BEFFFF` | free: zero, unmapped (AROS probes it) |
+  | `$BF0000–$BFFFFF` | io: CIAs |
+  | `$C00000–$DBFFFF` | slow RAM, 1.75 MB |
+  | `$DC0000–$DEFFFF` | free: zero (Gayle ID `$DE1000` reads 0) |
+  | `$DF0000–$DF0FFF` | disp: the palette LUT (as in guest.inc) |
+  | `$DF1000–$DFFFFF` | io: custom chips |
+  | `$E00000–$E7FFFF` | `aros-ext.bin` |
+  | `$E80000–$F7FFFF` | free: zero (no autoconfig board, no cartridge ROM) |
+  | `$F80000–$FFFFFF` | `aros-rom.bin` |
+
+  No write protection (the ROM is never written, S3_PLAN §3.3), no mirrors.
+- **Load** (`host/machine.py`). `find_rom` takes the two banks from the W6-O
+  cache named by `tools/aros/manifest.txt`, re-verifies every SHA256 and
+  fails closed; a missing or bad cache makes the boot legs print `SKIP
+  aros_boot …` and exit 0. The ROM never enters the repository or a build
+  artifact: it goes host → REU at test time only. Staging order: the WHOLE
+  REU is zeroed first (`aros_fill`: REC stashes of one zero byte, C64
+  address fixed; the U64E's REU otherwise holds the previous user's
+  data), then `aros-ext.bin` at `$E00000`, `aros-rom.bin` at `$F80000`, then
+  the overlay longs (below). VICE stages through the runner's
+  `test_load_chunk`; the U64E through the harness's SocketDMA `REUWRITE`
+  (`socket_dma_reu_write`), falling back to `test_load_chunk`. Every staged
+  span (and a zero hole at `$F00000`) is read back on the C64 by checksum
+  (`aros_sum` = `host/machine.fletcher`) before the boot.
+- **Overlay choice.** The A500's reset overlay (ROM mirrored at 0 until
+  CIA-A PRA bit 0 drops) is not modelled. Like the boot model, the loader
+  copies the ROM's first 8 bytes (reset SSP, reset PC) to guest 0, and the
+  boot entry loads SSP from `$000000` and PC from `$000004`. AROS reads
+  those once and turns OVL off (a CIA-A port write, only stored) before it
+  uses low memory; the 8 bytes are chip RAM afterwards.
+- **Boot entry** (`tests/aros/mboot.s` `aros_boot`). A test-time driver
+  assembled against `runner.lbl` (as `tests/irq/drv.s`), loaded at
+  `buf_case` and called through the runner's mailbox dispatcher (U64E) or
+  a 6-byte trampoline (`jsr aros_boot / jmp *`, VICE `goto`): the gate PRG
+  stays byte-identical. Sequence: `sei`; `st_exc` := 1; `emu_reset`; SSP,
+  PC from the overlay longs; SR := `$2700` (68000 reset: S, IPL 7); USP :=
+  0; `mach_s` := the profile value; `mach_init`; `chip_reset` (ends in
+  `cia_reset`: the CIAs at power-up, CIA-A PRA inputs `$EB`, "CIA-A/B");
+  `cia_reset` again (the brief's explicit step); `cop_reset` (display
+  state, `mach_fhook` := `cop_frame`); `disp_init` (LUT, `cop_dhook`); then
+  `mach_run`. It returns only on a real halt (an odd vector, or a STOP
+  nothing can wake); its result block records `st_halt`, `st_reason`, PC
+  and `mach_frames`. The **host stop condition** is the host's: it watches
+  the serial ring and the counters while the guest runs and ends the
+  session (VICE: the harness releases the instance; U64E: the DeviceLock
+  hold's restore resets the C64).
+- **`mach_s` per host** (measured, `docs/PERF.md` "AROS boot"), chosen
+  for SPEED only: **3 on the U64E at 48 MHz** (fix round 2, L8: picked by
+  the time to m3, the no-media screen, which is bound by guest time: s = 3
+  86.8 / 98.3 s, s = 4 101.0 / 100.6 s, s = 2 106.3 s, s = 5 113.7 s; m2
+  alone is fastest at s = 4, 58 s) and **9 on VICE** (m2 in ~120 s of
+  warp, m3 in 174 s; ≈ 9k guest instructions per frame after m1).
+  `tests/aros_boot.py` `BOOT_S_VICE`/`BOOT_S_U64` hold the values; `--s`
+  overrides. Lower s is slower to m2 or does not reach it; that is NOT a
+  requirement of AROS (fix round 1, HIGH-1: the boot model with its CPU
+  slowed 24× still reaches m2 at ~680 instructions per frame). What we
+  know (`docs/PERF.md` (l)): on VICE, s ≤ 6 failed through the
+  `MACH_POLL` cost (fixed, below; s = 6 now reaches m2); the U64E reaches m2 at s = 1 (4 of 4 runs on
+  the fix-round build, ~105 s; one earlier run did not, not reproduced)
+  and not at s = 0 (2 of 2 runs, 400 s), consistent with the model's
+  limit (see "C4").
+- **Milestones.** m1: serial `ROMInfo: 1MiB ROM detected`; m2: serial
+  `romtaginit done`, and the serial log up to it must equal the boot
+  model's byte for byte (414 bytes up to the milestone, 416 with its line
+  end; every captured byte is compared, so a capture defect fails), with
+  no byte lost (the host polls the 256-byte `chip_ser` ring every 20 ms on
+  the U64E, 250 ms on VICE; the host zeroes the ring and its count before
+  every boot and reads them back as zero; the ring read is bracketed by two
+  `chip_sern` reads and re-read until the bracket is consistent, else the
+  leg fails; `docs/HARDWARE.md` has the U64E read-path findings); m3: a conversion on the C64
+  (bitmap, matrix, colour RAM, the VIC registers disp.s owns) equal to one
+  of the boot model's insert-disk conversions (`tests/aros/model_frames.py`:
+  every distinct `c2v_ref.disp_convert` of the model's display state at
+  its vblanks, first seen at frame ≥ 345, the logo with its icons). On
+  the U64E the hash leaves the screen matrix out (it lies under the I/O
+  window and the running guest's `$01` is never touched; the model side
+  hashes the same way, `nomatrix`); on VICE the 6510 is halted for the
+  snapshot and `$01` is switched to `$34` and back to the value read.
+  Blind spot of the U64E hash: a screen with the right pixels but a wrong
+  palette differs only in the matrix (the hires cell colours), so the U64E
+  leg cannot see it; VICE's full hash covers it. The U64E leg re-hashes on
+  every 2 s poll (not only after a new conversion), so one torn read of
+  the final, static screen cannot make it time out. m3
+  needs the blitter (W11-B): green on the merged tree (VICE s = 9: 174 s,
+  guest frame 386; U64E s = 3: 86.8–98.3 s), red without it
+  (`build/evidence/w11-aros/red/m3_noblit_v2.log`, the pre-merge PRG, no
+  blitter, current hash: conversions match the model's frames 250 and 266
+  only, never ≥ 345). With the blitter but `disp.s` ignoring the epoch
+  (mutant `pixread`, `red/m3_pixread.log`) it is red as well: frames 250,
+  266, 267 (converted on display-register changes), then no conversion
+  of the later blit-only changes. Every conversion matched a model frame in
+  order (250, 266, 267, 293, 345): the screen needs no CPU-drawn pixels
+  beyond what the blits' epoch bumps (`disp_st+105`) make visible. Red: `ablate` (exception mode off: the CPU
+  probe's MOVEC halts `HALT_ILLEGAL`, no m1); the base tree reaches m1 and
+  (at s = 8 on VICE) m2: m2's enabling step is a working `mach_s` (VICE
+  s = 4 does not reach it, above).
+- **C4 (machine loop).** C4.2: `mach_wk` counts `mach_fhook`, with copper
+  DMA on ("Interrupt delivery", STOP). C4.1: the idle "starvation at s = 0"
+  is the arithmetic of a 1 MHz host (a 14188-phi2 frame holds ~23 guest
+  instructions; the pass, the VERTB delivery and handler and a copper run
+  fill most of it; at 48 MHz ~2%), pinned by leg `s0`. The AROS low-s
+  stalls are NOT that arithmetic (fix round 1, HIGH-1):
+  - VICE s ≤ 6: while a level-2 request (CIA-A PORTS) is pending under
+    IPL 3, every pass clamps the one-shot to `MACH_POLL` = `$0400` phi2
+    (~640 cycles per 1024 at 1 MHz), so the guest runs at ~37% for as
+    long as it is in its level-3 handler; the handler then outlasts the
+    frame, the kernel's level-3 dispatcher finds VERTB set again and never
+    returns (no delivery for hundreds of frames), and no task runs. A
+    build with `MACH_POLL` = `$4000` reaches m2 at s = 6 (158.7 s, frame
+    2821). Fixed (supervisor grant): the poll interval is max(`$0400`,
+    256 E << s) phi2, "Interrupt delivery"; leg `poll` (red 24% → green
+    100% of the quiet progress), mutant `pollfix`; m2 at VICE s = 6 on the
+    fixed build: 162.0 s, frame 2821.
+  - **U64E s = 0 (not a defect, rev-aros round 2):** after m1 the boot
+    runs at 25–39k guest IPS on the U64E, so s = 0 (14.2 ms frames) gives
+    ~350–540 instructions per guest frame: at or below the model's limit
+    (k = 32, 551 per frame: no m2 in 40k frames). s = 0 not reaching m2
+    (2 of 2 runs, 27k frames) is consistent with that limit. s = 1
+    (~680 per frame) sits next to the model's slowest passing case
+    (k = 24, 676), which fits its one failure in the first measurement
+    (later 6 of 6 passed). Model comparison (`tools/s3probe` boot model,
+    CPU slowed k×,
+    reviewer's `slowcpu2.py`):
+
+    | k | instr/frame | m1 frame | m2 frame |
+    |---:|---:|---:|---:|
+    | 1 | 11.7k | 96 | 214 |
+    | 16 | 906 | 1,334 | 4,921 |
+    | 20 | 761 | 1,691 | 7,477 |
+    | 24 | 676 | 1,869 | 12,087 |
+    | 32 | 551 | – | none in 40k |
+- **Risk (Workbench track).** A CIA timer.device underflow that becomes
+  pending while an SR mask holds it (MOVE/ANDI to SR, a running handler) is
+  taken up to one poll interval late after the mask drops (128–256 E, plus
+  the host's recognition work above); a real 68000 takes it at once. A
+  Disable()/Enable() pair through INTENA's INTEN is exact: Enable is a SET
+  write, and `mach_ichk` kicks at once.
+- **Backlog.** The boot entry is a test-time driver this wave; making it
+  part of the product PRG (the banked BCODE area) belongs to the
+  Workbench track.

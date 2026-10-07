@@ -1049,32 +1049,39 @@ halted: sta st_halt             ; = 1: halt_now's (an IRQ's bit 7 dropped,
 
 ; mach_pclamp — in exception mode, while an interrupt is pending and enabled
 ; (mach_lvl != 0) but not yet taken (masked by I2-I0, or a second one
-; behind the one this pass delivers), clamp the one-shot to MACH_POLL phi2:
-; an IPL drop by RTE / MOVE to SR (core.s, no hook) is then recognised
-; within MACH_POLL instead of at the next VERTB, and a lower level is never
-; starved by a recurring higher one.  Nothing pending: no cost but this
-; test.  Clobbers A, X.
+; behind the one this pass delivers), clamp the one-shot to the poll
+; interval: an IPL drop by RTE / MOVE to SR (core.s, no hook) is then
+; recognised within it instead of at the next VERTB, and a lower level is
+; never starved by a recurring higher one.  Nothing pending: no cost but
+; this test.  W11-A (supervisor grant, HIGH-1): the interval is
+; max(MACH_POLL, 256 E << s) phi2, at most $FFFF (mach_plo/mach_phi), so a
+; pass costs the guest a bounded share of GUEST time at every s (at s = 6
+; a fixed 1024 phi2 cost a 1 MHz host ~2/3 of the time a request waited).
+; Clobbers A, X.
 .proc mach_pclamp
         lda st_exl
         beq done
         jsr mach_lvl
         beq done
-        lda mach_w              ; mach_w > MACH_POLL: mach_w := MACH_POLL
-        cmp #<(MACH_POLL + 1)
-        lda mach_w+1
-        sbc #>(MACH_POLL + 1)
-        bcc done
-        lda #<MACH_POLL
-        sta mach_w
-        lda #>MACH_POLL
-        sta mach_w+1
+        ldx mach_sl             ; W11-A (supervisor grant, HIGH-1): the poll
+        lda mach_w              ; W11-A (supervisor grant, HIGH-1): interval is
+        cmp mach_plo,x          ; W11-A (supervisor grant, HIGH-1): max(MACH_POLL,
+        lda mach_w+1            ; W11-A (supervisor grant, HIGH-1): 256 E << s)
+        sbc mach_phi,x          ; W11-A (supervisor grant, HIGH-1): phi2, at most
+        bcc done                ; W11-A (supervisor grant, HIGH-1): $FFFF
+        lda mach_plo,x          ; W11-A (supervisor grant, HIGH-1)
+        sta mach_w              ; W11-A (supervisor grant, HIGH-1)
+        lda mach_phi,x          ; W11-A (supervisor grant, HIGH-1)
+        sta mach_w+1            ; W11-A (supervisor grant, HIGH-1)
 done:   rts
 .endproc
 
 ; mach_wk — C = 1 when a stopped CPU can still be woken: INTEN and an
 ; enabled source above I2-I0 that VERTB posts (bit 5), or any enabled
 ; source above I2-I0 while a client slot is armed or the VERTB hook is
-; installed (a client may post it).  Clobbers A, X.
+; installed (a client may post it), or while the frame hook mach_fhook is
+; installed with copper DMA on (W11-A: the copper writes INTREQ in it; its
+; DMA state is cop.s's disp_st dmacon field).  Clobbers A, X.
 .proc mach_wk
         lda chip_shd+MACH_INTENAR
         and #$40
@@ -1096,6 +1103,13 @@ done:   rts
         bne yes
         lda mach_cbv+1
         bne yes
+        lda mach_fhook+1        ; W11-A: the frame hook (the copper) can post
+        beq no                  ; W11-A: a request every frame (C4.2), but
+        lda disp_st+2           ; W11-A: only with copper DMA on (fix 1, L6):
+        and #$02                ; W11-A: DMACON DMAEN (bit 9) and COPEN (bit 7),
+        beq no                  ; W11-A: cop.s's state in disp_st+1 (LE; BASIC
+        lda disp_st+1           ; W11-A: is out: mach_wk runs inside mach_run)
+        bmi yes                 ; W11-A
 no:     clc
         rts
 yes:    sec
@@ -1124,9 +1138,17 @@ mach_bit:  .byte $01, $02, $04, $08, $10, $20, $40, $80
 ; INTREQ bits 0-7 of levels 1-4 (bits 8-13: levels 4, 5, 6 in mach_lvl);
 ; host/chipset_ref.IRQ_LEVELS, pinned by host/tests/test_irq.py
 mach_lvlo: .byte $07, $08, $70, $80
+; W11-A (supervisor grant, HIGH-1): mach_pclamp's poll interval by s = 0-16,
+; max(MACH_POLL, 256 E << s) phi2 capped at $FFFF (low, high byte)
+mach_plo:  .byte <MACH_POLL, <MACH_POLL, <MACH_POLL, $00, $00, $00, $00, $00
+           .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+mach_phi:  .byte >MACH_POLL, >MACH_POLL, >MACH_POLL, $08, $10, $20, $40, $80
+           .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
 ; INTREQ bits above I2-I0 = 0..7 (low, high byte)
 mach_ablo: .byte $FF, $F8, $F0, $80, $00, $00, $00, $00
 mach_abhi: .byte $3F, $3F, $3F, $3F, $38, $20, $00, $00
 .segment "CODE"
 .assert mach_nmi < $A000 .and mach_irq < $A000, lderror, "mach vectors must point at RAM visible under $01 = $34"
 .assert HALT_STOP = MACH_STOPCODE, lderror, "MACH_STOPCODE must equal core.s HALT_STOP"
+.assert MACH_POLL = 1024, error, "mach_plo/mach_phi assume MACH_POLL = 256 E << 2"  ; W11-A (supervisor grant, HIGH-1)
+.assert MACH_S_MAX = 16, error, "mach_plo/mach_phi hold s = 0-16"  ; W11-A (supervisor grant, HIGH-1)

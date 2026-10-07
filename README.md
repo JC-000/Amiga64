@@ -10,6 +10,7 @@ A translation layer for running Amiga 500 programs on the **C64 Ultimate** and *
 | **M1 — 68000 interpreter** | ✅ done (`m1-vectors-green`, `hw-validated`) — full user-mode integer set, 5150 golden + 63 hand vectors green in VICE **and on real U64E hardware with zero divergence** (the current golden gate is the 5129-case subset without $BF/$DF cases, see `docs/CONTRACTS.md` "Vector sets") |
 | **M2 — AmigaOS HLE** | ✅ done — **vbcc-compiled C programs run to completion**: stdio incl. file I/O (`fopen` r/w/a/r+, `fseek`, `remove`), keyboard input on stdin, `malloc`/`free` on a real heap, pools, custom stacks, `getenv`/`time`/`system` |
 | M3 — Chipset shim | ✅ done — **a static Amiga playfield, pixel-exact on the VIC-II**: an HLE C program (`fixtures/c/pf_static.c`) builds a copper list, and the copper (`runtime/ops/cop.s`) plus the display refresh (`runtime/ops/disp.s`, c2v kernels) reproduce it byte-for-byte against the host reference (Wave 10). Built on: supervisor mode & exceptions (Wave 6), the $BF/$DF I/O trap (S3.1), the machine loop/time base (S3.2), interrupt delivery (S3.3) and CIA-A/B (S3.4). Plan: [`docs/S3_PLAN.md`](docs/S3_PLAN.md) |
+| S3.6/S3.7 — Blitter + AROS boot | ✅ done — **the open-source AROS ROM boots to its "insert disk" screen** on VICE and on a real U64E (48 MHz, ~90 s), pixel-matched to the boot model: the synchronous OCS blitter (`runtime/ops/blt.s`, FS-UAE-checked), a machine-mode memory profile (`runtime/rc/machine.inc`) and the boot milestones in `tests/aros_boot.py` (Wave 11). Next: Workbench from floppy ([`docs/WB_BOOT.md`](docs/WB_BOOT.md)) |
 | M4 — AOT translator | not started |
 
 Measured on a real Ultimate 64 Elite (48 MHz turbo): **~75–80k 68k instructions/sec** on an ALU mix and **~68k memory-bound** (+25% memory-bound / +43% read-modify-write since the REC-shadow memory API) — roughly a 0.5–1 MHz 68000. Details in [`docs/HARDWARE.md`](docs/HARDWARE.md); model in [`docs/PERF.md`](docs/PERF.md).
@@ -88,7 +89,7 @@ The drivers take `--backend u64` to run on a real Ultimate 64 (through the harne
 ## Non-goals (for now)
 
 - Full-speed games or demos that race the beam on OCS.
-- Kickstart ROM emulation via proprietary ROM images — we target HLE and freely redistributable test programs. (Booting the open-source AROS ROM is kept open as a future option once a chipset shim and supervisor mode exist; see "Third-party material".)
+- Kickstart ROM emulation via proprietary ROM images — we target HLE and freely redistributable test programs. (The open-source AROS ROM is the boot target instead: it reaches its "insert disk" screen since Wave 11; see "Third-party material".)
 
 ## Third-party material
 
@@ -111,4 +112,6 @@ The drivers take `--backend u64` to run on a real Ultimate 64 (through the harne
   record of where the source is (`tools/aros/README.md`). The ROM is
   never committed, never placed under `build/`, and never required by any
   test. `tests/aros_oracle.py` boots it in FS-UAE to diff our vbcc programs
-  against a real AmigaOS-compatible system (`docs/ORACLE.md`).
+  against a real AmigaOS-compatible system (`docs/ORACLE.md`), and
+  `tests/aros_boot.py` stages it into the REU at test time to boot it on
+  Amiga64 itself (skipping cleanly when the cache is absent).
