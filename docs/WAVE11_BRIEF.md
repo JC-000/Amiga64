@@ -194,3 +194,17 @@ with the previous B word. Supervisor sign-off for a one-off non-additive
 edit to `host/chipset_ref.Blitter.write_bdat` and the chip_oracle mutant
 `bdat_write_not_shifted`; the boot model's counts must be re-shown
 unchanged. chip_oracle's exact counts change accordingly.
+
+## Addendum 3 (2026-10-06): review rulings (rev-aros round 1)
+
+- **Boot entry form:** `tests/aros/mboot.s`, a test-time driver loaded at
+  `buf_case` (as `tests/irq/drv.s`), is the accepted S3.7 form for this
+  wave. A product-PRG boot entry (BCODE) belongs to the Workbench track.
+- **Pixel epoch writer (C3):** writers do a read-modify-write
+  `inc disp_st+105` with BASIC banked out, not a store of a private
+  counter, so the first write always changes the byte after `disp_init`'s
+  snapshot. An exact multiple of 256 writes inside one deferred window
+  aliases; accepted residual (the next write heals it).
+- **C4.1:** the "≳3k instr/frame" threshold is withdrawn; the low-s boot
+  stall is treated as a fidelity defect (diagnose, then fix with sign-off
+  or document as open).
