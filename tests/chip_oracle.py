@@ -107,6 +107,8 @@ class Case:
     dumps: list = field(default_factory=list)      # [(addr, nbytes)]
     rule: str = ""                                  # what it pins (docs)
     limit: str = ""         # a documented model limit: the model must raise
+    diverge: str = ""       # W11-B: a documented divergence of the model from FS-UAE
+                            # (backlog): a differing dump/read is the LIMIT verdict
                             # NotImplementedError; the verdict is LIMIT
 
 
@@ -507,6 +509,65 @@ def cases() -> list[Case]:
                           d=DST + 94), ("BLIT", size(2, 4)), ("R", REG["DMACONR"], 0x2000)],
              init=blit_init("desc_masks_bzero", [(SRCB, b"\x00" * 64)]), dumps=DUMP_DST,
              rule="descending A.B with masks (B = 0: BZERO set), then ~A.~B (nonzero)"))
+    # ---- W11-B (S3.6 blitter v0): shapes the C64 blitter takes special paths for --
+    add(Case("aros_cd_ca_wide",
+             [*blit_setup(0x03CA, 0, 0x0FFF, 0xFFF0, c=BIG, d=BIG, adat=0xFFFF, bdat=0x5A5A),
+              ("BLIT", size(40, 20)), ("R", REG["DMACONR"], 0x2000)],
+             init=[(BIG, rnd("aros_cd_ca_wide", 4128))], dumps=[(BIG, 4128)],
+             rule="AROS text/clear shape: C,D $CA, constant A (masked) and B, 20 words x 40"))
+    add(Case("aros_bcd_ca",
+             [*blit_setup(0x07CA, 0, 0x00FF, 0xFF00, b=SRCB, c=DST, d=DST, bmod=4, cmod=8,
+                          dmod=8, adat=0xFFFF), ("BLIT", size(12, 8))],
+             init=blit_init("aros_bcd_ca"), dumps=DUMP_DST,
+             rule="AROS shape: B,C,D $CA, constant A with masks, distinct modulos"))
+    add(Case("desc_fill_ash",
+             [*blit_setup(0x49F0, 0x000E, 0xFF0F, 0xF0FF, a=SRC + flast, d=DST + 64 + flast),
+              ("BLIT", size(6, 2)), ("R", REG["DMACONR"], 0x2000)],
+             init=blit_init("desc_fill_ash", [(SRC, fsrc)]), dumps=DUMP_DST,
+             rule="descending, A shift 4 (left) with masks, then inclusive fill with FCI"))
+    add(Case("bdat_desc_bsh",
+             [*blit_setup(0x01CC, 0x7002, d=DST + 40, dmod=2, bdat=0xF00F), ("BLIT", size(3, 3)),
+              w("BLTBDAT", 0x8001), ("BLIT", size(2, 2))],
+             init=blit_init("bdat_desc_bsh"), dumps=DUMP_DST,
+             rule="B DMA off, descending, BSH 7: the CPU's BLTBDAT is shifted left "
+                  "alone, no previous B word enters (Wave 11 write_bdat ruling)"))
+    add(Case("bdat_asc_prev_cpu",
+             [*blit_setup(0x01CC, 0x5000, d=DST + 4, dmod=2, bdat=0xF00F), w("BLTBDAT", 0x8001),
+              ("BLIT", size(2, 2))],
+             init=blit_init("bdat_asc_prev_cpu"), dumps=DUMP_DST,
+             rule="two CPU BLTBDAT writes, ascending BSH 5: the second is shifted alone, "
+                  "not against the first"))
+    add(Case("bdat_after_bdma",
+             [*blit_setup(0x05CC, 0x5000, b=SRCB, d=DST, dmod=0, bmod=0), ("BLIT", size(1, 3)),
+              w("BLTBDAT", 0x8001), w("BLTCON0", 0x01CC), ("BLIT", size(2, 2))],
+             init=blit_init("bdat_after_bdma"), dumps=DUMP_DST,
+             rule="a CPU BLTBDAT write after a B-DMA blit, ascending BSH 5: shifted alone, "
+                  "not against the last fetched B"))
+    add(Case("b_stale_hold",
+             [*blit_setup(0x05CC, 0x5000, b=SRCB, d=DST, dmod=0, bmod=0), ("BLIT", size(1, 3)),
+              w("BLTCON0", 0x01CC), ("BLIT", size(2, 2))],
+             init=blit_init("b_stale_hold"), dumps=DUMP_DST,
+             rule="B DMA off after a B-DMA blit (BSH 5): the hold register is the last "
+                  "shifted B"))
+    # W11-B review (rev-blt) M1/L1: documented divergences, pinned here (backlog)
+    add(Case("p_overlap_asc2", [*blit_setup(0x09F0, a=DST, d=DST + 4), ("BLIT", size(1, 12))],
+             init=blit_init("p_overlap_asc2"), dumps=DUMP_DST,
+             rule="D two words ahead of A in one row: the model (word-serial) equals FS-UAE; "
+                  "blt.s fetches the whole row before writing D (run_blt: row-wise LIMIT)"))
+    add(Case("p_overlap_asc", [*blit_setup(0x09F0, a=DST, d=DST + 2), ("BLIT", size(2, 8))],
+             init=blit_init("p_overlap_asc"), dumps=DUMP_DST,
+             diverge="D one word ahead of A in a row: FS-UAE writes D one word late (its "
+                     "pipeline), the word-serial model smears; blt.s is row-wise (backlog)",
+             rule="in-row overlap at distance 1, ascending"))
+    add(Case("p_odd_mod", [*blit_setup(0x09F0, a=SRC, d=DST, amod=3, dmod=5), ("BLIT", size(4, 4))],
+             init=blit_init("p_odd_mod"), dumps=DUMP_DST,
+             diverge="FS-UAE ignores modulo bit 0; the model and blt.s honour it (backlog)",
+             rule="odd A/D modulos"))
+    add(Case("wide_shift_negmod",
+             [*blit_setup(0x99F0, 0, 0x7FFF, 0xFFFE, a=SRC + 2, d=DST, amod=-2, dmod=0),
+              ("BLIT", size(2, 0))],
+             init=blit_init("wide_shift_negmod"), dumps=DUMP_DST,
+             rule="width 0 = 64 words, A shift 9 carried across rows, negative A modulo"))
     add(ipl_case("ipl_levels",
                  [op for b in range(14) for op in (w("INTREQ", 0x8000 | 1 << b),
                                                     w("INTENA", 0xC000 | 1 << b), ("IPL", 0),
@@ -810,6 +871,8 @@ def diff(c: Case, hw: dict | None, mdl: dict) -> list[str]:
             bad = [i for i in range(0, min(len(hh), len(hx)), 2) if hh[i:i + 2] != hx[i:i + 2]]
             shown = ", ".join(f"${base + i // 2:05X} {hh[i:i + 2]}/{hx[i:i + 2]}" for i in bad[:6])
             out.append(f"dump ${addr}: {len(bad)} bytes differ (FS-UAE/model): {shown}")
+    if out and c.diverge and not any(x.startswith("INCONCLUSIVE") for x in out):
+        return [f"LIMIT: {c.diverge}"] + [f"LIMIT   ({x})" for x in out]
     return out
 
 
@@ -908,8 +971,7 @@ MUTANTS: dict[str, tuple[str, str] | list[tuple[str, str]]] = {
     "cdat_not_held": ("        if usec:\n            r[0x070 >> 1] = cdat\n", ""),
     "bdat_reshifted_per_word": ("        bsh_v = self.bhold                      # B DMA off: the hold register, as written",
                                 "        bsh_v = self.bhold = ((self.bprev << 16 | bdat) >> bsh) & 0xFFFF"),
-    "bdat_write_not_shifted": ("            self.bhold = ((self.bprev << 16 | v) >> bsh) & 0xFFFF",
-                               "            self.bhold = v"),
+    "bdat_write_not_shifted": ("            self.bhold = v >> bsh", "            self.bhold = v"),
     "fill_both_inclusive": ("                        if con1 & 0x18 == 0x08:  # IFE alone: edges drawn (both = EFE)",
                             "                        if con1 & 0x08:"),
     "latch0_span_64k": ("                span = self.ta_latch + 1                # latch 0: underflow every tick",

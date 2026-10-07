@@ -425,12 +425,20 @@ class Blitter:
         self.bhold = 0          # shifted B: what a blit with B DMA off uses
 
     def write_bdat(self, r, v):
-        """CPU write of BLTBDAT: B is shifted once, now, with the current BSH."""
+        """CPU write of BLTBDAT: B is shifted once, now, with the current BSH.
+
+        The CPU word is shifted ALONE (no previous B word enters):
+        descending (BLTCON1 bit 1) a left shift, ascending a right shift.
+        FS-UAE shows it (W11-B, supervisor ruling Wave 11; tests/chip_oracle.py
+        cases bdat_desc_bsh, bdat_asc_prev_cpu, bdat_after_bdma; b_stale_hold
+        pins the B-DMA hold).  The W7-M rule shifted against bprev; nothing
+        here reads bprev any more (kept: blit() still records it, and the
+        oracle mutant bdat_reshifted_per_word uses it)."""
         bsh = r[0x042 >> 1] >> 12
         if r[0x042 >> 1] & 2:
-            self.bhold = ((v << 16 | self.bprev) >> (16 - bsh)) & 0xFFFF if bsh else v
+            self.bhold = (v << bsh) & 0xFFFF
         else:
-            self.bhold = ((self.bprev << 16 | v) >> bsh) & 0xFFFF
+            self.bhold = v >> bsh
         self.bprev = v
 
     @staticmethod
