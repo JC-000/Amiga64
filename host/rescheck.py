@@ -78,6 +78,7 @@ FILE_OWNERS = {
     "runtime/ops/cia.s": "cia",         # W9-C guest CIA-A/B (S3.4)
     "runtime/ops/cop.s": "cop",         # W10-P copper + display state (S3.5)
     "runtime/ops/disp.s": "disp",       # W10-V display refresh (S3.5)
+    "runtime/ops/blt.s": "blt",         # W11-B blitter v0 (S3.6)
     "tests/runner/runner.s": "run",
     "tests/runner/run_program.s": "run",
 }

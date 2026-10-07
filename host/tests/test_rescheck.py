@@ -124,7 +124,7 @@ def test_foreign_absolute_literal_fails():
 def test_free_region_literal_fails():
     # unallocated space is not claimable by writing to it
     findings = rescheck.scan_source(
-        "runtime/core.s", "        sta $A000\n", "core", _spaces())
+        "runtime/core.s", "        sta $07F0\n", "core", _spaces())  # W11-B: $A000 is BCODE (core) now
     assert any(f.fatal and "'free'" in f.message for f in findings)
 
 
