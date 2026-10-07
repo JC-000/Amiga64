@@ -173,3 +173,51 @@ What you built; red → green evidence paths; mutation results; exact gate
 counts; runner wall-clocks; contract deviations (none expected); open
 risks; local-model use; changed files vs your base. Under 60 lines, as a
 message.
+
+## Addendum 1 (2026-10-06): banked code area BCODE
+
+The base runner leaves 1430 B free in MAIN, and blt.s needs about 2.1 KB.
+Supervisor decision (W11-B's option 1): a new ld65 memory area `BHI` at
+$A000–$B5FF, under BASIC ROM, with segments `BCODE` (and optional `BBSS`), and MAIN `fill = yes`
+so the PRG stays contiguous. ram.inc: `core $A000-$B5FF` BCODE plus W11-B's
+`blt $B600-$B7FF` row buffers. W11-B owns this one c64.cfg/ram.inc edit.
+BCODE is shared: code there runs only with BASIC banked out and is entered
+through a MAIN stub that restores the caller's $01. W11-A puts its bulk
+boot code there after the blitter merges. Existing module addresses must
+not move (map diff, link-swap proof, perf_cycles delta 0).
+
+## Addendum 2 (2026-10-06): BLTBDAT model fix
+
+FS-UAE (3 new oracle DIFFs) shows a CPU BLTBDAT write is shifted on its
+own: `(v << BSH) & $FFFF` descending, `v >> BSH` ascending, never combined
+with the previous B word. Supervisor sign-off for a one-off non-additive
+edit to `host/chipset_ref.Blitter.write_bdat` and the chip_oracle mutant
+`bdat_write_not_shifted`; the boot model's counts must be re-shown
+unchanged. chip_oracle's exact counts change accordingly.
+
+## Addendum 3 (2026-10-06): review rulings (rev-aros round 1)
+
+- **Boot entry form:** `tests/aros/mboot.s`, a test-time driver loaded at
+  `buf_case` (as `tests/irq/drv.s`), is the accepted S3.7 form for this
+  wave. A product-PRG boot entry (BCODE) belongs to the Workbench track.
+- **Pixel epoch writer (C3):** writers do a read-modify-write
+  `inc disp_st+105` with BASIC banked out, not a store of a private
+  counter, so the first write always changes the byte after `disp_init`'s
+  snapshot. An exact multiple of 256 writes inside one deferred window
+  aliases; accepted residual (the next write heals it).
+- **C4.1:** the "≳3k instr/frame" threshold is withdrawn; the low-s boot
+  stall is treated as a fidelity defect (diagnose, then fix with sign-off
+  or document as open).
+
+## Addendum 4 (2026-10-06): review rulings (rev-blt round 1)
+
+- **Addendum 1 wording:** "existing modules must not move" means `core.s`
+  and every module linked before `chip.s`. Modules linked after it (cia,
+  cop, disp, mach) may move by whole offsets; CONTRACTS lists them, and the
+  proof is the core.s link-swap plus `perf_cycles --max-delta 0`.
+- **Blitter divergences accepted for v0, documented and pinned as oracle
+  LIMIT cases:** D overlapping A/B/C within a row (blt.s is row-buffered;
+  the model is word-serial; FS-UAE writes D one word late) and odd
+  modulos (FS-UAE ignores bit 0). Model and blt.s fixes are backlog.
+- **U64E timing:** CIA ticks on the NTSC bench U64E are 0.978 µs
+  (17095 per frame), not 1 µs.

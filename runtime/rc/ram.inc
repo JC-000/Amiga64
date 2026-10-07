@@ -31,7 +31,15 @@ SCREEN     = $0400      ; 40x25 screen RAM; hle.s cursor offset 0-999
 ; @region core $0900-$0AFF DISPATCH jump tables - two page-aligned 256-byte tables (build/gen/dispatch.s)
 ; @region core $0B00-$9FFF PRG code/rodata/data/bss - CODE onward, incl. page-aligned code_win in BSS
 
-; @region free $A000-$B7FF BASIC ROM / RAM underneath - unclaimed
+; @region core $A000-$B5FF BCODE/BBSS: banked code, runs only with BASIC ROM out (shared; W11-B first user)
+; W11-B blt: the blitter's row buffers (RAM under BASIC ROM; blt.s banks BASIC out for a blit, REU DMA in/out)
+; @region blt $B600-$B7FF blitter channel rows: A, B, C, D, 128 bytes each (one row of up to 64 words, guest byte order)
+.ifndef blt_abuf
+blt_abuf   = $B600      ; W11-B blt: A row ($B600) and B row ($B680): one page, X-indexed by blt_prep
+.endif
+.ifndef blt_cbuf
+blt_cbuf   = $B700      ; W11-B blt: C row ($B700) and D row ($B780)
+.endif
 ; W10-P cop: the display-state block (RAM under BASIC ROM; cop.s only writes it, readers bank BASIC out)
 ; @region cop $B800-$B8FF disp_st: display-register state for the refresh driver (layout: docs/CONTRACTS.md "Copper and display state (S3.5)"; spare to $B8FF for appended fields)
 .ifndef disp_st

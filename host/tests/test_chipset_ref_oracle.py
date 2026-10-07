@@ -41,6 +41,8 @@ def test_model_matches_fsuae(case):
     d = co.diff(case, REC["cases"][case.name], co.run_model(case, ref))
     if case.limit:                      # documented limit: the model says so, loudly
         assert len(d) == 1 and d[0].startswith("LIMIT") and "CopperSkipError" in d[0]
+    elif case.diverge:                  # W11-B: documented divergence, still differing
+        assert d and not co.is_diff(d) and d[0] == f"LIMIT: {case.diverge}"
     else:
         assert d == []
 

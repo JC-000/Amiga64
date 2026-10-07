@@ -573,7 +573,66 @@ frame-counted budget (review), and s = 0 reaches HALT. On the U64E at
 48 MHz the CIAs count φ2 at 1 MHz [MEASURED HW, W8-H], so the same
 conversion is ~40× shorter in guest time: ≤ 0.5%.
 
-## (k) S3.7 AROS boot (W11-A)
+## (k) Blitter (W11-B, S3.6)
+
+**Hot path: +0.** `core.s` is unchanged and byte-identical modulo
+relocation (link-swap, `build/evidence/w11-blt/coreswap.txt`); every module
+linked before `chip.s` and all BSS before `blt.s` keep their addresses
+(`build/evidence/w11-blt/mapdiff.txt`); `tests.perf_cycles --base <wave11
+base> --max-delta 0` passes. The blitter costs only the trap path of a
+`$040-$074` write: +~25 cycles to route it to `blt_w`, and a DMACONR read
++~20.
+
+**Measured [MEASURED VICE, 1 MHz PAL; `tests.run_blt --perf`]:** `blt_w`
+timed directly (CIA2 phi2 count; two points, 1x1 and 20x40 words; best of
+3), so the per-word figure excludes the trap entry and the fixed figure is
+per blit (setup, the bank switch, the writeback, the IRQ raise):
+
+| shape | phi2 / word | fixed phi2 / blit | note |
+|---|---|---|---|
+| CD `$CA` (A, B constant: the boot's shape) | 108 | ~2,600 | fast `$CA` kernel, one C fetch + one D store per row |
+| BCD `$CA` | 120 | ~2,850 | |
+| AD `$F0` copy | 87 | ~2,800 | fast `$F0` kernel |
+| D `$00` clear | 46 | ~2,600 | fast clear kernel |
+| ABCD `$CA`, ASH = BSH = 4 | 812 | ~3,700 | bit-serial shifter (~20 phi2/bit/word per shifted channel) |
+| AD `$F0` + inclusive fill | 919 | ~2,950 | bit-serial fill (~100 phi2/byte) |
+
+**U64E [MEASURED HW, fw 3.15, 2026-10-06; `tests.run_blt --perf --backend
+u64`, `build/evidence/w11-blt/perf-u64.json`, `SESSION-2-perf-and-legs.log`]:**
+the same stub. The CIA2 timers count NTSC phi2 at every CPU speed (17095
+ticks/frame, 1 tick = 0.978 µs; docs/HARDWARE.md "CIA clock at turbo"), so
+the 48 MHz column is ticks x 0.978:
+
+| shape | 1 MHz: phi2/word, fixed phi2 | 48 MHz: µs/word (words/s), fixed µs/blit |
+|---|---|---|
+| CD `$CA` | 110.6, 2,668 | **4.26** (235k), 70 |
+| BCD `$CA` | 123.2, 2,981 | 5.12 (195k), 84 |
+| AD `$F0` | 88.2, 2,615 | 3.59 (279k), 71 |
+| ABCD `$CA` shifted | 812.9, 3,785 | 20.8 (48k), 109 |
+| D clear | 45.8, 2,503 | 1.65 (606k), 59 |
+| AD + fill | 904.3, 3,016 | 20.6 (49k), 78 |
+
+48 MHz is only ~25x the 1 MHz rate on the DMA-bound shapes (CD `$CA`:
+110.6 / 4.35 ticks), not ~39x: each row programs the REC twice (C fetch, D
+stash; ~9 register stores each at ~1 µs on the U64E, docs/HARDWARE.md
+finding 2), ~18 µs per row, i.e. ~0.9 µs/word on these 20-word rows.
+
+**vs S3_PLAN §3.5.** The plan assumed ~3.3 µs/word at 48 MHz with row-wise
+DMA. The boot's blits are all `CD`/`BCD` `$CA` with no shift (boot model:
+292 blits, 496,088 words in its first 40 guest seconds; 76 blits, ~324k
+words to "insert disk"). At 1 MHz they cost ~108-120 phi2/word, i.e.
+~324k x 0.115 ms ≈ 37 s of the ~40 min 1 MHz boot. At 48 MHz the boot's
+shape costs **4.26-5.12 µs/word, above the plan's ~3.3 µs/word**: ~324k
+words to "insert disk" ≈ 1.5 s instead of ≈ 1 s, and the current boot
+model's 496k words (first 40 guest seconds, 292 blits) ≈ 2.3 s instead of
+≈ 1.6 s: +0.5-0.7 s on the 70-95 s estimate, plus ~80 µs per blit (< 0.03 s). The REC register writes per row dominate; a
+lever is to keep the REC registers that do not change between rows (C64
+address, length, address control) and only rewrite the REU address. Shifted and filled blits use the generic bit-serial paths
+(8-10x slower; fine for v0, supervisor ruling); the boot uses neither, Workbench will (text, BOBs): the
+levers are a table shifter (2 x 256 B per shift) and a 512-byte fill
+table.
+
+## (l) S3.7 AROS boot (W11-A)
 
 `tests/aros_boot.py`, contract "Machine profile and AROS boot (S3.7)".
 Pinned ROM AROS-20260921 (`tools/aros/manifest.txt`). Wall time from

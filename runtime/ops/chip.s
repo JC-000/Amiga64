@@ -73,6 +73,8 @@
 .import mach_hold, mach_ichk                    ; W9-I irq: level hold, delivery kick
 .import cop_w0, cop_w1                          ; W10-P cop: S3.5 display/copper registers
 .export c_wrw, chip_a, chip_vl, chip_vh         ; W10-P cop: the copper's MOVE path
+.import blt_w, blt_dmaconr                      ; W11-B blt: S3.6 blitter
+.export chip_blitirq                            ; W11-B blt: INTREQ BLIT on completion
 
 CHIP_LOGN_MASK = 63     ; @value log ring entries - 1
 CHIP_SERDAT    = $30    ; @value SERDAT register offset
@@ -84,6 +86,10 @@ CHIP_INTREQR   = $1E    ; @value INTREQR (read-only) register offset
 CHIP_INTREQ    = $9C    ; @value INTREQ (write) register offset
 CHIP_INTENAR   = $1C    ; @value INTENAR (read-only) register offset; W9-I irq
 CHIP_INTENA    = $9A    ; @value INTENA (write) register offset; W9-I irq
+CHIP_BLT0      = $40    ; @value first blitter register (BLTCON0); W11-B blt
+CHIP_BLT1      = $76    ; @value past the last (BLTADAT $074); W11-B blt
+CHIP_DMACONR   = $02    ; @value DMACONR (read-only) register offset; W11-B blt
+CHIP_BLITREQ   = $40    ; @value INTREQ low byte: BLIT (bit 6); W11-B blt
 
 .segment "BSS"
 chip_shd:   .res 512
@@ -384,6 +390,8 @@ cia:    txa
         jmp c_open
 p0:     lda chip_a
         and #$FE
+        cmp #CHIP_DMACONR       ; W11-B blt: (DMACON & $07FF) | BZERO
+        beq dmacr               ; W11-B blt
         cmp #$04                ; VPOSR: LOF, Agnus ID 0 (OCS PAL)
         beq vposr
         cmp #$06                ; VHPOSR (W8-L: live after mach_init)
@@ -428,6 +436,7 @@ denise: lda #$FF
         sta chip_vh
         sta chip_vl
         rts
+dmacr:  jmp blt_dmaconr         ; W11-B blt
 .endproc
 
 ; c_beam — W8-L: the S3.2 beam into mach_bv/mach_bh; C = 1 before
@@ -533,8 +542,26 @@ ser:    ldx chip_sern           ; SERDAT: low byte -> the serial ring
         bne done
         inc chip_sern+1
 done:   rts
-cop:    jmp cop_w0              ; W10-P cop: COPxLC/COPJMP/DIW/DDF/DMACON/BPLxPT
+cop:    cpx #CHIP_BLT0          ; W11-B blt: $040-$074 to the blitter
+        bcc cop0                ; W11-B blt
+        cpx #CHIP_BLT1          ; W11-B blt
+        bcs cop0                ; W11-B blt
+        jmp blt_w               ; W11-B blt: BLTSIZE blits, BLTBDAT shifts
+cop0:   jmp cop_w0              ; W10-P cop: COPxLC/COPJMP/DIW/DDF/DMACON/BPLxPT
 .endproc
+
+; W11-B blt: chip_blitirq -- a finished blit raises INTREQ BLIT as the Paula
+; SET write $8040 through c_wrw's SET path (mach_hold ORed back, then
+; mach_ichk); not logged, the raw INTREQ slot untouched.  Clobbers A/X,
+; chip_vl/chip_vh; keeps Y.
+.proc chip_blitirq              ; W11-B blt
+        lda #$80                ; W11-B blt: SET
+        sta chip_vh             ; W11-B blt
+        lda #CHIP_BLITREQ       ; W11-B blt
+        sta chip_vl             ; W11-B blt
+        ldx #CHIP_INTREQ        ; W11-B blt
+        jmp c_wrw::paula        ; W11-B blt
+.endproc                        ; W11-B blt
 
 ; c_cia — select the CIA register of the byte at chip_a.
 ; Out: C = 0, X = CIA register index (CIA-A reg / CIA-B 16+reg), A = log id

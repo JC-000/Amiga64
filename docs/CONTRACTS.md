@@ -306,8 +306,8 @@ Design: `docs/S3_PLAN.md` §1.2–1.3, §3.4. Tests: `tests/run_chip.py`,
   POTINP `$FF00`, SERDATR `$3000`, DENISEID `$FFFF`. The other read-only
   slots (`$000–$01E`) return their shadow word, and write-only registers
   (`$020–$1FE`) return 0. CIA registers return their shadow, except CIA-A
-  PRA = `(PRA & DDRA) | ($EB & ~DDRA)`. Not modelled yet: DMACONR (it
-  reads its slot, 0), timers, ICR and TOD (S3.3/S3.4).
+  PRA = `(PRA & DDRA) | ($EB & ~DDRA)`. DMACONR: see "Blitter (S3.6)"
+  (W11-B; it read its slot, 0, before). Timers, ICR and TOD: S3.3/S3.4.
 - **Writes.** Every decoded write is logged. A write to a write-only
   register also lands in the shadow, while a write to a read-only slot is
   ignored there. CIA writes land in `chip_cia`, and a SERDAT write appends
@@ -864,7 +864,7 @@ with a `valid` byte, `cop_dhook` in BSS, copper DMA gating). Reference:
   (`run_cop` case `nopc`, mutant `nopcok`).
 - **Not modelled:** WAIT/SKIP beam timing (the model's limit), copper DMA
   cycles, the copper stopping when its own DMA goes off mid-list, DMACONR
-  (still reads its slot), BPLCON3+, the blitter's response to copper
+  (since S3.6: "Blitter (S3.6)"), BPLCON3+, the blitter's response to copper
   writes (S3.6). (`mach_wk` counts `mach_fhook` as a wake source since
   W11-A, C4.2: "Interrupt delivery", STOP.)
 - **Link order.** `cop.s` links after `cia.s` and before `mach.s`
@@ -950,6 +950,139 @@ spec: `docs/C2V.md` "Row skip", "Display refresh (S3.5)". Reference:
   are padded to whole pages, and there is no RODATA or DATA. `core.s` is
   unchanged.
 
+## Blitter (S3.6) (W11-B)
+
+Owner: blt (`runtime/ops/blt.s`; in `runtime/ops/chip.s` the blitter write
+paths `$040–$074`, the DMACONR read and `chip_blitirq`, labelled `; W11-B
+blt`). Design: `docs/WAVE11_BRIEF.md` C1/C3, `docs/S3_PLAN.md` §3.4, §3.5,
+§4 "S3.6". Reference: `host/chipset_ref.Blitter` (normal mode) through
+`Chipset` (Paula's DMACONR/BZERO, INTREQ BLIT). Tests: `tests/run_blt.py`
+(+ `--mutants`, `--perf`), `host/tests/test_blt.py`, the blit cases of
+`tests/chip_oracle.py`.
+
+- **Entry.** Every write to `$040–$074` (CPU word/long/byte, or a copper
+  MOVE with COPCON CDANG) is logged and lands in `chip_shd` as before; then
+  c_wrw calls `blt_w` (X = offset; Y kept, A/X clobbered). BLTSIZE (`$058`)
+  runs the whole blit **synchronously, inside the trap**; BLTBDAT (`$072`)
+  loads the B hold register (below). Every other blitter register is read
+  from `chip_shd` at BLTSIZE. OCS size: h = bits 15–6 (0 = 1024), w = bits
+  5–0 (0 = 64). BLTSIZV/BLTSIZH/BLTCON0L (ECS) only land in the shadow.
+- **Normal mode** = `Blitter.blit` except for in-row overlap (below,
+  "Not modelled": blt.s reads a whole row of A/B/C before it writes the D
+  row; the model is word-serial): channels A/B/C/D = BLTCON0 bits 11–8;
+  minterm LF (bit 7 = ABC … bit 0 = ¬A¬B¬C); A masked by AFWM on the first
+  and ALWM on the last word of each row in processing order (both when
+  w = 1), before its shift; ASH/BSH with the old word carried across words
+  **and rows** (0 at the start of each blit); signed modulos added after
+  each row (subtracted when descending); descending (BLTCON1 bit 1):
+  addresses step down, shifts go left; fill (IFE bit 3, EFE bit 4, both =
+  exclusive) per word bits 0–15, carry = FCI (bit 2) at every row start;
+  a channel with DMA off uses BLTADAT/BLTCDAT, B its hold register. After
+  the blit the four pointers are written back as `(p >> 16) & $1F : p &
+  $FFFF` (all four, used or not), BLTADAT/BLTBDAT/BLTCDAT hold the last
+  word their channel fetched (raw), and the B hold register = the last
+  shifted B.
+- **BLTBDAT (CPU write)**: hold := the value shifted **alone** by the
+  current BSH: `(v << BSH) & $FFFF` descending, `v >> BSH` ascending; no
+  previous B word enters. **Model change (Wave 11, supervisor-approved
+  exception to "chipset_ref additive only"):** `Blitter.write_bdat` used to
+  shift against the previous B word (`bprev`); FS-UAE shows otherwise
+  (oracle cases `bdat_desc_bsh`, `bdat_asc_prev_cpu`, `bdat_after_bdma`;
+  `b_stale_hold` pins that a B-off blit after a B-DMA blit uses the last
+  shifted B, unchanged). The old cases missed it (previous B always 0, or
+  BSH 0). `bprev` stays in the model (written by `blit()`, read only by
+  the oracle mutant `bdat_reshifted_per_word`); blt.s keeps no such word.
+  The chip-oracle mutant `bdat_write_not_shifted` was retargeted at the new
+  line. The AROS boot model is unaffected (its blits use no BSH; same
+  instruction and blitter-word counts before and after:
+  `build/evidence/w11-blt/bootmodel/`). Tests: `host/tests/test_blt_ref.py`
+  (31 cases red on the old model).
+- **Line mode** (BLTCON1 bit 0): counted in `blt_nline` (and logged as
+  the BLTSIZE write); memory, pointers, data registers, BZERO and the
+  pixel epoch untouched; completion as below. Deliberate divergence from
+  `Blitter.line` (an unverified approximation). The AROS boot model uses
+  no line blit (76 blits, all `CD lf=CA` / `BCD lf=CA`).
+- **Completion** (both modes): INTREQ BLIT (bit 6) is set by
+  `chip_blitirq`, c_wrw's Paula SET path for `$8040` (mach_hold ORed back,
+  then `mach_ichk`: in exception mode a deliverable level-3 interrupt is
+  taken at the instruction after the BLTSIZE write). Not logged; the raw
+  INTREQ slot is untouched. **DMACONR** = `(DMACON & $07FF) | BZERO`, with
+  DMACON = cop.s's field `cop_sh+1` (C1 +1) and BZERO = no 1 bit in any D
+  word of the last normal blit (D DMA on or off; after fill when filling);
+  BBUSY never reads 1. (This supersedes "DMACONR reads its slot" in "I/O
+  trap" and "Copper and display state", which predate S3.6.)
+- **Memory.** Channel addresses are guest addresses masked to the model's
+  2 MB chip range: `& $1FFFFE` at the start (as `Blitter._ptr`), then
+  24-bit arithmetic, and every REC bank store is `& $1F`. A blit therefore
+  never reads or writes banks `$BF`/`$DF` (the REU under `$DF0000` holds
+  `disp_lut`; test `iobank`). One REU DMA per channel row (two when the row
+  crosses a 512 KB REC line; mod 2 MB past `$1FFFFF`, below 0), combined in
+  the row buffers `blt_abuf`/`blt_cbuf` (rc `blt $B600-$B7FF`, RAM under
+  BASIC ROM; BASIC is banked out for the blit, the caller's `$01`
+  restored), one DMA per D row. The REC use ends with `mem_rec_dirty`.
+- **Instruction window.** A D row that touches the guest page of `r_pc`
+  sets a flag; at the end of the blit blt.s re-stores one byte of that page
+  through `mem_read8`/`mem_write8` (same value), so core.s's WINCHK drops
+  the window (test `smc`). m_addr, m_val and t_tmp are saved around it.
+- **Pixel epoch (C3, Addendum 3).** After every normal blit with D on:
+  `inc disp_st+105`, a read-modify-write of the byte itself (BASIC is out
+  in BCODE), never a private counter (one that happened to equal a
+  reader's `disp_init` snapshot would hide the first blit). Tests `pix`
+  (+1 per D blit, none for D-off or line blits) and `epoch` (byte preset
+  to the old counter's next value: red on the old code,
+  `build/evidence/w11-blt/red/epoch-old-counter.txt`).
+- **Trap ABI.** m_addr, m_val, t_tmp and chip_a survive a blit (the second
+  word of `move.l` to `$DFF056` or `$DFF058` still lands); chip_vl/chip_vh
+  are clobbered by the IRQ raise (c_wrw's callers reload them per word).
+- **Host-visible** (`runner.lbl`): `blt_n` (u16 normal blits), `blt_nline`
+  (u16), `blt_nwd` (u32 words), `blt_bz` (`$20` = BZERO), `blt_bhold` (u16
+  LE); entry `blt_reset` (BZERO, hold registers
+  and counters := 0; host only; `chip_reset` does not call it).
+- **Link order and layout (BCODE).** `blt.s` links after `cop.s`, before
+  `disp.s`. Only `blt_w` (the bank stub), `blt_dmaconr` and `blt_reset` are
+  in CODE (73 bytes); BSS (MAIN) 133 bytes; BBSS 0 bytes. Everything else
+  (dispatch, BLTBDAT, shifter, the blit, window invalidation: 1,998 bytes,
+  `$A000-$A7CD`) is in **BCODE**, the shared banked-code segment (with
+  `BBSS`, optional banked BSS, not cleared at boot): `runtime/c64.cfg`
+  memory area `BHI` = `$A000-$B5FF` (rc `core $A000-$B5FF`), RAM under
+  BASIC ROM, 3,634 bytes still free there; MAIN is `fill = yes`, so the PRG
+  is one contiguous load from `$0801` (40,911 bytes on disk vs 33,824
+  before; loads verified through the harness on VICE and the U64E, BCODE
+  read back with BASIC out). **BCODE rules:**
+  code there runs only with BASIC ROM banked out and is entered only
+  through a MAIN stub that banks BASIC out (`$37` → `$36`; `$36`, `$35`,
+  `$34` unchanged) and restores the caller's `$01` on every exit (blt_w:
+  one return path; test `bank` calls it with `$37`, `$36`, `$35`; mutant
+  `nobank` jams in BASIC ROM). blt.s puts no BSS in BBSS. **IRQ safety:** the I flag is the caller's. A
+  machine-loop IRQ/NMI during a blit (`mach_run`: `$01` = `$35`, handlers
+  and RAM vectors at `$FFFA` in MAIN/RAM under KERNAL) or a KERNAL IRQ in
+  HLE (`$36` keeps KERNAL in) runs code outside BCODE that neither depends
+  on BASIC nor touches the REC, and returns into BCODE with `$01` as it
+  found it. **What moved** (`build/evidence/w11-blt/mapdiff.txt`; CODE grew
+  $6A = chip.s +33 + blt.s MAIN 73): the CODE and BSS of every module
+  linked before chip.s are unchanged (core.s's included); chip.s's CODE
+  grew in place; cia.s and cop.s CODE +$21; disp.s and mach.s CODE +$6A
+  and BSS +$85; the RODATA and DATA of every module (core.s's included)
+  +$6A, since those segments follow CODE. `core.s` is byte-identical
+  modulo that relocation (link-swap: the PRG linked with the base tree's
+  core.s equals the gate PRG, `coreswap.txt`) and `perf_cycles --max-delta
+  0` passes on the final build.
+- **Not modelled:** blitter DMA cycles and BBUSY, BLTPRI/nasty, ECS
+  BLTSIZV/BLTSIZH, line drawing, CPU writes to bitplanes for the pixel
+  epoch (C3 backlog). **In-row overlap** (review W11-B M1): when D lies
+  inside the same row of A/B/C, blt.s's row-wise fetch-then-store differs
+  from the word-serial model and from FS-UAE (which writes D one word
+  late): oracle case `p_overlap_asc2` (D two words ahead of A, 1 x 12) —
+  model = FS-UAE, blt.s differs in 20 bytes; `p_overlap_asc` (distance 1,
+  2 x 8) — blt.s, the model and FS-UAE all differ (the model's own
+  mismatch: 30 bytes). Both are chip_oracle LIMIT/MATCH-pinned and
+  `run_blt` pins blt.s to a row-wise model. Overlaps across rows (the
+  usual scroll/copy cases, modulo-separated) are exact. **Odd modulos**
+  (L1): FS-UAE ignores modulo bit 0; the model and blt.s honour it
+  (`p_odd_mod`, 12 bytes, documented LIMIT). Backlog: a word-serial path
+  for in-row overlap (detectable at setup), FS-UAE's D delay for distance
+  1 in the model, modulo bit 0.
+
 ## Machine profile and AROS boot (S3.7) (W11-A)
 
 Owner: aros (`runtime/rc/machine.inc`, `tests/aros/mboot.s`,
@@ -1029,7 +1162,7 @@ Tests: `tests/aros_boot.py` (legs `m1`, `m2`, `m3`, `ablate`, `wkhook`,
   overrides. Lower s is slower to m2 or does not reach it; that is NOT a
   requirement of AROS (fix round 1, HIGH-1: the boot model with its CPU
   slowed 24× still reaches m2 at ~680 instructions per frame). What we
-  know (`docs/PERF.md` (k)): on VICE, s ≤ 6 failed through the
+  know (`docs/PERF.md` (l)): on VICE, s ≤ 6 failed through the
   `MACH_POLL` cost (fixed, below; s = 6 now reaches m2); the U64E reaches m2 at s = 1 (4 of 4 runs on
   the fix-round build, ~105 s; one earlier run did not, not reproduced)
   and not at s = 0 (2 of 2 runs, 400 s): **open defect**, see "C4".

@@ -32,7 +32,7 @@ Machine-loop legs (no ROM; VICE): C4 and C3 of the brief.
           off / 4 / 28 MOVEs per frame): every s reaches HALT (no
           livelock), and at s >= 4 the loop keeps >= 75% of the s = 6
           rate.  s <= 1 starves this idle guest on a 1 MHz host by
-          arithmetic (docs/PERF.md (k)); AROS's own low-s stalls are a
+          arithmetic (docs/PERF.md (l)); AROS's own low-s stalls are a
           different matter (CONTRACTS S3.7 "C4")
   pix     C3: a change of the pixel epoch disp_st+105 alone (fields and
           gen unchanged) converts the display again
