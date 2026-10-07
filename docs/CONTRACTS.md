@@ -638,8 +638,12 @@ Owner: s3 (`runtime/ops/mach.s`; the INTENA/INTREQ paths of
   pass has seen the request pending (a request POSTED by a pass, VERTB or
   a CIA, always is; one SET by the CPU while masked is clamped only from
   the next event on, ≤ one VERTB wait). Pinned by `tests/aros_boot.py`
-  leg `lat` (s = 4: 543–563 E, bound 640; s = 9: 127–128 E, bound 320)
-  and its mutant `poll8` (s = 4 entry 8× too long: 2031 E). Exact
+  leg `lat` (s = 4: 543–563 E against a TEST bound of 640; s = 9:
+  127–128 E against 320) and its mutant `poll8` (s = 4 entry 8× too long:
+  2031 E). The test bounds are not worst cases: t0 is taken after the guest
+  has seen the posted bit, so an arbitrary drop can come somewhat later
+  than the measured ~560 E; the leg catches a 2× regression of the s = 4
+  interval (~810 E) but not ~1.3×. Exact
   recognition there would need a core.s SR-write hook: backlog.
 - **STOP** (exception mode): `emu_run` halts `HALT_STOP`; `mach_run`
   marks the CPU stopped (`mach_stp`), clears `st_halt`, and delivers at
@@ -1193,11 +1197,20 @@ Tests: `tests/aros_boot.py` (legs `m1`, `m2`, `m3`, `ablate`, `wkhook`,
   the U64E the hash leaves the screen matrix out (it lies under the I/O
   window and the running guest's `$01` is never touched; the model side
   hashes the same way, `nomatrix`); on VICE the 6510 is halted for the
-  snapshot and `$01` is switched to `$34` and back to the value read. m3
+  snapshot and `$01` is switched to `$34` and back to the value read.
+  Blind spot of the U64E hash: a screen with the right pixels but a wrong
+  palette differs only in the matrix (the hires cell colours), so the U64E
+  leg cannot see it; VICE's full hash covers it. The U64E leg re-hashes on
+  every 2 s poll (not only after a new conversion), so one torn read of
+  the final, static screen cannot make it time out. m3
   needs the blitter (W11-B): green on the merged tree (VICE s = 9: 174 s,
   guest frame 386; U64E s = 3: 86.8–98.3 s), red without it
-  (`build/evidence/w11-aros/red/m3_noblit.log`: the only conversion is the
-  model's empty frame 250). Every conversion matched a model frame in
+  (`build/evidence/w11-aros/red/m3_noblit_v2.log`, the pre-merge PRG, no
+  blitter, current hash: conversions match the model's frames 250 and 266
+  only, never ≥ 345). With the blitter but `disp.s` ignoring the epoch
+  (mutant `pixread`, `red/m3_pixread.log`) it is red as well: frames 250,
+  266, 267 (converted on display-register changes), then no conversion
+  of the later blit-only changes. Every conversion matched a model frame in
   order (250, 266, 267, 293, 345): the screen needs no CPU-drawn pixels
   beyond what the blits' epoch bumps (`disp_st+105`) make visible. Red: `ablate` (exception mode off: the CPU
   probe's MOVEC halts `HALT_ILLEGAL`, no m1); the base tree reaches m1 and

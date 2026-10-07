@@ -535,8 +535,8 @@ def leg_m3(m: Machine, r: dict, timeout: float) -> list[str]:
     while time.monotonic() - t0 < timeout:
         nconv = struct.unpack("<H", m.r(m.lab("disp_nconv"), 2))[0]
         mode = m.r(m.lab("disp_mode"), 1)[0]
-        if nconv != last:
-            last = nconv
+        if nconv != last or not m.vice:     # U64E: every poll (a torn read
+            last = nconv                    # of a static screen heals)
             h, vic = c64_hash(m)
             fr = struct.unpack("<I", m.r(ZP_FRAMES, 4))[0]
             if h not in seen:
