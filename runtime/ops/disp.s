@@ -30,7 +30,10 @@
 ;     consumed, so a later call converts it;
 ;   * outside mach_run (HLE runners) every gen change converts at once;
 ;   * disp_refresh converts unconditionally (no gen, compare or budget);
-;   * no dirty tracking of bitplane writes (backlog).
+;   * no dirty tracking of CPU bitplane writes (backlog); W11-A (C3): a
+;     change of the pixel epoch disp_st+105 (blt.s bumps it after every
+;     D-enabled blit) is a change like gen's, and converts even when the
+;     fields are equal (same budget inside mach_run);
 ;
 ; Entry points (JSR; clobber A/X/Y; call with I/O mapped in and no IRQ that
 ; touches the REC; each restores the caller's $01 and ends REC use with
@@ -47,7 +50,9 @@
 ; DISP_MUT_CLR (lines below DIWSTOP not cleared), DISP_MUT_BUDGET (no
 ; duty budget), DISP_MUT_BANK (BASIC ROM left in: disp_st read as ROM),
 ; DISP_MUT_DIRTY (the dirty byte ignored), DISP_MUT_EFROM (the budget
-; measured from a conversion's start).
+; measured from a conversion's start); DISP_TRACE (W11-A, supervisor grant:
+; disp_tstart/disp_tfin record the least gap from a conversion's END to the
+; next one's START inside mach_run, for tests/run_pf.py leg gap).
 ;
 ; Link layout: CODE and BSS are each padded to whole pages, no RODATA or
 ; DATA, so modules linked after this one move by whole pages only.
@@ -58,6 +63,9 @@
 .export disp_init, disp_frame, disp_refresh
 .export disp_mode, disp_why, disp_nconv, disp_nblank, disp_seen, disp_ok
 .export disp_cur, disp_laste, disp_bud, disp_lines, disp_crop
+.ifdef DISP_TRACE
+.export disp_tend, disp_tval, disp_gmin, disp_ngap   ; W11-A (supervisor grant, efrom)
+.endif
 .export DISP_N, disp_lut       ; disp_lut: the rc equate, for the host
 .import c2v_init, c2v_pal_mc2, c2v_pal_hires, c2v_mc2s, c2v_hiress
 .import mem_rec_dirty, mach_in, mach_etime, mach_et
@@ -102,6 +110,7 @@ DISP_S_VALID    = 70                 ; copy of disp_st + DISP_ST_VALID
 DISP_ST_VALID   = 103                ; @value W10-P: valid byte offset in disp_st
 DISP_COPVALID   = $A5                ; @value W10-P: valid once cop_reset ran
 DISP_ST_DIRTY   = 104                ; @value W10-P: dirty byte offset in disp_st (F1)
+DISP_ST_PIX     = 105                ; @value W11-A: pixel epoch offset in disp_st (C3)
 
 ; c2v argument block (docs/C2V.md "Argument block", "Row skip")
 DISP_A_SRC     = c2v_args + 0       ; 4 x u24
@@ -158,6 +167,7 @@ disp_nconv: .res 2              ; conversions (u16, wraps)
 disp_nblank: .res 2             ; blank decisions (u16, wraps)
 disp_laste: .res 4              ; E (mach_et) when the last conversion ended
 disp_bud:   .res 1              ; nonzero: disp_laste is a budget reference
+disp_pix:   .res 1              ; W11-A: pixel epoch (disp_st+105) when last taken
 disp_lines: .res 1              ; lines shown (<= DISP_LINES)
 disp_crop:  .res 1              ; rows skipped at the top (centre crop)
 disp_dm:    .res 1              ; candidate mode
@@ -175,6 +185,12 @@ disp_srh:   .res 4
 disp_srb:   .res 4
 disp_w:     .res 3              ; row walk
 disp_t:     .res 4              ; scratch
+.ifdef DISP_TRACE                ; W11-A (supervisor grant, efrom): test only
+disp_tend:  .res 4              ; E when the last conversion inside mach_run ended
+disp_tval:  .res 1              ; nonzero: disp_tend is valid
+disp_gmin:  .res 4              ; least END -> next START gap in E (host presets $FFFFFFFF)
+disp_ngap:  .res 2              ; gaps measured
+.endif
 disp_b1:
         .res (256 - ((disp_b1 - disp_b0) .mod 256)) .mod 256
 
@@ -258,6 +274,8 @@ disp_init:
         sta disp_mode
         lda #0                  ; the first conversion is never deferred
         sta disp_bud
+        lda disp_st + DISP_ST_PIX ; W11-A: C3, the epoch's snapshot (undefined
+        sta disp_pix            ; W11-A: before its first writer)
         lda #0                  ; the hook: high byte last (0 = none)
         sta cop_dhook+1
         lda #<disp_frame
@@ -284,6 +302,9 @@ disp_frame:
         lda disp_st + DISP_ST_DIRTY ; F1: set by every bump, even one that
         bne @chg                ; wrapped gen back to disp_seen
 .endif
+        lda disp_st + DISP_ST_PIX ; W11-A: C3, guest pixels rewritten (a blit)
+        cmp disp_pix            ; W11-A
+        bne @chg                ; W11-A
         jmp disp_leave          ; unchanged
 @chg:
 .ifdef DISP_MUT_BUDGET
@@ -319,7 +340,12 @@ disp_frame:
 @rts:   jmp disp_leave          ; deferred: the change stays unseen
 @go:    lda disp_st
         sta disp_seen
-        jsr disp_snap
+        lda disp_st + DISP_ST_PIX ; W11-A: C3, a new epoch converts even with
+        cmp disp_pix            ; W11-A: equal fields (the pixels changed)
+        php                     ; W11-A
+        jsr disp_snap           ; (takes the epoch too)
+        plp                     ; W11-A
+        bne disp_take           ; W11-A
         lda disp_ok
         beq disp_take
         ldx #DISP_SNAP - 1
@@ -352,6 +378,9 @@ disp_take:
         sta disp_ok
         jsr disp_decide
         bcs @blank
+.ifdef DISP_TRACE
+        jsr disp_tstart         ; W11-A (supervisor grant, efrom): test only
+.endif
 .ifdef DISP_MUT_EFROM
         jsr disp_stamp          ; mutant: budget measured from the START
 .endif
@@ -377,6 +406,9 @@ disp_take:
 .ifndef DISP_MUT_EFROM
         jsr disp_stamp          ; F3: the budget runs from the END
 .endif
+.ifdef DISP_TRACE
+        jsr disp_tfin           ; W11-A (supervisor grant, efrom): test only
+.endif
         jmp @out
 @blank: inc disp_nblank
         bne :+
@@ -395,7 +427,8 @@ disp_leave:
         rts
 
 ; disp_snap — disp_new := disp_st + 1 .. + 70, then disp_st's valid byte;
-; then dirty := 0 (F1: the change is taken).
+; then dirty := 0 (F1: the change is taken) and, W11-A (C3), disp_pix :=
+; the pixel epoch.
 disp_snap:
         ldx #DISP_S_VALID - 1
 :       lda disp_st + 1,x
@@ -406,7 +439,65 @@ disp_snap:
         sta disp_new + DISP_S_VALID
         lda #0
         sta disp_st + DISP_ST_DIRTY
+        lda disp_st + DISP_ST_PIX ; W11-A: C3, the epoch is taken
+        sta disp_pix            ; W11-A
         rts
+
+.ifdef DISP_TRACE
+; W11-A (supervisor grant, efrom): test-only trace of the duty budget, read
+; by tests/run_pf.py leg gap.  Independent of disp_laste (which the efrom
+; mutant stamps at a conversion's start): disp_tfin records the real END of
+; every conversion inside mach_run, disp_tstart the gap to the next START.
+disp_tstart:
+        lda mach_in
+        beq @x
+        lda disp_tval
+        beq @x
+        jsr mach_etime
+        sec
+        lda mach_et
+        sbc disp_tend
+        sta disp_t
+        lda mach_et+1
+        sbc disp_tend+1
+        sta disp_t+1
+        lda mach_et+2
+        sbc disp_tend+2
+        sta disp_t+2
+        lda mach_et+3
+        sbc disp_tend+3
+        sta disp_t+3
+        lda disp_t              ; gap < gmin (unsigned): gmin := gap
+        cmp disp_gmin
+        lda disp_t+1
+        sbc disp_gmin+1
+        lda disp_t+2
+        sbc disp_gmin+2
+        lda disp_t+3
+        sbc disp_gmin+3
+        bcs :+
+        ldx #3
+@cp:    lda disp_t,x
+        sta disp_gmin,x
+        dex
+        bpl @cp
+:       inc disp_ngap
+        bne @x
+        inc disp_ngap+1
+@x:     rts
+disp_tfin:
+        lda mach_in
+        beq @x
+        jsr mach_etime
+        ldx #3
+@cp:    lda mach_et,x
+        sta disp_tend,x
+        dex
+        bpl @cp
+        lda #1
+        sta disp_tval
+@x:     rts
+.endif
 
 ; disp_stamp — the budget's reference: inside mach_run, E now and the
 ; budget armed; outside it (HLE), no budget.

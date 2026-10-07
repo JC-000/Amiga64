@@ -918,3 +918,96 @@ sample content beyond frequency, and whether playing during heavy REU DMA
 under-runs audibly. Evidence is in `build/evidence/` (ignored by git); the
 reproduction is `U64_HOST=10.43.23.81 U64_BASELINE_ON_ENTRY=0 python3
 tools/s3probe/sampler/sampler.py --backend u64 --out DIR`.
+
+## Reading a running C64's RAM over REST at 48 MHz (W11-A, 2026-10-06)
+
+Question (W11 review, HIGH-2): the first U64E AROS boots captured the
+guest's serial ring (`chip_ser`, 256 B, plus the u16 count `chip_sern`)
+with NULs and foreign bytes. Is the U64's host read path corrupting bytes
+at turbo, or was the capture racing the running guest?
+
+**Path.** `c64_test_harness.read_bytes` → `Ultimate64Transport.read_memory`
+→ `Ultimate64Client.read_mem` = REST `GET /v1/machine:readmem` (a DMA read
+of C64 memory while the 6510 keeps running); `read_bytes` splits a read
+above 256 bytes into 256-byte requests. No debug or data stream, no UCI,
+no SocketDMA is involved in any read (SocketDMA `REUWRITE` is used only to
+stage the ROM into the REU, before the boot).
+
+**Experiment** [MEASURED HW] (U64E fw 3.15 git 3a1ff9ff, fpga 126, core
+1.50; one DeviceLock hold, config restored identical; host on Wi-Fi;
+`build/evidence/w11-aros/u64/ringexp/ringexp.json`). A 6502-only writer
+(no 68k) uses the `chip_ser` protocol on the runner's own `chip_ser`: it
+stores byte k at slot k & $FF, value (11 + 37 k + (k >> 8)) & $FF (so a
+previous lap's byte is distinguishable), then bumps the count, ~370
+bytes/s (the boot's serial burst rate). The host polls for 40 s per row
+with two protocols and checks every slot whose latest write is final
+for that snapshot:
+
+| MHz | protocol | polls | slots checked | NUL | stale (prev. lap) | shifted | other |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 48 | count, ring (256 B), count | 291 | 62,936 | 0 | 0 | 0 | 0 |
+| 48 | ring + count in one 260-B read (round 0) | 296 | 75,776 | 37 | 7,555 | 0 | 0 |
+| 1 | count, ring, count | 281 | 62,131 | 0 | 0 | 0 | 0 |
+| 1 | one 260-B read (round 0) | 310 | 79,360 | 31 | 7,410 | 0 | 0 |
+| 48 | count, ring, count (again) | 307 | 68,734 | 0 | 0 | 0 | 0 |
+| 48 | one 260-B read (again) | 313 | 80,128 | 27 | 7,556 | 0 | 0 |
+
+**Result: the single-read failures are the race.** 0 wrong bytes in
+193,801 checked slots read by the bracketed protocol, at 48 MHz and at
+1 MHz. The round-0 protocol (the count read last, after the ring) gets
+~10% of its slots wrong at BOTH speeds, all NUL (first lap) or
+previous-lap bytes: it counts bytes the guest wrote after the ring was
+read. No shifted or foreign byte appeared in either protocol.
+
+**Not explained, and a read-path effect is NOT ruled out** (rev-aros
+round 2). The s = 1 boot of `u64/boot_48_low.json` read the count FIRST
+(one count read, then the ring; the code that wrote that file is the one
+that added `serial_matches_model`), yet slot 130 came back as '\n' =
+the model's serial byte 386, i.e. that slot's second-lap byte of the
+PREVIOUS boot (s = 2, same day, a separate hold). That byte had been
+cleared twice before the read: by the runner's BSS clear at `run_prg`
+and by `chip_reset` at the start of the boot, ~20 s earlier. A slot the
+count already covered therefore read a stale value from before both
+clears, during a REU-DMA-heavy AROS boot at 48 MHz. The s = 5 capture
+(one byte missing at slot 130) may be the same effect. A second
+experiment repeated the ring under REU-DMA load [MEASURED HW, same
+device and firmware, `u64/ringexp-reu/`]: the 6502 writer also does 16
+REU transfers of 256 bytes per ring byte (bank `$40`), the ring was
+pre-filled with `$EE` and cleared by the writer, 48 MHz, 45 s per row:
+
+| REU load | protocol | slots checked | NUL | `$EE` (pre-clear) | stale | other |
+|---|---|---:|---:|---:|---:|---:|
+| 16 DMAs/byte | count, ring, count | 70,511 | 0 | 0 | 0 | 0 |
+| 16 DMAs/byte | one 260-B read | 80,128 | 24 | 0 | 5,693 | 0 |
+| none | count, ring, count | 64,997 | 0 | 0 | 0 | 0 |
+| none | one 260-B read | 81,408 | 37 | 0 | 8,631 | 0 |
+| 16 DMAs/byte | count, ring, count | 79,638 | 0 | 0 | 0 | 0 |
+| 16 DMAs/byte | one 260-B read | 89,856 | 17 | 0 | 5,641 | 0 |
+
+Clean again: this load (large REU blocks, a quiet 6510) did not
+reproduce it. The AROS boot's load differs (millions of short REU DMAs
+from the memory API and the code window, the REC reprogrammed
+constantly), and the stale value crossed a `run_prg` and a C64 reset.
+So the user's turbo/read-path hypothesis stays OPEN: a stale DMA read of
+C64 RAM under that load. The capture now guards against it:
+`tests/aros_boot.py` zeroes the ring and its count from the host before
+every boot and reads them back as zero (a stale read then shows as a NUL
+or as a pre-clear byte), reads count, ring, count, takes only the slots
+the bracket proves final, and compares every captured byte with the boot
+model, so any wrong byte fails the leg. Every U64E boot since (16, fix
+rounds 1 and 2) captured all 416 bytes equal to the model.
+
+**Turbo switches and `reboot(client)`.** The harness README requires
+`reboot(client)` when switching turbo speeds between REU-heavy workloads
+(stale DMA state). No AROS session rebooted between holds: each hold sets
+1 MHz, `run_prg`s the runner, sets 48 MHz, boots (REU-heavy), and the hold's
+restore resets the C64. The corrupt captures and the clean ones (s = 2,
+and every bracketed run since) followed the same switch pattern, so the
+switches do not discriminate them; the experiment above (which switches
+48 → 1 → 48 live) read clean. The UCI turbo fence (`turbo_safe`) is not
+relevant: nothing here touches `$DF1C-$DF1F` (the runner's U64 mailbox
+dispatcher is plain RAM at `$CE00`). Harness-reserved RAM `$C400-$C87D`
+(turbo UCI routines, `docs/memory_safety.md`) overlaps the runner's
+`buf_case` only above `$C400`; the AROS driver (`$C000-$C181`), the
+experiment's writer (`$C200-$C245`) and the boot's P/R blocks
+(`$C900-$C96F`) stay clear of it.

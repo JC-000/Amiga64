@@ -30,6 +30,16 @@ Checks
       equate under it must carry that owner's prefix (``<owner>_``), so an
       I/O register equate cannot move into it.  They take no part in (a)/(b)
       and the scan (d) still classifies raw literals by the sys region.
+  (g) guest PROFILES (W11-A, S3.7): runtime/rc/machine.inc is a second,
+      complete map of the same guest space (the machine-mode boot).  Each
+      profile is checked ON ITS OWN by (a)-(c), and every guest map (the
+      HLE one in guest.inc and each profile) must reserve the trapped I/O
+      banks ``IO_BANKS``: whatever lies there is owned by ``io`` or by a
+      registered holder of host-private REU data (``IO_BANK_OWNERS``:
+      disp's palette LUT), never ``free`` or guest memory.  Sources under
+      ``PROFILE_SOURCES`` (the machine boot driver) have their guest
+      literals judged against their profile, and the profile's host
+      mirrors (host/machine.py) are cross-checked like (e).
 
 Region grammar (in rc files; parsed from comments)::
 
@@ -60,6 +70,19 @@ RC_FILES = {
     "guest": "runtime/rc/guest.inc",
 }
 
+# Alternative guest-space profiles (check g): name -> rc file.  Each one
+# declares ``@space guest`` and is never included by runtime/macros.inc.
+PROFILES = {
+    "machine": "runtime/rc/machine.inc",    # W11-A: S3.7 machine mode (AROS)
+}
+# The banks the memory API traps (docs/CONTRACTS.md "I/O trap"): no guest
+# map may hand them out.  ``io`` = the trapped register bank itself; the
+# other owners keep host-private data in the REU under it.
+IO_BANKS = ((0xBF0000, 0xBFFFFF), (0xDF0000, 0xDFFFFF))
+IO_BANK_OWNERS = frozenset({"io", "disp"})
+# Sources whose guest literals belong to a profile, not to guest.inc.
+PROFILE_SOURCES = [("tests/aros/*.s", "machine")]
+
 # Module owner of each scanned source file (docs/RESOURCES.md registry).
 # ``sys``/``free``/``mb`` are region owners only — no file maps to them.
 FILE_OWNERS = {
@@ -81,6 +104,7 @@ FILE_OWNERS = {
     "runtime/ops/blt.s": "blt",         # W11-B blitter v0 (S3.6)
     "tests/runner/runner.s": "run",
     "tests/runner/run_program.s": "run",
+    "tests/aros/mboot.s": "aros",       # W11-A machine-mode boot driver (S3.7)
 }
 
 # Owners by glob, for module families that grow by file (checked after the
@@ -91,7 +115,8 @@ OWNER_GLOBS = [
     ("runtime/ops/hle*.s", "hle"),      # hle.s, hle_dos.s (M2)
     ("runtime/ops/dosio*.s", "hle"),    # dos I/O backends (WS-B2)
 ]
-SCANNED_GLOBS = ["runtime/*.s", "runtime/ops/*.s", "tests/runner/*.s"]
+SCANNED_GLOBS = ["runtime/*.s", "runtime/ops/*.s", "tests/runner/*.s",
+                 "tests/aros/*.s"]
 
 # Where @under (RAM under an I/O window) is legal: space -> inclusive ranges.
 UNDER_WINDOWS = {"ram": ((0xD000, 0xDFFF),)}
@@ -132,6 +157,12 @@ HOST_MIRRORS = {
     "STACK_TOP": ("host/image.py", "STACK_TOP"),
     "PROG_BASE": ("host/image.py", "BASE_ADDR"),
     "PROG_END": ("host/image.py", "PROG_END"),
+}
+# The same for each profile (check g): profile -> {rc name: (py file, py name)}.
+PROFILE_MIRRORS = {
+    "machine": {n: ("host/machine.py", n) for n in (
+        "AROS_CHIP", "AROS_CHIP_END", "AROS_SLOW", "AROS_SLOW_END",
+        "AROS_EXT", "AROS_EXT_END", "AROS_ROM", "AROS_ROM_END")},
 }
 
 # --- rc-file model ----------------------------------------------------------
@@ -492,6 +523,64 @@ def check_host_mirrors(root: Path, guest: Space) -> list[str]:
     return errors
 
 
+def check_io_banks(space: Space) -> list[str]:
+    """Check (g): a guest map reserves every trapped I/O bank."""
+    errors: list[str] = []
+    for lo, hi in IO_BANKS:
+        inside = [r for r in space.regions if r.lo <= hi and r.hi >= lo]
+        for r in inside:
+            if r.lo < lo or r.hi > hi:
+                errors.append(
+                    f"{space.path}:{r.line}: region {r.owner} ${r.lo:X}-${r.hi:X} "
+                    f"straddles the I/O bank ${lo:X}-${hi:X}")
+            elif r.owner not in IO_BANK_OWNERS:
+                errors.append(
+                    f"{space.path}:{r.line}: region {r.owner} ${r.lo:X}-${r.hi:X} "
+                    f"lies in the trapped I/O bank ${lo:X}-${hi:X}: only "
+                    f"{sorted(IO_BANK_OWNERS)} may own it")
+        if not any(r.owner == "io" for r in inside):
+            errors.append(f"{space.path}: no 'io' region reserves the I/O bank "
+                          f"${lo:X}-${hi:X}")
+    return errors
+
+
+def check_profile_mirrors(root: Path, name: str, space: Space) -> list[str]:
+    errors: list[str] = []
+    rc_vals = {e.name: e.value for e in space.equates}
+    cache: dict[str, dict[str, int]] = {}
+    for rc_name, (py_file, py_name) in PROFILE_MIRRORS.get(name, {}).items():
+        if py_file not in cache:
+            fp = root / py_file
+            cache[py_file] = parse_py_constants(fp.read_text()) if fp.exists() else {}
+        if rc_name not in rc_vals:
+            errors.append(f"{space.path}: mirrored constant {rc_name} missing")
+        elif py_name not in cache[py_file]:
+            errors.append(f"{py_file}: mirrored constant {py_name} not found")
+        elif cache[py_file][py_name] != rc_vals[rc_name]:
+            errors.append(
+                f"mirror mismatch: {py_file} {py_name}=0x{cache[py_file][py_name]:X} "
+                f"!= {space.path} {rc_name}=${rc_vals[rc_name]:X}")
+    return errors
+
+
+def load_profiles(root: Path) -> tuple[dict[str, Space], list[str]]:
+    profiles: dict[str, Space] = {}
+    errors: list[str] = []
+    for name, rel in PROFILES.items():
+        fp = root / rel
+        if not fp.exists():
+            errors.append(f"{rel}: missing profile rc file")
+            continue
+        space, errs = parse_rc_text(fp.read_text(), rel)
+        errors.extend(errs)
+        if space is not None:
+            if space.name != "guest":
+                errors.append(f"{rel}: @space '{space.name}', expected 'guest' "
+                              f"(a profile is a guest map)")
+            profiles[name] = space
+    return profiles, errors
+
+
 # --- Driver -----------------------------------------------------------------
 
 
@@ -516,6 +605,14 @@ def run_checks(root: Path, verbose: bool = False) -> int:
     spaces, errors = load_spaces(root)
     for space in spaces.values():
         errors.extend(check_space(space))
+    profiles, perrs = load_profiles(root)
+    errors.extend(perrs)
+    for name, prof in profiles.items():
+        errors.extend(check_space(prof))
+        errors.extend(check_io_banks(prof))
+        errors.extend(check_profile_mirrors(root, name, prof))
+    if "guest" in spaces:
+        errors.extend(check_io_banks(spaces["guest"]))
 
     owners, unregistered = source_owners(root)
     errors.extend(f"{rel}: source file has no registered owner "
@@ -527,8 +624,11 @@ def run_checks(root: Path, verbose: bool = False) -> int:
         for ln in text.splitlines())
     findings: list[Finding] = []
     for rel, text in sources.items():
+        prof = next((p for g, p in PROFILE_SOURCES if Path(rel).match(g)), None)
+        view = spaces if prof is None or prof not in profiles else \
+            {**spaces, "guest": profiles[prof]}
         findings.extend(
-            scan_source(rel, text, owners[rel], spaces, corpus))
+            scan_source(rel, text, owners[rel], view, corpus))
 
     if "guest" in spaces:
         errors.extend(check_host_mirrors(root, spaces["guest"]))
@@ -542,13 +642,14 @@ def run_checks(root: Path, verbose: bool = False) -> int:
     for msg in warn:
         print(f"rescheck: {msg}")
 
-    n_regions = sum(len(s.regions) for s in spaces.values())
-    n_equates = sum(len(s.equates) for s in spaces.values())
+    n_regions = sum(len(s.regions) for s in [*spaces.values(), *profiles.values()])
+    n_equates = sum(len(s.equates) for s in [*spaces.values(), *profiles.values()])
     if fatal:
         print(f"rescheck: FAIL — {len(fatal)} violation(s), "
               f"{len(warn)} unclassified")
         return 1
-    print(f"rescheck: OK — {len(spaces)} spaces, {n_regions} regions, "
+    print(f"rescheck: OK — {len(spaces)} spaces + {len(profiles)} profile(s), "
+          f"{n_regions} regions, "
           f"{n_equates} equates, {len(sources)} sources scanned, "
           f"{len(warn)} unclassified")
     return 0

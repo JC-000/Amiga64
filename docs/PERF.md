@@ -490,7 +490,11 @@ share is **~1.3%** [EST]. The poll runs only in exception mode and only
 while `mach_lvl` ≠ 0: AROS's Disable() clears INTEN, so `mach_lvl` = 0 and
 nothing polls; the case is a request pending under a higher running level
 (a handler) or under an SR mask. `MACH_POLL` is one named constant in
-`mach.s`; at 1 MHz a larger value trades latency for throughput. Exact
+`mach.s`; at 1 MHz a larger value trades latency for throughput. **W11-A (supervisor grant, HIGH-1):** the
+interval is now max(`MACH_POLL`, 256 E << s) phi2, at most `$FFFF`: the
+same `$0400` at s ≤ 2 (the numbers above), `$1000` at s = 4, `$4000` at
+s = 6, so the passes' share at 1 MHz falls with s (~13% at s = 4, ~4% at
+s = 6) and the latency stays ≤ 256 guest E ticks. Exact
 recognition at the SR write would need a core.s SR-write hook (backlog).
 
 **Forward progress: one forced guest instruction (fix round 2).** A pass
@@ -627,6 +631,97 @@ address, length, address control) and only rewrite the REU address. Shifted and 
 (8-10x slower; fine for v0, supervisor ruling); the boot uses neither, Workbench will (text, BOBs): the
 levers are a table shifter (2 x 256 B per shift) and a 512-byte fill
 table.
+
+## (l) S3.7 AROS boot (W11-A)
+
+`tests/aros_boot.py`, contract "Machine profile and AROS boot (S3.7)".
+Pinned ROM AROS-20260921 (`tools/aros/manifest.txt`). Wall time from
+`aros_boot` (after staging) to the serial line; "frame" = `mach_frames`
+then; "IPS" = the boot model's instruction count at that line / the wall
+time (model: m1 1,256,189 instr / frame 95, m2 2,640,815 / frame 212) —
+an estimate, since dilated guest time changes the count a little.
+
+**U64E, 48 MHz** [MEASURED HW, fw 3.15 git 3a1ff9ff, fpga 126, core 1.50;
+one DeviceLock hold per row, config restored identical; NTSC: frames/s =
+72.08 / 2^s; `build/evidence/w11-aros/u64/`]:
+
+| s | m1 | m2 | m1 IPS | m2 IPS | frame at m2 (model 212) |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 19.9 s | not in 420 s | 63k | – | (30,248 frames at 420 s) |
+| 1 | 19.9 s | not in 420 s; fix-round build 4 of 4: 104–106 s | 63k | 25k | 3,793–3,821 |
+| 2 | 19.9 s | 67.8 s | 63k | 39k | 1,222 |
+| 3 | 20.3 s | 63.4 s | 62k | 42k | 570 |
+| **4** | **20.4 s** | **58.1 s** | **62k** | **45k** | **261** |
+| 5 | 20.8 s | 58.0 s | 60k | 46k | 130 |
+
+Fix round 1 build (scaled poll, bracketed capture; `u64/fix1-w3/`, 416/416
+serial bytes equal to the model in every run): s = 4 m1 20.1 s / m2 57.6 s
+(frame 259); s = 3 20.0 / 59.9 s (540); s = 2 19.9 / 67.6 s (1,219); s = 1
+19.9 / 106.1 s (3,834). s = 4 stays the fastest: `mach_s` stays 4.
+
+**Milestone 3, the no-media screen** (merged tree with the blitter, fix
+round 2; `build/evidence/w11-aros/m3/`; wall time from the boot's start):
+
+| s (U64E 48 MHz) | m2 | m3 | guest frame at m3 (model 345) |
+|---:|---:|---:|---:|
+| 2 | 67.8 s | 106.3 s | 1,917 |
+| **3** | 62.4 s | **86.8 s / 98.3 s** | 785 / 887 |
+| 4 | 57.8–58.0 s | 100.6 s / 101.0 s | 453 / 455 |
+| 5 | 57.8 s | 113.7 s | 256 |
+
+S3_PLAN §3.5 estimated 70–95 s at 48 MHz [EST]; s = 3 lands at 87–98 s
+(the m3 instant is quantised by the conversion budget, DISP_N frames, and
+a 2 s poll, so runs vary ±6 s). The phase after m2 waits on guest time
+(the model idles 59–89% of frames 250–345), so a smaller s wins there
+while a larger one wins up to m2: s = 3 is the best total, `mach_s` = 3
+on the U64E. VICE s = 9: m3 at 174 s of warp (frame 386).
+
+m1 is CPU-bound (the ROM checksum and ROMtag scan, 32% of the boot) and
+independent of s: ~62k IPS, inside S3_PLAN §3.5's 52–68k [EST]. Staging:
+zero fill of 16 MB 4.3–4.7 s, SocketDMA REU write of 1 MB 3.5–4.2 s,
+checksum readback 2.6–2.9 s. S3_PLAN §3.5 estimated 70–95 s to the
+insert-disk screen; at 45k IPS the model's 3.43 M instructions take ~76 s,
+plus the blits (W11-B), inside that range [EST].
+
+**VICE x64sc, PAL, warp** [MEASURED VICE; correctness vehicle, no
+performance claim; `build/evidence/w11-aros/explore/`]: m1 ~50 s at every
+s. m2: s = 4 not in 400 s (27,856 frames), s = 6 not in 900 s (16,013), s = 7
+180 s (frame 1,605), s = 8 129 s (564), **s = 9 119 s (259)**, s = 10 117 s
+(129); serial matches the model in every passing run.
+
+**Low s (C4.1; fix round 1, HIGH-1 — the round-0 "AROS needs ≳ 3k
+instructions per frame" was wrong and is withdrawn).** One guest frame is
+14188 << s phi2 and the CIAs count phi2 at ~1 MHz on both hosts, so a frame
+holds ~IPS × 0.0144 × 2^s raw guest instructions: 1 MHz ~23 × 2^s, 48 MHz
+~890 × 2^s. The boot model with its CPU slowed k× still reaches m2 down to
+~680 instructions per frame (k = 24; CONTRACTS S3.7 "C4" has the table).
+Measured on our machine: VICE s ≤ 6 stalls through the `MACH_POLL` cost
+(a level-2 request pending under IPL 3 makes every pass a 1024-phi2 poll,
+~37% guest speed at 1 MHz, so the level-3 handler outlasts the frame and
+the kernel's dispatcher never returns; `MACH_POLL` = `$4000` reaches m2 at
+s = 6 in 158.7 s, frame 2821; fixed by the scaled poll interval below and
+in (i): m2 at s = 6 in 162.0 s, frame 2821); the U64E reaches m2 at s = 1 (4 of 4 runs,
+104–106 s, frame ~3,800; one earlier run did not) and not at s = 0 (2 of
+2, 400 s): consistent with the model's limit, since after m1 the U64E
+runs 25–39k IPS, ~350–540 instructions per s = 0 frame, at or below the
+model's k = 32 (551 per frame, no m2). Post-m1
+rates at the chosen s (model instructions m1→m2 / frames): U64E s = 4
+≈ 8.1k per frame, VICE s = 9 ≈ 9.3k. The idle "machine loop starves the
+guest at s = 0" backlog item, by contrast, is the arithmetic of a 1 MHz
+host, measured by leg `s0` (main-loop instructions per real second, a
+VERTB handler that only acknowledges, VICE PAL):
+
+| s | 6 | 4 | 3 | 2 | 1 | 0 |
+|---|---:|---:|---:|---:|---:|---:|
+| copper off | 1,628 | 1,447 | 1,371 | 1,291 | 1,104 | 741 |
+| 4 copper MOVEs | 1,628 | 1,395 | 1,302 | 1,140 | 810 | 153 |
+| 28 copper MOVEs | 1,628 | 1,302 | 1,132 | 805 | 146 | 129 |
+
+At s = 0 the fixed per-frame work (the pass and its IRQ, the VERTB delivery
+and handler with their window refills: ~7.6k cycles; a 4-MOVE copper run
+with its gen snapshot: ~5k) fills most of the 14188-cycle frame; every
+case still reaches HALT (no livelock). At 48 MHz the same work is ~2% of a
+frame. The boot profile's s is chosen per host for speed (U64E 4, VICE 9).
 
 ## (e) Caveats
 

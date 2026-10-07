@@ -13,6 +13,17 @@ SPEC §2/§3) to a single-repo multi-module codebase.
 | `runtime/rc/ram.inc` | `ram` | `$0100-$FFFF` (C64 side) |
 | `runtime/rc/guest.inc` | `guest` | `$000000-$FFFFFF` (guest addr = REU offset) |
 
+**Guest profiles (W11-A, S3.7).** `runtime/rc/machine.inc` is a second,
+complete `guest` map: the machine-mode (AROS) layout of the same REU. It is
+NOT included by `runtime/macros.inc`; its consumers are the machine boot
+driver `tests/aros/mboot.s` and `host/machine.py` (mirrored constants,
+cross-checked). `host/rescheck.py` checks each profile on its own (its own
+overlap/coverage/equate checks) and requires every guest map, guest.inc
+included, to reserve the trapped banks `$BF0000-$BFFFFF` and
+`$DF0000-$DFFFFF` (owner `io`, or a holder of host-private REU data under
+the bank: `disp`'s LUT). Sources under `tests/aros/` have their guest
+literals judged against the machine profile.
+
 Each allocation is a ca65 integer equate, one per line, `.ifndef`-guarded —
 **the assembler is the schema**. `runtime/macros.inc` includes all three, so
 `runtime/*.s` and `runtime/ops/*.s` get every name for free;
@@ -49,7 +60,8 @@ Regions never overlap, and together they must COVER the space — unclaimed
 space is declared explicitly with owner `free`, never left implicit.
 Non-module owner tags: `sys` (hardware/OS, not claimable), `free`
 (unallocated), `mb` (hardware-harness mailbox page `$CE00-$CEFF`, reserved
-for in-flight Ultimate-64 harness work).
+for in-flight Ultimate-64 harness work), `io` (guest space: a bank the
+memory API traps to the chip model, never guest RAM; W11-A).
 
 ## Prefix registry (name ownership)
 
@@ -69,6 +81,7 @@ registered as-is (no renames: `build/runner.lbl` consumers exist).
 | `cia_` `CIA_` | cia (W9-C guest CIA-A/B, `runtime/ops/cia.s`) | `cia_read`, `cia_st`, `CIA_SZ`, `CIA_TOD` |
 | `cop_` `COP_` + the single name `disp_st` (a cop-owned exception in the `disp_` family) | cop (W10-P copper + display state, `runtime/ops/cop.s`) | `cop_reset`, `cop_dhook`, `COP_LIMIT`, `disp_st` |
 | `disp_` `DISP_` | disp (W10-V display refresh, `runtime/ops/disp.s`); `disp_st` is cop-owned (W10-P's C1 block) | `disp_frame`, `disp_lut`, `DISP_N` |
+| `aros_` `AROS_` | aros (W11-A machine-mode profile `runtime/rc/machine.inc` + boot driver `tests/aros/mboot.s`) | `aros_boot`, `AROS_ROM` |
 | `rc_` | the resource contract itself | reserved for future contract symbols |
 
 New symbols MUST take a registered prefix of their owning module (new
@@ -92,7 +105,9 @@ scan of `runtime/` + `tests/runner/` sources for raw address literals
 (direct ZP operands; absolute `$0400-$DFFF`; 5-6-digit guest literals) that
 land in another owner's region, `free`, `sys`, or `mb` space — anything
 ambiguous is reported UNCLASSIFIED, never guessed; (e) host mirror
-constants match `rc/guest.inc`. Legitimate exceptions go in the
+constants match `rc/guest.inc`; (f) `@under` claims; (g) the guest
+profiles (`machine.inc`): each map on its own, the I/O banks reserved in
+every guest map, the profile's host mirrors (`host/machine.py`). Legitimate exceptions go in the
 `ALLOWLIST` table in `host/rescheck.py` with a documented reason (currently
 empty — the migration left no raw foreign literals).
 
