@@ -306,8 +306,8 @@ Design: `docs/S3_PLAN.md` §1.2–1.3, §3.4. Tests: `tests/run_chip.py`,
   POTINP `$FF00`, SERDATR `$3000`, DENISEID `$FFFF`. The other read-only
   slots (`$000–$01E`) return their shadow word, and write-only registers
   (`$020–$1FE`) return 0. CIA registers return their shadow, except CIA-A
-  PRA = `(PRA & DDRA) | ($EB & ~DDRA)`. Not modelled yet: DMACONR (it
-  reads its slot, 0), timers, ICR and TOD (S3.3/S3.4).
+  PRA = `(PRA & DDRA) | ($EB & ~DDRA)`. DMACONR: see "Blitter (S3.6)"
+  (W11-B; it read its slot, 0, before). Timers, ICR and TOD: S3.3/S3.4.
 - **Writes.** Every decoded write is logged. A write to a write-only
   register also lands in the shadow, while a write to a read-only slot is
   ignored there. CIA writes land in `chip_cia`, and a SERDAT write appends
@@ -840,7 +840,7 @@ with a `valid` byte, `cop_dhook` in BSS, copper DMA gating). Reference:
   (`run_cop` case `nopc`, mutant `nopcok`).
 - **Not modelled:** WAIT/SKIP beam timing (the model's limit), copper DMA
   cycles, the copper stopping when its own DMA goes off mid-list, DMACONR
-  (still reads its slot), BPLCON3+, the blitter's response to copper
+  (since S3.6: "Blitter (S3.6)"), BPLCON3+, the blitter's response to copper
   writes (S3.6). `mach_wk` does not count `mach_fhook` as a wake source
   (backlog; the CIA's slot-0 hook already keeps a STOPped CPU waiting).
 - **Link order.** `cop.s` links after `cia.s` and before `mach.s`
