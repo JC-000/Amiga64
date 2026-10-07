@@ -208,3 +208,16 @@ unchanged. chip_oracle's exact counts change accordingly.
 - **C4.1:** the "≳3k instr/frame" threshold is withdrawn; the low-s boot
   stall is treated as a fidelity defect (diagnose, then fix with sign-off
   or document as open).
+
+## Addendum 4 (2026-10-06): review rulings (rev-blt round 1)
+
+- **Addendum 1 wording:** "existing modules must not move" means `core.s`
+  and every module linked before `chip.s`. Modules linked after it (cia,
+  cop, disp, mach) may move by whole offsets; CONTRACTS lists them, and the
+  proof is the core.s link-swap plus `perf_cycles --max-delta 0`.
+- **Blitter divergences accepted for v0, documented and pinned as oracle
+  LIMIT cases:** D overlapping A/B/C within a row (blt.s is row-buffered;
+  the model is word-serial; FS-UAE writes D one word late) and odd
+  modulos (FS-UAE ignores bit 0). Model and blt.s fixes are backlog.
+- **U64E timing:** CIA ticks on the NTSC bench U64E are 0.978 µs
+  (17095 per frame), not 1 µs.
