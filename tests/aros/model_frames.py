@@ -39,12 +39,15 @@ INSERT_DISK_FRAME = 345
 VIC_MASK = {0xD011: 0x7F, 0xD016: 0x1F, 0xD018: 0xFE, 0xD020: 0x0F, 0xD021: 0x0F}
 
 
-def conv_hash(bitmap: bytes, screen: bytes, colram: bytes, vic: dict) -> str:
+def conv_hash(bitmap: bytes, screen: bytes | None, colram: bytes, vic: dict) -> str:
     """The hash of one conversion; tests/aros_boot.py computes it from the
-    C64 side with the same function (colour RAM low nibbles, masked VIC)."""
+    C64 side with the same function (colour RAM low nibbles, masked VIC).
+    screen None: the variant without the screen matrix (the U64E cannot read
+    the RAM under the I/O window of a running machine without banking it in)."""
     h = hashlib.sha1()
     h.update(bitmap)
-    h.update(screen)
+    if screen is not None:
+        h.update(screen)
     h.update(bytes(b & 0x0F for b in colram))
     for a in sorted(VIC_MASK):
         h.update(bytes([vic[a] & VIC_MASK[a]]))
@@ -94,7 +97,9 @@ def main(argv=None) -> int:
             if h not in seen:
                 d = conv["decide"]
                 seen[h] = {"frame": f, "icount": am.icount, "mode": d["mode"],
-                           "why": d["why"], "count": 0}
+                           "why": d["why"], "count": 0,
+                           "nomatrix": conv_hash(conv["bitmap"], None, conv["colram"],
+                                                 conv["vic"]) if "bitmap" in conv else "blank"}
             seen[h]["count"] += 1
         return n
     am.copper = copper

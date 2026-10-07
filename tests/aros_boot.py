@@ -213,6 +213,15 @@ class Machine:
                 "sums_ok": sorted(sums)}
 
     def start(self, s: int, exc: bool = True) -> None:
+        # rev-aros round 2: the serial ring and its count are zeroed from the
+        # host before every boot (aros_boot's chip_reset zeroes them again),
+        # so a stale read of a slot surfaces as a NUL, never as a byte of a
+        # previous boot; the read-back proves the zeroes landed.
+        ser, sern = self.lab("chip_ser"), self.lab("chip_sern")
+        self.w(ser, bytes(256))
+        self.w(sern, bytes(2))
+        if self.r(ser, 256) != bytes(256) or self.r(sern, 2) != bytes(2):
+            raise CaptureError("the serial ring did not read back as zero")
         self.w(P + 12, bytes([s, 1 if exc else 0]))
         self.w(R, b"\0")
         a = self.dl["aros_boot"]
@@ -374,9 +383,13 @@ def vice_session(prg: str, fn):
 
 def u64_session(prg: str, out_dir: str, mhz: int, fn):
     """One DeviceLock hold (tests/bench/u64_session.u64_hold: config
-    snapshot before, exact restore and C64 reset after, even on failure);
-    the runner is booted at 1 MHz, the boot runs at *mhz*."""
+    snapshot before, exact restore and C64 reset after, even on failure).
+    The CPU speed is set to *mhz* FIRST and the machine rebooted
+    (`reboot(client)`: the harness README requires it after a turbo switch
+    between REU-heavy workloads, stale DMA state), then the runner boots
+    and the boot runs at *mhz* (W11 fix round 2)."""
     from c64_test_harness import Labels
+    from c64_test_harness.backends.ultimate64_helpers import reboot
     from tests.bench.u64_session import u64_hold
     from tests.run_vectors import prepare_target
     prg = os.path.abspath(prg)
@@ -384,15 +397,16 @@ def u64_session(prg: str, out_dir: str, mhz: int, fn):
     os.makedirs(out_dir, exist_ok=True)
     with u64_hold(out_dir) as hold:
         tg = hold["target"]
-        tg.transport.set_speed(1)
-        prepare_target(tg, prg)
         tg.transport.set_speed(mhz)
-        time.sleep(0.5)
-        log(f"U64E: runner booted, CPU speed {mhz} MHz")
+        reboot(tg.transport.client)
+        log(f"U64E: CPU speed {mhz} MHz, rebooted (reboot(client))")
+        prepare_target(tg, prg)
+        log(f"U64E: runner booted at {mhz} MHz")
         try:
             return fn(Machine(tg, labels, prg))
         finally:
             tg.transport.set_speed(1)
+            reboot(tg.transport.client)
 
 
 # --------------------------------------------------------------------------
@@ -473,19 +487,32 @@ def model_frames() -> tuple[dict | None, str]:
 
 
 def c64_hash(m: "Machine") -> tuple[str, dict]:
-    """The current VIC picture, hashed as model_frames.conv_hash does (VICE:
-    the CPU stays halted across the $01 switch the RAM read needs)."""
-    from c64_test_harness import read_bytes
-    from tests import run_c2v as C
+    """The current VIC picture, hashed as model_frames.conv_hash does.
+    The guest runs inside mach_run with $01 = $35 (KERNAL out, I/O in): the
+    bitmap at $E000 is RAM, colour RAM and the VIC registers are I/O, and
+    the screen matrix is RAM UNDER the I/O window.  VICE: the 6510 is halted
+    for the whole snapshot, so $01 is switched to $34 for the matrix and put
+    back to the value READ, not to a constant (fix: the first m3 version
+    restored $37, mapping the KERNAL in under the running guest).  U64E: the
+    6510 keeps running and $01 is never touched: the matrix is left out
+    (the model side hashes the same way, "nomatrix")."""
+    from c64_test_harness import read_bytes, write_bytes
     sys.path.insert(0, os.path.join(ROOT, "tests", "aros"))
     import model_frames as MF
-    cs = C.Session(m.tg, m.labels)
-    bitmap = cs.read_ram(cs.bitmap, 8000)
-    screen = cs.read_ram(cs.screen, 1000)
-    colram = read_bytes(m.t, 0xD800, 1000)
-    vic = {a: read_bytes(m.t, a, 1)[0] for a in MF.VIC_MASK}
+    bm, sc = m.lab("c2v_bitmap"), m.lab("c2v_screen")
+    t = m.t
     if m.vice:
-        m.t.resume()
+        port = read_bytes(t, 0x0001, 1)
+        bitmap = read_bytes(t, bm, 8000)
+        t.write_memory(0x0001, bytes([0x34]), override="aros_boot: read RAM under I/O")
+        screen = read_bytes(t, sc, 1000)
+        t.write_memory(0x0001, port, override="aros_boot: restore $01")
+    else:
+        bitmap, screen = read_bytes(t, bm, 8000), None
+    colram = read_bytes(t, 0xD800, 1000)
+    vic = {a: read_bytes(t, a, 1)[0] for a in MF.VIC_MASK}
+    if m.vice:
+        t.resume()
     return MF.conv_hash(bitmap, screen, colram, vic), vic
 
 
@@ -497,7 +524,9 @@ def leg_m3(m: Machine, r: dict, timeout: float) -> list[str]:
     mf, why = model_frames()
     if mf is None:
         return [f"m3: no model reference: {why}"]
-    ok = {h: v for h, v in mf["hashes"].items()
+    key = (lambda h, v: h) if m.vice else (lambda h, v: v["nomatrix"])
+    every = {key(h, v): v for h, v in mf["hashes"].items()}
+    ok = {key(h, v): v for h, v in mf["hashes"].items()
           if v["frame"] >= mf["insert_disk_frame"]}
     t0 = time.monotonic()
     seen: dict[str, int] = {}
@@ -512,7 +541,7 @@ def leg_m3(m: Machine, r: dict, timeout: float) -> list[str]:
             fr = struct.unpack("<I", m.r(ZP_FRAMES, 4))[0]
             if h not in seen:
                 seen[h] = fr
-                hit = mf["hashes"].get(h)
+                hit = every.get(h)
                 log(f"  m3: conversion {nconv} (mode {mode}) at guest frame {fr}: "
                     f"{h[:12]} {'= model frame ' + str(hit['frame']) if hit else '(not a model frame)'}")
             if h in ok:
@@ -836,6 +865,95 @@ def leg_poll(prg: str, rep: dict) -> list[str]:
     return M.session(prg, body)
 
 
+LAT_K = 8                       # measurements per run
+LAT_SLACK = {4: 384, 9: 64}     # E: the host work around the poll, fixed in
+                                # phi2 (two trapped beam reads, the pass, the
+                                # exception frame: ~4.8k phi2 at 1 MHz = ~300 E
+                                # at s = 4, < 10 E at s = 9; VICE measured
+                                # 544-560 E at s = 4, 126-128 E at s = 9)
+LAT_S = (4, 9)
+LAT_TABLE = 0x018000            # guest: K (t0, t1) VPOSR:VHPOSR longs
+
+
+def prog_lat() -> object:
+    """Fix round 2 (rev-aros): RTE / MOVE-to-SR recognition latency.  K
+    times: at SR $2300 wait until VERTB is pending (masked: the same level),
+    i.e. until a pass has posted it and armed the poll; then t0 := the beam
+    (move.l VPOSR) and MOVE #$2000,SR; the level-3 handler takes t1 := the
+    beam, acknowledges, flags.  Host: E ticks from t0 to t1."""
+    from tests import run_irq as I
+    from tests.run_mach import G, HALT, mv_imm_abs_w
+    g = G()
+    I.vec(g, 27, "h3")
+    I.clr_l(g, I.CNT)
+    mv_imm_abs_w(g, 0x7FFF, I.INTENA)
+    mv_imm_abs_w(g, 0x7FFF, I.INTREQ)
+    g(0x41F9, *g.abs(LAT_TABLE))                # lea TABLE,a0
+    g(0x7E00 | (LAT_K - 1))                     # moveq #K-1,d7
+    mv_imm_abs_w(g, 0xC020, I.INTENA)           # INTEN | VERTB
+    g.label("next")
+    I.move_sr(g, 0x2300)                        # IPL 3: VERTB masked
+    mv_imm_abs_w(g, 0x0020, I.INTREQ)           # clear a stale one
+    g.label("wv")
+    g(0x0839, 5, *g.abs(0xDFF01F))              # btst #5,INTREQR+1
+    g.bcc(0x6700, "wv")                         # beq.w: until a pass posts it
+    I.clr_l(g, I.CNT + 4)                       # flag := 0
+    g(0x20F9, *g.abs(0xDFF004))                 # move.l VPOSR,(a0)+   t0
+    I.move_sr(g, 0x2000)                        # the IPL drop
+    g.label("spin")
+    g(0x4AB9, *g.abs(I.CNT + 4))                # tst.l flag
+    g.bcc(0x6700, "spin")                       # beq.w
+    g.dbra(7, "next")
+    g(HALT)
+    g.label("h3")
+    g(0x20F9, *g.abs(0xDFF004))                 # move.l VPOSR,(a0)+   t1
+    mv_imm_abs_w(g, 0x0020, I.INTREQ)
+    I.mv_l_imm_abs(g, 1, I.CNT + 4)
+    g(0x4E73)                                   # rte
+    return g
+
+
+def beam_cc(v: int) -> int:
+    """VPOSR:VHPOSR long -> colour clocks into the frame."""
+    line = ((v >> 16) & 1) << 8 | (v >> 8) & 0xFF
+    return line * 227 + (v & 0xFF)
+
+
+def leg_lat(prg: str, rep: dict) -> list[str]:
+    """Fix round 2 (rev-aros must-fix 1): the documented bound "an IPL drop
+    by RTE / MOVE to SR is recognised within one poll interval (<= 256 E
+    for s >= 2) while a request is pending and a pass has seen it".  Every
+    measured drop -> delivery <= 256 E + LAT_SLACK[s]."""
+    from tests import run_irq as I
+    from tests import run_mach as M
+    from tests.run_mach import BASE, F_INIT, F_SUPER
+    out = rep.setdefault("lat", {})
+
+    def body(rig) -> list[str]:
+        f: list[str] = []
+        for sv in LAT_S:
+            (pc,) = rig.stage(I.link(prog_lat(), BASE))
+            res = rig.run(pc, s=sv, flags=F_INIT | F_SUPER)
+            if res["halt"] != 1 or res["reason"] != 0:
+                f.append(f"lat s={sv}: halt ${res['halt']:02X} reason {res['reason']}")
+                continue
+            raw = rig.guest_read(LAT_TABLE, 8 * LAT_K)
+            ds = []
+            for k in range(LAT_K):
+                t0, t1 = struct.unpack_from(">II", raw, 8 * k)
+                d = (beam_cc(t1) - beam_cc(t0)) % 70940
+                ds.append(d / 5)
+            bound = 256 + LAT_SLACK[sv]
+            out[f"s{sv}"] = {"latency_E": [round(x, 1) for x in ds], "bound_E": bound}
+            log(f"  lat s={sv}: drop -> delivery {min(ds):.0f}..{max(ds):.0f} E "
+                f"(bound {bound} E: 256 + slack {LAT_SLACK[sv]})")
+            if max(ds) > bound:
+                f.append(f"lat s={sv}: an IPL drop was recognised {max(ds):.0f} E "
+                         f"late (bound {bound} E)")
+        return f
+    return M.session(prg, body)
+
+
 PIX_OFF = 105                   # disp_st + 105: the pixel epoch (C3)
 PLANES = (0x100000, 0x4000)     # the two mc2 planes' region (base, length)
 
@@ -974,7 +1092,8 @@ def run(prg: str, legs: list[str], s, backend: str, timeout: float,
         runs.append((svals[0], ["ablate"]))
     for name, fn in (("wkhook", leg_wkhook), ("pix", leg_pix),
                      ("s0", lambda p: leg_s0(p, rep)),
-                     ("poll", lambda p: leg_poll(p, rep))):
+                     ("poll", lambda p: leg_poll(p, rep)),
+                     ("lat", lambda p: leg_lat(p, rep))):
         if name in legs:
             log(f"[{name}]")
             f = fn(prg)
@@ -1059,6 +1178,9 @@ MUTANTS = {
          "        lda #<MACH_POLL         ; MUTANT\n"),
         ("        lda mach_phi,x          ; W11-A (supervisor grant, HIGH-1)\n",
          "        lda #>MACH_POLL         ; MUTANT\n")]),
+    # rev-aros round 2: the s = 4 poll interval 8x too long (2048 E)
+    "poll8": (MACH, [("mach_phi:  .byte >MACH_POLL, >MACH_POLL, >MACH_POLL, $08, $10, $20, $40, $80\n",
+                      "mach_phi:  .byte >MACH_POLL, >MACH_POLL, >MACH_POLL, $08, $80, $20, $40, $80\n")]),
     # C3: disp_frame ignores an epoch change (gen and dirty only)
     "pixread": (DISP, [("        lda disp_st + DISP_ST_PIX ; W11-A: C3, guest pixels rewritten (a blit)\n"
                         "        cmp disp_pix            ; W11-A\n"
@@ -1087,7 +1209,7 @@ MUTANTS = {
                      "        and #0                  ; MUTANT\n"
                      "        sta st_exc              ; latched by emu_reset\n")]),
 }
-MUTANT_LEGS = {"pollfix": ["poll"], "wkfhook": ["wkhook"], "wkdma": ["wkhook"], "pixread": ["pix"], "pixforce": ["pix"],
+MUTANT_LEGS = {"pollfix": ["poll"], "poll8": ["lat"], "wkfhook": ["wkhook"], "wkdma": ["wkhook"], "pixread": ["pix"], "pixforce": ["pix"],
                "pixtake": ["pix"], "pixbudget": ["pix"], "vecswap": ["m1"],
                "noexc": ["m1"]}
 MUTANT_TIMEOUT = 240.0          # m1 comes at ~50 s of VICE warp
@@ -1173,7 +1295,7 @@ def teeth(prg: str, only: list[str] | None, s: int, out: str) -> int:
 # mach_s for the boot profile, per host (measured: docs/CONTRACTS.md
 # "Machine profile and AROS boot (S3.7)", PERF "AROS boot")
 BOOT_S_VICE = 9                 # speed: m2 in ~120 s of warp (~9k instr/frame after m1)
-BOOT_S_U64 = 4                  # speed: m2 in 58 s at 48 MHz (~8k instr/frame after m1)
+BOOT_S_U64 = 3                  # speed to m3 (L8): 87-98 s at 48 MHz (s=4: 101 s, s=2: 106, s=5: 114)
 
 if __name__ == "__main__":
     sys.exit(main())

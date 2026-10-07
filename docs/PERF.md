@@ -659,6 +659,23 @@ serial bytes equal to the model in every run): s = 4 m1 20.1 s / m2 57.6 s
 (frame 259); s = 3 20.0 / 59.9 s (540); s = 2 19.9 / 67.6 s (1,219); s = 1
 19.9 / 106.1 s (3,834). s = 4 stays the fastest: `mach_s` stays 4.
 
+**Milestone 3, the no-media screen** (merged tree with the blitter, fix
+round 2; `build/evidence/w11-aros/m3/`; wall time from the boot's start):
+
+| s (U64E 48 MHz) | m2 | m3 | guest frame at m3 (model 345) |
+|---:|---:|---:|---:|
+| 2 | 67.8 s | 106.3 s | 1,917 |
+| **3** | 62.4 s | **86.8 s / 98.3 s** | 785 / 887 |
+| 4 | 57.8–58.0 s | 100.6 s / 101.0 s | 453 / 455 |
+| 5 | 57.8 s | 113.7 s | 256 |
+
+S3_PLAN §3.5 estimated 70–95 s at 48 MHz [EST]; s = 3 lands at 87–98 s
+(the m3 instant is quantised by the conversion budget, DISP_N frames, and
+a 2 s poll, so runs vary ±6 s). The phase after m2 waits on guest time
+(the model idles 59–89% of frames 250–345), so a smaller s wins there
+while a larger one wins up to m2: s = 3 is the best total, `mach_s` = 3
+on the U64E. VICE s = 9: m3 at 174 s of warp (frame 386).
+
 m1 is CPU-bound (the ROM checksum and ROMtag scan, 32% of the boot) and
 independent of s: ~62k IPS, inside S3_PLAN §3.5's 52–68k [EST]. Staging:
 zero fill of 16 MB 4.3–4.7 s, SocketDMA REU write of 1 MB 3.5–4.2 s,
@@ -685,7 +702,9 @@ the kernel's dispatcher never returns; `MACH_POLL` = `$4000` reaches m2 at
 s = 6 in 158.7 s, frame 2821; fixed by the scaled poll interval below and
 in (i): m2 at s = 6 in 162.0 s, frame 2821); the U64E reaches m2 at s = 1 (4 of 4 runs,
 104–106 s, frame ~3,800; one earlier run did not) and not at s = 0 (2 of
-2, 400 s, ~60% of samples at IPL 3 vs the model's 40%): open. Post-m1
+2, 400 s): consistent with the model's limit, since after m1 the U64E
+runs 25–39k IPS, ~350–540 instructions per s = 0 frame, at or below the
+model's k = 32 (551 per frame, no m2). Post-m1
 rates at the chosen s (model instructions m1→m2 / frames): U64E s = 4
 ≈ 8.1k per frame, VICE s = 9 ≈ 9.3k. The idle "machine loop starves the
 guest at s = 0" backlog item, by contrast, is the arithmetic of a 1 MHz

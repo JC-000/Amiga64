@@ -620,7 +620,9 @@ Owner: s3 (`runtime/ops/mach.s`; the INTENA/INTREQ paths of
   poll; "lost" (a SET never delivered) stays 0.
   With nothing pending it is recognised at the next event, which is
   harmless: nothing can be delivered. So a lower level is never starved by
-  a recurring higher one (`starve`, `kick`), and a handler that never
+  a recurring higher one **while the higher source's period exceeds the
+  poll interval** (s ≤ 2: 1024 phi2; s = 4: 256 E = 4096 phi2; s = 6: 256 E;
+  s ≥ 8: 65535 phi2, ≤ 128 E at s = 9) (`starve`, `kick`), and a handler that never
   acknowledges its request is re-entered right after its RTE, as on a
   68000 (`storm`: 20 re-entries within 2 frames at s = 4). Cost: one pass
   per poll interval while something is pending, `docs/PERF.md` (i).
@@ -630,9 +632,15 @@ Owner: s3 (`runtime/ops/mach.s`; the INTENA/INTREQ paths of
   `runtime/ops/mach.s:294`–`304` takes the event path, whose pass is
   followed by `mach_dlv`, `runtime/ops/mach.s:276`): at once. RTE, MOVE to
   SR, ANDI/EORI to SR (core.s, no SR-write hook): within one poll interval
-  (≤ 256 E ticks at s ≥ 2, ≤ 1024 phi2 at s ≤ 2) while something is
-  pending. Exact recognition there would need a core.s SR-write hook:
-  backlog.
+  (≤ 256 E ticks at s ≥ 2, ≤ 1024 phi2 at s ≤ 2) plus the host work of the
+  recognition itself (the pass and the exception frame, fixed in phi2:
+  ~300 E at s = 4 on a 1 MHz host, < 10 E at s = 9 or at 48 MHz), once a
+  pass has seen the request pending (a request POSTED by a pass, VERTB or
+  a CIA, always is; one SET by the CPU while masked is clamped only from
+  the next event on, ≤ one VERTB wait). Pinned by `tests/aros_boot.py`
+  leg `lat` (s = 4: 543–563 E, bound 640; s = 9: 127–128 E, bound 320)
+  and its mutant `poll8` (s = 4 entry 8× too long: 2031 E). Exact
+  recognition there would need a core.s SR-write hook: backlog.
 - **STOP** (exception mode): `emu_run` halts `HALT_STOP`; `mach_run`
   marks the CPU stopped (`mach_stp`), clears `st_halt`, and delivers at
   once if an interrupt is already deliverable. Otherwise, if one can still
@@ -1155,9 +1163,11 @@ Tests: `tests/aros_boot.py` (legs `m1`, `m2`, `m3`, `ablate`, `wkhook`,
   session (VICE: the harness releases the instance; U64E: the DeviceLock
   hold's restore resets the C64).
 - **`mach_s` per host** (measured, `docs/PERF.md` "AROS boot"), chosen
-  for SPEED only: **4 on the U64E at 48 MHz** (m2 in 58 s; ≈ 8k guest
-  instructions per guest frame between m1 and m2, the A500's ~12k) and
-  **9 on VICE** (m2 in ~120 s of warp; ≈ 9k per frame after m1).
+  for SPEED only: **3 on the U64E at 48 MHz** (fix round 2, L8: picked by
+  the time to m3, the no-media screen, which is bound by guest time: s = 3
+  86.8 / 98.3 s, s = 4 101.0 / 100.6 s, s = 2 106.3 s, s = 5 113.7 s; m2
+  alone is fastest at s = 4, 58 s) and **9 on VICE** (m2 in ~120 s of
+  warp, m3 in 174 s; ≈ 9k guest instructions per frame after m1).
   `tests/aros_boot.py` `BOOT_S_VICE`/`BOOT_S_U64` hold the values; `--s`
   overrides. Lower s is slower to m2 or does not reach it; that is NOT a
   requirement of AROS (fix round 1, HIGH-1: the boot model with its CPU
@@ -1165,19 +1175,31 @@ Tests: `tests/aros_boot.py` (legs `m1`, `m2`, `m3`, `ablate`, `wkhook`,
   know (`docs/PERF.md` (l)): on VICE, s ≤ 6 failed through the
   `MACH_POLL` cost (fixed, below; s = 6 now reaches m2); the U64E reaches m2 at s = 1 (4 of 4 runs on
   the fix-round build, ~105 s; one earlier run did not, not reproduced)
-  and not at s = 0 (2 of 2 runs, 400 s): **open defect**, see "C4".
+  and not at s = 0 (2 of 2 runs, 400 s), consistent with the model's
+  limit (see "C4").
 - **Milestones.** m1: serial `ROMInfo: 1MiB ROM detected`; m2: serial
   `romtaginit done`, and the serial log up to it must equal the boot
   model's byte for byte (414 bytes up to the milestone, 416 with its line
   end; every captured byte is compared, so a capture defect fails), with
   no byte lost (the host polls the 256-byte `chip_ser` ring every 20 ms on
-  the U64E, 250 ms on VICE; the ring read is bracketed by two `chip_sern`
-  reads and re-read until the bracket is consistent, else the leg fails); m3: a conversion on the C64
+  the U64E, 250 ms on VICE; the host zeroes the ring and its count before
+  every boot and reads them back as zero; the ring read is bracketed by two
+  `chip_sern` reads and re-read until the bracket is consistent, else the
+  leg fails; `docs/HARDWARE.md` has the U64E read-path findings); m3: a conversion on the C64
   (bitmap, matrix, colour RAM, the VIC registers disp.s owns) equal to one
   of the boot model's insert-disk conversions (`tests/aros/model_frames.py`:
   every distinct `c2v_ref.disp_convert` of the model's display state at
-  its vblanks, first seen at frame ≥ 345, the logo with its icons). m3
-  needs the blitter (W11-B). Red: `ablate` (exception mode off: the CPU
+  its vblanks, first seen at frame ≥ 345, the logo with its icons). On
+  the U64E the hash leaves the screen matrix out (it lies under the I/O
+  window and the running guest's `$01` is never touched; the model side
+  hashes the same way, `nomatrix`); on VICE the 6510 is halted for the
+  snapshot and `$01` is switched to `$34` and back to the value read. m3
+  needs the blitter (W11-B): green on the merged tree (VICE s = 9: 174 s,
+  guest frame 386; U64E s = 3: 86.8–98.3 s), red without it
+  (`build/evidence/w11-aros/red/m3_noblit.log`: the only conversion is the
+  model's empty frame 250). Every conversion matched a model frame in
+  order (250, 266, 267, 293, 345): the screen needs no CPU-drawn pixels
+  beyond what the blits' epoch bumps (`disp_st+105`) make visible. Red: `ablate` (exception mode off: the CPU
   probe's MOVEC halts `HALT_ILLEGAL`, no m1); the base tree reaches m1 and
   (at s = 8 on VICE) m2: m2's enabling step is a working `mach_s` (VICE
   s = 4 does not reach it, above).
@@ -1198,15 +1220,15 @@ Tests: `tests/aros_boot.py` (legs `m1`, `m2`, `m3`, `ablate`, `wkhook`,
     256 E << s) phi2, "Interrupt delivery"; leg `poll` (red 24% → green
     100% of the quiet progress), mutant `pollfix`; m2 at VICE s = 6 on the
     fixed build: 162.0 s, frame 2821.
-  - **Open defect** (U64E s = 0; the s = 1 failure of the first
-    measurement): not pinned. At s = 0 (~890 raw guest instructions per
-    frame, like the model at k = 16, which reaches m2 3.6k frames after
-    m1) the guest delivers ~1.2 interrupts per frame but spends ~60% of
-    its samples at IPL 3 (the model at k = 16: 40%) and reaches no m2 in
-    27k frames. Best evidence so far: the level-3 work is chip-register
-    heavy (each trapped access costs the host ~2 ordinary instructions),
-    so the effective rate is below the model's; a fidelity defect is not
-    excluded. Model comparison (`tools/s3probe` boot model, CPU slowed k×,
+  - **U64E s = 0 (not a defect, rev-aros round 2):** after m1 the boot
+    runs at 25–39k guest IPS on the U64E, so s = 0 (14.2 ms frames) gives
+    ~350–540 instructions per guest frame: at or below the model's limit
+    (k = 32, 551 per frame: no m2 in 40k frames). s = 0 not reaching m2
+    (2 of 2 runs, 27k frames) is consistent with that limit. s = 1
+    (~680 per frame) sits next to the model's slowest passing case
+    (k = 24, 676), which fits its one failure in the first measurement
+    (later 6 of 6 passed). Model comparison (`tools/s3probe` boot model,
+    CPU slowed k×,
     reviewer's `slowcpu2.py`):
 
     | k | instr/frame | m1 frame | m2 frame |
@@ -1216,6 +1238,12 @@ Tests: `tests/aros_boot.py` (legs `m1`, `m2`, `m3`, `ablate`, `wkhook`,
     | 20 | 761 | 1,691 | 7,477 |
     | 24 | 676 | 1,869 | 12,087 |
     | 32 | 551 | – | none in 40k |
+- **Risk (Workbench track).** A CIA timer.device underflow that becomes
+  pending while an SR mask holds it (MOVE/ANDI to SR, a running handler) is
+  taken up to one poll interval late after the mask drops (128–256 E, plus
+  the host's recognition work above); a real 68000 takes it at once. A
+  Disable()/Enable() pair through INTENA's INTEN is exact: Enable is a SET
+  write, and `mach_ichk` kicks at once.
 - **Backlog.** The boot entry is a test-time driver this wave; making it
   part of the product PRG (the banked BCODE area) belongs to the
   Workbench track.
