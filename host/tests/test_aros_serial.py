@@ -177,6 +177,17 @@ def test_lap_during_ring_read_is_rejected():
         capture(FakeMachine(g), len(text))
 
 
+def test_lap_by_one_byte_is_rejected():
+    """The bound is exact: 225 bytes land during the ring GET, so the
+    closing count is seen + 1025 and byte 1024 already sits in slot 0.
+    One byte past the ring must reject (kills: a bound of sz + 1)."""
+    text = rnd(1025, 4)
+    g = FakeGuest(1024, text, [0, 225])
+    g.step(800)
+    with pytest.raises(AB.CaptureError):
+        capture(FakeMachine(g), len(text))
+
+
 def test_minus_torn_closing_count_during_a_lap_is_rejected():
     """As above, but 480 bytes land during the ring GET (count 1280 = $0500,
     slots 0..255 overwritten) and the closing count read tears to -256
