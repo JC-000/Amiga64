@@ -36,7 +36,8 @@
 ;
 ; Test-only variants (tests/aros_resume.py mutants, ≤ 10): SNAP_MUT_NOZP,
 ; SNAP_MUT_NODST, SNAP_MUT_NOBSS, SNAP_MUT_NOCIA, SNAP_MUT_NOEPOCH,
-; SNAP_MUT_NOEXC (no emu_reset patch), SNAP_MUT_NOSSUM,
+; SNAP_MUT_NOEXC (no emu_reset patch), SNAP_MUT_NOHSUM, SNAP_MUT_NOSSUM
+; (NOSSUM: off the <= 10 list since fix round 3; E5's refusal tests pin it),
 ; SNAP_MUT_NOINVALL (no code_invall after the restore, I1), SNAP_MUT_NOSCR
 ; (a refusal leaves the loaded header in the scratch page, F1).
 ; ===========================================================================
@@ -66,7 +67,7 @@ SNAP_KEEP = snap_keep - __BSS_RUN__
 SNAP_KEEPR = (SNAP_KEEP + $FF) & $FF00 ; the image in whole pages (stash, sum, file)
 SNAP_NPG  = 2 + SNAP_KEEPR / $100 ; state span pages: zp, disp_st, image
 SNAP_SCR  = __BSS_RUN__         ; resume scratch (BSS start: cw_* ... since W12-C), before the restore
-SNAP_SAV  = snap_base + $2E00   ; F1: the scratch page as it was at snap_res entry (in no file span)
+SNAP_SAV  = snap_base + $2E00   ; F1: the scratch page as it was at snap_res entry (in no file span; = host/snapfmt.OFF_SAV)
 SNAP_NSP  = 6                   ; @value file spans: header, state, 4 guest ranges
 ; header offsets (= host/snapfmt.py)
 SNAP_HSUM = 252                 ; @value header checksum (u32)
@@ -383,7 +384,7 @@ snap_res:
         sei
         ldx #REU_CMD_STASH      ; F1: the scratch page, for every refusal
         ldy #D_SAV
-        jsr snap_dma
+        jsr snap_dma            ; (REC stash: X = STASH survives, kept)
         lda snap_req
         sta snap_rq
         lda #0
@@ -415,6 +416,7 @@ snap_res:
         jsr snap_dma
         ldy #D_HSC              ; -> the scratch
         jsr snap_dma
+.ifndef SNAP_MUT_NOHSUM
         jsr snap_sum0           ; header checksum
         lda #SNAP_HSUM
         jsr snap_sumb
@@ -424,6 +426,7 @@ snap_res:
         lda #SNAP_E_HSUM
         jmp snap_fail
 :
+.endif
         jsr snap_mkhdr          ; dosio_buf := what this build would write
         ldx #31                 ; M3: a declared ROM id is never all zero
         lda #0

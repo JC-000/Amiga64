@@ -563,7 +563,10 @@ def zero_check(m: AB.Machine, rep: dict) -> list[str]:
     out, fails = {}, []
     keepr = F.keepr(F.parse_header(Snap(m, m_prg(m), b"").reu_read(F.SNAP_BASE, 256))["keep"])
     lo = F.SNAP_BASE + F.OFF_BSS + keepr
-    df = [(lo, ((F.SNAP_BASE + F.OFF_RID) & ~0xFF) - lo), (F.SNAP_END + 1, 0xE00000 - F.SNAP_END - 1)]
+    sav = F.SNAP_BASE + F.OFF_SAV                # F1's scratch save: carved out
+    rid = (F.SNAP_BASE + F.OFF_RID) & ~0xFF
+    df = [(lo, sav - lo), (sav + 0x100, rid - sav - 0x100), (F.SNAP_END + 1, 0xE00000 - F.SNAP_END - 1)]
+    df = [(a, n) for a, n in df if n > 0]
     for a, n in (df if m.vice else list(ZERO_CHECK) + df):
         m.w(AB.P + 4, struct.pack("<II", a, n))
         got = struct.unpack_from("<I", m.call("aros_sum"), 4)[0]
@@ -729,9 +732,9 @@ MUTANTS = {                     # name -> (define, leg)
     "nocia": ("SNAP_MUT_NOCIA", "mid"),
     "noexc": ("SNAP_MUT_NOEXC", "mid"),
     "noepoch": ("SNAP_MUT_NOEPOCH", "m3"),
-    "noscr": ("SNAP_MUT_NOSCR", "refuse:E2"),     # F1 (replaces nohsum: E2 is pinned by the refusal legs)
+    "noscr": ("SNAP_MUT_NOSCR", "refuse:E2"),     # F1 (replaces nossum: E5 is pinned by the refusal legs)
+    "nohsum": ("SNAP_MUT_NOHSUM", "accept:E2"),
     "noinvall": ("SNAP_MUT_NOINVALL", "mid"),   # I1 (replaces nobid; E3 is the m3 leg's refusal)
-    "nossum": ("SNAP_MUT_NOSSUM", "accept:E5"),
 }
 
 

@@ -55,6 +55,22 @@ def test_declared_rom_id_lies_in_the_region_and_in_no_file_span():
     assert "SNAP_RID  = snap_base + $2FE0" in SNAP.read_text()
 
 
+def test_scratch_save_is_carved_out():
+    """F1: snap_res's 256-byte save of the scratch page lies between the BSS
+    image and the declared ROM id, in no file span (snap.s also link-asserts
+    it against the real image end)."""
+    sav = F.SNAP_BASE + F.OFF_SAV
+    assert "SNAP_SAV  = snap_base + $2E00" in SNAP.read_text() and F.OFF_SAV == 0x2E00
+    assert sav + 0x100 <= F.SNAP_BASE + F.OFF_RID
+    lbl = ROOT / "build" / "w12t" / "runner.lbl"
+    keep = 0x2000
+    if lbl.exists():
+        lab = F.labels(str(lbl))
+        keep = lab["snap_keep"] - lab["__BSS_RUN__"]
+    for a, n in F.spans(keep):
+        assert sav + 0x100 <= a or sav >= a + n, (hex(a), n)
+
+
 def test_snap_region_in_both_profiles_and_inside_the_io_bank():
     for name in ("guest.inc", "machine.inc"):
         e = rc(name)

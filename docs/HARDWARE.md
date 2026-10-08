@@ -1050,7 +1050,10 @@ IDENTICAL (`build/evidence/c64u-ser/round1/{c64u64,u64e48}/`).
 
 ## Suspend/resume and UCI REU I/O (W12-T, 2026-10-08)
 
-Runner build ID `d371b5987ec1cf7e` (fix round 1, merged with W12-V + W12-C),
+Runner build ID `d371b5987ec1cf7e` (fix round 2, merged with W12-V + W12-C;
+the C64U legs re-run on `d5b5c8149c639820`, fix round 3, `c64u/final7.log`:
+mid PASS, m3 PASS, picture again 3.14 s, refusals 6/6 with the scratch
+page intact),
 one log per device: `build/evidence/w12-reu/{c64u,u64e}/final5.log`; `tests/aros_resume.py
 --backend u64`, one `u64_hold` per leg; every hold's config read back
 IDENTICAL. REU-resident snapshot: suspend, harness `reset`, fresh runner
@@ -1088,7 +1091,8 @@ was written.
 
 ### UCI LOAD_REU, read-only probe (W12-T fix round 1)
 
-`tests/ureu_probe.py` (supervisor ruling: read-only device storage; no
+`tests/ureu_probe.py`, runner build `4c59dc5db2efe1ad` (fix round 1, before
+the V+C merge; the reply check as now, A1 added later) (supervisor ruling: read-only device storage; no
 writes of any kind; Flash/Temp never entered or listed). One `u64_hold`
 each; the Command Interface is Disabled in both devices' configs and is
 set Enabled inside the hold (restored: config IDENTICAL every time).
@@ -1115,7 +1119,7 @@ Logs: `build/evidence/w12-reu/probe-*.log`, `probe/*/probe.json`.
 
 ### Device storage legs on the U64E (W12-T fix round 1, storage writes allowed)
 
-Harness `c64-test-harness` master **c1a2095** (PR #526: `storage_put_file`,
+Runner build `d371b5987ec1cf7e`. Harness `c64-test-harness` master **c1a2095** (PR #526: `storage_put_file`,
 `storage_get_file`, `storage_delete_file`), every call under the DeviceLock
 (inside `u64_hold`); the Command Interface Enabled inside the hold, restored
 IDENTICAL. The C64U has no medium (its `/SD` slot is empty): its file legs

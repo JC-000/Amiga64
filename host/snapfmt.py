@@ -63,6 +63,7 @@ SNAP_BASE = 0xDF1000            # rc snap region ($DF1000-$DF3FFF)
 SNAP_END = 0xDF3FFF
 OFF_ZP, OFF_DST, OFF_BSS = 0x100, 0x200, 0x300
 OFF_RID = 0x2FE0                # the ROM id the host/stager declares (32 bytes)
+OFF_SAV = 0x2E00                # F1: snap_res's save of the scratch page (256 bytes; no file span)
 KEEP_MAX = SNAP_END + 1 - SNAP_BASE - OFF_BSS
 H_NSP, H_FLAGS, H_BID, H_RID, H_SSUM, HDR_SUM = 5, 52, 56, 64, 96, 252
 # The guest REU ranges a file carries (runtime/rc/machine.inc): chip RAM,

@@ -1475,8 +1475,10 @@ the UCI model).
   custom-chip bank, never guest-visible, both profiles): `+$000` header,
   `+$100` zero page, `+$200` the `disp_st` page, `+$300` the MAIN BSS image
   `__BSS_RUN__ .. snap_keep` (stashed, summed and filed as whole pages,
-  restored exactly), `+$2FE0` the declared ROM id (32 bytes, in no file
-  span). Layout and header: `host/snapfmt.py`.
+  restored exactly), `+$2E00-$2EFF` the scratch-page save of a resume
+  (F1, `SNAP_SAV`; in no file span, carved out of `zero_check`),
+  `+$2FE0` the declared ROM id (32 bytes, in no file span). Link asserts:
+  image end <= `SNAP_SAV`, `SNAP_SAV` + 256 <= the ROM id. Layout and header: `host/snapfmt.py`.
 - **Resume** (`snap_resume` from a FRESH runner load; does not return while
   the guest runs): with bit 6, LOAD_REU span 0 (the header) first. Checks,
   all before anything is restored (a refusal leaves `mach_on` 0): the
@@ -1540,10 +1542,20 @@ the UCI model).
 - **Nothing else writes the snapshot region**: the memory API traps every
   guest access to `$DF0000-$DFFFFF` to chip.s, which never addresses the
   REU (no REC programming in chip.s/cia.s/cop.s); the only REU users under
-  `$DF` are disp.s (the LUT, `$DF0000-$DF0FFF`) and snap.s. Checked after
-  m3 on every backend: the REU from the end of the BSS image to the
-  declared ROM id, and `$DF4000-$DFFFFF`, read zero (`aros_resume`
-  `zero_check`).
+  `$DF` are disp.s (the LUT, `$DF0000-$DF0FFF`) and snap.s (the snapshot
+  area, and `SNAP_SAV` `+$2E00-$2EFF`: snap_res's own save of the scratch
+  page at every resume entry, F1). Checked after m3 on every backend: the
+  REU from the end of the BSS image to `SNAP_SAV`, from `SNAP_SAV` + 256 to
+  the declared ROM id (empty today), and `$DF4000-$DFFFFF`, read zero
+  (`aros_resume` `zero_check`, `SNAP_SAV` carved out).
+- **REU size**: `snap_resume` (and the suspend) require the REU configured
+  at 16 MB: the snapshot area, `SNAP_SAV` and the declared ROM id lie at
+  `$DF1000-$DF3FFF`; a smaller REU wraps those addresses into guest memory
+  (the AROS boot needs 16 MB anyway; `prepare_target` sets it).
+- **Builds the hardware legs ran on**: the U64E file legs (ADF probe,
+  `m3file`) and the U64E/C64U REU-resident legs of fix round 2 on
+  `d371b5987ec1cf7e`; the C64U REU-resident legs of fix round 3
+  (`c64u/final7.log`) on `d5b5c8149c639820` (= 6886c98's runner).
 - **Link order** (L6): snap.s then ureu.s link last (Makefile), so the
   image `__BSS_RUN__ .. snap_keep` holds every other module's BSS and none
   of W12-T's scratch. `snapfmt --stamp` refuses a runner whose BSS does not
