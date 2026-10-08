@@ -1047,3 +1047,102 @@ IDENTICAL (`build/evidence/c64u-ser/c64u64/run.log`, `c64u64-run2/`); with
 one GET per segment (round 1) again on the C64U at 64 MHz (m2 at 45 s, 0
 capture retries) and on the U64E at 48 MHz (m2 at 60 s, 0 retries), both
 IDENTICAL (`build/evidence/c64u-ser/round1/{c64u64,u64e48}/`).
+
+## Suspend/resume and UCI REU I/O (W12-T, 2026-10-08)
+
+Runner build ID `d371b5987ec1cf7e` (fix round 2, merged with W12-V + W12-C;
+the C64U legs re-run on `d5b5c8149c639820`, fix round 3, `c64u/final7.log`:
+mid PASS, m3 PASS, picture again 3.14 s, refusals 6/6 with the scratch
+page intact),
+one log per device: `build/evidence/w12-reu/{c64u,u64e}/final5.log`; `tests/aros_resume.py
+--backend u64`, one `u64_hold` per leg; every hold's config read back
+IDENTICAL. REU-resident snapshot: suspend, harness `reset`, fresh runner
+load (`prepare_target`: `set_reu` + `run_prg`), resume. No device storage
+was written.
+
+| | C64U fw 1.1.0, 64 MHz | U64E fw 3.15, 48 MHz |
+|---|---|---|
+| suspend request -> frozen (mid / m3) | 0.22 / 0.21 s | 0.15 / 0.16 s |
+| `mid`: suspended at guest frame (serial bytes out) | 53 (0 of 416) | 51 (0 of 416) |
+| `mid`: serial after the resume | all 416 bytes = the model | all 416 bytes = the model |
+| `m3`: boot to the insert-disk picture | 63.6 s (frame 573) | 80.4 s (frame 724) |
+| `m3`: `snap_resume` (checks + restore) | 0.40 s | 0.10 s |
+| `m3`: picture hash again after launching the resume | **4.22 s** | **2.78 s** |
+| state fletcher at suspend = after reset (`survive`) | equal (mid, m3) | equal (mid, m3) |
+| REU config after the reset (read back) | enabled, 16 MB | enabled, 16 MB |
+| refusals E8/E3/E4/EA/E2/E5 | all as specified | all as specified |
+
+- **The REU survives** the harness reset and `run_prg` on both firmwares,
+  proven per leg: the state span's fletcher computed by the C64 at suspend
+  equals `aros_sum` of it after the reset; the guest then continues. The
+  REU under `$DF2400-$DF3EFF` and `$DF4000-$DFFFFF` reads zero after m3
+  (nothing but snap.s writes the snapshot region).
+- **Unmapped space after m3**: `$200000-$BEFFFF` and `$E80000-$F7FFFF`
+  read zero (`aros_sum`), the same on both devices. `$DC0000-$DEFFFF` does
+  NOT (fletcher `$9935017E` on both: AROS writes there), so the file's
+  slow-RAM span runs to `$DEFFFF` (CONTRACTS "Suspend/resume").
+- **Timing note**: the picture time is measured with one REST GET per
+  ≤ 1 KB (`transport.read_memory`); the harness's `read_bytes` (128-byte
+  GETs, ~112 ms each on the C64U) made the first C64U measurement 18.5 s.
+- **Not measured yet (blocked: no device storage writes until the harness
+  owner decides)**: SAVE_REU, the file-backed suspend/resume (`snap_req`
+  bit 6). LOAD_REU: the read-only probe below. The protocol is pinned host-side
+  (`host/tests/test_snap_ureu.py`) against `dos.cc:254-319`.
+
+### UCI LOAD_REU, read-only probe (W12-T fix round 1)
+
+`tests/ureu_probe.py`, runner build `4c59dc5db2efe1ad` (fix round 1, before
+the V+C merge; the reply check as now, A1 added later) (supervisor ruling: read-only device storage; no
+writes of any kind; Flash/Temp never entered or listed). One `u64_hold`
+each; the Command Interface is Disabled in both devices' configs and is
+set Enabled inside the hold (restored: config IDENTICAL every time).
+Logs: `build/evidence/w12-reu/probe-*.log`, `probe/*/probe.json`.
+
+| | U64E fw 3.15, 48 MHz | U64E fw 3.15, 1 MHz | C64U fw 1.1.0, 64 MHz |
+|---|---|---|---|
+| storage root | `/USB1`: 64 entries | same | `/SD`: `83,NO SUCH DIRECTORY` (the root lists SD, Flash, Temp; no card mounted?) |
+| file | `/USB1/aes256/rngtest.d81`, 819,200 B, 4 chunks | same | none: not measured |
+| `ureu_ld` (open + LOAD_REU chunks + close) | 0.32 s (open+close alone 0.16 s) | 4.59 s (1.32 s) | — |
+| ≈ throughput (REST-latency-limited estimate) | ~5 MB/s | ~245 KiB/s (the C64's fenced polls at 1 MHz) | — |
+| reply text | `$008000 BYTES LOADED TO REU $8C0000` | same | — |
+| REU vs READ_DATA, 16 × ≤ 256 B samples | equal | equal | — |
+| one byte past the end | `00` + short count → `ureu_err` 5 | same | — |
+
+- **H1 on real firmware**: the reply is small_printf's `%6x`: six
+  upper-case digits, zero-filled (`$008000`), as `ureu_chk` now expects.
+  The first version expected C's `"$  8000"` and would have refused every
+  chunk.
+- The count rule holds on the device: a request past the end gets status
+  `00,OK` with the short count, and `ureu_ld` refuses it.
+- **Not measured**: the C64U (its `/SD` does not open), SAVE_REU (writes are
+  blocked), and anything at 64 MHz on the C64U.
+
+### Device storage legs on the U64E (W12-T fix round 1, storage writes allowed)
+
+Runner build `d371b5987ec1cf7e`. Harness `c64-test-harness` master **c1a2095** (PR #526: `storage_put_file`,
+`storage_get_file`, `storage_delete_file`), every call under the DeviceLock
+(inside `u64_hold`); the Command Interface Enabled inside the hold, restored
+IDENTICAL. The C64U has no medium (its `/SD` slot is empty): its file legs
+are not run. Logs: `build/evidence/w12-reu/probe-adf-10.43.23.81-{48,1}.log`,
+`u64e/final5.log` (m3file).
+
+| U64E fw 3.15 | 48 MHz | 1 MHz |
+|---|---|---|
+| ADF uploaded once to `/USB1/amiga64/amiga-os-310-workbench.adf` (901,120 B, FTP read-back verified; it stays as test input) | uploaded | present, same SHA-256 |
+| LOAD_REU of the ADF (4 chunks) | 0.40 s (open+close 0.29 s) | 4.84 s (1.54 s) |
+| fletcher of the REU copy (on the C64) = the ADF's | `$AC4CA4E6` = `$AC4CA4E6` | equal |
+| SAVE_REU of that range to `/USB1/amiga64/probe-save.bin` | 0.77 s (~1.8 MB/s) | 5.22 s (~240 KiB/s) |
+| its FTP read-back = the ADF; then deleted | equal; deleted | equal; deleted |
+| replies | `$01C000 BYTES LOADED TO REU $8C0000` / `... SAVED FROM REU ...` | same |
+| one byte past the end | refused (`ureu_err` 5) | refused |
+
+**Variant B (file-backed suspend/resume), U64E 48 MHz** (`aros_resume`
+leg `m3file`): AROS to m3 in 79.4 s (frame 715); suspend WITH the file:
+5,182,208 bytes (header, state, chip RAM, slow RAM to `$DEFFFF`, both ROM
+banks) SAVE_REU'd to `/USB1/amiga64/snap-test.bin` in **3.14 s** (~1.6 MB/s;
+read back over FTP: size = the spans, header and state checksums valid);
+harness reset, fresh runner load, the WHOLE REU zeroed (`aros_fill`), then
+`snap_resume` from the file: **1.15 s** including LOAD_REU (~4.5 MB/s), the
+insert-disk picture again **3.65 s** after the launch (budget 15 s; first
+run 3.70 s, `u64e/m3file.log`). The
+test file was deleted afterwards.

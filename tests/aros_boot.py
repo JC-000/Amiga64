@@ -68,7 +68,7 @@ TRAMP = R + 0x30                # VICE: jsr aros_boot / jmp * (goto target)
 ZP_FRAMES = 0x96                # rc zp mach_frames (u32 LE)
 DRV_SYMS = ("emu_reset", "mem_read32", "mem_rec_dirty", "mach_init",
             "mach_run", "mach_s", "chip_reset", "cia_reset", "cop_reset",
-            "disp_init")
+            "disp_init", "snap_arm")    # snap_arm: W12-T (mboot.s, supervisor-approved)
 MILESTONES = {"m1": b"ROMInfo: 1MiB ROM detected",
               "m2": b"romtaginit done"}
 # boot model (tools/s3probe/aros_boot_model.py, this ROM): the instruction
