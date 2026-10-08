@@ -325,9 +325,16 @@ Design: `docs/S3_PLAN.md` §1.2–1.3, §3.4. Tests: `tests/run_chip.py`,
   C64 Ultimate. Host readers take the size from `CHIP_SERSZ` (checked
   against `chip_logn - chip_ser`), never a constant. It is cleared by the boot BSS clear and by
   `chip_reset` (host entry, clobbers A/X), but NOT by `emu_reset`: it is
-  machine state, like guest RAM.
-- **Link order.** `chip.s` links last (Makefile), so adding it moves no
-  other module. core.s CODE size is unchanged ($D34).
+  machine state, like guest RAM. Store-before-count is checked statically
+  (`host/tests/test_chip_ser_order.py`: every path from `ser` stores
+  exactly once into `chip_ser` before `sinc` bumps the count); no dynamic
+  test observes the order (the final state cannot show it).
+- **Link order.** `chip.s` linked last when it was added (W7-T), so it
+  moved no other module then; since then `cia.s`, `cop.s`, `blt.s`,
+  `disp.s` and `mach.s` link after it (Makefile), so growing `chip.s`'s
+  CODE or BSS moves them (c64u ser-ring: CODE +43 B, BSS +768 B; modules
+  before `chip.s` and BSS before `chip_shd` keep their addresses). core.s
+  CODE size is unchanged ($D34).
 
 ## Machine loop (S3.2) (W8-L)
 
@@ -1203,7 +1210,13 @@ Tests: `tests/aros_boot.py` (legs `m1`, `m2`, `m3`, `ablate`, `wkhook`,
   guest no longer writes) and the remaining slots takes the bytes printed
   after the last poll. The 256-byte ring could not serve the C64U, where
   one REST read takes ~112 ms and AROS writes 257 bytes (count 130 -> 387)
-  inside one read; 1024 bytes hold the whole 416-byte m2 text; `docs/HARDWARE.md` has the U64E read-path findings); m3: a conversion on the C64
+  inside one read; 1024 bytes hold the whole 416-byte m2 text. On the
+  U64E/C64U each contiguous ring segment is read in ONE readmem GET (the
+  transport's `read_memory`; verified up to 1024 B on C64U fw 1.1.0 and
+  U64E fw 3.15, `docs/HARDWARE.md`), not `read_bytes`, which splits reads
+  above 256 B into 128-byte GETs (VICE keeps `read_bytes`: the monitor
+  read halts the 6510). A lossy capture (`lost` > 0) or a capture error
+  makes the ablate leg INFRA, never a pass; `docs/HARDWARE.md` has the U64E read-path findings); m3: a conversion on the C64
   (bitmap, matrix, colour RAM, the VIC registers disp.s owns) equal to one
   of the boot model's insert-disk conversions (`tests/aros/model_frames.py`:
   every distinct `c2v_ref.disp_convert` of the model's display state at
