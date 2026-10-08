@@ -316,8 +316,14 @@ Design: `docs/S3_PLAN.md` §1.2–1.3, §3.4. Tests: `tests/run_chip.py`,
   512 B big-endian register image (index = offset), `chip_cia` 32 B (A
   0–15, B 16–31), and `chip_log` a ring of 64 {u16 id, u16 value} (id =
   offset, CIA-A `$0A00+reg`, CIA-B `$0B00+reg`) with u16 `chip_logn`.
-  `chip_ser` is a 256 B ring with u16 `chip_sern`, and u16 `chip_nopen`
-  counts open-bus accesses. It is cleared by the boot BSS clear and by
+  `chip_ser` is a 1024 B ring (`CHIP_SERSZ`, exported; byte k at slot
+  k mod 1024, stored before the count is bumped; 1024 divides 65536, so
+  the slot stays continuous across the count's wrap) with u16 `chip_sern`
+  (all bytes ever written, mod 65536), and u16 `chip_nopen` counts
+  open-bus accesses. The ring stays in MAIN BSS: the host reads it over
+  REST/the monitor, and RAM under BASIC (BBSS) is not host-readable on the
+  C64 Ultimate. Host readers take the size from `CHIP_SERSZ` (checked
+  against `chip_logn - chip_ser`), never a constant. It is cleared by the boot BSS clear and by
   `chip_reset` (host entry, clobbers A/X), but NOT by `emu_reset`: it is
   machine state, like guest RAM.
 - **Link order.** `chip.s` links last (Makefile), so adding it moves no
@@ -1185,11 +1191,19 @@ Tests: `tests/aros_boot.py` (legs `m1`, `m2`, `m3`, `ablate`, `wkhook`,
   `romtaginit done`, and the serial log up to it must equal the boot
   model's byte for byte (414 bytes up to the milestone, 416 with its line
   end; every captured byte is compared, so a capture defect fails), with
-  no byte lost (the host polls the 256-byte `chip_ser` ring every 20 ms on
-  the U64E, 250 ms on VICE; the host zeroes the ring and its count before
-  every boot and reads them back as zero; the ring read is bracketed by two
-  `chip_sern` reads and re-read until the bracket is consistent, else the
-  leg fails; `docs/HARDWARE.md` has the U64E read-path findings); m3: a conversion on the C64
+  no byte lost (the host polls the 1024-byte `chip_ser` ring every 20 ms
+  on the U64E and the C64U, 250 ms on VICE, reading only the slots between
+  the last seen count and the new one; the host zeroes the ring and its
+  count before every boot and reads them back as zero; the ring read is
+  bracketed by two `chip_sern` reads and re-read until the bracket is
+  consistent, else the leg fails; a count read whose low byte is $FF/$00
+  (it may be torn across the carry, off by 256, which a 1024-byte bracket
+  no longer rejects by itself) is trusted only if a second read agrees;
+  once `mach_run` has returned, one final read of the count (exact: the
+  guest no longer writes) and the remaining slots takes the bytes printed
+  after the last poll. The 256-byte ring could not serve the C64U, where
+  one REST read takes ~112 ms and AROS writes 257 bytes (count 130 -> 387)
+  inside one read; 1024 bytes hold the whole 416-byte m2 text; `docs/HARDWARE.md` has the U64E read-path findings); m3: a conversion on the C64
   (bitmap, matrix, colour RAM, the VIC registers disp.s owns) equal to one
   of the boot model's insert-disk conversions (`tests/aros/model_frames.py`:
   every distinct `c2v_ref.disp_convert` of the model's display state at

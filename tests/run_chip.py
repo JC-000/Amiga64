@@ -20,6 +20,10 @@ REU sentinels and the chip state):
   carry  move.l $BEFFFE,d3 / move.l d4,$DEFFFE (bank carry into $BF/$DF)
   byte   byte reads and writes of custom registers
   cia    CIA-A odd / CIA-B even selection, open-bus holes, PRA inputs
+  serial 1300 SERDAT writes from a zero count: the 1024-byte chip_ser ring
+         (CHIP_SERSZ) wraps past its end; the whole ring image is compared
+  serwrap 1500 SERDAT writes from chip_sern = $FD44: the u16 count wraps
+         through 0 and the ring wraps again
   api    direct mem_read*/mem_write* calls (cold and warm) over custom,
          CIA, split and carry addresses: result vs the reference model,
          REC command stores counted by VICE watchpoints (a trapped byte
@@ -29,7 +33,7 @@ After every call and run the invariant is checked: m_rbk (the REC bank
 shadow) never holds $BF or $DF.
 
     python3 -m tests.run_chip --prg build/w7-trap/runner.prg [--legs a,b]
-    python3 -m tests.run_chip --prg ... --mutants     # teeth: 4 mutants
+    python3 -m tests.run_chip --prg ... --mutants     # teeth: 4 core.s + 3 chip.s mutants
     python3 -m tests.run_chip --prg ... --perf --base build/w7-base/runner.prg
 
 Exit 0 = every selected leg passed (--mutants: every mutant failed a leg;
@@ -86,8 +90,20 @@ class ChipRef:
         self.cias = (chipset_ref.CIA(), chipset_ref.CIA())
         self.cias[0].pra_in = CIAA_PRA_IN
         self.log: list[tuple[int, int]] = []
-        self.ser = bytearray()
+        self.ser = bytearray()          # SERDAT bytes written by this run
+        self.ser0 = 0                   # chip_sern before the run (a leg's seed)
         self.nopen = 0
+
+    def sern(self) -> int:
+        return (self.ser0 + len(self.ser)) & 0xFFFF
+
+    def ser_ring(self, sz: int) -> bytes:
+        """chip_ser after the run: zero (chip_reset), byte k of the run at
+        slot (ser0 + k) mod sz."""
+        ring = bytearray(sz)
+        for k, b in enumerate(self.ser):
+            ring[(self.ser0 + k) % sz] = b
+        return bytes(ring)
 
     # custom word access at a 24-bit address in bank $DF
     def c_rw(self, a: int) -> int:
@@ -277,11 +293,12 @@ def pad_to(words: list[int], byte_off: int) -> list[int]:
 # --------------------------------------------------------------------------
 
 class Leg:
-    def __init__(self, name, words, seeds, regs, reu_after, chip_fn):
+    def __init__(self, name, words, seeds, regs, reu_after, chip_fn, sern0=0):
         self.name, self.words, self.seeds = name, words, seeds
         self.regs = regs                  # {"D0": value}
         self.reu_after = reu_after        # {addr: byte} expected after run
         self.chip_fn = chip_fn            # ChipRef -> None (expected ops)
+        self.sern0 = sern0                # chip_sern seeded after chip_reset
 
 
 SENT = 0xA5
@@ -438,26 +455,44 @@ def leg_cia() -> Leg:
                dict(seeds), chip)
 
 
-def leg_serial() -> Leg:
-    """300 SERDAT writes: the 256-byte ring wraps and both u16 counters
-    (chip_sern, chip_logn) carry into their high byte."""
-    n = 300
+def _serial_leg(name: str, n: int, sern0: int) -> Leg:
+    """n SERDAT writes of byte i = (i & $FF) ^ (i >> 8) (distinct per
+    256-byte page of the run, so a ring page written to the wrong slot
+    shows), chip_sern seeded to sern0 first."""
     code = (moveq(0, 1) + move_imm_d(2, n - 1, 0)
-            + move_d_abs(2, 1, 0xDFF030)              # loop: SERDAT := d1
-            + [0x5201,                                #       addq.b #1,d1
-               0x51C8, 0xFFF6, HALT])                 #       dbra d0,loop
+            + [0x3601,                                # loop: move.w d1,d3
+               0xE04B,                                #       lsr.w #8,d3
+               0xB303]                                #       eor.b d1,d3
+            + move_d_abs(2, 3, 0xDFF030)              #       SERDAT := d3
+            + [0x5241,                                #       addq.w #1,d1
+               0x51C8, 0xFFF0, HALT])                 #       dbra d0,loop
     seeds = {0xDFF030: SENT, 0xDFF031: SENT}
 
     def chip(c: ChipRef):
+        c.ser0 = sern0
         for i in range(n):
-            c.c_ww(0xDFF030, i & 0xFF)
-    return Leg("serial", code, seeds, {"D0": 0xFFFF, "D1": n & 0xFF},
-               dict(seeds), chip)
+            c.c_ww(0xDFF030, ((i & 0xFF) ^ (i >> 8)) & 0xFF)
+    return Leg(name, code, seeds, {"D0": 0xFFFF, "D1": n}, dict(seeds), chip,
+               sern0)
+
+
+def leg_serial() -> Leg:
+    """1300 SERDAT writes from a zero count: the 1024-byte ring (chip.s
+    CHIP_SERSZ) wraps past its end, every page is written, and both u16
+    counters (chip_sern, chip_logn) carry into their high byte."""
+    return _serial_leg("serial", 1300, 0)
+
+
+def leg_serwrap() -> Leg:
+    """1500 SERDAT writes from chip_sern = $FD44 (65536 - 700): the u16
+    count wraps through 0 mid-run (1024 divides 65536, so the slot stays
+    continuous) and the ring wraps past 1024 again."""
+    return _serial_leg("serwrap", 1500, 0x10000 - 700)
 
 
 LEGS = {"main": leg_main, "cold": leg_cold, "split": leg_split,
         "carry": leg_carry, "byte": leg_byte, "cia": leg_cia,
-        "serial": leg_serial}
+        "serial": leg_serial, "serwrap": leg_serwrap}
 
 # Direct-API cases: (entry, address, value-or-None, warm?)
 API_ADDRS = [
@@ -498,6 +533,9 @@ class Rig:
             except KeyError:
                 pass
         self.has_chip = len(self.chip) == 7
+        if self.has_chip:
+            from tests.aros_boot import ser_size
+            self.sersz = ser_size(self.lab)     # CHIP_SERSZ, label-checked
         self.cps = None
 
     def call(self, addr: int, timeout: float = 30.0) -> None:
@@ -549,11 +587,9 @@ class Rig:
         for k in range(first, logn):
             i = 4 * (k % LOG_ENTRIES)
             log.append(struct.unpack("<HH", raw[i:i + 4]))
-        ring = read_bytes(self.t, c["chip_ser"], 256)
-        ns = min(sern, 256)
-        ser = bytes(ring[(sern - ns + i) % 256] for i in range(ns))
+        ring = bytes(read_bytes(self.t, c["chip_ser"], self.sersz))
         return {"shd": bytes(read_bytes(self.t, c["chip_shd"], 512)),
-                "logn": logn, "log": log, "ser": ser, "sern": sern,
+                "logn": logn, "log": log, "ring": ring, "sern": sern,
                 "nopen": struct.unpack(
                     "<H", read_bytes(self.t, c["chip_nopen"], 2))[0]}
 
@@ -583,8 +619,14 @@ def check_chip(rig: Rig, want: ChipRef, got: dict | None, fails: list,
         fails.append(f"{tag}: log {[(hex(r), hex(v)) for r, v in got['log']]}"
                      f" want {[(hex(r), hex(v)) for r, v in want.log[-LOG_ENTRIES:]]}"
                      f" (logn {got['logn']} want {len(want.log)})")
-    if got["ser"] != bytes(want.ser[-256:]) or got["sern"] != len(want.ser):
-        fails.append(f"{tag}: serial {got['ser']!r} want {bytes(want.ser)!r}")
+    wring = want.ser_ring(len(got["ring"]))
+    if got["sern"] != want.sern():
+        fails.append(f"{tag}: chip_sern {got['sern']} want {want.sern()}")
+    if got["ring"] != wring:
+        diff = [f"{i}:{got['ring'][i]:02X}/{wring[i]:02X}"
+                for i in range(len(wring)) if got["ring"][i] != wring[i]]
+        fails.append(f"{tag}: serial ring differs in {len(diff)} slot(s) "
+                     f"(slot:got/want) {diff[:8]}")
     if got["shd"] != bytes(want.shd):
         diff = [f"${i:03X}:{got['shd'][i]:02X}/{want.shd[i]:02X}"
                 for i in range(512) if got["shd"][i] != want.shd[i]]
@@ -605,6 +647,9 @@ def run_leg(rig: Rig, leg: Leg) -> list[str]:
     rig.sess.stage(chunks)
     seed(rig, leg.seeds)
     rig.chip_reset()
+    if leg.sern0:
+        from c64_test_harness import write_bytes
+        write_bytes(rig.t, rig.chip["chip_sern"], struct.pack("<H", leg.sern0))
     res = rig.sess.run_program(man["entry"], man["stack_top"], 10000)
     if not (res.halt and res.reason == 0 and not res.timeout):
         fails.append(f"{leg.name}: no clean HALT (halt={res.halt} "
@@ -776,9 +821,20 @@ MUTANTS = {
 # Source mutants of runtime/ops/chip.s (review round 1, L3)
 CHIP_MUTANTS = {
     # the SERDAT byte counter never carries into its high byte
-    "ser_nowrap_hi": [("        inc chip_sern\n        bne done\n"
-                       "        inc chip_sern+1\n",
-                       "        inc chip_sern\n        bne done\n")],
+    "ser_nowrap_hi": [("sinc:   inc chip_sern           ; then the count (u16; the store came first)\n"
+                       "        bne done\n        inc chip_sern+1\n",
+                       "sinc:   inc chip_sern           ; MUTANT\n"
+                       "        bne done\n")],
+    # c64u ser-ring: the old 256-byte ring (slot = count mod 256; the page
+    # bits ignored, every byte to page 0)
+    "ser_mod256": [("        lda chip_sern+1         ; X = slot bits 7-0, the page = count bits 9-8\n",
+                    "        lda #0                  ; MUTANT\n")],
+    # c64u ser-ring: pages 1 and 2 swapped (count bits 8 and 9 read the
+    # wrong way round)
+    "ser_pageswap": [("s2:     sta chip_ser+512,x      ; page 2\n",
+                      "s2:     sta chip_ser+256,x      ; MUTANT\n"),
+                     ("        sta chip_ser+256,x      ; page 1\n",
+                      "        sta chip_ser+512,x      ; MUTANT\n")],
 }
 
 

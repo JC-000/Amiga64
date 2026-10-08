@@ -76,7 +76,7 @@ MILESTONES = {"m1": b"ROMInfo: 1MiB ROM detected",
 MODEL_AT = {"m1": (1_256_189, 95), "m2": (2_640_815, 212),
             "m3": (3_429_641, 343)}
 BOOT_LEGS = ("m1", "m2", "m3", "ablate")
-POLL_S = 0.02                   # U64E: the ring holds 256 bytes, AROS sends ~400 in ~1 s
+POLL_S = 0.02                   # U64E: the ring holds CHIP_SERSZ (1024) bytes, AROS sends ~400 in ~1 s
 POLL_VICE_S = 0.25              # VICE: every monitor read halts the 6510 (warp is slower)
 EVID = os.path.join(ROOT, "build", "evidence", "w11-aros")
 VERBOSE = False
@@ -139,6 +139,7 @@ class Machine:
         self.lab = lambda n: lookup_label(labels, n)
         d = os.path.join(os.path.dirname(os.path.abspath(prg)), "aros-drv")
         self.retries = 0                # serial snapshots read again
+        self.sersz = ser_size(self.lab)  # chip_ser ring bytes (CHIP_SERSZ)
         self.drv, self.dl = build_driver(os.path.splitext(prg)[0] + ".lbl", d,
                                          DRV_OVERRIDE[0])
 
@@ -217,10 +218,10 @@ class Machine:
         # host before every boot (aros_boot's chip_reset zeroes them again),
         # so a stale read of a slot surfaces as a NUL, never as a byte of a
         # previous boot; the read-back proves the zeroes landed.
-        ser, sern = self.lab("chip_ser"), self.lab("chip_sern")
-        self.w(ser, bytes(256))
+        ser, sern, z = self.lab("chip_ser"), self.lab("chip_sern"), bytes(self.sersz)
+        self.w(ser, z)
         self.w(sern, bytes(2))
-        if self.r(ser, 256) != bytes(256) or self.r(sern, 2) != bytes(2):
+        if self.r(ser, self.sersz) != z or self.r(sern, 2) != bytes(2):
             raise CaptureError("the serial ring did not read back as zero")
         self.w(P + 12, bytes([s, 1 if exc else 0]))
         self.w(R, b"\0")
@@ -249,29 +250,76 @@ class Machine:
     def count(self) -> int:
         return struct.unpack("<H", self.r(self.lab("chip_sern"), 2))[0]
 
-    def serial(self, seen: int) -> tuple[int, bytes]:
-        """(n, ring): ring slots seen..n-1 are final.  On the U64E the guest
-        runs during the reads (chip.s stores the byte, then bumps the count),
-        so the ring read is bracketed by two count reads n1 <= n2: a slot
-        below n1 was written before the ring read began, and none of
-        seen..n1-1 was overwritten during it as long as n2 - seen <= 256.
-        A 2-byte count read can tear across the low byte's carry (off by
-        256): any bracket that breaks these bounds is read again, and one
-        that never settles raises CaptureError (fix round 1, HIGH-2: a
-        capture defect fails, never passes silently).  The burst of ~400
-        bytes in ~1 s means two count reads are rarely EQUAL at 48 MHz, so
-        equality is not required."""
-        ser = self.lab("chip_ser")
+    def count_untorn(self) -> int:
+        """chip_sern, re-read while it may be torn.  chip.s bumps the low
+        byte, then (on its carry) the high byte, so a 2-byte read racing the
+        carry is off by +-256 and shows a low byte of $FF (+256: low read
+        before the carry, high after) or $00 (-256).  With the 256-byte ring
+        a +-256 error always broke the bracket in serial(); with 1024 slots
+        it can fit, so a count whose low byte is $FF/$00 is accepted only
+        when a second read returns the same value (two reads ~4-112 ms
+        apart cannot both land inside the guest's few-cycle carry window)."""
         for _ in range(64):
-            n1 = self.count()
-            ring = self.r(ser, 256)
-            n2 = self.count()
-            a, b = (n1 - seen) & 0xFFFF, (n2 - seen) & 0xFFFF
-            if a <= b <= 256:
-                return n1, ring
+            n = self.count()
+            if n & 0xFF not in (0x00, 0xFF) or self.count() == n:
+                return n
+            self.retries += 1
+        raise CaptureError(f"chip_sern never settled at a carry ({n})")
+
+    def ring_slots(self, lo: int, hi: int) -> bytearray:
+        """A ring image (self.sersz bytes) holding the slots of the byte
+        indices lo..hi-1 (mod 65536, at most self.sersz of them), read with
+        the harness's read_bytes; the other slots are 0.  At most two
+        contiguous reads (the run may wrap past the ring's end)."""
+        sz, ser = self.sersz, self.lab("chip_ser")
+        ring, k = bytearray(sz), (hi - lo) & 0xFFFF
+        assert k <= sz
+        a = lo % sz
+        first = min(k, sz - a)
+        if first:
+            ring[a:a + first] = self.r(ser + a, first)
+        if k - first:
+            ring[0:k - first] = self.r(ser, k - first)
+        return ring
+
+    def serial(self, seen: int) -> tuple[int, bytes]:
+        """(n, ring): ring slots of byte indices seen..n-1 are final (slot =
+        index mod self.sersz; chip.s CHIP_SERSZ = 1024).  On the U64E/C64U
+        the guest runs during the reads (chip.s stores the byte, then bumps
+        the count), so the ring read is bracketed by two count reads
+        n1 <= n2: a slot below n1 was written before the ring read began,
+        and none of seen..n1-1 was overwritten during it as long as
+        n2 - seen <= self.sersz.  Only those slots are read (fewer REST
+        GETs; on the C64U one GET is ~112 ms).  A count that may be torn
+        across the low byte's carry is read again (count_untorn); any
+        bracket that breaks these bounds is read again, and one that never
+        settles raises CaptureError (fix round 1, HIGH-2: a capture defect
+        fails, never passes silently).  Two count reads are rarely EQUAL
+        during the burst, so equality is not required."""
+        sz = self.sersz
+        for _ in range(64):
+            n1 = self.count_untorn()
+            a = (n1 - seen) & 0xFFFF
+            if a == 0:
+                return n1, bytes(sz)
+            if a <= sz:
+                ring = self.ring_slots(seen, n1)
+                n2 = self.count_untorn()
+                b = (n2 - seen) & 0xFFFF
+                if a <= b <= sz:
+                    return n1, bytes(ring)
             self.retries += 1
         raise CaptureError("no consistent serial snapshot in 64 tries "
-                           f"(last counts {n1}, {n2}, seen {seen})")
+                           f"(last count {n1}, seen {seen}, ring {sz})")
+
+    def serial_final(self, seen: int) -> tuple[int, bytes]:
+        """After mach_run returned (the guest writes no more): the count is
+        exact (nothing races it), so read it and the slots seen..n-1 once.
+        More than a ring's worth since *seen* is returned as a loss."""
+        n = self.count()
+        if (n - seen) & 0xFFFF > self.sersz:
+            return n, bytes(self.sersz)
+        return n, bytes(self.ring_slots(seen, n))
 
     def frames(self) -> int:
         return struct.unpack("<I", self.r(ZP_FRAMES, 4))[0]
@@ -287,10 +335,39 @@ def _cpu_state(m: "Machine") -> str:
             f"INTREQR ${shd[2]:02X}{shd[3]:02X} irqs {nirq} stopped {stp}")
 
 
+def ser_size(lab) -> int:
+    """The chip_ser ring size from the runner's labels: the exported
+    CHIP_SERSZ, cross-checked against the label distance chip_ser ->
+    chip_logn (chip.s BSS order; chip.s asserts the same at link time)."""
+    sz = lab("CHIP_SERSZ")
+    if lab("chip_logn") - lab("chip_ser") != sz or not sz or 0x10000 % sz:
+        raise RuntimeError(f"chip_ser ring size {sz}: labels disagree "
+                           f"(chip_logn - chip_ser = "
+                           f"{lab('chip_logn') - lab('chip_ser')})")
+    return sz
+
+
+def take(text: bytearray, ring: bytes, seen: int, n: int,
+         sz: int) -> tuple[int, int]:
+    """Append the bytes seen..n-1 (slot = index mod sz) to *text*; returns
+    (the new seen, bytes lost because the ring wrapped between reads)."""
+    new, lost = (n - seen) & 0xFFFF, 0
+    if new > sz:
+        lost = new - sz
+        seen = (n - sz) & 0xFFFF
+        new = sz
+    for i in range(new):
+        text.append(ring[(seen + i) % sz])
+    return n, lost
+
+
 def watch(m: Machine, want: list[str], timeout: float, out: dict) -> None:
     """Poll the serial ring until every milestone in *want* is seen, the
-    boot returns, or *timeout*.  Fills out["serial"], out["at"]."""
+    boot returns, or *timeout*.  Fills out["serial"], out["at"].  When the
+    boot has returned, one final read takes what the guest printed after
+    the last poll (bytes printed just before a halt are not dropped)."""
     text, seen, lost = bytearray(), 0, 0
+    sz = m.sersz
     at: dict[str, dict] = {}
     t0 = time.monotonic()
     out.update(at=at)
@@ -319,13 +396,8 @@ def watch(m: Machine, want: list[str], timeout: float, out: dict) -> None:
                        serial=text.decode("latin-1"))
             log(f"  CAPTURE ERROR: {out['capture_error']}")
             return
-        if new > 256:
-            lost += new - 256
-            seen = (n - 256) & 0xFFFF
-            new = 256
-        for i in range(new):
-            text.append(ring[(seen + i) & 0xFF])
-        seen = n
+        seen, nlost = take(text, ring, seen, n, sz)
+        lost += nlost
         for k in want:
             if k in MILESTONES and k not in at and MILESTONES[k] in text:
                 fr = m.frames()
@@ -338,6 +410,24 @@ def watch(m: Machine, want: list[str], timeout: float, out: dict) -> None:
                    capture_retries=m.retries,
                    wall_s=round(el, 1))
         if rh[0] == 0xFF:
+            # mach_run returned: the guest writes no more, so this count is
+            # exact; take what it printed since the poll above (review: the
+            # ablate leg could pass on bytes dropped here)
+            n, ring = m.serial_final(seen)
+            if (n - seen) & 0xFFFF > 0x8000:
+                out.update(capture_error=f"chip_sern went back from {seen} to {n}",
+                           serial=text.decode("latin-1"))
+                log(f"  CAPTURE ERROR: {out['capture_error']}")
+                return
+            seen, nlost = take(text, ring, seen, n, sz)
+            lost += nlost
+            for ms in want:
+                if ms in MILESTONES and ms not in at and MILESTONES[ms] in text:
+                    at[ms] = {"wall_s": round(el, 2), "frames": m.frames(),
+                              "model_icount": MODEL_AT[ms][0], "final_read": True,
+                              "ips_est": round(MODEL_AT[ms][0] / max(el, 1e-6))}
+                    log(f"  {ms} reached (in the final read after the return)")
+            out.update(serial=text.decode("latin-1"), lost=lost, final_count=n)
             out["returned"] = {"st_halt": rh[1], "st_reason": rh[2],
                                "pc": struct.unpack_from("<I", rh, 8)[0],
                                "frames": struct.unpack_from("<I", rh, 12)[0]}
@@ -427,7 +517,7 @@ def boot_legs(m: Machine, rom: machine.Rom, legs: list[str], s: int,
         if r.get("capture_error"):
             fails.append(f"{INFRA}serial capture: {r['capture_error']}")
         if r.get("lost"):
-            fails.append(f"serial: {r['lost']} byte(s) lost (the 256-byte ring "
+            fails.append(f"serial: {r['lost']} byte(s) lost (the {m.sersz}-byte ring "
                          f"wrapped between two polls)")
         mf, _ = model_frames()
         ref = (mf or {}).get("serial", "")

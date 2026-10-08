@@ -1011,3 +1011,19 @@ dispatcher is plain RAM at `$CE00`). Harness-reserved RAM `$C400-$C87D`
 `buf_case` only above `$C400`; the AROS driver (`$C000-$C181`), the
 experiment's writer (`$C200-$C245`) and the boot's P/R blocks
 (`$C900-$C96F`) stay clear of it.
+
+**C64 Ultimate: a 1024-byte ring (c64u ser-ring, 2026-10-07).** On the
+C64U (fw 1.1.0, fpga 122, core 1.49; 64 MHz) one REST read takes ~112 ms
+(~53 ms RTT), and AROS writes 257 serial bytes (count 130 -> 387) inside
+one read, so the 256-byte ring lapped before the host saw it and m2 failed
+with a capture error (`build/evidence/c64u/boot64/run.log`: "no consistent
+serial snapshot in 64 tries (last counts 387, 387, seen 130)"). No host
+polling can fix that. `chip_ser` is now 1024 bytes (`CHIP_SERSZ`, still in
+MAIN BSS: RAM under BASIC is not host-readable on the C64U), more than
+the whole 416-byte m2 text. The host reads only the slots between the
+last seen count and the new one. Because a +-256 torn count can now fit
+inside a 1024-byte bracket, a count whose low byte is $FF/$00 is trusted
+only if a second read agrees. After `mach_run` returns, one final read
+takes the bytes printed after the last poll. Result: m1, m2 (416 bytes
+equal to the model) and m3 PASS on the C64U at 64 MHz, config restored
+IDENTICAL (`build/evidence/c64u-ser/c64u64/run.log`).

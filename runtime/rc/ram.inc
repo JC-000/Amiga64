@@ -30,6 +30,9 @@ SCREEN     = $0400      ; 40x25 screen RAM; hle.s cursor offset 0-999
 ; @region core $0801-$08FF PRG start: BASIC SYS stub (STARTUP) + link slack before DISPATCH alignment
 ; @region core $0900-$0AFF DISPATCH jump tables - two page-aligned 256-byte tables (build/gen/dispatch.s)
 ; @region core $0B00-$9FFF PRG code/rodata/data/bss - CODE onward, incl. page-aligned code_win in BSS
+; c64u ser-ring: chip.s's chip_ser (1 KiB SERDAT ring, CHIP_SERSZ) is BSS here, NOT BBSS: the host
+; reads it while the guest runs, and RAM under BASIC is not host-readable on the C64 Ultimate.
+; BSS ends at $9DEE with it (was $9AEE with the 256 B ring; build/runner.map).
 
 ; @region core $A000-$B5FF BCODE/BBSS: banked code, runs only with BASIC ROM out (shared; W11-B first user)
 ; W11-B blt: the blitter's row buffers (RAM under BASIC ROM; blt.s banks BASIC out for a blit, REU DMA in/out)
