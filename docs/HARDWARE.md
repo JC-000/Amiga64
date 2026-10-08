@@ -1043,4 +1043,7 @@ inside a 1024-byte bracket, a count whose low byte is $FF/$00 is trusted
 only if a second read agrees. After `mach_run` returns, one final read
 takes the bytes printed after the last poll. Result: m1, m2 (416 bytes
 equal to the model) and m3 PASS on the C64U at 64 MHz, config restored
-IDENTICAL (`build/evidence/c64u-ser/c64u64/run.log`).
+IDENTICAL (`build/evidence/c64u-ser/c64u64/run.log`, `c64u64-run2/`); with
+one GET per segment (round 1) again on the C64U at 64 MHz (m2 at 45 s, 0
+capture retries) and on the U64E at 48 MHz (m2 at 60 s, 0 retries), both
+IDENTICAL (`build/evidence/c64u-ser/round1/{c64u64,u64e48}/`).
