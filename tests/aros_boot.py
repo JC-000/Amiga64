@@ -140,6 +140,10 @@ class Machine:
         d = os.path.join(os.path.dirname(os.path.abspath(prg)), "aros-drv")
         self.retries = 0                # serial snapshots read again
         self.sersz = ser_size(self.lab)  # chip_ser ring bytes (CHIP_SERSZ)
+        # round 1, R3: a ring segment is ONE readmem GET on the U64E/C64U
+        # (the transport's read_memory, no 128-byte split; verified up to
+        # 1024 B on both firmwares, docs/HARDWARE.md); VICE keeps read_bytes
+        self.one_get = not self.vice
         self.drv, self.dl = build_driver(os.path.splitext(prg)[0] + ".lbl", d,
                                          DRV_OVERRIDE[0])
 
@@ -266,20 +270,33 @@ class Machine:
             self.retries += 1
         raise CaptureError(f"chip_sern never settled at a carry ({n})")
 
+    def seg(self, addr: int, n: int) -> bytes:
+        """One contiguous ring segment.  U64E/C64U: ONE REST readmem GET
+        through the transport (the harness's read_bytes would split a read
+        above 256 B into 128-byte GETs, ~112 ms each on the C64U, and the
+        guest keeps writing between them); VICE: read_bytes (the monitor
+        read halts the 6510, so the split costs no consistency)."""
+        if self.one_get:
+            b = self.t.read_memory(addr, n)
+            if len(b) != n:
+                raise CaptureError(f"readmem ${addr:04X}: {len(b)} of {n} bytes")
+            return b
+        return self.r(addr, n)
+
     def ring_slots(self, lo: int, hi: int) -> bytearray:
         """A ring image (self.sersz bytes) holding the slots of the byte
-        indices lo..hi-1 (mod 65536, at most self.sersz of them), read with
-        the harness's read_bytes; the other slots are 0.  At most two
-        contiguous reads (the run may wrap past the ring's end)."""
+        indices lo..hi-1 (mod 65536, at most self.sersz of them); the other
+        slots are 0.  At most two contiguous segments (the run may wrap
+        past the ring's end), each one seg() read."""
         sz, ser = self.sersz, self.lab("chip_ser")
         ring, k = bytearray(sz), (hi - lo) & 0xFFFF
         assert k <= sz
         a = lo % sz
         first = min(k, sz - a)
         if first:
-            ring[a:a + first] = self.r(ser + a, first)
+            ring[a:a + first] = self.seg(ser + a, first)
         if k - first:
-            ring[0:k - first] = self.r(ser, k - first)
+            ring[0:k - first] = self.seg(ser, k - first)
         return ring
 
     def serial(self, seen: int) -> tuple[int, bytes]:
@@ -289,8 +306,11 @@ class Machine:
         the count), so the ring read is bracketed by two count reads
         n1 <= n2: a slot below n1 was written before the ring read began,
         and none of seen..n1-1 was overwritten during it as long as
-        n2 - seen <= self.sersz.  Only those slots are read (fewer REST
-        GETs; on the C64U one GET is ~112 ms).  A count that may be torn
+        n2 - seen <= self.sersz.  Only those slots are read: on the U64E/C64U one
+        poll is 1 GET when nothing is new, else count + 1 or 2 ring GETs
+        (seg: one GET per contiguous segment) + count, plus one more count
+        GET when a count's low byte is $FF/$00; one GET is ~112 ms on the
+        C64U.  A count that may be torn
         across the low byte's carry is read again (count_untorn); any
         bracket that breaks these bounds is read again, and one that never
         settles raises CaptureError (fix round 1, HIGH-2: a capture defect
@@ -315,11 +335,11 @@ class Machine:
     def serial_final(self, seen: int) -> tuple[int, bytes]:
         """After mach_run returned (the guest writes no more): the count is
         exact (nothing races it), so read it and the slots seen..n-1 once.
-        More than a ring's worth since *seen* is returned as a loss."""
+        When more than a ring's worth arrived since *seen*, the last
+        self.sersz bytes are read (take() counts the rest as lost)."""
         n = self.count()
-        if (n - seen) & 0xFFFF > self.sersz:
-            return n, bytes(self.sersz)
-        return n, bytes(self.ring_slots(seen, n))
+        lo = seen if (n - seen) & 0xFFFF <= self.sersz else (n - self.sersz) & 0xFFFF
+        return n, bytes(self.ring_slots(lo, n))
 
     def frames(self) -> int:
         return struct.unpack("<I", self.r(ZP_FRAMES, 4))[0]
@@ -548,13 +568,28 @@ def boot_legs(m: Machine, rom: machine.Rom, legs: list[str], s: int,
         r["stage"] = m.stage(rom)
         m.start(s, exc=False)
         watch(m, ["m1"], min(timeout, 300.0), r)
-        if "m1" in r["at"]:
-            fails.append("ablate: m1 reached with exception mode off")
-        elif "returned" not in r:
-            fails.append("ablate: the boot neither halted nor reached m1")
-        else:
+        af = ablate_verdict(r)
+        fails += af
+        if not af:
             log(f"  red as expected: {r['returned']}")
     return fails
+
+
+def ablate_verdict(r: dict) -> list[str]:
+    """The ablate leg passes only on a clean capture that shows no m1 and a
+    returned boot.  A capture error or lost bytes make the "m1 absent"
+    verdict untrustworthy (the line may be in what was lost): INFRA, never
+    a pass (round 1, R4)."""
+    if r.get("capture_error"):
+        return [f"{INFRA}ablate: serial capture: {r['capture_error']}"]
+    if r.get("lost"):
+        return [f"{INFRA}ablate: {r['lost']} serial byte(s) lost; m1 may be "
+                "among them"]
+    if "m1" in r.get("at", {}):
+        return ["ablate: m1 reached with exception mode off"]
+    if "returned" not in r:
+        return ["ablate: the boot neither halted nor reached m1"]
+    return []
 
 
 MODEL_JSON = os.path.join(ROOT, "build", "aros", "model_frames.json")
