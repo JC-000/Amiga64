@@ -363,8 +363,11 @@ def run_kernel(s: Session, kind: str, case: dict, luts: dict) -> list[str]:
     return fails
 
 
-def nmi_tramp(entry: int, count: int) -> bytes:
-    """Arm a CIA2 timer-A one-shot NMI *count* cycles out, jsr *entry*, rts."""
+def nmi_tramp(entry: int, count: int, spin: int = 0) -> bytes:
+    """Arm a CIA2 timer-A one-shot NMI *count* cycles out, jsr *entry*, then
+    (W12-V) *spin* x ~1280 cycles of delay loop, rts: an NMI armed past the
+    entry's end then fires before the call returns, never in a race with the
+    monitor's stop."""
     return bytes([
         0xA9, 0x7F, 0x8D, 0x0D, 0xDD,           # lda #$7F / sta $DD0D  (mask all)
         0xAD, 0x0D, 0xDD,                       # lda $DD0D             (ack)
@@ -374,14 +377,23 @@ def nmi_tramp(entry: int, count: int) -> bytes:
         0xA9, 0x81, 0x8D, 0x0D, 0xDD,           # enable TA -> NMI
         0xA9, 0x19, 0x8D, 0x0E, 0xDD,           # TA: force load, one-shot, start
         0x20, entry & 0xFF, entry >> 8,         # jsr entry
+        *([0xA0, spin, 0xA2, 0x00, 0xCA, 0xD0, 0xFD, 0x88, 0xD0, 0xF8]
+          if spin else []),                     # ldy #spin / ldx #0 / dex / bne / dey / bne
         0x60])
 
 
 NMI_ACK = bytes([0xA9, 0x7F, 0x8D, 0x0D, 0xDD, 0xAD, 0x0D, 0xDD, 0x60])
 NMI_COUNTS = (1500, 3000, 5000)     # phi2 cycles from arming to the NMI
-# W12-V (fix round 1): c2v_hfill maps a page with I/O in, then stores it at
-# $01 = $34; these land inside the $34 store loops of pages 0, 1 and 2 (VICE)
-HFILL_COUNTS = (6500, 18500, 31000)
+# W12-V: c2v_hfill maps a page (256 cells) with I/O in, then stores it at
+# $01 = $34 (~3.3-3.6k cycles a page, 4 pages in ~41k).  The leg sweeps the
+# NMI from arming in HFILL_STEP steps (smaller than a store window, so every
+# window gets one wherever the code before it moves: integration review,
+# V + C) and requires the NMIs that land at $34 (taken by mach_nmi) to form
+# HFILL_WINDOWS separate clusters; every other one is the KERNAL's.
+HFILL_STEP = 2000
+HFILL_COUNTS = tuple(range(HFILL_STEP, 46000, HFILL_STEP))
+HFILL_WINDOWS = 4
+HFILL_SPIN = 6                  # ~7.7k cycles after the fill: no NMI outlives the call
 NMI_CONTROL = 100                   # fires in the LUT lookups ($01=$36): the
                                     # KERNAL handler must take it
 # the reviewer's second NMI (scripts/nmi_latch.py): CIA2 timer B one-shot 200
@@ -401,6 +413,7 @@ def run_nmi(s: Session, case: dict, luts: dict) -> list[str]:
         return fails
     nmis_at = s.nmis_at
     lut = luts[case["lut"]]
+    hfill_in: list[int] = []
     for kind in ("mc2", "hires", "hfill"):          # W12-V: c2v_hfill's fill too
         for count in (HFILL_COUNTS if kind == "hfill" else (NMI_CONTROL,) + NMI_COUNTS):
             kk = "hires" if kind == "hfill" else kind
@@ -420,7 +433,8 @@ def run_nmi(s: Session, case: dict, luts: dict) -> list[str]:
                 ref = hfill_ref(s, ref, col)
                 entry = "c2v_hfill"
             n0 = s.read_ram(nmis_at, 1)[0]
-            write_bytes(s.T, TRAMP, nmi_tramp(s.lab[entry], count))
+            write_bytes(s.T, TRAMP, nmi_tramp(s.lab[entry], count,
+                                              HFILL_SPIN if kind == "hfill" else 0))
             tag = f"nmi {kind} @{count}"
             try:
                 call_checked(s, TRAMP, fails)
@@ -443,6 +457,10 @@ def run_nmi(s: Session, case: dict, luts: dict) -> list[str]:
             write_bytes(s.T, TRAMP, NMI_ACK)
             s.call(TRAMP)
             want = 0 if count == NMI_CONTROL else 1
+            if kind == "hfill":                     # in a $34 window or not:
+                if taken == 1:                      # exactly one NMI either way
+                    hfill_in.append(count)
+                want = 0 if taken == 0 else 1
             if taken != want:
                 f.append(f"mach_nmi took {taken} NMI(s), want {want}"
                          + (" (control: must go to the KERNAL)" if not want else ""))
@@ -450,11 +468,19 @@ def run_nmi(s: Session, case: dict, luts: dict) -> list[str]:
                 f.append(f"ICR ${icr:02X} after the call: NMI not acknowledged")
             what = ("control: taken and acked by the KERNAL before the fill"
                     if count == NMI_CONTROL else
-                    "taken by mach_nmi, ICR acked; later TB NMI delivered")
+                    "taken by the KERNAL (I/O in), ICR acked" if kind == "hfill" and not taken
+                    else "taken by mach_nmi, ICR acked; later TB NMI delivered")
             print(f"  {tag:30s} {'OK' if not f else 'FAIL'}  ({what})")
             for x in f:
                 print(f"      {x}")
             fails += [f"{tag}: {x}" for x in f]
+    clusters = sum(1 for i, c in enumerate(hfill_in)
+                   if i == 0 or c - hfill_in[i - 1] > HFILL_STEP)
+    print(f"  nmi hfill: {len(hfill_in)} of {len(HFILL_COUNTS)} offsets landed at $34 "
+          f"({clusters} store windows: {hfill_in})")
+    if clusters < HFILL_WINDOWS:
+        fails.append(f"nmi hfill: NMIs at $34 in {clusters} store window(s), want "
+                     f"{HFILL_WINDOWS} (taken by mach_nmi at {hfill_in})")
     return fails
 
 
