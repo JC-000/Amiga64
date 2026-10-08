@@ -71,7 +71,8 @@ def _code(line: str) -> str:
 
 
 def test_stripped_source_has_the_base_fingerprints() -> None:
-    fp = hp.fingerprints(strip_w7t(_src()))
+    from host.tests.test_cwin_hotpath import restore_base   # W12-C WINCHK
+    fp = hp.fingerprints(strip_w7t(restore_base(_src())))
     assert fp["memory_api"] == BASE_MEMORY_API
     for name, want in hp.EXPECTED.items():
         if name != "memory_api":
