@@ -99,11 +99,28 @@ def test_header_round_trip_and_template_prefix():
     assert not F.parse_header(bytes(bad))["sum_ok"]
 
 
-def _prg(tmp_path, body: bytes, bid_off: int) -> tuple[str, str]:
+BSS_OK = ("al 008E00 .__BSS_RUN__\nal 0010FF .__BSS_SIZE__\nal 009EF1 .snap_keep\n"
+          "al 009EF3 .ureu_ra\nal 009EFF .ureu_bend\n")
+
+
+def _prg(tmp_path, body: bytes, bid_off: int, bss: str = BSS_OK) -> tuple[str, str]:
     prg, lbl = tmp_path / "r.prg", tmp_path / "r.lbl"
     prg.write_bytes(b"\x01\x08" + body)
-    lbl.write_text(f"al 000001 .SNAP_VER\nal {0x0801 + bid_off:06X} .snap_bid\n")
+    lbl.write_text(f"al 000001 .SNAP_VER\nal {0x0801 + bid_off:06X} .snap_bid\n" + bss)
     return str(prg), str(lbl)
+
+
+def test_stamp_refuses_when_snap_ureu_bss_is_not_last(tmp_path):
+    prg, lbl = _prg(tmp_path, bytes(64), 8, BSS_OK.replace("009EFF .ureu_bend", "009E00 .ureu_bend"))
+    with pytest.raises(ValueError, match="not last"):
+        F.stamp(prg, lbl)
+
+
+def test_built_runner_has_snap_ureu_bss_last():
+    lbl = ROOT / "build" / "w12t" / "runner.lbl"
+    if not lbl.exists():
+        pytest.skip("no build/w12t")
+    F.check_bss_last(F.labels(str(lbl)), str(lbl))
 
 
 def test_stamp_deterministic_idempotent(tmp_path):

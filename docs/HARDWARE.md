@@ -1050,28 +1050,29 @@ IDENTICAL (`build/evidence/c64u-ser/round1/{c64u64,u64e48}/`).
 
 ## Suspend/resume and UCI REU I/O (W12-T, 2026-10-08)
 
-Runner build ID `ca3d352f5f2134e8` (`build/evidence/w12-reu/{c64u,u64e}/final2.log`),
-`tests/aros_resume.py --backend u64`, one `u64_hold` per leg; every hold's
-config read back IDENTICAL. REU-resident snapshot: suspend, harness
-`reset`, fresh runner load (`prepare_target`: `set_reu` + `run_prg`),
-resume. No device storage was written.
+Runner build ID `4c59dc5db2efe1ad` (fix round 1), one log per device:
+`build/evidence/w12-reu/{c64u,u64e}/final3.log`; `tests/aros_resume.py
+--backend u64`, one `u64_hold` per leg; every hold's config read back
+IDENTICAL. REU-resident snapshot: suspend, harness `reset`, fresh runner
+load (`prepare_target`: `set_reu` + `run_prg`), resume. No device storage
+was written.
 
 | | C64U fw 1.1.0, 64 MHz | U64E fw 3.15, 48 MHz |
 |---|---|---|
-| suspend request -> frozen | 0.36 / 0.20 s | 0.16 / 0.19 s |
-| `mid`: frozen at serial byte | 387 of 416 (frame 149) | 251 of 416 (frame 192) |
-| `mid`: serial after the resume | = the model to byte 416 | = the model to byte 416 |
-| `m3`: boot to the insert-disk picture | 68.7 s (frame 620) | 88.4 s (frame 797) |
-| `m3`: `snap_resume` (checks + restore) | 0.44 s | 0.16 s |
-| `m3`: picture hash again after launching the resume | **6.04 s** | **5.27 s** |
+| suspend request -> frozen (mid / m3) | 0.24 / 0.23 s | 0.15 / 0.15 s |
+| `mid`: suspended at guest frame (serial bytes out) | 52 (0 of 416) | 51 (0 of 416) |
+| `mid`: serial after the resume | all 416 bytes = the model | all 416 bytes = the model |
+| `m3`: boot to the insert-disk picture | 68.5 s (frame 618) | 93.2 s (frame 840) |
+| `m3`: `snap_resume` (checks + restore) | 0.35 s | 0.10 s |
+| `m3`: picture hash again after launching the resume | **5.84 s** | **2.62 s** |
 | state fletcher at suspend = after reset (`survive`) | equal (mid, m3) | equal (mid, m3) |
 | REU config after the reset (read back) | enabled, 16 MB | enabled, 16 MB |
-| refusals E8/E3/E4/E2/E5 | all as specified | all as specified |
+| refusals E8/E3/E4/EA/E2/E5 | all as specified | all as specified |
 
 - **The REU survives** the harness reset and `run_prg` on both firmwares,
   proven per leg: the state span's fletcher computed by the C64 at suspend
   equals `aros_sum` of it after the reset; the guest then continues. The
-  REU under `$DF2400-$DF2EFF` and `$DF4000-$DFFFFF` reads zero after m3
+  REU under `$DF2400-$DF3EFF` and `$DF4000-$DFFFFF` reads zero after m3
   (nothing but snap.s writes the snapshot region).
 - **Unmapped space after m3**: `$200000-$BEFFFF` and `$E80000-$F7FFFF`
   read zero (`aros_sum`), the same on both devices. `$DC0000-$DEFFFF` does
@@ -1081,7 +1082,33 @@ resume. No device storage was written.
   ≤ 1 KB (`transport.read_memory`); the harness's `read_bytes` (128-byte
   GETs, ~112 ms each on the C64U) made the first C64U measurement 18.5 s.
 - **Not measured yet (blocked: no device storage writes until the harness
-  owner decides)**: UCI `LOAD_REU`/`SAVE_REU` throughput, checksum
-  correctness through a file, the 1 MHz C64U case, and the file-backed
-  resume (`snap_req` bit 6). The protocol is pinned host-side
+  owner decides)**: SAVE_REU, the file-backed suspend/resume (`snap_req`
+  bit 6). LOAD_REU: the read-only probe below. The protocol is pinned host-side
   (`host/tests/test_snap_ureu.py`) against `dos.cc:254-319`.
+
+### UCI LOAD_REU, read-only probe (W12-T fix round 1)
+
+`tests/ureu_probe.py` (supervisor ruling: read-only device storage; no
+writes of any kind; Flash/Temp never entered or listed). One `u64_hold`
+each; the Command Interface is Disabled in both devices' configs and is
+set Enabled inside the hold (restored: config IDENTICAL every time).
+Logs: `build/evidence/w12-reu/probe-*.log`, `probe/*/probe.json`.
+
+| | U64E fw 3.15, 48 MHz | U64E fw 3.15, 1 MHz | C64U fw 1.1.0, 64 MHz |
+|---|---|---|---|
+| storage root | `/USB1`: 64 entries | same | `/SD`: `83,NO SUCH DIRECTORY` (the root lists SD, Flash, Temp; no card mounted?) |
+| file | `/USB1/aes256/rngtest.d81`, 819,200 B, 4 chunks | same | none: not measured |
+| `ureu_ld` (open + LOAD_REU chunks + close) | 0.32 s (open+close alone 0.16 s) | 4.59 s (1.32 s) | — |
+| ≈ throughput (REST-latency-limited estimate) | ~5 MB/s | ~245 KiB/s (the C64's fenced polls at 1 MHz) | — |
+| reply text | `$008000 BYTES LOADED TO REU $8C0000` | same | — |
+| REU vs READ_DATA, 16 × ≤ 256 B samples | equal | equal | — |
+| one byte past the end | `00` + short count → `ureu_err` 5 | same | — |
+
+- **H1 on real firmware**: the reply is small_printf's `%6x`: six
+  upper-case digits, zero-filled (`$008000`), as `ureu_chk` now expects.
+  The first version expected C's `"$  8000"` and would have refused every
+  chunk.
+- The count rule holds on the device: a request past the end gets status
+  `00,OK` with the short count, and `ureu_ld` refuses it.
+- **Not measured**: the C64U (its `/SD` does not open), SAVE_REU (writes are
+  blocked), and anything at 64 MHz on the C64U.

@@ -14,7 +14,9 @@
 ;    file's CURRENT position (consecutive commands continue the file);
 ;    reply (one block, last_part) "$%6x BYTES LOADED TO REU $%6x" /
 ;    "... SAVED FROM REU ..." with the TRANSFERRED count (a short file
-;    still answers "00,OK"); a FatFS error replaces the status.
+;    still answers "00,OK"); a FatFS error replaces the status.  The
+;    firmware's sprintf is software/system/small_printf.cc: "%6x" is
+;    exactly 6 upper-case digits, zero-filled ("$040000"; see ureu_chk).
 ;  - dos.cc:16 the truncation status; dos.cc:111-134 OPEN [t][02][flags]
 ;    [name] / CLOSE [t][03] (dosio_uci.s, same transaction primitives).
 ; The count, not the status, is the truth: every command must answer
@@ -40,7 +42,7 @@
 
 .include "../macros.inc"
 
-.export ureu_ld, ureu_sv, ureu_bank
+.export ureu_ld, ureu_sv, ureu_bank, ureu_bend
 .export ureu_open, ureu_xfer, ureu_close
 .export ureu_ra, ureu_rl, ureu_err, ureu_us
 .exportzp UREU_LOAD, UREU_SAVE, UREU_FRD, UREU_FWR
@@ -76,6 +78,7 @@ ureu_rl:  .res 4                ; bytes left (u32 LE, <= $1000000)
 ureu_err: .res 1                ; 0 or UREU_E_*
 ureu_us:  .res 2                ; first two status bytes of the failing reply
 ureu_jv:  .res 2                ; ureu_bank's target
+ureu_bend:                      ; L6: the end of ALL MAIN BSS (host/snapfmt.py --stamp checks it)
 
 .segment "SBSS"
 ureu_cmd: .res 1
@@ -285,11 +288,16 @@ ureu_xfer:
         sec
         rts
 
-; ureu_chk — the reply must be exactly "$%6x " of ureu_n (dos.cc:276/309:
-; the transferred count, right-aligned in spaces, lower-case hex; a chunk
-; is < 2^24, so 6 digits): dosio_buf[0] = '$', [1..6], [7] = ' '.  Checked
-; from the last digit up against ureu_n.  C=1: a short count, any other
-; count, or not that text (UREU_E_SHORT covers all three).
+.segment "CODE"                 ; (MAIN: SNAPHI is full; runs with BASIC in or out)
+
+; ureu_chk — the reply must begin "$" + the chunk length as EXACTLY 6
+; upper-case hex digits, zero-filled + " " (dos.cc:276/309 "$%6x ...",
+; formatted by the firmware's own sprintf, software/system/small_printf.cc:
+; '%x'/'%X' -> _hex (178-184) writes exactly `width` digits from hexchar[]
+; = "0123456789ABCDEF" (11, 54-63): zero-filled, upper case, truncated to
+; the width; a chunk is < 2^24, so 6 digits always hold it).  Checked from
+; the last digit up against ureu_n.  C=1: a short count, any other count,
+; or not that text (UREU_E_SHORT covers all three).
 ureu_chk:
         lda dosio_uci_rn+1
         bne :+
@@ -308,20 +316,13 @@ ureu_chk:
         dex
         bpl @c
         ldx #6
-@d:     lda ureu_acc            ; value left = 0: padding (but digit 6)
-        ora ureu_acc+1
-        ora ureu_acc+2
-        bne @dig
-        lda #' '
-        cpx #6
-        bne @cmp
-@dig:   lda ureu_acc
+@d:     lda ureu_acc
         and #$0F
         cmp #10
         bcc :+
-        adc #'a' - '0' - 10 - 1 ; C = 1 here
+        adc #'A' - '0' - 10 - 1 ; C = 1 here
 :       adc #'0'                ; C = 0 here
-@cmp:   cmp dosio_buf,x
+        cmp dosio_buf,x
         bne @bad
         ldy #4
 @s:     lsr ureu_acc+2

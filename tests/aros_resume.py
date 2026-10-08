@@ -12,15 +12,16 @@ machine state into the REU snapshot area at the next frame hook and
 freezes (sei).  Then the machine is RESET and the runner loaded FRESH
 (VICE: harness reset + run_prg_via_sys; U64: harness reset + run_prg), the
 ROM id written again and snap_resume launched.  REU-resident: the guest
-ranges and the snapshot stay in the REU across the reset (the file path,
-SAVE_REU/LOAD_REU, needs device storage writes: --file, blocked until the
-supervisor relays the harness owner's decision).
+ranges and the snapshot stay in the REU across the reset.  The file path
+(snap_req bit 6: SAVE_REU/LOAD_REU) needs device storage writes and is not
+driven from here yet; host/tests/test_snap_file.py pins it on the host.
 
 Legs:
-  mid    suspend in the middle of the boot's serial text (after MID_BYTES
-         bytes), resume: the serial text after the resume must continue
-         the boot model's byte for byte through "romtaginit done" (m2),
-         and m3's insert-disk screen hash must then come
+  mid    suspend early in the boot, at guest frame SUSPEND_FRAME (before
+         the first serial byte on every backend), resume: ALL the serial
+         text then comes after the resume and must equal the boot model's
+         byte for byte through "romtaginit done" (m2), and m3's
+         insert-disk screen hash must then come
   m3     boot to m3 (the insert-disk screen hash), suspend, resume: the
          hash must match a model insert-disk frame again within
          M3_BUDGET_S (15 s, the Ultimate) of launching the resume (VICE:
@@ -63,7 +64,7 @@ from host import snapfmt as F  # noqa: E402
 from tests import aros_boot as AB  # noqa: E402
 
 EVID = os.path.join(ROOT, "build", "evidence", "w12-reu")
-MID_BYTES = 150                 # suspend after this much serial text (of 416)
+SUSPEND_FRAME = 50              # mid: the suspend request (the model's first serial line is at frame 95)
 M3_BUDGET_S = 15.0              # brief: m3's hash again within 15 s (the Ultimate)
 M3_BUDGET_VICE_S = 60.0         # VICE: a 1 MHz C64 in warp (host-dependent), reported
 STUB = 0xC700                   # host REU access stub (buf_case tail)
@@ -334,11 +335,10 @@ def leg_mid(m: AB.Machine, rom, rid: bytes, s: int, prg_resume: str,
     sn = Snap(m, m_prg(m), rid)
     boot(m, rom, s, rep, sn)
     text, seen, t0 = bytearray(), 0, time.monotonic()
-    while len(text) < MID_BYTES:
+    while m.frames() < SUSPEND_FRAME:
         if time.monotonic() - t0 > timeout:
-            return [f"mid: only {len(text)} serial bytes before the suspend point"]
-        seen = serial_text(m, seen, text)
-        time.sleep(AB.POLL_VICE_S if m.vice else AB.POLL_S)
+            return [f"mid: guest frame {m.frames()} < {SUSPEND_FRAME} after {timeout:.0f} s"]
+        time.sleep(AB.POLL_VICE_S if m.vice else 0.05)
     suspend(m, sn, rep)
     n, ring = m.serial_final(seen)              # frozen: the count is exact
     AB.take(text, ring, seen, n, m.sersz)
@@ -414,7 +414,9 @@ def refusals(m: AB.Machine, sn: Snap, rep: dict) -> list[str]:
         ("E8 unstamped", lambda: m.w(sn.a_bid, bytes(8)), lambda: m.w(sn.a_bid, bid), 0xE8),
         ("E3 build ID", lambda: m.w(sn.a_bid, bytes([bid[0] ^ 0x5A]) + bid[1:]),
          lambda: m.w(sn.a_bid, bid), 0xE3),
-        ("E4 ROM id", lambda: sn.declare_rid(bytes(32)), lambda: sn.declare_rid(), 0xE4),
+        ("E4 ROM id", lambda: sn.declare_rid(hashlib.sha256(b"another ROM").digest()),
+         lambda: sn.declare_rid(), 0xE4),
+        ("EA no ROM id", lambda: sn.declare_rid(bytes(32)), lambda: sn.declare_rid(), 0xEA),
         ("E2 header byte", lambda: sn.reu_write(F.SNAP_BASE + F.H_FLAGS, b"\x01"),
          lambda: sn.reu_write(F.SNAP_BASE + F.H_FLAGS, hdr[F.H_FLAGS:F.H_FLAGS + 1]), 0xE2),
         ("E5 state byte", lambda: sn.reu_write(st1, bytes([st1v[0] ^ 0xFF])),
@@ -453,14 +455,16 @@ def survive_check(m: AB.Machine, sn: "Snap", rep: dict) -> list[str]:
     a, n = F.spans(p["keep"])[1]
     m.w(AB.P + 4, struct.pack("<II", a, n))
     got = struct.unpack_from("<I", m.call("aros_sum"), 4)[0]
-    out = {"header_sum_ok": p["sum_ok"], "state_sum_at_suspend": f"${p['state_sum']:08X}",
+    bid = m.r(sn.a_bid, 8)
+    out = {"magic": p["magic"].decode("latin-1"), "bid_ok": p["bid"] == bid,
+           "header_sum_ok": p["sum_ok"], "state_sum_at_suspend": f"${p['state_sum']:08X}",
            "state_sum_after_reset": f"${got:08X}", "span": f"${a:06X}+${n:X}"}
     if not m.vice:
         from c64_test_harness.backends.ultimate64_helpers import get_reu_config
         out["reu_config_after_reset"] = list(get_reu_config(m.t.client))
     rep["survive"] = out
     log(f"  REU across the reset: {out}")
-    if not p["sum_ok"] or got != p["state_sum"]:
+    if p["magic"] != F.MAGIC or p["bid"] != bid or not p["sum_ok"] or got != p["state_sum"]:
         return [f"survive: the snapshot did not survive the reset: {out}"]
     return []
 

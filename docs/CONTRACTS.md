@@ -1304,7 +1304,13 @@ Tests: `host/tests/test_snap_ureu.py` (byte-level, the UCI model of
   the transfer is `file->read`/`write` at the file's current position;
   the reply is one block `"$%6x BYTES LOADED TO REU $%6x"` /
   `"... SAVED FROM REU ..."` carrying the TRANSFERRED count (a short file
-  still says `00,OK`); a FatFS error replaces the status. The firmware
+  still says `00,OK`); a FatFS error replaces the status. The firmware's
+  `sprintf` is its own `software/system/small_printf.cc` (linked into every
+  target, e.g. `target/u64/riscv/ultimate/Makefile:40`): `%x` with a width
+  is `_hex` (178-184), exactly `width` digits from `hexchar[] =
+  "0123456789ABCDEF"` (11), zero-filled, upper case, truncated to the
+  width, so a 256 KB chunk answers `"$040000 BYTES ..."` (fix round 1, H1:
+  the first version expected C's space padding and lower case). The firmware
   writes the REU backing memory whatever the C64's REU config; the C64
   sees it only with the REU enabled and large enough (the hold sets it).
 - **Entries** (MAIN; I/O in; BASIC banked out around the SCODE part by
@@ -1319,8 +1325,8 @@ Tests: `host/tests/test_snap_ureu.py` (byte-level, the UCI model of
   ~8 s at 64 MHz) and nothing is aborted mid-transfer. The C64 waits for
   every reply: a running guest is paused for the whole transfer.
 - **The count is the truth**: every chunk must answer status `00` AND the
-  exact text `$` + the chunk length in `%6x` (right-aligned in spaces,
-  lower-case) + space; anything else (a short or long count, a truncation,
+  exact text `$` + the chunk length as 6 upper-case hex digits,
+  zero-filled (small_printf `%6x`) + space; anything else (a short or long count, a truncation,
   another text) fails with `ureu_err` = 5 (`UREU_E_SHORT`); a status other
   than `00` = 3 (`ureu_us` keeps its first two bytes); no reply = 2 (the
   handshake is aborted); open refused = 1; close refused = 6. On a failure
@@ -1331,13 +1337,16 @@ Tests: `host/tests/test_snap_ureu.py` (byte-level, the UCI model of
   has none).
 - **Storage**: C64U `/SD/amiga64/`, U64E `/USB1/amiga64/`; never `/Flash` or
   `/Temp`. Device storage writes wait for the harness owner's decision
-  (Wave 12 brief).
+  (Wave 12 brief). **SAVE_REU is unverified on hardware** until then;
+  LOAD_REU: the read-only probe (`tests/ureu_probe.py`, HARDWARE.md).
 
 ## Suspend/resume (W12-T)
 
 Owner: snap (`runtime/ops/snap.s`, `host/snapfmt.py`, rc `snap` region).
 Tests: `tests/aros_resume.py` (legs `mid`, `m3` with the refusals,
-`--mutants`), `host/tests/test_snap_fmt.py`.
+`--mutants`), `host/tests/test_snap_fmt.py`, `host/tests/test_snap_file.py`
+(the file path at host level: the 6502 code on a REU-controller model and
+the UCI model).
 
 - **Trigger**: `snap_arm` (`tests/aros/mboot.s`'s W12-T line, after
   `cop_reset`/`disp_init`, before `mach_run`; 31 φ2 per guest frame with no
@@ -1349,7 +1358,15 @@ Tests: `tests/aros_resume.py` (legs `mid`, `m3` with the refusals,
   (`dosio_name`), bit 7 continues the guest afterwards; without bit 7 the
   guest freezes (`sei`, spin): a REU-resident snapshot is valid only while
   nothing runs. `snap_st`: `$10` suspended, `$11` + file,
-  `$20` resumed, `$E1-$E9` refused (`host/snapfmt.ST_ERR`).
+  `$20` resumed, `$E1-$EA` refused (`host/snapfmt.ST_ERR`).
+- **The file path (bit 6) is UNVERIFIED ON HARDWARE until the storage
+  decision**: SAVE_REU/LOAD_REU of the spans in order, the refusals and the
+  restore are pinned at host level only (`test_snap_file.py`).
+- **Consumed (M1)**: a successful resume, and a suspend that continues the
+  guest (bit 7), overwrite the REU header's first magic byte
+  (`snap_kill`): the REU-resident snapshot can then never be resumed over
+  guest memory that moved on (a second resume refuses `$E2`: the header no
+  longer checks). A file keeps its own copy.
 - **Snapshot area** (rc `snap $DF1000-$DF3FFF`, the REU under the trapped
   custom-chip bank, never guest-visible, both profiles): `+$000` header,
   `+$100` zero page, `+$200` the `disp_st` page, `+$300` the MAIN BSS image
@@ -1362,12 +1379,28 @@ Tests: `tests/aros_resume.py` (legs `mid`, `m3` with the refusals,
   build is stamped (`snap_bid` ≠ 0, else `$E8`); the header checksum
   (`$E2`); the header equals what this build would write, flags and state
   sum aside (magic/version `$E1`, layout `$E9`, build ID `$E3`, ROM id = the one declared
-  at `+$2FE0` `$E4`); then (file) span 1, the state checksum (`$E5`), then
+  at `+$2FE0` `$E4`; an all-zero declared ROM id `$EA`); then (file) span 1, the state checksum (`$E5`), then
   the guest ranges. Restore: `disp_init`; `st_exc` from the image, then
   `emu_reset`; zero page; `disp_st`; the BSS image; the CIA #2 counter;
   the pixel epoch `disp_st+105` += 1 (I2); `code_invall` (I1; until W12-C
-  lands a stub: `emu_reset` already set `w_inv`); `mem_rec_dirty`; then
-  `mach_run` (`mach_on` = 1: no `mach_init`).
+  lands a stub: `emu_reset` already set `w_inv`); `snap_kill` (M1);
+  `mem_rec_dirty`; then `mach_run` (`mach_on` = 1: no `mach_init`).
+- **What `mach_run`'s entry overwrites** (the image's values of these never
+  take effect): `mach_port` := the caller's `$01`; `mach_ev` := `ev_pend`,
+  `ev_pend` := 0 (a pending event is serviced by the entry pass, as at any
+  entry); `mach_stp` := 0, `mach_fs` := 0; `mach_in` := `$81`;
+  `mach_svc` resets `mach_insv`/`mach_fran` per pass. The suspend runs
+  inside a service pass, so the restored machine re-enters exactly like a
+  `mach_run` entry after a halt: the remainder of that pass (re-reading
+  the counter, counting passed frames, arming the one-shot) is redone; the
+  displaced hook's forced step (`mach_fs`) is dropped.
+- **STOP across a suspend** (known deviation): a guest suspended while
+  STOPped (`mach_stp` = 1: the suspend can run in mach_run's STOP wait) is
+  resumed RUNNING: `mach_run`'s entry clears `mach_stp` (frozen code), so
+  the instruction after the STOP executes before the next interrupt, a
+  spurious wake-up. AROS's idle loop STOPs again (the m3 suspends happen
+  there; the picture and serial continuation pass). A fix needs mach.s
+  (re-enter the STOP wait when the image's `mach_stp` was set).
 - **REU-resident resume (interim, until device storage is allowed)**:
   the snapshot and the guest's memory stay in the REU across the harness
   reset and the fresh runner load. Proven per run, not assumed
@@ -1382,14 +1415,21 @@ Tests: `tests/aros_resume.py` (legs `mid`, `m3` with the refusals,
   m3 on every backend: the REU from the end of the BSS image to the
   declared ROM id, and `$DF4000-$DFFFFF`, read zero (`aros_resume`
   `zero_check`).
+- **Link order** (L6): snap.s then ureu.s link last (Makefile), so the
+  image `__BSS_RUN__ .. snap_keep` holds every other module's BSS and none
+  of W12-T's scratch. `snapfmt --stamp` refuses a runner whose BSS does not
+  end with ureu.s's (`ureu_bend = __BSS_RUN__ + __BSS_SIZE__`, `snap_keep <
+  ureu_ra`); snap.s asserts at link time that its scratch (the loaded header
+  at `__BSS_RUN__`) never overlaps `dosio_buf`.
 - **Build ID** (I3): `snap_bid` (DATA) = the first 8 bytes of SHA-256 of the
   PRG with those 8 bytes zeroed, stamped by the Makefile after the link
   (`host/snapfmt.py --stamp`). Other links (variant builds) stay 0 and can
-  suspend but never resume. ROM id: 32 bytes in the REU at snapshot
-  `+$2FE0`, written by whoever staged the ROM (the host: SHA-256 of
-  `aros-ext.bin || aros-rom.bin`, `tests/aros_resume.rom_id`); the C64 does
-  not hash the ROM. Suspend copies it into the header; resume compares the
-  header's with the one declared now. (In the REU, not MAIN: 32 bytes of
+  suspend but never resume. **ROM id** (I3): a host-declared TAG, not a
+  hash the C64 verifies: 32 bytes in the REU at snapshot `+$2FE0`, written
+  by whoever staged the ROM (the tests: SHA-256 of `aros-ext.bin ||
+  aros-rom.bin`, `tests/aros_resume.rom_id`). The C64 never hashes the ROM;
+  suspend copies the tag into the header, resume compares the header's tag
+  with the one declared now and refuses an all-zero tag (`$EA`). (In the REU, not MAIN: 32 bytes of
   DATA tipped the MAIN layout over a page, see the Wave 12 report.)
 
 ### State inventory

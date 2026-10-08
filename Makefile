@@ -2,6 +2,7 @@ PY      := python3
 BUILD   := build
 
 .PHONY: all host-test runtime vectors vice-test smoke rescheck clean
+.DELETE_ON_ERROR:               # W12-T: a failed stamp leaves no unstamped runner.prg
 
 all: runtime
 
@@ -23,7 +24,7 @@ $(BUILD)/gen/dispatch.s: host/gen_dispatch.py runtime/core.s $(wildcard runtime/
 RUNTIME_SRC := $(filter-out runtime/ops/chip.s runtime/ops/cia.s runtime/ops/cop.s runtime/ops/blt.s runtime/ops/disp.s runtime/ops/mach.s runtime/ops/snap.s runtime/ops/ureu.s,$(wildcard runtime/*.s runtime/ops/*.s tests/runner/*.s)) runtime/ops/chip.s runtime/ops/cia.s runtime/ops/cop.s runtime/ops/blt.s runtime/ops/disp.s runtime/ops/mach.s runtime/ops/snap.s runtime/ops/ureu.s
 RUNTIME_INC := runtime/macros.inc $(wildcard runtime/rc/*.inc) $(wildcard runtime/ops/*.inc)
 
-$(BUILD)/runner.prg: $(RUNTIME_SRC) $(RUNTIME_INC) $(BUILD)/gen/dispatch.s runtime/c64.cfg
+$(BUILD)/runner.prg: $(RUNTIME_SRC) $(RUNTIME_INC) $(BUILD)/gen/dispatch.s runtime/c64.cfg host/snapfmt.py
 	mkdir -p $(BUILD)
 	cl65 -t none -C runtime/c64.cfg -o $@ -Ln $(BUILD)/runner.lbl -m $(BUILD)/runner.map \
 		$(RUNTIME_SRC) $(BUILD)/gen/dispatch.s

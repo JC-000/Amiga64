@@ -24,18 +24,21 @@
 ; snapshot must already be in the REU.  Checks, all before any state is
 ; touched: magic/version, header checksum, layout (KEEP, __BSS_RUN__,
 ; ranges), build ID (nonzero and equal to this PRG's snap_bid), ROM id
-; (= the one declared at SNAP_RID), state checksum.  Then: disp_init (c2v
+; (= the tag declared at SNAP_RID; an all-zero tag refuses, M3), state
+; checksum.  Then: disp_init (c2v
 ; tables, LUT, cop_dhook), st_exc from the image + emu_reset (the step-
 ; loop patch, w_inv/m_rok invalidated), zero page $10-$7F/$88-$99, disp_st,
 ; the BSS image, the CIA #2 counter := ~mach_now, disp_st+105 += 1 (I2:
 ; one conversion rebuilds the screen), code_invall (I1), mem_rec_dirty,
-; and mach_run continues (mach_on = 1: no mach_init).
+; snap_kill (M1: the REU-resident snapshot is consumed; a suspend that
+; continues the guest consumes it too), and mach_run continues (mach_on =
+; 1: no mach_init).
 ;
 ; Test-only variants (tests/aros_resume.py mutants, ≤ 10): SNAP_MUT_NOZP,
 ; SNAP_MUT_NODST, SNAP_MUT_NOBSS, SNAP_MUT_NOCIA, SNAP_MUT_NOEPOCH,
 ; SNAP_MUT_NOEXC (no emu_reset patch), SNAP_MUT_NOHSUM, SNAP_MUT_NOBID,
-; SNAP_MUT_NOSSUM.  (NOBID takes the identity bytes from the loaded header:
-; build ID and ROM id unchecked, size-neutral.)
+; SNAP_MUT_NOSSUM.  (NOBID takes the build ID bytes from the loaded
+; header instead of snap_bid: the build ID goes unchecked; size-neutral.)
 ; ===========================================================================
 
 .include "../macros.inc"
@@ -73,8 +76,10 @@ H_SSUM    = 96                  ; @value state checksum (u32)
 .assert SNAP_BSS + SNAP_KEEPR - 1 <= snap_end, lderror, "BSS image overflows the rc snap region"
 .assert ^(snap_base + $300 + SNAP_KEEPR - 1) = ^snap_base, lderror, "snapshot area must not cross a 64 KB REU bank (single REC ops)"
 .assert (snap_chain & $FF) <> $FF, lderror, "jmp (snap_chain) must not straddle a page (6502 bug)"
+.assert ureu_ra > snap_keep, lderror, "ureu.s's BSS must follow snap.s's (L6: the image range holds no W12-T scratch)"
 .assert ureu_rl = ureu_ra + 3, lderror, "snap_xs copies 7 bytes into ureu_ra/ureu_rl"
 .assert SNAP_BSS + SNAP_KEEPR <= SNAP_RID, lderror, "the BSS image must end below the declared ROM id"
+.assert dosio_buf >= SNAP_SCR + $100, lderror, "the resume scratch (the loaded header) must not overlap dosio_buf"
 .assert SNAP_NPG < 256, lderror, "state span page count must fit a byte"
 
 ; snap_req bits / snap_st codes (= host/snapfmt.py)
@@ -93,6 +98,7 @@ SNAP_E_OPEN  = $E6              ; @value
 SNAP_E_XFER  = $E7              ; @value
 SNAP_E_NOID  = $E8              ; @value
 SNAP_E_LAY   = $E9              ; @value
+SNAP_E_NORID = $EA              ; @value no ROM id declared (all zero)
 
 DISP_ST_PIX  = 105              ; @value CONTRACTS: pixel epoch offset in disp_st
 ZP_LO1 = $10                    ; @value restored zero page: $10-$7F ...
@@ -358,7 +364,8 @@ snap_sus:
         lda snap_rq
         bmi @cont
 @frz:   jmp @frz                ; frozen (sei): the host resets the machine
-@cont:  plp
+@cont:  jsr snap_kill           ; M1: the guest runs on: the REU copy is stale
+        plp
         rts
 
 ; ===========================================================================
@@ -412,6 +419,16 @@ snap_res:
 :
 .endif
         jsr snap_mkhdr          ; dosio_buf := what this build would write
+        ldx #31                 ; M3: a declared ROM id is never all zero
+        lda #0
+:       ora dosio_buf+H_RID,x
+        dex
+        bpl :-
+        tax
+        bne :+
+        lda #SNAP_E_NORID
+        jmp snap_fail
+:
         ldx #0                  ; compare, but the flags and the state sum
 @c:     cpx #H_FLAGS
         beq @n
@@ -555,11 +572,22 @@ snap_rest:
         inc disp_st + DISP_ST_PIX ; I2: one conversion rebuilds the screen
 .endif
         jsr snap_invall         ; I1
+        jsr snap_kill           ; M1: consumed (a second resume refuses: E2)
         jsr mem_rec_dirty       ; C1
         lda #SNAP_S_RES
         sta snap_st
         clc
         rts
+
+; snap_kill — M1: overwrite the REU header's first magic byte, so the
+; REU-resident snapshot can never be resumed again (after a resume, or a
+; suspend that lets the guest continue: the guest memory moves on).  A
+; file keeps its own copy.
+snap_kill:
+        ldx #REU_CMD_STASH
+        ldy #D_KILL
+        jsr snap_dma
+        jmp mem_rec_dirty       ; C1
 
 ; I1 STUB (W12-T): until W12-C's code_invall (core.s) lands.  emu_reset
 ; above already set w_inv, which invalidates the single code window; at
@@ -601,6 +629,10 @@ D_RID = * - snap_dt
         .word dosio_buf + H_RID
         .faraddr SNAP_RID
         .word 32
+D_KILL = * - snap_dt            ; M1: one byte that is not 'A' over the magic
+        .word snap_dt + D_ZPS   ; (D_ZPS's C64 address low byte: $00)
+        .faraddr SNAP_HDR
+        .word 1
 D_SUM = * - snap_dt
         .word dosio_buf
         .faraddr SNAP_ZP

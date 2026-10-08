@@ -39,7 +39,9 @@ Header (all little-endian):
       constant of the build (snap.s snap_tpl)
   52  flags: RQ_FILE when the suspend also wrote the file
   56  build ID (8 bytes, the suspending PRG's snap_bid)
-  64  ROM id (32 bytes: the SHA-256 the host declared at SNAP_BASE+OFF_RID)
+  64  ROM id (32 bytes): a TAG the host/stager declares at SNAP_BASE+OFF_RID
+      (the tests use SHA-256 of the ROM banks); the C64 never hashes the ROM,
+      it only compares tags (an all-zero tag refuses: $EA)
   96  fletcher of the state span (u32)
   100 zeros
   252 fletcher of bytes 0..251 (u32)
@@ -79,7 +81,8 @@ ST_SUS, ST_SUSF, ST_RES = 0x10, 0x11, 0x20
 ST_ERR = {0xE1: "magic/version", 0xE2: "header checksum", 0xE3: "build ID",
           0xE4: "ROM id", 0xE5: "state checksum", 0xE6: "file open",
           0xE7: "file transfer", 0xE8: "unstamped build (build ID 0)",
-          0xE9: "layout (KEEP / BSS address / ranges)"}
+          0xE9: "layout (KEEP / BSS address / ranges)",
+          0xEA: "no ROM id declared (all zero)"}
 
 
 def fletcher(data: bytes, a: int = 0, b: int = 0) -> int:
@@ -163,6 +166,7 @@ def stamp(prg_path: str, lbl_path: str, as_id: bytes | None = None) -> bytes:
     lab = labels(lbl_path)
     if "snap_bid" not in lab:
         raise KeyError(f"{lbl_path}: no snap_bid label")
+    check_bss_last(lab, lbl_path)
     prg = bytearray(open(prg_path, "rb").read())
     bid = as_id if as_id is not None else build_id(bytes(prg), lab["snap_bid"])
     o = prg_offset(bytes(prg), lab["snap_bid"])
@@ -170,6 +174,23 @@ def stamp(prg_path: str, lbl_path: str, as_id: bytes | None = None) -> bytes:
     with open(prg_path, "wb") as f:
         f.write(prg)
     return bid
+
+
+def check_bss_last(lab: dict, lbl_path: str = "") -> None:
+    """L6: ureu.s's BSS ends ALL of MAIN BSS (snap.s's before it), so the
+    image __BSS_RUN__ .. snap_keep holds every other module's BSS.  Checked
+    for every stamped runner (the Makefile link, the snap mutants); test
+    links with their own shims are not stamped and not checked."""
+    need = ("ureu_bend", "__BSS_RUN__", "__BSS_SIZE__", "snap_keep", "ureu_ra")
+    miss = [n for n in need if n not in lab]
+    if miss:
+        raise KeyError(f"{lbl_path}: labels missing for the BSS-order check: {miss}")
+    if lab["ureu_bend"] != lab["__BSS_RUN__"] + lab["__BSS_SIZE__"]:
+        raise ValueError(f"{lbl_path}: ureu.s's BSS is not last (ends ${lab['ureu_bend']:04X}, "
+                         f"BSS ends ${lab['__BSS_RUN__'] + lab['__BSS_SIZE__']:04X}): "
+                         f"link snap.s, ureu.s last (Makefile)")
+    if not lab["snap_keep"] < lab["ureu_ra"]:
+        raise ValueError(f"{lbl_path}: snap.s's BSS must precede ureu.s's")
 
 
 def read_bid(prg_path: str, lbl_path: str) -> bytes:
