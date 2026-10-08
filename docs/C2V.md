@@ -27,7 +27,12 @@ line `y` sits at `c2v_bitmap + (y>>3)*320 + cx*8 + (y&7)`.
   is on iff the OR of the planes is nonzero, taken 2:1 by OR-ing pixel
   pairs (`c2v_pairhi`/`c2v_pairlo`, built by `c2v_init`). On = colour 1
   (screen high nibble), off = colour 0. The v1 per-palette boolean is still
-  open (S3_PLAN §2.1).
+  open (S3_PLAN §2.1). **W12-V:** the kernel also picks each cell's pen
+  (`c2v_pick`: the leftmost set pixel of the cell's first line with one)
+  and writes the pens of each finished char row to colour RAM
+  (`c2v_hrow`), counting cells per pen in `c2v_v_cnt`. `c2v_hfill` then
+  writes matrix cell = `c2v_v_col`[pen] << 4 | `c2v_v_col`[0]; disp.s sets
+  `c2v_v_col` by the colour choice (CONTRACTS "Display refresh (S3.5)").
 
 Each line fetches one row per plane (REC autoload, so only the C64 page and
 the 24-bit REU address are stored per row) into a page-aligned row that the
@@ -42,8 +47,11 @@ index. The 4096-byte table lives in the REU at a caller-supplied address
 (a guest claim follows at S3.5 integration). `c2v_pal_*` look up colours
 0–3 (mc2) or 0–1 (hires) with one byte DMA each. They then fill the screen
 matrix and colour RAM and set `c2v_a_bgc`. In hires, colour RAM is unused
-and is filled with colour 0. Palette changes are the only time the screen
-matrix is written: never per frame.
+by the VIC and is filled with colour 0 (W12-V: `c2v_hires` then
+overwrites the converted rows with the cell pens). `c2v_setmc2` (W12-V)
+is `c2v_pal_mc2` with `c2v_v_col[0..3]` already set. Before W12-V,
+palette changes were the only time the matrix was written; disp.s now
+rewrites it per hires conversion (`c2v_hfill`).
 
 ## C64 memory: VIC bank 3, 200 lines (S3_PLAN §2.4)
 
@@ -191,6 +199,7 @@ too.
 | +16 | 16 × u16: OCS colours `$0RGB` (bits 15–12 ignored) |
 | +48 | u8 out: VIC colour for `$D021` (colour 0) |
 | +49…+71 | module state (opaque) |
+| +92…+143 | W12-V state: `c2v_v_col` 16 × u8 (colour per pen), `c2v_v_cnt` 16 × u8 (hires cells per pen), `c2v_v_tab` 16 × u8 (`c2v_hfill`'s matrix byte per pen), `c2v_pick` scratch (CONTRACTS "Display refresh", "Colour choice") |
 
 Preconditions:
 
@@ -420,7 +429,7 @@ blank border look it up with one byte DMA each.
   nothing more happens. W10-P bumps `gen` only on a net value change, so
   this costs one 71-byte compare at most.
 - Inside `mach_run` (`mach_in` ≠ 0) a conversion is **deferred** until
-  `DISP_N` × 14188 guest E ticks (20 frames' worth; `docs/PERF.md` (j))
+  `DISP_N` × 14188 guest E ticks (24 frames' worth since W12-V, was 20; `docs/PERF.md` (j), (m))
   have passed since the previous conversion **ended** (F3: the round-0
   frame count from the start livelocked the guest at s ≤ 1). A deferred
   change leaves `gen`/`dirty` unseen, so a later frame converts it.

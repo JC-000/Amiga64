@@ -121,7 +121,11 @@ def convert_hires(planes: list[bytes], pal: list[int], lut: bytes,
     """4-plane hires 640 px -> hires 320 px silhouette (v0).
 
     Output pixel on iff either pixel of its pair has a nonzero colour
-    index; on = colour 1 (screen high nibble), off = colour 0."""
+    index; on = colour 1 (screen high nibble), off = colour 0.  W12-V: the
+    kernel also leaves each converted cell's pen (``cell_pens``) in colour
+    RAM, and ``cnt`` (pen -> cells, saturating at 255) for ``separate``;
+    the screen matrix stays c2v_pal_hires's fill (disp's c2v_hfill replaces
+    it, ``disp_convert``)."""
     bmp = bytearray(rows * 320)
     for y in range(rows * 8):
         for cx in range(40):
@@ -134,8 +138,99 @@ def convert_hires(planes: list[bytes], pal: list[int], lut: bytes,
             bmp[_cell_offset(y, cx)] = (o[0] << 4) | o[1]
     c = [_lookup(lut, pal, i) for i in range(2)]
     screen, colram = _colours((c[1] << 4) | c[0], c[0], c[0], rows)
+    pens, cnt = cell_pens(planes, rows)
+    colram = bytes(pens[:rows * 40]) + colram[rows * 40:]
     return {"bitmap": bytes(bmp), "screen": screen, "colram": colram,
-            "bgc": c[0]}
+            "bgc": c[0], "pens": pens, "cnt": cnt}
+
+
+# ---------------------------------------------------------------------------
+# W12-V: per-cell pens (hires) and the contrast-preserving colour choice.
+# docs/CONTRACTS.md "Display refresh (S3.5)", "Colour choice (W12-V)".
+# ---------------------------------------------------------------------------
+
+def _luma(rgb: tuple[int, int, int]) -> float:
+    return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+
+
+# The VIC colours by Rec. 709 luma of VIC_RGB, darkest first (ties: lower
+# index); disp.s carries it as disp_lad.  Pinned by host/tests/test_disp_colour.py.
+LADDER = tuple(sorted(range(16), key=lambda i: (_luma(VIC_RGB[i]), i)))
+CNT_MAX = 255                   # a pen's cell count saturates here
+
+
+def cell_pen(planes: list[bytes], y0: int, cx: int) -> int:
+    """The pen of hires cell (row y0 // 8, column cx): on the first of its 8
+    lines with a set pixel, the colour index of the leftmost set pixel of
+    the cell's 16 (plane bytes 2cx then 2cx+1, bit 7 first); 0 if none."""
+    for y in range(y0, y0 + 8):
+        for h in range(2):
+            o = y * HIRES_ROW + 2 * cx + h
+            v = 0
+            for p in planes[:4]:
+                v |= p[o]
+            if v:
+                m = 0x80
+                while not v & m:
+                    m >>= 1
+                return sum(1 << p for p in range(4) if planes[p][o] & m)
+    return 0
+
+
+def cell_pens(planes: list[bytes], rows: int = C2V_ROWS) -> tuple[list[int], list[int]]:
+    """Every converted cell's pen (row-major, rows * 40) and the cells per
+    pen (saturating at CNT_MAX; pen 0 not counted)."""
+    pens = [cell_pen(planes, r * 8, cx) for r in range(rows) for cx in range(40)]
+    cnt = [0] * 16
+    for k in pens:
+        if k:
+            cnt[k] = min(CNT_MAX, cnt[k] + 1)
+    return pens, cnt
+
+
+def separate(pal: list[int], lut: bytes, cnt: list[int]) -> list[int | None]:
+    """The VIC colour of every pen in use (None for the others).
+
+    Pens in use: 0 and every p >= 1 with cnt[p] > 0.  Order: pen 0, then
+    by cnt descending, ties by lower pen.  Pass 1 gives each pen in order
+    its nearest colour LUT[pal & $FFF] if no pen with a different OCS
+    colour holds it; pass 2 walks LADDER outward from that colour's place
+    (k, k+1, k-1, k+2, k-2, ...) to the first colour no pen with a
+    different OCS colour holds.  Pen 0 always keeps its nearest colour;
+    pens with equal OCS colours share one; pens with different OCS colours
+    never do (at most 16 pens, 16 colours: pass 2 always finds one)."""
+    ocs = [c & 0xFFF for c in list(pal) + [0] * (16 - len(pal))]
+    order = [0] + sorted((p for p in range(1, 16) if cnt[p]), key=lambda p: (-cnt[p], p))
+    vic: list[int | None] = [None] * 16
+    own: list[int | None] = [None] * 16
+    for maxd in (0, 15):
+        for p in order:
+            if vic[p] is not None:
+                continue
+            k = LADDER.index(lut[ocs[p]])
+            for kk in [k] + [k + s * d for d in range(1, maxd + 1) for s in (1, -1)]:
+                if 0 <= kk < 16:
+                    x = LADDER[kk]
+                    if own[x] is None or ocs[own[x]] == ocs[p]:
+                        vic[p] = x
+                        if own[x] is None:
+                            own[x] = p
+                        break
+    return vic
+
+
+def screen_sum(screen: bytes) -> int:
+    """disp_mck: Fletcher sums mod 255 of the 1000 matrix bytes, as disp.s
+    adds them: 8-bit add, then the carry added back (end-around), so a
+    value of 255 can stand for 0.  s1 = sum b, s2 = sum of the running s1;
+    returned s1 | s2 << 8."""
+    s1 = s2 = 0
+    for b in screen[:SCREEN_LEN]:
+        t = s1 + b
+        s1 = (t & 0xFF) + (t >> 8)
+        t = s2 + s1
+        s2 = (t & 0xFF) + (t >> 8)
+    return s1 | s2 << 8
 
 
 def check_placement(base: int, length: int, what: str) -> None:
@@ -189,12 +284,30 @@ def unpack_lut(packed: bytes) -> bytes:
     return bytes(v for b in packed for v in (b & 15, b >> 4))
 
 
+def rle_lut(lut: bytes) -> bytes:
+    """W12-V: the LUT as disp.s carries it: runs of equal colours, one byte
+    each, (run - 1) << 4 | colour, run 1-16."""
+    assert len(lut) == LUT_LEN and max(lut) < 16
+    out, i = bytearray(), 0
+    while i < LUT_LEN:
+        j = i
+        while j < LUT_LEN and j - i < 16 and lut[j] == lut[i]:
+            j += 1
+        out.append((j - i - 1) << 4 | lut[i])
+        i = j
+    return bytes(out)
+
+
+def unrle_lut(packed: bytes) -> bytes:
+    return bytes(v for b in packed for v in [b & 15] * ((b >> 4) + 1))
+
+
 def lut_inc(lut: bytes | None = None) -> str:
-    """runtime/ops/disp_lut.inc, the packed LUT as ca65 source."""
-    packed = pack_lut(lut if lut is not None else build_lut())
+    """runtime/ops/disp_lut.inc, the run-length LUT as ca65 source."""
+    packed = rle_lut(lut if lut is not None else build_lut())
     out = ["; runtime/ops/disp_lut.inc - GENERATED by host/c2v_ref.py lut_inc();",
-           "; do not edit.  The 4096-entry OCS-RGB -> VIC LUT (build_lut), nibble-",
-           "; packed: byte i = LUT[2i] | LUT[2i+1] << 4.  Pinned by",
+           "; do not edit.  The 4096-entry OCS-RGB -> VIC LUT (build_lut), run-",
+           "; length packed (W12-V): byte = (run - 1) << 4 | colour.  Pinned by",
            "; host/tests/test_disp_ref.py."]
     for i in range(0, len(packed), 16):
         out.append("        .byte " + ",".join(f"${b:02X}" for b in packed[i:i + 16]))
@@ -329,14 +442,24 @@ def disp_convert(st: dict, read, lut: bytes) -> dict:
     planes = [disp_rows(read, d["src"][p], d["width"], d["skip"][p])
               for p in range(n)]
     pal = st["color"][:16]
-    conv = convert_mc2 if d["mode"] == MODE_MC2 else convert_hires
-    out = conv(planes, pal, lut)
+    if d["mode"] == MODE_MC2:                       # W12-V: pens 0-3 in use
+        vic = separate(pal, lut, [0, 1, 1, 1] + [0] * 12)
+        out = convert_mc2(planes, list(range(4)), bytes(vic[:4]) + bytes(LUT_LEN - 4))
+    else:                                           # W12-V: c2v_hfill
+        out = convert_hires(planes, pal, lut)
+        vic = separate(pal, lut, out["cnt"])
+        n = C2V_ROWS * 40
+        out["screen"] = bytes((vic[k] << 4) | vic[0] for k in out["pens"]) + \
+            bytes([(vic[0] << 4) | vic[0]] * (SCREEN_LEN - n))
+        out["colram"] = out["colram"][:n] + bytes(SCREEN_LEN - n)    # blank rows: pen 0
+    out["vic_pens"] = vic
     bmp = bytearray(out["bitmap"])
     for y in range(d["lines"], C2V_LINES):           # below DIWSTOP: colour 0
         for cx in range(40):
             bmp[_cell_offset(y, cx)] = 0
     out["bitmap"] = bytes(bmp)
     out["decide"] = d
+    out["mck"] = screen_sum(out["screen"])          # W12-V: disp_mck
     out["vic"] = {0xD011: VIC_D011_ON, 0xD016: VIC_D016[d["mode"]],
                   0xD018: VIC_D018, 0xD020: out["bgc"], 0xD021: out["bgc"]}
     return out

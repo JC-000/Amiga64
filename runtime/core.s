@@ -65,6 +65,17 @@ emu_brnc_enforced = 1           ; @value guards fail the link (production/gate)
 .macro HOTALIGN n
         .align n, $EA
 .endmacro
+.macro CW_INC32 c               ; W12-C counter build only
+        .local done
+        inc c
+        bne done
+        inc c+1
+        bne done
+        inc c+2
+        bne done
+        inc c+3
+done:
+.endmacro
 
 ; --- Contract ABI exports --------------------------------------------------
 .export emu_reset, emu_step, emu_run, dispatch_next, fetch_word
@@ -83,6 +94,14 @@ emu_brnc_enforced = 1           ; @value guards fail the link (production/gate)
 .export sr_write, sp_swap       ; full-SR write with SP banking / A7<->r_osp
 .export emu_stop, emu_addrerr   ; halts with HALT_STOP / HALT_ADDRESS
 .export emu_rst_hook            ; RESET hook (patchable jmp)
+.export code_invall, code_invpg ; W12-C code-window cache (CONTRACTS "Code-window cache")
+.ifndef FETCH_DIRECT
+.export cw_tlo, cw_thi, cw_val, cw_hand, cw_mok  ; W12-C host-visible (tests/run_cwin.py)
+.export CWIN_N, cwin_map        ; W12-C
+.ifdef CWIN_COUNT
+.export cw_nins, cw_nmis, cw_nref, cw_nkil, cw_nslw ; W12-C counter build
+.endif
+.endif
 
 ; ZP map / constants re-exported so they land in build/runner.lbl for the
 ; host harness.  Group agents: use runtime/macros.inc, do NOT .import these.
@@ -109,11 +128,13 @@ HALT_ADDRESS = $05      ; @value odd PC from a vector / RTE (reason code only)
 
 ; ===========================================================================
 ; Instruction-stream window state (core-internal; linker-assigned, outside
-; the $10-$7F contract register file).  The window caches the 256-byte
-; guest page (w_pg1:w_pg0 = guest address bits 23-8) that PC last fetched
-; from; w_inv nonzero forces the next fetch to refill.  code_win gets one
-; guard byte so an (undefined-behavior) odd-PC fetch at page offset $FF
-; reads allocated memory instead of a neighboring BSS variable.
+; the $10-$7F contract register file).  W12-C: w_pg1:w_pg0 (guest address
+; bits 23-8) and w_inv describe the CURRENT window of the code-window cache
+; (the one the hit-path loads point at; see "W12-C code-window cache" at
+; the end of this file); w_inv nonzero forces the next fetch to miss.  An
+; (undefined-behavior) odd-PC fetch at page offset $FF reads byte 256 of
+; the window: the next window's byte 0, or cwin_map[0] for the last one --
+; allocated memory, never a neighboring BSS variable.
 ; ===========================================================================
 .segment "ZEROPAGE" : zeropage
 w_pg0:  .res 1                  ; window guest page, low  (addr bits 15-8)
@@ -129,9 +150,34 @@ m_rlo:  .res 1                  ; REC_REULO   as last programmed
 m_rhi:  .res 1                  ; REC_REUHI   as last programmed
 m_rbk:  .res 1                  ; REC_REUBANK as last programmed
 
+; W12-C: the windows themselves live in BHI (cwin_base, rc ram.inc), so
+; code_win names window 0, the assembled operand of the four hit-path loads
+; that cw_sel re-points (high byte) at the selected window.
+code_win = cwin_base            ; W12-C
+
+.ifndef FETCH_DIRECT            ; W12-C cache directory (MAIN BSS)
+.ifndef CWIN_N
+CWIN_N = 7                      ; @value W12-C windows (1..7: cwin_map counts in 3 bits)
+.endif
+.assert CWIN_N >= 1, error, "W12-C CWIN_N: at least one window"
+.assert CWIN_N <= 7, error, "W12-C CWIN_N: 1..7 windows fit $A900-$AFFF"
 .segment "BSS"
-.align $100                     ; page-aligned: in-window offset = PC low byte
-code_win: .res 257
+cw_tlo: .res CWIN_N             ; W12-C window tag, guest address bits 15-8
+cw_thi: .res CWIN_N             ; W12-C window tag, guest address bits 23-16
+cw_val: .res CWIN_N             ; W12-C nonzero = window holds its tag's page
+cw_hand: .res 1                 ; W12-C next window to refill (FIFO, 0..CWIN_N-1)
+cw_mok: .res 1                  ; W12-C nonzero = cwin_map cleared since boot
+cw_ys:  .res 1                  ; W12-C Y saved by the miss path / code_invpg
+cw_xs:  .res 1                  ; W12-C X saved by the write-check slow path
+cw_pg:  .res 2                  ; W12-C code_invpg: page (bits 15-8, 23-16)
+.ifdef CWIN_COUNT               ; W12-C counter build (tests/run_cwin.py)
+cw_nins: .res 4                 ; W12-C instructions (exception-mode loop)
+cw_nmis: .res 4                 ; W12-C miss-path entries (page change/invalid)
+cw_nref: .res 4                 ; W12-C refills (one 256-byte DMA each)
+cw_nkil: .res 4                 ; W12-C windows dropped by a write
+cw_nslw: .res 4                 ; W12-C write checks that took the slow path
+.endif
+.endif
 
 ; ===========================================================================
 ; PRG load address + BASIC SYS stub
@@ -201,8 +247,7 @@ core_code0:                     ; first CODE byte of the PRG (core.s links first
 .if .not (.defined(REC_NOINVAL) .or .defined(REC_MUT_RESET))
         sta m_rok               ; C1: emu_reset implies mem_rec_dirty
 .endif
-        lda #1
-        sta w_inv
+        jsr code_invall         ; W12-C every window (was: w_inv := 1)
         lda st_exc              ; latch: the loop patch below AND st_exl, which
         sta st_exl              ; every runtime flag test reads -- so a write to
         beq @plain              ; st_exc between resets changes nothing (F2)
@@ -265,10 +310,10 @@ dispatch_go:
         ora w_inv               ; 3   0 only if both pages match AND valid
         BRNC bne, dg_miss             ; 2
         ldx r_pc                ; 3   in-window offset = PC low byte
-        lda code_win,x          ; 4   guest [PC]   = opcode high byte
+dg_w0:  lda code_win,x          ; 4   guest [PC]   = opcode high byte (W12-C: high byte patched by cw_sel)
         sta op_hi               ; 3
         sta t_tmp+1             ; 3
-        lda code_win+1,x        ; 4   guest [PC+1] = opcode low byte
+dg_w1:  lda code_win+1,x        ; 4   guest [PC+1] = opcode low byte (W12-C: patched)
         sta op_lo               ; 3
         sta t_tmp               ; 3
         inx                     ; 2   PC += 2
@@ -328,6 +373,16 @@ dispatch_gox:
         sta st_ipc+2
         lda r_pc+3
         sta st_ipc+3
+.ifdef CWIN_COUNT               ; W12-C counter build: instructions
+        inc cw_nins
+        bne :+
+        inc cw_nins+1
+        bne :+
+        inc cw_nins+2
+        bne :+
+        inc cw_nins+3
+:
+.endif
         jsr fetch_word
         lda op_lo
         sta st_iop
@@ -343,17 +398,20 @@ dispatch_gox:
 ; fetch_word — read guest big-endian word at PC into op_lo/op_hi (mirrored
 ; to t_tmp+0=lo/t_tmp+1=hi), PC += 2.  Handlers use it for extension words.
 ;
-; Windowed build (default): serves from code_win when PC is inside the
-; cached page, else refills the whole page with one 256-byte REU DMA and
-; serves from the fresh copy.  An instruction or extension word run may
-; span the window edge: each word is fetched independently, and the first
-; word of the next page simply misses and refills — always correct.
+; Windowed build (default): serves from the current window when PC is in
+; its page; else the miss path (W12-C: cw_look) switches to the cached
+; window of PC's page or refills one with a 256-byte REU DMA, then serves.
+; An instruction or extension-word run may span a page end: each word is
+; fetched independently at an even PC (bytes X and X+1, X <= $FE, inside
+; the window), and the first word of the next page misses and comes from
+; that page's own window -- no window needs a 257th byte.
 ; PC is architecturally even (odd PC = 68000 address error, outside the
-; M1 subset); an odd PC at page offset $FF would fetch a stale guard byte
-; (defined memory, no crash) and wrap PC within the page — harmless UB in
-; an already-undefined state.
+; M1 subset); an odd PC at page offset $FF would fetch byte 256 (defined
+; memory, no crash) and wrap PC within the page — harmless UB in an
+; already-undefined state.
 ; Clobbers: A, X, t_tmp+0/+1 (m_addr/m_val NOT touched, unlike the direct
-; build).  Cycles: hit 57 (+6 jsr), miss ~380 (refill DMA included).
+; build).  Cycles: hit 57 (+6 jsr); a window switch ~130, a refill ~590
+; (DMA included; PERF.md (n)).
 ;
 ; FETCH_DIRECT build: the v0 path, one 2-byte REU DMA per word.
 ; Clobbers: A, m_addr, m_val, t_tmp.  ~150 cycles (incl. REU DMA).
@@ -395,10 +453,10 @@ dispatch_gox:
         ora w_inv               ; 3   0 only if both pages match AND valid
         BRNC bne, miss                ; 2
 serve:  ldx r_pc                ; 3   in-window offset = PC low byte
-        lda code_win,x          ; 4   guest [PC]   = high byte
+fw_w0:  lda code_win,x          ; 4   guest [PC]   = high byte (W12-C: high byte patched by cw_sel)
         sta op_hi               ; 3
         sta t_tmp+1             ; 3
-        lda code_win+1,x        ; 4   guest [PC+1] = low byte
+fw_w1:  lda code_win+1,x        ; 4   guest [PC+1] = low byte (W12-C: patched)
         sta op_lo               ; 3
         sta t_tmp               ; 3
         inx                     ; 2   PC += 2
@@ -411,30 +469,16 @@ wrap:   inc r_pc+1
         inc r_pc+2
 wdone:  rts
 
-miss:                           ; refill the window with PC's guest page:
-        lda #0                  ; one 256-byte REU DMA into code_win (a
-.if .not (.defined(REC_NOINVAL) .or .defined(REC_MUT_REFILL))
-        sta m_rok               ; page never straddles a 512 KB REU block)
-.endif                          ; C1: shadow stale BEFORE the REC changes
-        sta w_inv
-        lda r_pc+1
-        sta w_pg0
-        sta REC_REUHI           ; REU offset = page << 8
-        lda r_pc+2
-        sta w_pg1
-        sta REC_REUBANK
-        lda #0
-        sta REC_REULO
-        sta REC_C64LO           ; code_win is page-aligned
-        sta REC_LENLO           ; length $0100
-        sta REC_ACTRL           ; both addresses increment
-        lda #>code_win
-        sta REC_C64HI
-        lda #1
-        sta REC_LENHI
-        lda #REU_CMD_FETCH
-        sta REC_COMMAND         ; DMA executes here, CPU stalled ~256 cyc
-        jmp serve               ; ~60 setup + ~258 DMA, then the hit path
+miss:                           ; W12-C: page change or dropped window
+.ifndef CWIN_MUT_NOBANK
+        lda CPU_PORT            ; W12-C BASIC ROM visible (LORAM and HIRAM
+        and #3                  ; W12-C set)?  The windows and cwin_map are
+        cmp #3                  ; W12-C the RAM under it: bank it out and
+        bne nobas               ; W12-C leave it out (CONTRACTS "Code-window
+        dec CPU_PORT            ; W12-C cache"); $x7 -> $x6, as blt_w
+nobas:
+.endif
+        jmp cw_look             ; W12-C the lookup (CWCODE)
 .endproc
 .endif
 
@@ -519,43 +563,86 @@ miss:                           ; refill the window with PC's guest page:
 .endmacro
 .macro WINCHK_W lastoff
 .endmacro
-.else
+.macro WINCHK_SLOW_B
+.endmacro
+.macro WINCHK_SLOW_W lastoff
+.endmacro
+.elseif .defined(CWIN_MUT_CURONLY)
+; W12-C mutant (tests/run_cwin.py): the single-window check -- only the
+; CURRENT window is dropped; a write into another cached page goes unseen.
 .macro WINCHK_B
-        .local kill, done
-        lda m_addr+1            ; 3
-        eor w_pg0               ; 3
-        BRNC bne, done                ; 3 taken = common exit (9 cycles)
+        .local done
+        lda m_addr+1
+        eor w_pg0
+        bne done
         lda m_addr+2
         eor w_pg1
-        BRNC bne, done
+        bne done
+        lda #1
+        sta w_inv
+done:
+.endmacro
+.macro WINCHK_W lastoff
+        .local chkhi, kill, done
+        lda m_addr+1
+        eor w_pg0
+        beq chkhi
+        lda m_addr
+        cmp #$100 - lastoff
+        bcc done
+        lda m_addr+1
+        adc #0
+        eor w_pg0
+        bne done
+        lda m_addr+2
+        adc #0
+        eor w_pg1
+        bne done
+        beq kill
+chkhi:  lda m_addr+2
+        eor w_pg1
+        bne done
 kill:   lda #1
         sta w_inv
 done:
 .endmacro
+.macro WINCHK_SLOW_B
+.endmacro
+.macro WINCHK_SLOW_W lastoff
+.endmacro
+.else
+; W12-C: the overlap test reads cwin_map[page-low of the write] through a
+; self-modified absolute load (the memory API keeps X and Y, so there is
+; no free index register).  B: bit 7 set -> the page may be cached; W:
+; any bit -> the page or the next one (a spill) may be.  The precise test
+; (tags, bank, spill) is out of line: WINCHK_SLOW_* after the entry's
+; last rts, then cw_ww.  Common path 13 cycles (was 9 for B, 16 for W).
+.macro WINCHK_B
+        lda m_addr+1            ; 3
+        sta cwlk+1              ; 4
+cwlk:   lda cwin_map            ; 4   low byte self-modified
+        bmi cwslow              ; 2   not taken = common path
+cwback:
+.endmacro
 
 .macro WINCHK_W lastoff
-        .local chkhi, cross, kill, done
         lda m_addr+1            ; 3
-        eor w_pg0               ; 3
-        BRNC beq, chkhi               ; 2
-        lda m_addr              ; 3   page differs: overlap only possible if
-        cmp #$100 - lastoff     ; 2   the write spills into the next page
-        BRNC bcc, done                ; 3 taken = common exit (16 cycles)
-cross:  lda m_addr+1            ; C=1 from the cmp: A = write page + 1
-        adc #0
-        eor w_pg0
-        BRNC bne, done
-        lda m_addr+2
-        adc #0                  ; propagate the +1 carry (eor kept C)
-        eor w_pg1
-        BRNC bne, done
-        BRNC beq, kill                ; always
-chkhi:  lda m_addr+2
-        eor w_pg1
-        BRNC bne, done
-kill:   lda #1
-        sta w_inv
-done:
+        sta cwlk+1              ; 4
+cwlk:   lda cwin_map            ; 4   low byte self-modified
+        bne cwslow              ; 2   not taken = common path
+cwback:
+.endmacro
+
+.macro WINCHK_SLOW_B
+cwslow: lda #0
+        jsr cw_ww
+        jmp cwback
+.endmacro
+
+.macro WINCHK_SLOW_W lastoff
+cwslow: lda #lastoff
+        jsr cw_ww
+        jmp cwback
 .endmacro
 .endif
 
@@ -807,6 +894,7 @@ trap:   jmp chip_r32            ; W7-T
         sta REC_COMMAND
         rts
 trap:   jmp chip_w8             ; W7-T
+        WINCHK_SLOW_B           ; W12-C
 .endproc
 
 .proc mem_write16
@@ -820,6 +908,7 @@ trap:   jmp chip_w8             ; W7-T
         lda #REU_CMD_STASH_AL
         sta REC_COMMAND
         rts
+        WINCHK_SLOW_W 1         ; W12-C (in branch range)
 split:  lda #REU_CMD_STASH
         sta m_scmd
         lda #2
@@ -843,6 +932,7 @@ trap:   jmp chip_w16            ; W7-T
         lda #REU_CMD_STASH_AL
         sta REC_COMMAND
         rts
+        WINCHK_SLOW_W 3         ; W12-C (in branch range)
 split:  lda #REU_CMD_STASH
         sta m_scmd
         lda #4
@@ -1948,3 +2038,360 @@ ea_modetab_hi:
 .import __ZP_LAST__
 .assert __ZP_LAST__ <= st_exc, lderror, "ZEROPAGE .res pool grew into the W6-S equates at $88 (rc/zp.inc)"
 .assert (__BSS_RUN__ & $FF) = 0, lderror, "boot BSS clear assumes page-aligned BSS (c64.cfg align = $100)"
+
+.segment "CODE"
+
+; ===========================================================================
+; W12-C code-window cache (docs/CONTRACTS.md "Code-window cache").
+;
+; CWIN_N page-aligned 256-byte windows at cwin_base (CWIN area, RAM under
+; BASIC ROM), a directory in MAIN BSS (cw_tlo/cw_thi tags, cw_val, the
+; FIFO hand cw_hand) and the page-low map cwin_map:
+;   bit 7     some valid window has page-low p
+;   bit 6     some valid window has page-low p+1
+;   bits 5-3  hint: the window last filled with page-low p
+;   bits 2-0  how many valid windows have page-low p (<= CWIN_N <= 7)
+; The write check (WINCHK_*) reads ONE map byte: a byte write may hit a
+; window only if bit 7 is set, a word/long write (which may spill into
+; the next page) only if bit 7 or 6 is.  The lookup tries the hint's
+; window first.  Invariant: bits 7, 6, 2-0 describe exactly the valid
+; windows; the hint is only a guess (always checked against the tags).
+; Replacement is FIFO (cw_hand): on the AROS boot's page trace FIFO
+; leaves 1.0% more refills than LRU at N = 7 (90,631 vs 89,717 to m3,
+; build/evidence/w12-cwin/policy.txt) and costs nothing on a switch.
+;
+; Banking.  Everything that reads a window or the map runs with BASIC ROM
+; out: the miss path banks it out (and leaves it out) before the first
+; window can become valid, so a valid window implies BASIC out for the
+; rest of that run (every $01 restorer inside a run restores a value it
+; saved during the run).  A caller that maps BASIC in again after a run
+; calls emu_reset or code_invall before the next run (contract text).
+; Code that may run with BASIC in stays in MAIN (the miss prologue in
+; fetch_word, cw_ww, code_invpg, cw_kill, cw_drop, code_invall); the
+; lookup and refill (cw_look) is in CWCODE (CWIN area, $A800).
+; ===========================================================================
+.ifndef FETCH_DIRECT
+
+; cw_ww — the out-of-line half of WINCHK_B/WINCHK_W, entered only when the
+; map byte says a window may overlap.  A = lastoff (bytes after the first:
+; 0/1/3).  Clobbers A only, like the macros; $01 comes back as it came in.
+; With BASIC ROM in (a call from outside a run, e.g. host staging through
+; test_load_chunk at $37) the map byte that sent us here was a ROM byte:
+; BASIC is banked out for the duration of the check (code_invpg reads the
+; real map) and the caller's $01 restored -- such calls pay the slow path
+; for every write whose ROM byte at cwin_map+p is "maybe" (PERF.md (n)).
+.proc cw_ww
+.ifdef CWIN_COUNT
+        CW_INC32 cw_nslw
+.endif
+        stx cw_xs
+        tax                     ; X = lastoff
+        lda CPU_PORT
+        pha                     ; the caller's $01
+        and #3
+        cmp #3
+        bne :+
+        dec CPU_PORT            ; BASIC out while the map is read
+:       txa
+        clc
+        adc m_addr              ; C = the write spills into the next page
+        lda #0
+        rol
+        pha
+        lda m_addr+1
+        ldx m_addr+2
+        jsr code_invpg          ; the page it starts in
+        pla
+.ifndef CWIN_MUT_NOSPILL
+        beq done
+        lda m_addr+2
+        sta cw_pg+1
+        lda m_addr+1
+        clc
+        adc #1                  ; the next page; 24-bit wrap $FFFFxx ->
+        bne :+                  ; $0000xx (bank $FF + 1 = 0)
+.ifndef CWIN_MUT_NOCARRY
+        inc cw_pg+1
+.endif
+:       ldx cw_pg+1
+        jsr code_invpg
+.endif
+done:   pla
+        sta CPU_PORT            ; the caller's $01
+        ldx cw_xs
+        rts
+.endproc
+
+; cw_kill — X = a valid window a guest write overlapped: drop it, and mark
+; the current window invalid if it is this one.  Clobbers A, Y; keeps X.
+.proc cw_kill
+.ifdef CWIN_COUNT
+        CW_INC32 cw_nkil
+.endif
+        lda cw_tlo,x            ; valid tags are unique, so the current
+        cmp w_pg0               ; window is the one tagged w_pg
+        bne notcur
+        lda cw_thi,x
+        cmp w_pg1
+        bne notcur
+        lda #1
+        sta w_inv
+notcur: jmp cw_drop
+.endproc
+
+; cw_drop — X = a valid window: invalid, its page-low leaves cwin_map (while
+; another window shares the page-low the hint may keep pointing at this one:
+; a guess; with none left the entry keeps only bit 6).  Clobbers A, Y; keeps X.
+.proc cw_drop
+        lda #0
+        sta cw_val,x
+        ldy cw_tlo,x
+        lda cwin_map,y
+        sec
+        sbc #1                  ; count - 1 (bits 2-0 >= 1: no borrow out)
+        sta cwin_map,y
+        and #$07
+        bne done                ; another window has this page-low
+        lda cwin_map,y          ; the last one: bit 7 and the hint go
+.ifdef CWIN_MUT_STALEHINT
+        and #$7F                ; (mutant: the hint stays)
+.else
+        and #$40                ; (a stale hint would make the byte nonzero
+.endif
+        sta cwin_map,y          ; and send every word write here slow)
+        dey                     ; page-low - 1 (wraps $00 -> $FF)
+        lda cwin_map,y
+        and #$BF
+        sta cwin_map,y
+done:   rts
+.endproc
+
+.endif  ; .ifndef FETCH_DIRECT
+
+; ---------------------------------------------------------------------------
+; code_invpg — (W12-C) A = guest page bits 15-8, X = bits 23-16: drop
+; every cached window of that page.  For guest-memory writes that bypass
+; mem_write* (a blitter D row).  Reads and updates cwin_map, so it needs
+; BASIC ROM out (its callers: BCODE; cw_ww, which banks it out around the
+; call).  Clobbers A, X; keeps Y; never touches $01.
+; ---------------------------------------------------------------------------
+.proc code_invpg
+.ifndef FETCH_DIRECT
+        sta cw_pg
+        stx cw_pg+1
+        tax
+        lda cwin_map,x
+        bmi some
+        rts                     ; no valid window has this page-low
+some:   pha
+        and #$07
+        cmp #1
+        bne many
+        pla                     ; one window has this page-low: if the hint
+        and #$38                ; is it, its bank decides (the common case:
+        lsr                     ; code and data share a page-low only)
+        lsr
+        lsr
+        tax
+        lda cw_val,x
+        beq scan
+        lda cw_tlo,x
+        cmp cw_pg
+        bne scan
+        lda cw_thi,x
+        cmp cw_pg+1
+        beq kill
+        rts
+many:   pla
+scan:   ldx #CWIN_N-1
+lp:     lda cw_val,x
+        beq nx
+        lda cw_tlo,x
+        cmp cw_pg
+        bne nx
+        lda cw_thi,x
+        cmp cw_pg+1
+        beq kill
+nx:     dex
+        bpl lp
+        rts
+kill:   sty cw_ys
+        jsr cw_kill             ; valid tags are unique: one window
+        ldy cw_ys
+.endif
+        rts
+.endproc
+
+; ---------------------------------------------------------------------------
+; code_invall — (W12-C, interface I1) invalidate every cached window: the
+; next fetch refills.  For anything that rewrote guest memory behind the
+; memory API's back (snap.s resume, host staging); emu_reset calls it.
+; Writes cwin_map but never reads it, so it is correct with BASIC ROM in
+; (a store under ROM lands in the RAM).  The first call since boot clears
+; the whole map (power-up garbage).  Clobbers A, X; keeps Y.
+; ---------------------------------------------------------------------------
+.proc code_invall
+        lda #1
+        sta w_inv
+.ifndef FETCH_DIRECT
+.ifndef CWIN_MUT_NOINVALL
+        lda cw_mok
+        bne some
+        tax                     ; A = 0: first call since boot (the BSS
+clr:    sta cwin_map,x          ; clear zeroed cw_val, cw_hand)
+        inx
+        bne clr
+        inc cw_mok
+        rts
+some:   sty cw_pg               ; (cw_pg is free outside code_invpg)
+        ldx #CWIN_N-1
+lp:     lda cw_val,x
+        beq nx
+        lda #0                  ; every valid window goes, so its map
+        sta cw_val,x            ; entries (page-low and page-low - 1) end
+        ldy cw_tlo,x            ; up all zero
+        sta cwin_map,y
+        dey
+        sta cwin_map,y
+nx:     dex
+        bpl lp
+        ldy cw_pg
+.endif
+.endif
+        rts
+.endproc
+
+.ifndef FETCH_DIRECT
+.segment "CWCODE"               ; W12-C: CWIN area, runs with BASIC ROM out
+
+; ---------------------------------------------------------------------------
+; cw_look — fetch_word's miss path after the banking prologue (PC's page is
+; not the current window, or the current window was dropped).  A valid
+; window holding PC's page becomes current (no DMA: the map hint's window
+; first, else a scan); otherwise the FIFO hand's window is refilled with
+; one 256-byte REU DMA.  The current window is the one the four hit-path
+; loads point at (dg_w0/dg_w1 in dispatch_go, fw_w0/fw_w1 in fetch_word:
+; high bytes patched in sel).  Then the hit path serves the word.  Keeps Y.
+; ---------------------------------------------------------------------------
+.proc cw_look
+.ifdef CWIN_COUNT
+        CW_INC32 cw_nmis
+.endif
+        sty cw_ys
+        ldy r_pc+1
+        lda cwin_map,y          ; bit 7: some valid window has this
+        bmi hinted              ; page-low (else no tag can match)
+        jmp fill
+hinted: and #$38                ; the hint
+        lsr
+        lsr
+        lsr
+        tax
+        tya
+        cmp cw_tlo,x
+        bne scan
+        lda cw_thi,x
+        cmp r_pc+2
+        bne scan
+.ifdef CWIN_MUT_HINTNOVAL
+        jmp sel                 ; (mutant: the hint's window, valid or not)
+.else
+        lda cw_val,x
+        bne sel                 ; the hint's window: switch, no DMA
+.endif
+scan:   ldx #CWIN_N-1           ; another bank with the same page-low
+lp:     lda cw_val,x
+        beq nx
+        tya
+        cmp cw_tlo,x
+        bne nx
+        lda cw_thi,x
+        cmp r_pc+2
+        beq sel
+nx:     dex
+        bpl lp
+
+        jmp fill
+
+sel:    lda r_pc+1              ; X = the window: current from now on
+        sta w_pg0
+        lda r_pc+2
+        sta w_pg1
+        lda #0
+        sta w_inv
+        txa                     ; re-point the four hit-path loads
+        clc
+        adc #>cwin_base
+        sta dg_w0+2
+        sta dg_w1+2
+.ifndef CWIN_MUT_NOPATCH
+        sta fetch_word::fw_w0+2
+        sta fetch_word::fw_w1+2
+.endif
+        ldy cw_ys
+        jmp fetch_word::serve
+
+fill:   ldx cw_hand             ; FIFO: the oldest fill goes (the hand
+        dex                     ; counts down, CWIN_N-1 .. 0)
+        bpl :+
+        ldx #CWIN_N-1
+:       stx cw_hand
+        lda cw_val,x
+        beq dma
+        jsr cw_drop             ; evict: its tag leaves cwin_map
+dma:
+.ifdef CWIN_COUNT
+        CW_INC32 cw_nref
+.endif
+        lda #0                  ; one 256-byte REU DMA into the window (a
+.if .not (.defined(REC_NOINVAL) .or .defined(REC_MUT_REFILL))
+        sta m_rok               ; page never straddles a 512 KB REU block)
+.endif                          ; C1: shadow stale BEFORE the REC changes
+        sta REC_REULO
+        sta REC_C64LO           ; windows are page-aligned
+        sta REC_LENLO           ; length $0100
+        sta REC_ACTRL           ; both addresses increment
+        lda r_pc+1
+        sta cw_tlo,x
+        sta REC_REUHI           ; REU offset = page << 8
+        lda r_pc+2
+        sta cw_thi,x
+        sta REC_REUBANK
+        txa
+        clc
+        adc #>cwin_base
+        sta REC_C64HI
+        lda #1
+        sta REC_LENHI
+        sta cw_val,x
+        lda #REU_CMD_FETCH
+        sta REC_COMMAND         ; DMA executes here, CPU stalled ~256 cyc
+.ifndef CWIN_MUT_NOMAPADD
+        ldy r_pc+1              ; cwin_map[page-low]: count + 1, hint :=
+        txa                     ; this window, bit 7; [page-low - 1]:
+        asl                     ; bit 6
+        asl
+        asl
+        sta cw_pg               ; (hint << 3; cw_pg is free here)
+        lda cwin_map,y
+        and #$C7
+        ora cw_pg
+        clc
+        adc #1                  ; count <= CWIN_N - 1 before: no carry
+        ora #$80                ; out of bits 2-0
+        sta cwin_map,y
+        dey
+        lda cwin_map,y
+        ora #$40
+        sta cwin_map,y
+.endif
+        jmp sel
+.endproc
+
+
+.import __CWCODE_RUN__, __CWCODE_SIZE__
+.assert __CWCODE_RUN__ + __CWCODE_SIZE__ <= cwin_base, lderror, "W12-C: CWCODE runs into the code windows"
+.assert cwin_base + CWIN_N * $100 <= cwin_map, error, "W12-C: windows overlap cwin_map"
+.assert (cwin_base & $FF) = 0 .and (cwin_map & $FF) = 0, error, "W12-C: windows and map page-aligned"
+.segment "CODE"
+.endif

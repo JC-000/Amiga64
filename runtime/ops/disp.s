@@ -8,7 +8,10 @@
 ; register paths) and shows it on the VIC-II through the c2v kernels:
 ;
 ;   2-plane lores   -> c2v_mc2s   (multicolour 160x200, exact colours)
-;   4-plane hires   -> c2v_hiress (hires 320x200 silhouette, v0)
+;   4-plane hires   -> c2v_hiress (hires 320x200 silhouette, v0; W12-V:
+;                      per-cell colours, c2v_hfill)
+;   W12-V: the colours by disp_cols (docs/CONTRACTS.md "Display refresh":
+;   colour choice); every shown conversion ends with disp_msum (disp_mck)
 ;   anything else   -> blank + log (disp_why; disp_nblank counts)
 ;
 ; Link: disp_init stores disp_frame in W10-P's RAM vector cop_dhook (high
@@ -52,7 +55,11 @@
 ; DISP_MUT_DIRTY (the dirty byte ignored), DISP_MUT_EFROM (the budget
 ; measured from a conversion's start); DISP_TRACE (W11-A, supervisor grant:
 ; disp_tstart/disp_tfin record the least gap from a conversion's END to the
-; next one's START inside mach_run, for tests/run_pf.py leg gap).
+; next one's START inside mach_run, for tests/run_pf.py leg gap).  W12-V:
+; DISP_MUT_W12ORD (counts ignored), DISP_MUT_W12ONEPASS (no pass 1),
+; DISP_MUT_W12OCS (equal OCS colours never share), DISP_MUT_W12UP (the
+; walk never goes down), DISP_MUT_W12MCK (s2 not summed), DISP_MUT_W12RLE
+; (LUT colour bit 3 lost), DISP_MUT_W12RUN (LUT run length bit 3 lost).
 ;
 ; Link layout: CODE and BSS are each padded to whole pages, no RODATA or
 ; DATA, so modules linked after this one move by whole pages only.
@@ -67,13 +74,19 @@
 .export disp_tend, disp_tval, disp_gmin, disp_ngap   ; W11-A (supervisor grant, efrom)
 .endif
 .export DISP_N, disp_lut       ; disp_lut: the rc equate, for the host
-.import c2v_init, c2v_pal_mc2, c2v_pal_hires, c2v_mc2s, c2v_hiress
+.export disp_mck                ; W12-V: matrix checksum, for the host
+.export disp_cols, disp_msum     ; W12-V: for tests/run_pf.py leg cols
+.import c2v_init, c2v_mc2s, c2v_hiress
+.import c2v_lookn, c2v_setmc2, c2v_hfill        ; W12-V
+.import c2v_v_col, c2v_v_cnt                    ; W12-V
+.import mach_nmi                                ; W12-V: disp_msum's NMI guard
 .import mem_rec_dirty, mach_in, mach_etime, mach_et
 .import cop_dhook               ; cop.s BSS (consumer -> provider, as cia.s
                                 ; imports mach_cbv); disp_st: rc equate (cop)
 
 .ifndef DISP_N
-DISP_N     = 20                 ; duty budget: frames per conversion (PERF (j))
+DISP_N     = 24                 ; duty budget: frames per conversion (PERF (j); W12-V fix
+                                ; round 1: 20 -> 24, PERF (m))
 .endif
 DISP_FRAME_E = 14188            ; @value E ticks per guest frame (CONTRACTS "Machine loop")
 DISP_EBUD  = DISP_N * DISP_FRAME_E ; E ticks from a conversion's end to the next start
@@ -185,6 +198,15 @@ disp_srh:   .res 4
 disp_srb:   .res 4
 disp_w:     .res 3              ; row walk
 disp_t:     .res 4              ; scratch
+disp_mck:   .res 2              ; W12-V: matrix Fletcher sums s1, s2 (c2v_ref.screen_sum)
+disp_rp:    .res 1              ; W12-V: disp_rule's pen
+disp_rd:    .res 1              ; W12-V: disp_rule's walk distance
+disp_rc:    .res 1              ; W12-V: disp_rule's candidate colour
+disp_ro:    .res 16             ; W12-V: disp_rule's owner pen per VIC colour
+disp_ord:   .res 16             ; W12-V: pens in order; bit 7: has its colour
+disp_rn:    .res 1              ; W12-V: pens in disp_ord
+disp_rm:    .res 1              ; W12-V: the pass's walk limit (0, then 15)
+disp_ry:    .res 1              ; W12-V: the pen's place in disp_ord
 .ifdef DISP_TRACE                ; W11-A (supervisor grant, efrom): test only
 disp_tend:  .res 4              ; E when the last conversion inside mach_run ended
 disp_tval:  .res 1              ; nonzero: disp_tend is valid
@@ -210,58 +232,46 @@ disp_refresh:
 disp_init:
         jsr c2v_init
         DISP_ENTER
-        lda #<disp_lutp         ; unpack 128 packed bytes -> 256 LUT bytes
-        sta @rd+1               ; into c2v_stage, stash them; 16 times
-        lda #>disp_lutp
-        sta @rd+2
-        lda #0
-        sta disp_t
-@chunk: ldy #0
-        ldx #0
-@rd:    lda disp_lutp,y         ; operand patched
-        pha
-        and #$0F
-        sta c2v_stage,x
-        inx
-        pla
-        lsr
-        lsr
-        lsr
-        lsr
-        sta c2v_stage,x
-        inx
-        iny
-        bpl @rd                 ; Y = 0..127
-        lda #<c2v_stage
-        sta REC_C64LO
-        lda #>c2v_stage
-        sta REC_C64HI
-        lda #<disp_lut
-        sta REC_REULO
-        clc
-        lda #>disp_lut
-        adc disp_t
-        sta REC_REUHI
-        lda #^disp_lut
-        adc #0
-        sta REC_REUBANK
-        lda #0
-        sta REC_LENLO
-        sta REC_ACTRL
-        lda #1
-        sta REC_LENHI           ; 256 bytes
-        lda #REU_CMD_STASH
-        sta REC_COMMAND
-        clc
-        lda @rd+1
-        adc #$80
-        sta @rd+1
-        bcc :+
-        inc @rd+2
-:       inc disp_t
-        lda disp_t
-        cmp #16
-        bne @chunk
+        lda #<disp_lutp         ; W12-V (supervisor-approved): run-length LUT
+        sta @rd+1               ; W12-V (supervisor-approved): (c2v_ref.rle_lut: byte =
+        lda #>disp_lutp         ; W12-V (supervisor-approved): (run - 1) << 4 | colour);
+        sta @rd+2               ; W12-V (supervisor-approved): 256 entries into c2v_stage,
+        lda #0                  ; W12-V (supervisor-approved): then stash them; stops at
+        sta disp_t              ; W12-V (supervisor-approved): exactly 4096 entries
+        tax                     ; W12-V (supervisor-approved)
+@rd:    lda disp_lutp           ; W12-V (supervisor-approved): operand patched
+        inc @rd+1               ; W12-V (supervisor-approved)
+        bne :+                  ; W12-V (supervisor-approved)
+        inc @rd+2               ; W12-V (supervisor-approved)
+:       pha                     ; W12-V (supervisor-approved)
+        lsr                     ; W12-V (supervisor-approved)
+        lsr                     ; W12-V (supervisor-approved)
+        lsr                     ; W12-V (supervisor-approved)
+        lsr                     ; W12-V (supervisor-approved)
+.ifdef DISP_MUT_W12RUN
+        and #$07                ; mutant: run length bit 3 lost
+.endif
+        tay                     ; W12-V (supervisor-approved): run - 1
+        pla                     ; W12-V (supervisor-approved)
+.ifdef DISP_MUT_W12RLE
+        and #$07                ; mutant: colour bit 3 lost
+.else
+        and #$0F                ; W12-V (supervisor-approved)
+.endif
+@em:    sta c2v_stage,x         ; W12-V (supervisor-approved)
+        inx                     ; W12-V (supervisor-approved)
+        bne :+                  ; W12-V (supervisor-approved)
+        pha                     ; W12-V (supervisor-approved)
+        jsr disp_stash          ; W12-V (supervisor-approved): a chunk is full
+        ldx disp_t              ; W12-V (supervisor-approved)
+        cpx #16                 ; W12-V (supervisor-approved): C = 4096 entries done
+        ldx #0                  ; W12-V (supervisor-approved): (C kept)
+        pla                     ; W12-V (supervisor-approved): (C kept)
+        bcs @lut                ; W12-V (supervisor-approved)
+:       dey                     ; W12-V (supervisor-approved)
+        bpl @em                 ; W12-V (supervisor-approved)
+        bmi @rd                 ; W12-V (supervisor-approved): (always)
+@lut:
         jsr mem_rec_dirty       ; C1
         lda #0
         sta disp_ok
@@ -284,6 +294,32 @@ disp_init:
         sta cop_dhook+1
         pla
         sta CPU_PORT
+        rts
+
+; disp_stash — W12-V (supervisor-approved): c2v_stage's 256 bytes to disp_lut + 256 * disp_t;
+; disp_t + 1.  Keeps X and Y.
+disp_stash:
+        lda #<c2v_stage
+        sta REC_C64LO
+        lda #>c2v_stage
+        sta REC_C64HI
+        lda #<disp_lut
+        sta REC_REULO
+        clc
+        lda #>disp_lut
+        adc disp_t
+        sta REC_REUHI
+        lda #^disp_lut
+        adc #0
+        sta REC_REUBANK
+        lda #0
+        sta REC_LENLO
+        sta REC_ACTRL
+        lda #1
+        sta REC_LENHI           ; 256 bytes
+        lda #REU_CMD_STASH
+        sta REC_COMMAND
+        inc disp_t
         rts
 
 ; ---------------------------------------------------------------------------
@@ -388,12 +424,25 @@ disp_take:
         lda disp_dm
         cmp #DISP_MC2
         bne @hires
-        jsr c2v_pal_mc2
+        ldx #15                 ; W12-V: pens 0-3 in use (count 1), in order
+:       lda #0                  ; W12-V
+        cpx #4                  ; W12-V
+        bcs :+                  ; W12-V
+        lda #1                  ; W12-V
+:       sta c2v_v_cnt,x         ; W12-V
+        dex                     ; W12-V
+        bpl :--                 ; W12-V
+        ldx #3                  ; W12-V
+        jsr disp_cols           ; W12-V
+        jsr c2v_setmc2          ; W12-V
         jsr c2v_mc2s
         jmp @shown
-@hires: jsr c2v_pal_hires
-        jsr c2v_hiress
-@shown: jsr disp_clrlines
+@hires: jsr c2v_hiress          ; W12-V: pens to colour RAM, c2v_v_cnt
+        ldx #15                 ; W12-V
+        jsr disp_cols           ; W12-V
+        jsr c2v_hfill           ; W12-V: the matrix from the pens
+@shown: jsr disp_msum           ; W12-V: disp_mck
+        jsr disp_clrlines
         jsr disp_vicon
         lda #0
         sta disp_why
@@ -790,12 +839,7 @@ disp_args:
         inx
         cpx #4
         bne @s
-        lda #<disp_lut
-        sta DISP_A_LUT
-        lda #>disp_lut
-        sta DISP_A_LUT + 1
-        lda #^disp_lut
-        sta DISP_A_LUT + 2
+        jsr disp_alut           ; W12-V (shared with disp_border)
         ldx #31                 ; COLOR00-15
 @p:
 .ifdef DISP_MUT_PAL
@@ -915,38 +959,227 @@ disp_vicon:
         sta VIC_BORDER
         rts
 
+; disp_cols — W12-V: X = highest pen; c2v_v_col[0..X] := LUT, then the
+; colour choice (docs/CONTRACTS.md "Display refresh", c2v_ref.separate):
+; the pens in use (0 and every p with c2v_v_cnt[p] > 0) in order pen 0,
+; then by count descending (ties: lower pen).  Pass 1: each takes its LUT
+; colour if no pen with a different OCS colour holds it.  Pass 2: each pen
+; still without one walks the ladder from its LUT colour's place k (k+1,
+; k-1, k+2, ...) to the first colour no pen with a different OCS colour
+; holds.  Consumes c2v_v_cnt.
+disp_cols:
+        jsr c2v_lookn
+        ldx #15
+        lda #$FF
+:       sta disp_ro,x           ; every colour free
+        dex
+        bpl :-
+        sta c2v_v_cnt           ; pen 0 first (A = $FF)
+        ldy #0                  ; pens in order so far
+@sel:   lda #1                  ; best count so far (a pen in use has >= 1)
+        sta disp_t
+        lda #$FF
+        sta disp_t+1            ; best pen: none
+        ldx #15
+@sc:    lda c2v_v_cnt,x
+.ifdef DISP_MUT_W12ORD
+        beq :+                  ; mutant: every pen in use counts 1 (index order)
+        lda #1
+:
+.endif
+        cmp disp_t
+        bcc @nx                 ; >= keeps the lower pen on a tie
+        sta disp_t
+        stx disp_t+1
+@nx:    dex
+        bpl @sc
+        ldx disp_t+1
+        bmi @sorted             ; no pen left
+        lda #0
+        sta c2v_v_cnt,x         ; taken
+        txa
+        sta disp_ord,y
+        iny
+        bne @sel                ; (always)
+@sorted:
+        sty disp_rn
+.ifdef DISP_MUT_W12ONEPASS
+        lda #15                 ; mutant: one pass, the walk at once
+.else
+        lda #0
+.endif
+        sta disp_rm             ; pass 1: d = 0 only
+@pass:  ldy #0
+@pen:   lda disp_ord,y
+        bmi @nxp                ; has its colour
+        sty disp_ry
+        sta disp_rp
+        tax
+        lda c2v_v_col,x         ; the LUT colour's place on the ladder
+        ldx #15
+:       cmp disp_lad,x
+        beq :+
+        dex
+        bpl :-
+:       stx disp_t+2            ; k
+        lda #0
+        sta disp_rd             ; d
+@w:     lda disp_t+2
+        clc
+        adc disp_rd
+        jsr @try                ; k + d
+        bcc @got
+.ifndef DISP_MUT_W12UP
+        lda disp_t+2
+        sec
+        sbc disp_rd
+        jsr @try                ; k - d
+        bcc @got
+.endif
+        inc disp_rd
+        lda disp_rm
+        cmp disp_rd
+        bcs @w                  ; d <= the pass's limit
+        bcc @nx2                ; pass 1: none
+@got:   ldy disp_ry
+        lda disp_ord,y
+        ora #$80                ; done
+        sta disp_ord,y
+@nx2:   ldy disp_ry
+@nxp:   iny
+        cpy disp_rn
+        bne @pen
+        lda disp_rm
+        bne @rts
+        lda #15                 ; pass 2: the whole ladder
+        sta disp_rm
+        bne @pass
+@rts:   rts
+; @try: A = a ladder place; C = 0 if pen disp_rp took its colour
+@try:   cmp #16
+        bcs @r                  ; off the ladder (k + d > 15 or k - d < 0)
+        tay
+        lda disp_lad,y
+        sta disp_rc
+        tay
+        lda disp_ro,y
+        bmi @own                ; free
+.ifdef DISP_MUT_W12OCS
+        bpl @no                 ; mutant: a held colour is never shared
+.endif
+        asl                     ; held: same OCS colour as the holder?
+        tay
+        lda disp_rp
+        asl
+        tax
+        lda DISP_A_PAL,y
+        eor DISP_A_PAL,x
+        bne @no
+        lda DISP_A_PAL + 1,y
+        eor DISP_A_PAL + 1,x
+        and #$0F
+        beq @set
+@no:    sec
+@r:     rts
+@own:   lda disp_rp
+        sta disp_ro,y
+@set:   ldx disp_rp
+        lda disp_rc
+        sta c2v_v_col,x
+        clc
+        rts
+
+; disp_msum — W12-V (V2, fix round 1: mod 255): disp_mck := the Fletcher
+; sums mod 255 (end-around carry) of the 1000 matrix bytes read back
+; (c2v_ref.screen_sum), so the host sees the cell colours without reading
+; the RAM under I/O.  A palette error moves high nibbles only; mod 256 would
+; keep ~8 bits of it, mod 255 keeps all 16.  A matrix at or above $A000
+; (under BASIC, I/O or KERNAL) is read at $01 = %xx100 one page at a time
+; with IRQs masked, the RAM NMI vector pointed at mach_nmi first (as
+; c2v_fill: identical bytes inside mach_run).
+DISP_ROMLO = $A000               ; @value lowest address a ROM or I/O can map over
+DISP_SCR_BANKED = c2v_screen >= DISP_ROMLO
+disp_msum:
+        lda #0
+        sta disp_mck
+        sta disp_mck+1
+        lda #>c2v_screen
+        sta @rd+2
+.if DISP_SCR_BANKED
+        lda #<mach_nmi
+        sta mach_vnmi
+        lda #>mach_nmi
+        sta mach_vnmi+1
+.endif
+        ldx #0
+@pg:    php
+        sei
+        lda CPU_PORT
+        sta disp_t
+.if DISP_SCR_BANKED
+        and #$F8
+        ora #$04
+        sta CPU_PORT
+.endif
+@lp:
+@rd:    lda c2v_screen,x        ; operand high byte patched
+        clc
+        adc disp_mck
+        adc #0                  ; end-around carry: mod 255
+        sta disp_mck
+.ifndef DISP_MUT_W12MCK
+        clc
+        adc disp_mck+1
+        adc #0
+        sta disp_mck+1          ; (mutant: s2 never summed)
+.endif
+        inx
+        beq @nx
+        cpx #<1000
+        bne @lp
+        lda @rd+2
+        cmp #>(c2v_screen + $300)
+        bne @lp
+@nx:    lda disp_t
+        sta CPU_PORT
+        plp
+        inc @rd+2
+        txa
+        beq @pg                 ; a page wrapped; else all 1000 are summed
+        rts
+
+; The VIC colours by luma, darkest first (c2v_ref.LADDER).
+disp_lad:
+        .byte 0, 6, 9, 2, 11, 4, 8, 14, 12, 10, 5, 15, 3, 7, 13, 1
+
 ; disp_border — blank: display off, border = LUT[COLOR00] (one byte DMA).
 disp_border:
-        lda #<disp_t
-        sta REC_C64LO
-        lda #>disp_t
-        sta REC_C64HI
-        clc
-        lda disp_cur + DISP_S_COLOR
-        adc #<disp_lut
-        sta REC_REULO
-        lda disp_cur + DISP_S_COLOR + 1
-        and #$0F
-        adc #>disp_lut
-        sta REC_REUHI
-        lda #^disp_lut
-        adc #0
-        sta REC_REUBANK
-        lda #1
-        sta REC_LENLO
-        lda #0
-        sta REC_LENHI
-        sta REC_ACTRL
-        lda #REU_CMD_FETCH
-        sta REC_COMMAND
+        lda disp_cur + DISP_S_COLOR     ; W12-V: the lookup through c2v_lookn
+        sta DISP_A_PAL                  ; W12-V: (pen 0, which the colour
+        lda disp_cur + DISP_S_COLOR + 1 ; W12-V: choice never moves)
+        sta DISP_A_PAL + 1              ; W12-V
+        jsr disp_alut                   ; W12-V
+        ldx #0                          ; W12-V
+        jsr c2v_lookn                   ; W12-V
         jsr mem_rec_dirty       ; C1
-        lda disp_t
+        lda c2v_v_col                   ; W12-V
         sta VIC_BORDER
         lda #DISP_VOFF
         sta VIC_CTRL1
         rts
 
-; The OCS-RGB -> VIC LUT, nibble-packed (host/c2v_ref.py lut_inc()).
+; disp_alut — W12-V: c2v_a_lut := disp_lut.
+disp_alut:
+        lda #<disp_lut
+        sta DISP_A_LUT
+        lda #>disp_lut
+        sta DISP_A_LUT + 1
+        lda #^disp_lut
+        sta DISP_A_LUT + 2
+        rts
+
+; The OCS-RGB -> VIC LUT, run-length packed (host/c2v_ref.py lut_inc()).
+; W12-V (supervisor-approved)
 disp_lutp:
         .include "disp_lut.inc"
 .endif

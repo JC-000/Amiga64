@@ -98,7 +98,8 @@ def test_colours_and_blank_band(lut):
     assert m["colram"] == bytes([15] * 880 + [0] * 120)
     h = R.convert_hires([bytes(176 * 80)] * 4, [0xFFF, 0x000], lut, rows=22)
     assert h["screen"] == bytes([0x01] * 880 + [0x11] * 120)
-    assert h["colram"] == bytes([1] * 1000) and h["bgc"] == 1
+    # W12-V: converted rows carry each cell's pen (0: no pixel); the band keeps c0
+    assert h["colram"] == bytes([0] * 880 + [1] * 120) and h["bgc"] == 1
 
 
 def test_pack_args_layout():

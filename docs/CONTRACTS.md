@@ -51,7 +51,7 @@ $000400–$000FFF, stack top $00F000, program load base $010000.
 - `emu_reset` — clear state, `st_halt`=0.
 - `emu_step` — execute exactly one guest instruction (fetch, dispatch, retire). Returns with `st_halt` set if the instruction halted/trapped.
 - `emu_run` — loop `emu_step` until `st_halt` ≠ 0.
-- `fetch_word` — read guest word at PC into `op_lo`/`op_hi` (also mirrored to `t_tmp` for extension words per handler need), PC += 2. Handlers use it for extension words. Clobbers A and X. Served from a 256-byte page-aligned instruction window (one REU DMA per page refill); `emu_reset` and any `mem_write*` overlapping the cached page invalidate it. Any future path that writes guest memory WITHOUT going through `mem_write*` (e.g. direct REU staging mid-run) must set the window-invalid flag (`w_inv`, ZP $82) or call `emu_reset` first.
+- `fetch_word` — read guest word at PC into `op_lo`/`op_hi` (also mirrored to `t_tmp` for extension words per handler need), PC += 2. Handlers use it for extension words. Clobbers A and X. Served from a cache of 256-byte page-aligned instruction windows (W12-C, "Code-window cache" below: a page change switches windows or refills one with one REU DMA); `emu_reset` and any `mem_write*` overlapping ANY cached page invalidate that window. A path that writes guest memory WITHOUT going through `mem_write*` calls `code_invpg` for each page it wrote (e.g. a blitter D row) or `code_invall` (e.g. REU staging or a resume), or `emu_reset`. (`w_inv`, ZP $82, now only marks the current window; setting it no longer covers the other windows.)
 - Memory API (guest BE ↔ ZP LE conversion at this boundary, v0 = direct per-call REU DMA; internals may later add windowing/TLB — **only these entry points are stable**):
   - `mem_read8` / `mem_read16` / `mem_read32`: `m_addr` → `m_val`
   - `mem_write8` / `mem_write16` / `mem_write32`: `m_addr`, `m_val` →
@@ -59,6 +59,30 @@ $000400–$000FFF, stack top $00F000, program load base $010000.
 - EA resolution: `ea_calc` — decodes mode/reg bits (X = 6-bit mode|reg field), leaves address in `t_ea`; `ea_load`/`ea_store` sized variants (size in A: 0=B,1=W,2=L). Covers all 68000 modes incl. d8(An,Xn) brief extension and abs.W/L, PC-relative, immediate.
 - Sized ALU primitives (all CCR logic lives HERE, not in group handlers): `alu_add`, `alu_sub`, `alu_cmp`, `alu_and`, `alu_or`, `alu_eor`, `alu_not`, `alu_neg`, `alu_addx`, `alu_subx`, `alu_ext`. Inputs `t_op1`,`t_op2`, size in A; result `t_res`, CCR updated per 68000 PRM semantics (X only where the 68k sets it).
 - `dispatch_next` — handlers `jmp` here when done (it is the top of the step loop).
+
+## Code-window cache (W12-C)
+
+`runtime/core.s`, labelled `; W12-C`; measurements in `docs/PERF.md` (m).
+
+- **Layout.** `CWIN_N` = 7 windows (`-D CWIN_N=1..7`), window k at `cwin_base` + k·$100 = $A900 + k·$100 (rc `ram.inc`, c64.cfg area CWIN $A800–$B0FF, RAM under BASIC ROM). `cwin_map` $B000–$B0FF (also the last window's guard byte). The cache's lookup/refill code `cw_look` is segment `CWCODE` at $A800 (asserted to end below `cwin_base`). The directory (`cw_tlo`/`cw_thi` tags = guest address bits 15-8/23-16, `cw_val`, the FIFO hand `cw_hand`, `cw_mok`) is MAIN BSS; ZP `w_pg0`/`w_pg1`/`w_inv` describe the **current** window, the one the four hit-path loads (`dg_w0`/`dg_w1` in `dispatch_go`, `fw_w0`/`fw_w1` in `fetch_word`) point at.
+- **Hit path unchanged.** The per-instruction test (PC page = `w_pg`, `w_inv` = 0) and the two loads are the base instructions; a window switch re-points the loads' operand high bytes (self-modified, like `jvec`). Only the miss path changed: it banks BASIC out (below) and jumps to `cw_look`.
+- **Miss.** `cw_look`: `cwin_map[page-low]` bit 7 clear → refill. Else the map's hint window, then a scan of the directory: a valid window with PC's page becomes current (no DMA). A refill takes the window at the FIFO hand (`cw_hand`, counting down), drops its old page from the map, issues one 256-byte REU DMA (`mem_rec_dirty` semantics as before: `m_rok` := 0 first) and enters the new page.
+- **`cwin_map[p]`.** Bit 7: some valid window has page-low p. Bit 6: some valid window has page-low p+1. Bits 5-3: hint, the window last filled with page-low p (a guess; always checked against the tags). Bits 2-0: how many valid windows have page-low p. Bits 7/6/2-0 describe exactly the valid windows, and an entry with count 0 has no hint bits (invariant; `run_cwin` smc/map).
+- **Write invalidation (`WINCHK_*`, every `mem_write*`).** One map read through a self-modified absolute load (the memory API keeps X and Y): byte write → slow path only if bit 7; word/long → only if the byte is nonzero. Common path 13 cycles (was 9 for bytes, 16 for words/longs). Slow-path cases (VICE, extra cycles per write; PERF (n)): page-low p+1 cached (bit 6, a word/long that does not spill) ~+100; page-low p cached in another bank (the map ignores the bank; one window with that page-low: the hint decides) ~+156; a real hit drops the window. A slow path entered with BASIC ROM in (a call from outside a run, e.g. `test_load_chunk` at $37, where the map byte was a ROM byte) banks BASIC out for the check and restores the caller's `$01`: such calls pay the slow path for every write whose ROM byte says "maybe" (host staging only; about half of the staged bytes on the AROS staging). The slow path (`cw_ww`) checks the start page and, for a write that spills past the page end, the next page (24-bit wrap $FFFFxx → $0000xx), by tag; each matching valid window is dropped (`cw_kill`: invalid, map updated; the current one also sets `w_inv`). Clobbers A only, as before.
+- **`code_invpg`** (export): A = page bits 15-8, X = bits 23-16: drop every cached window of that page. Clobbers A, X; keeps Y. Reads and updates the map: call it with BASIC out (BCODE callers have it out). Never touches `$01`.
+- **`code_invall`** (export, interface I1 for W12-T's resume): invalidate every window; the next fetch refills. Clobbers A, X; keeps Y. Writes the map but never reads it, so it is correct with BASIC ROM in. `emu_reset` calls it (it replaces `w_inv := 1`). The first call since boot clears the whole map (`cw_mok`).
+- **Banking ($01).** The windows and the map are RAM under BASIC ROM. The miss path banks BASIC out when it is in (LORAM and HIRAM both set: `dec $01`, `$x7 → $x6`, the `blt_w` idiom) and **leaves it out**; apart from that, only the write-check slow path (`cw_ww`) touches the CPU port: it banks BASIC out for the check and restores the caller's `$01` (rev-cwin round 2). Inside `mach_run` $01 = $35 already. Invariant: while a window is valid and the CPU is inside `emu_run`/`emu_step`/`mem_write*`, BASIC is out — every $01 restorer that runs inside a run (`blt_w`, `c2v`, `disp`, `mach_nmi`) restores a value saved during that run. **Caller rule:** a caller that maps BASIC in again after a run (e.g. `mach_run` returning to a `$37` caller) calls `emu_reset` or `code_invall` before the next `emu_step`/`emu_run` or before relying on `mem_write*` invalidation. Every runner and driver in the tree does (they call `emu_reset` per run). Callers of `emu_run`/`emu_step` from `$37` get `$36` back.
+- **Page ends.** Every fetch is one word at an even PC, so the hit path reads `base+X` and `base+X+1` with X <= $FE: inside the window. After the last word of a page, `wrap` bumps the PC page and the next word (an extension word or the next opcode) misses and comes from that page's own window. No window keeps a 257th byte; byte 256 (the next window's byte 0, or `cwin_map[0]` for the last window) is read only at an odd PC, an address error on the 68000. Test: `run_cwin` smc/straddle_ext and straddle_long, with both pages in non-adjacent windows.
+- **Writers that bypass `mem_write*`.**
+  - blt D rows: `code_invpg` per row (`blt_dpage`).
+  - dosio STASH into guest RAM: `dosio_stash_guest` only; it re-stores the first and last byte through `mem_write8` (transfers <= 256 bytes, so at most 2 pages).
+  - hle_mem (MEMF_CLEAR) and `test_load_chunk`: `mem_write*`.
+  - Host REU staging (SocketDMA, mboot's `aros_fill`): before `emu_reset`.
+  - W12-T resume and any UCI REU load into guest memory: `code_invall`.
+  - c2v/disp STASH only into the $DF LUT bank (trapped, never executed).
+- **Replacement: FIFO.** On the AROS boot's page trace (boot model, to m3) FIFO leaves 1.0% more refills than LRU at N = 7 and costs nothing on a window switch; `build/evidence/w12-cwin/policy.txt`.
+- **Counter build** (`-D CWIN_COUNT`, tests only): `cw_nins` (instructions, exception-mode loop), `cw_nmis` (miss-path entries), `cw_nref` (refills), `cw_nkil` (windows dropped by writes), u32 each, consecutive; `cw_nslw` (write-check slow paths, u32, exported).
+- **Tests:** `tests/run_cwin.py` (legs smc, invall, blt, bank, bench, bytew, aros; `--mutants`, 10), `tests/smc.py`, `host/tests/test_cwin_hotpath.py`.
 
 ## Dispatch
 
@@ -929,7 +953,7 @@ spec: `docs/C2V.md` "Row skip", "Display refresh (S3.5)". Reference:
 - **Policy v0:** a change is `gen` ≠ the last value seen **or** `dirty` ≠ 0
   (F1); it converts if the copied fields differ from the last snapshot.
   Inside `mach_run` (`mach_in` ≠ 0) a conversion starts only when
-  `DISP_N` × 14188 guest E ticks (20 frames' worth) have passed since the
+  `DISP_N` × 14188 guest E ticks (24 frames' worth since W12-V; was 20) have passed since the
   previous conversion **ended** (`mach_etime` at its end; F3: a frame count
   was eaten by the catch-up after each long conversion, livelocking the
   guest at s ≤ 1). E going backwards (`mach_init`) opens the budget. A
@@ -953,11 +977,63 @@ spec: `docs/C2V.md` "Row skip", "Display refresh (S3.5)". Reference:
   frames that passed during one pass, as in W10-P's copper catch-up
   ("Machine loop" / "Copper"). A guest that counts VERTB interrupts to
   keep time sees fewer of them while the display converts.
-- **Modes:** 2-plane lores → `c2v_mc2s` (exact); 4-plane hires →
-  `c2v_hiress` (silhouette); anything else, DMA off, an empty DIW, a
-  short DDF or a row crossing a 512 KB line → blank (`disp_why` 1–6). Once
-  a picture has been shown, a blank sets `$D011` = `$0B` and `$D020` =
-  LUT[COLOR00]. Before that, a blank only logs.
+- **Modes:** 2-plane lores → `c2v_mc2s` (exact pixels); 4-plane hires →
+  `c2v_hiress` (silhouette pixels, per-cell colours, W12-V); anything
+  else, DMA off, an empty DIW, a short DDF or a row crossing a 512 KB
+  line → blank (`disp_why` 1–6). Once a picture has been shown, a blank
+  sets `$D011` = `$0B` and `$D020` = LUT[COLOR00]. Before that, a blank
+  only logs.
+- **Colour choice (W12-V).** Reference `host/c2v_ref.separate`; tests
+  `host/tests/test_disp_colour.py`, `tests/run_pf.py` steps `mc2-dark` /
+  `hires-dark`. The LUT (nearest VIC colour in CIE L\*a\*b\*) alone
+  maps every dark OCS colour to black, so the insert-disk screen's pens
+  ($111, $222, $024 on $000) were black on black. The rule:
+  - **Cell pen (hires).** For each 8×8 cell (16 hires pixels per line),
+    on the first of its 8 lines with a set pixel, the colour index of the
+    leftmost set pixel (plane bytes 2cx then 2cx+1, bit 7 first); 0 if
+    the cell has none. All 200 converted lines count, also those below
+    DIWSTOP that `disp_clrlines` clears afterwards. `c2v_hiress` leaves
+    the pens in colour RAM (unused by the VIC in hires) and counts cells
+    per pen (`c2v_v_cnt`, saturating at 255).
+  - **Pens in use:** pen 0 always; mc2: pens 1–3; hires: every cell pen.
+    **Order:** pen 0, then by cell count descending, ties by lower pen
+    (mc2: 1, 2, 3).
+  - **Pass 1:** in order, each pen takes its LUT colour unless a pen with
+    a different OCS colour (COLORxx & `$FFF`) already holds it. **Pass
+    2:** in order, each pen still without a colour walks the luma ladder
+    (`c2v_ref.LADDER` = `disp_lad`: 0 6 9 2 11 4 8 14 12 10 5 15 3 7 13
+    1) from its LUT colour's place k: k+1, k−1, k+2, k−2, … (places off
+    the ladder skipped), and takes the first colour no pen with a
+    different OCS colour holds.
+  - **Guarantees:** pen 0 keeps LUT[COLOR00] (the background and border
+    are unchanged); pens with equal OCS colours share a colour; pens in
+    use with different OCS colours never do (≤ 16 pens, 16 colours: pass
+    2 always finds one). In hires "in use" means a **cell pen**: a pen
+    that is never the leftmost pixel of a cell's first line with pixels
+    (on the insert-disk screen pen 3, $024) is not separated and does not
+    show. Colour fidelity is best effort: a pen that loses its nearest
+    colour gets the nearest free one in luma, any hue.
+  - **Output:** mc2: the four colours as before (`$D021`, matrix nibbles,
+    colour RAM). Hires: matrix cell = colour(pen) << 4 | colour(pen 0),
+    colour RAM = the cell pen (0 on any blank rows), via `c2v_hfill`
+    after `c2v_lookn` and `disp_cols` (the rule).
+  - **Matrix checksum (V2):** after every shown conversion `disp_msum`
+    reads the 1000 matrix bytes back (`$01` = `%xx100` one page at a
+    time, IRQs masked per page; the NMI vector already guarded by the
+    fill; a matrix at or above $A000 is always read banked, the NMI vector
+    set first) into `disp_mck` (BSS, u16 LE: Fletcher sums mod 255 with
+    end-around carry, s1 = Σ b, s2 = Σ s1, `c2v_ref.screen_sum`; fix
+    round 1: mod 256 kept only ~8 bits of a palette error, which moves
+    high nibbles only). The host reads it where it cannot read the RAM
+    under I/O (the Ultimate, m3). Proven: every one-bit error of one pen's
+    colour and every pen swap on a frame-345-like screen changes it
+    (`host/tests/test_disp_colour.py`); in general it is a 16-bit
+    checksum, so 1 wrong palette in ~65k can still collide.
+  - **LUT carriage:** `disp_lutp` holds the LUT run-length packed
+    (`c2v_ref.rle_lut`: byte = (run − 1) << 4 | colour, 821 bytes, was
+    2048 nibble-packed; supervisor-approved); `disp_init` unpacks it, once,
+    into the same 4096 REU bytes at `disp_lut` and stops at exactly 4096
+    entries (`disp_init` 126,616 φ2 cycles, base 120,006–120,225).
 - **C64 resources:** writes the c2v regions (bitmap, matrix under I/O,
   colour RAM, `c2v_stage` during `disp_init`, `c2v_args`), `$D011`,
   `$D016`, `$D018`, `$D020`, `$D021`, and `$DD00` bits 1–0 (bits 7–2 and
@@ -1045,10 +1121,11 @@ blt`). Design: `docs/WAVE11_BRIEF.md` C1/C3, `docs/S3_PLAN.md` §3.4, §3.5,
   the row buffers `blt_abuf`/`blt_cbuf` (rc `blt $B600-$B7FF`, RAM under
   BASIC ROM; BASIC is banked out for the blit, the caller's `$01`
   restored), one DMA per D row. The REC use ends with `mem_rec_dirty`.
-- **Instruction window.** A D row that touches the guest page of `r_pc`
-  sets a flag; at the end of the blit blt.s re-stores one byte of that page
-  through `mem_read8`/`mem_write8` (same value), so core.s's WINCHK drops
-  the window (test `smc`). m_addr, m_val and t_tmp are saved around it.
+- **Instruction window.** W12-C (supervisor-approved): before each D row
+  is stored, `blt_dpage` calls core.s's `code_invpg` for the row's first and
+  last page (a row is at most 128 bytes), dropping every cached code window
+  of those pages, current or not (tests `smc` here and `run_cwin` leg
+  `blt`). m_addr, m_val and t_tmp are untouched (`code_invpg` uses none).
 - **Pixel epoch (C3, Addendum 3).** After every normal blit with D on:
   `inc disp_st+105`, a read-modify-write of the byte itself (BASIC is out
   in BCODE), never a private counter (one that happened to equal a
@@ -1223,11 +1300,24 @@ Tests: `tests/aros_boot.py` (legs `m1`, `m2`, `m3`, `ablate`, `wkhook`,
   its vblanks, first seen at frame ≥ 345, the logo with its icons). On
   the U64E the hash leaves the screen matrix out (it lies under the I/O
   window and the running guest's `$01` is never touched; the model side
-  hashes the same way, `nomatrix`); on VICE the 6510 is halted for the
+  hashes the same way); on VICE the 6510 is halted for the
   snapshot and `$01` is switched to `$34` and back to the value read.
-  Blind spot of the U64E hash: a screen with the right pixels but a wrong
-  palette differs only in the matrix (the hires cell colours), so the U64E
-  leg cannot see it; VICE's full hash covers it. The U64E leg re-hashes on
+  W12-V narrowed the U64E hash's blind spot (a right-pixel, wrong-palette
+  screen differed only in the matrix): its hash now carries `disp_mck`,
+  the 16-bit matrix checksum disp.s keeps in BSS (model key `u64`; a
+  wrong palette collides with probability ~2⁻¹⁶, tested exactly for
+  one-pen errors and swaps), and VICE checks `disp_mck` against the
+  matrix it reads. The U64E/C64U bitmap and colour RAM are read in
+  1000-byte GETs and read again if `disp_nconv` changed meanwhile. The
+  matched model frame must show ≥ 3 distinct non-background colours
+  (`visible`, asserted by `model_frames.py` for every insert-disk
+  conversion and by the leg), and the leg renders the frame to
+  `build/aros/m3_vice.png` or `m3_u64.png` (both Ultimates write the
+  same name). On VICE the PNG is the C64's bitmap and matrix; on the
+  Ultimates the matrix is not readable, so the PNG takes the bitmap and
+  the cell pens from C64 memory and the pen colours from the model's
+  `vic_pens`, and is written only if that matrix's sums equal the C64's
+  `disp_mck`. The U64E leg re-hashes on
   every 2 s poll (not only after a new conversion), so one torn read of
   the final, static screen cannot make it time out. m3
   needs the blitter (W11-B): green on the merged tree (VICE s = 9: 174 s,
