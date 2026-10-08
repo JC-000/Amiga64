@@ -1047,3 +1047,41 @@ IDENTICAL (`build/evidence/c64u-ser/c64u64/run.log`, `c64u64-run2/`); with
 one GET per segment (round 1) again on the C64U at 64 MHz (m2 at 45 s, 0
 capture retries) and on the U64E at 48 MHz (m2 at 60 s, 0 retries), both
 IDENTICAL (`build/evidence/c64u-ser/round1/{c64u64,u64e48}/`).
+
+## Suspend/resume and UCI REU I/O (W12-T, 2026-10-08)
+
+Runner build ID `ca3d352f5f2134e8` (`build/evidence/w12-reu/{c64u,u64e}/final2.log`),
+`tests/aros_resume.py --backend u64`, one `u64_hold` per leg; every hold's
+config read back IDENTICAL. REU-resident snapshot: suspend, harness
+`reset`, fresh runner load (`prepare_target`: `set_reu` + `run_prg`),
+resume. No device storage was written.
+
+| | C64U fw 1.1.0, 64 MHz | U64E fw 3.15, 48 MHz |
+|---|---|---|
+| suspend request -> frozen | 0.36 / 0.20 s | 0.16 / 0.19 s |
+| `mid`: frozen at serial byte | 387 of 416 (frame 149) | 251 of 416 (frame 192) |
+| `mid`: serial after the resume | = the model to byte 416 | = the model to byte 416 |
+| `m3`: boot to the insert-disk picture | 68.7 s (frame 620) | 88.4 s (frame 797) |
+| `m3`: `snap_resume` (checks + restore) | 0.44 s | 0.16 s |
+| `m3`: picture hash again after launching the resume | **6.04 s** | **5.27 s** |
+| state fletcher at suspend = after reset (`survive`) | equal (mid, m3) | equal (mid, m3) |
+| REU config after the reset (read back) | enabled, 16 MB | enabled, 16 MB |
+| refusals E8/E3/E4/E2/E5 | all as specified | all as specified |
+
+- **The REU survives** the harness reset and `run_prg` on both firmwares,
+  proven per leg: the state span's fletcher computed by the C64 at suspend
+  equals `aros_sum` of it after the reset; the guest then continues. The
+  REU under `$DF2400-$DF2EFF` and `$DF4000-$DFFFFF` reads zero after m3
+  (nothing but snap.s writes the snapshot region).
+- **Unmapped space after m3**: `$200000-$BEFFFF` and `$E80000-$F7FFFF`
+  read zero (`aros_sum`), the same on both devices. `$DC0000-$DEFFFF` does
+  NOT (fletcher `$9935017E` on both: AROS writes there), so the file's
+  slow-RAM span runs to `$DEFFFF` (CONTRACTS "Suspend/resume").
+- **Timing note**: the picture time is measured with one REST GET per
+  ≤ 1 KB (`transport.read_memory`); the harness's `read_bytes` (128-byte
+  GETs, ~112 ms each on the C64U) made the first C64U measurement 18.5 s.
+- **Not measured yet (blocked: no device storage writes until the harness
+  owner decides)**: UCI `LOAD_REU`/`SAVE_REU` throughput, checksum
+  correctness through a file, the 1 MHz C64U case, and the file-backed
+  resume (`snap_req` bit 6). The protocol is pinned host-side
+  (`host/tests/test_snap_ureu.py`) against `dos.cc:254-319`.

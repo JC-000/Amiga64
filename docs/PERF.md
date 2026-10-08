@@ -741,3 +741,19 @@ frame. The boot profile's s is chosen per host for speed (U64E 4, VICE 9).
   call sites and callees in different pages pays more (~380/refill).
 - Real-hardware validation on the U64E is pending; treat every figure here as
   provisional until a cycle-counted hardware run exists.
+
+## Suspend hook cost (W12-T)
+
+`snap_arm` (tests/aros/mboot.s, before `mach_run`) puts `snap_fhook` in
+front of the frame hook. With no request pending, per frame-hook call
+(once per service pass that posted a VERTB, i.e. once per guest frame):
+`lda snap_chain+1` 4, `beq` 2, `jsr @ch` 6, `jmp (snap_chain)` 5 (then
+`cop_frame` exactly as before, returning to snap_fhook), `lda snap_req` 4,
+`and #1` 2, `bne` 2, `rts` 6 = **31 φ2 cycles per guest frame** on top of
+`cop_frame`. A frame is 14188 << s φ2 (s = 3 on the Ultimate: 113,504),
+so ≤ 0.03 % of guest time. The per-instruction path is untouched
+(`perf_cycles --max-delta 0`: no module's code moved; snap.s/ureu.s link
+last). Suspend itself (a request pending) costs four REC stashes plus
+the checksum pass over ~4.6 KB: 0.20-0.36 s from request to frozen on
+the Ultimate, 0.26-0.52 s on VICE (dominated by waiting for the next
+frame hook and the host's polling).

@@ -1287,3 +1287,144 @@ Tests: `tests/aros_boot.py` (legs `m1`, `m2`, `m3`, `ablate`, `wkhook`,
 - **Backlog.** The boot entry is a test-time driver this wave; making it
   part of the product PRG (the banked BCODE area) belongs to the
   Workbench track.
+
+## UCI REU I/O (W12-T)
+
+Owner: snap (`runtime/ops/ureu.s`; W12-T exports in `dosio_uci.s`).
+Tests: `host/tests/test_snap_ureu.py` (byte-level, the UCI model of
+`test_hle_dos_uci.py` with `$21`/`$22` added test-side), the hardware probe
+(`docs/HARDWARE.md`, W12-T).
+
+- **Firmware facts** (1541ultimate `software/filemanager`, read at
+  `~/Documents/1541u-315preview` @871ad034; dos.h/dos.cc relayed identical
+  in the C64U 1.1.0 build): `dos.h:29-30` `DOS_CMD_LOAD_REU = $21`,
+  `DOS_CMD_SAVE_REU = $22`; `dos.cc:254-319`: `[t][cmd][addr u32 LE][len
+  u32 LE]`, addr masked to 24 bits, len to 25; no open file → `85,NO FILE
+  OPEN`; `addr + len > 16 MB` → len clamped, status `02,REQUEST TRUNCATED`;
+  the transfer is `file->read`/`write` at the file's current position;
+  the reply is one block `"$%6x BYTES LOADED TO REU $%6x"` /
+  `"... SAVED FROM REU ..."` carrying the TRANSFERRED count (a short file
+  still says `00,OK`); a FatFS error replaces the status. The firmware
+  writes the REU backing memory whatever the C64's REU config; the C64
+  sees it only with the REU enabled and large enough (the hold sets it).
+- **Entries** (MAIN; I/O in; BASIC banked out around the SCODE part by
+  `ureu_bank`, the caller's `$01` restored): `ureu_ld` / `ureu_sv` = open
+  `dosio_name` (`FA_READ` / `FA_WRITE|FA_CREATE_ALWAYS`) on DOS target 1,
+  one transfer of `ureu_rl` bytes at REU `ureu_ra`, close (always; a save
+  is flushed by the close). `dosio_uci_init` runs first (handshake reset,
+  both targets closed). SCODE pieces for snap.s: `ureu_open`, `ureu_xfer`
+  (A = `$21`/`$22`), `ureu_close`.
+- **Chunks**: one command moves at most 256 KB (`UREU_CHUNK_HI`), so each
+  reply arrives inside `dosio_uci.s`'s poll budget (65536 fenced polls,
+  ~8 s at 64 MHz) and nothing is aborted mid-transfer. The C64 waits for
+  every reply: a running guest is paused for the whole transfer.
+- **The count is the truth**: every chunk must answer status `00` AND the
+  exact text `$` + the chunk length in `%6x` (right-aligned in spaces,
+  lower-case) + space; anything else (a short or long count, a truncation,
+  another text) fails with `ureu_err` = 5 (`UREU_E_SHORT`); a status other
+  than `00` = 3 (`ureu_us` keeps its first two bytes); no reply = 2 (the
+  handshake is aborted); open refused = 1; close refused = 6. On a failure
+  `ureu_ra`/`ureu_rl` point at the failing chunk.
+- **Scratch**: the 8-byte command payload and the check's shift register
+  sit in `dosio_buf + $F0..` (a reply keeps at most 40 bytes at its start).
+  ureu is never used while an HLE dos.library file is open (machine mode
+  has none).
+- **Storage**: C64U `/SD/amiga64/`, U64E `/USB1/amiga64/`; never `/Flash` or
+  `/Temp`. Device storage writes wait for the harness owner's decision
+  (Wave 12 brief).
+
+## Suspend/resume (W12-T)
+
+Owner: snap (`runtime/ops/snap.s`, `host/snapfmt.py`, rc `snap` region).
+Tests: `tests/aros_resume.py` (legs `mid`, `m3` with the refusals,
+`--mutants`), `host/tests/test_snap_fmt.py`.
+
+- **Trigger**: `snap_arm` (`tests/aros/mboot.s`'s W12-T line, after
+  `cop_reset`/`disp_init`, before `mach_run`; 31 φ2 per guest frame with no
+  request, PERF "Suspend hook cost") puts `snap_fhook` in `mach_fhook` and keeps the displaced
+  hook (`cop_frame`) in `snap_chain`, which it calls first. The frame hook
+  runs in `mach_run`'s service pass after `emu_run` returned: an instruction
+  boundary, `$01 = $35`. The host sets `snap_req` bit 0; the suspend runs
+  at the next frame hook (≤ 1 guest frame). Bit 6 also writes the file
+  (`dosio_name`), bit 7 continues the guest afterwards; without bit 7 the
+  guest freezes (`sei`, spin): a REU-resident snapshot is valid only while
+  nothing runs. `snap_st`: `$10` suspended, `$11` + file,
+  `$20` resumed, `$E1-$E9` refused (`host/snapfmt.ST_ERR`).
+- **Snapshot area** (rc `snap $DF1000-$DF3FFF`, the REU under the trapped
+  custom-chip bank, never guest-visible, both profiles): `+$000` header,
+  `+$100` zero page, `+$200` the `disp_st` page, `+$300` the MAIN BSS image
+  `__BSS_RUN__ .. snap_keep` (stashed, summed and filed as whole pages,
+  restored exactly), `+$2FE0` the declared ROM id (32 bytes, in no file
+  span). Layout and header: `host/snapfmt.py`.
+- **Resume** (`snap_resume` from a FRESH runner load; does not return while
+  the guest runs): with bit 6, LOAD_REU span 0 (the header) first. Checks,
+  all before anything is restored (a refusal leaves `mach_on` 0): the
+  build is stamped (`snap_bid` ≠ 0, else `$E8`); the header checksum
+  (`$E2`); the header equals what this build would write, flags and state
+  sum aside (magic/version `$E1`, layout `$E9`, build ID `$E3`, ROM id = the one declared
+  at `+$2FE0` `$E4`); then (file) span 1, the state checksum (`$E5`), then
+  the guest ranges. Restore: `disp_init`; `st_exc` from the image, then
+  `emu_reset`; zero page; `disp_st`; the BSS image; the CIA #2 counter;
+  the pixel epoch `disp_st+105` += 1 (I2); `code_invall` (I1; until W12-C
+  lands a stub: `emu_reset` already set `w_inv`); `mem_rec_dirty`; then
+  `mach_run` (`mach_on` = 1: no `mach_init`).
+- **REU-resident resume (interim, until device storage is allowed)**:
+  the snapshot and the guest's memory stay in the REU across the harness
+  reset and the fresh runner load. Proven per run, not assumed
+  (`aros_resume` `survive`): the state fletcher the C64 computed at
+  suspend (header +96, under the header checksum) equals `aros_sum` of the
+  same span after the reset; the REU config is re-set by `prepare_target`
+  inside the hold before the boot and before the resume, and read back.
+- **Nothing else writes the snapshot region**: the memory API traps every
+  guest access to `$DF0000-$DFFFFF` to chip.s, which never addresses the
+  REU (no REC programming in chip.s/cia.s/cop.s); the only REU users under
+  `$DF` are disp.s (the LUT, `$DF0000-$DF0FFF`) and snap.s. Checked after
+  m3 on every backend: the REU from the end of the BSS image to the
+  declared ROM id, and `$DF4000-$DFFFFF`, read zero (`aros_resume`
+  `zero_check`).
+- **Build ID** (I3): `snap_bid` (DATA) = the first 8 bytes of SHA-256 of the
+  PRG with those 8 bytes zeroed, stamped by the Makefile after the link
+  (`host/snapfmt.py --stamp`). Other links (variant builds) stay 0 and can
+  suspend but never resume. ROM id: 32 bytes in the REU at snapshot
+  `+$2FE0`, written by whoever staged the ROM (the host: SHA-256 of
+  `aros-ext.bin || aros-rom.bin`, `tests/aros_resume.rom_id`); the C64 does
+  not hash the ROM. Suspend copies it into the header; resume compares the
+  header's with the one declared now. (In the REU, not MAIN: 32 bytes of
+  DATA tipped the MAIN layout over a page, see the Wave 12 report.)
+
+### State inventory
+
+Every C64-side byte the guest's progress depends on, and what happens to
+it. "Image" = saved and restored byte for byte. Wholesale by design: the
+image is every module's BSS, so a BSS byte added later is covered without
+an edit here (snap.s/ureu.s link last; only `snap_chain` of theirs lies
+before `snap_keep`).
+
+| State | Where | Suspend | Resume | Why |
+|---|---|---|---|---|
+| 68k registers D0-A7, PC, SR | zp `$10-$55` | image | restored | the guest CPU |
+| opcode, memory-API args, EA, ALU operands/result, scratch | zp `$56-$77` | image | restored | dead at an instruction boundary; restoring is harmless |
+| `st_halt`/`st_reason` | zp `$78-$79` | image | restored | `mach_run` takes a racing event bit as on any entry |
+| interpreter-internal | zp `$7A-$7F` | image | restored | as above |
+| fetch window `w_pg0/w_pg1/w_inv`, REC shadow `m_rok..m_rbk` | zp `$80-$87` | image | NOT restored: `emu_reset` sets `w_inv`, clears `m_rok`; `code_invall`, `mem_rec_dirty` | caches: the restored values would describe the fresh load's REC/window |
+| `st_exc`, `r_osp`, `st_ipc`, `st_iop`, `st_sp6`, `st_exl` | zp `$88-$94` | image | `st_exc` first (latched by `emu_reset`), then all | supervisor mode, inactive SP, the exception snapshot (`st_sp6` is re-taken per instruction) |
+| `ev_pend`, `mach_frames` | zp `$95-$99` | image | restored | pending events, the frame count |
+| loader scratch, `$00/$01`, free zp | zp `$00-$0F`, `$9A-$FF` | image (not used) | not restored | runner/harness or hardware, not guest state |
+| step-loop patch (`nx_br`, `step_jv`, `run_jv`) | CODE (SMC) | — | rebuilt: `emu_reset` with the image's `st_exc` | the only persistent self-modification (others are per instruction) |
+| `code_win` (+ W12-C windows in CWIN) | BSS / `$A800-$B0FF` | image | invalidated (`code_invall`) | a cache of guest memory |
+| chip shadow, serial ring + count, log | `chip.s` BSS | image | restored | Paula/INTREQ/INTENA state; the ring continues the text |
+| CIA-A/B state (timers, ICR, TOD, ports) | `cia.s` BSS | image | restored | guest CIAs live in E time (event slots) |
+| copper state, `cop_dhook`, `cop_sh` | `cop.s` BSS | image (`cop_dhook` re-set by `disp_init`, then overwritten by the image) | restored | the copper |
+| display state block | `disp_st` `$B800-$B8FF` | image page | restored; +105 bumped | written by cop/blt, read by disp |
+| blitter state | `blt.s` BSS | image | restored | blits are synchronous: no blit is in flight at a frame hook; row buffers `$B600-$B7FF` are scratch |
+| display driver (`disp_cur`, budget, epoch) | `disp.s` BSS | image | restored | the next conversion decides as before; the bumped epoch forces one |
+| machine loop (deadlines, slots, `mach_on`, `mach_fhook`, `mach_now`, `mach_chi`) | `mach.s` BSS | image (`mach_rdc` first) | restored | event seam and frame timing, absolute in the time base below |
+| `snap_chain` | `snap.s` BSS (before `snap_keep`) | image | restored | the chained frame hook |
+| HLE / dos / con / mem state | `hle*.s`, `dosio_*.s` BSS | image | restored | inert in machine mode (no HLE traps); restoring keeps them consistent |
+| group scratch (`v_*`), `mach_s` | DATA | not saved | fresh load | `v_*` per instruction; `mach_s` is read by `mach_init` only (latched in `mach_sl`) |
+| CIA #2 TA/TB (the time base) | hardware | in the image as `mach_now` | reloaded to `~mach_now` (TA ≥ `$0100`: ≤ 255 φ2 earlier) | every deadline is absolute in this counter |
+| CIA #1 TA one-shot, ICR mask, IRQ/NMI vectors, `$01` | hardware / `$FFFA` | — | rebuilt by `mach_run`'s entry (`mach_vec`, `mach_svc` re-arms) | mach_run's own entry contract |
+| VIC registers, `$DD00` bank, bitmap, matrix, colour RAM | hardware / `$D000`, `$E000` | — | rebuilt by the forced conversion (I2) | derived from `disp_st` + guest memory |
+| c2v pair tables, `c2v_args` | `$B900-$BAFF`, `$BF00` | — | `disp_init` → `c2v_init`; args per conversion | derived |
+| LUT | REU `$DF0000` | — | `disp_init` stashes it | derived |
+| guest memory | REU chip RAM, slow RAM + `$DC0000-$DEFFFF`, ROM banks | stays (REU-resident) / file spans 2-5 | stays / LOAD_REU | the guest's RAM. AROS WRITES `$DC0000-$DEFFFF` (unmapped in the profile; not zero after m3 on both Ultimates), so the slow-RAM span runs to `$DEFFFF`. `$200000-$BEFFFF` and `$E80000-$F7FFFF` read zero after m3 (`aros_resume` m3 leg, Ultimate) and are not filed: a resume needs them zero, as the boot does (`host/machine.ZERO_SPANS`) |

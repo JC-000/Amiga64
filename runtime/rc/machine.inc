@@ -49,7 +49,14 @@ AROS_SLOW_END = $DBFFFF ; last slow-RAM byte (inclusive)
 .ifndef disp_lut
 disp_lut  = $DF0000     ; W10-V disp: OCS-RGB -> VIC LUT, 4096 bytes (index = $0RGB)
 .endif
-; @region io $DF1000-$DFFFFF custom-chip bank: trapped to chip.s by the memory API
+; @region snap $DF1000-$DF3FFF W12-T (supervisor-approved) suspend snapshot in the REU under the trapped $DF bank (never guest-visible): header, zero page, disp_st, BSS image (host/snapfmt.py)
+.ifndef snap_base
+snap_base = $DF1000     ; W12-T (supervisor-approved): snapshot area (header at +0)
+.endif
+.ifndef snap_end
+snap_end  = $DF3FFF     ; W12-T (supervisor-approved): last byte of the snapshot area (inclusive)
+.endif
+; @region io $DF4000-$DFFFFF custom-chip bank: trapped to chip.s by the memory API ; W12-T (supervisor-approved): was $DF1000-
 
 ; @region aros $E00000-$E7FFFF extension ROM bank, 512 KB (aros-ext.bin, staged by host/machine.py)
 .ifndef AROS_EXT
