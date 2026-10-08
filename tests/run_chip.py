@@ -33,7 +33,7 @@ After every call and run the invariant is checked: m_rbk (the REC bank
 shadow) never holds $BF or $DF.
 
     python3 -m tests.run_chip --prg build/w7-trap/runner.prg [--legs a,b]
-    python3 -m tests.run_chip --prg ... --mutants     # teeth: 4 core.s + 3 chip.s mutants
+    python3 -m tests.run_chip --prg ... --mutants     # teeth: 4 core.s + 4 chip.s mutants
     python3 -m tests.run_chip --prg ... --perf --base build/w7-base/runner.prg
 
 Exit 0 = every selected leg passed (--mutants: every mutant failed a leg;
@@ -640,13 +640,40 @@ def seed(rig: Rig, seeds: dict[int, int]) -> None:
         rig.reu_poke(a, bytes([v]))
 
 
+def reset_checked(rig: Rig, fails: list, tag: str) -> None:
+    """chip_reset over POISONED chip state, then every byte it owns must
+    read 0: the shadow, the log, the whole serial ring and the three u16
+    counters.  Every leg does this before its run, so a partial clear is
+    caught whatever ran before (round 1, R5: a reset clearing only the
+    ring's first page is killed by any single leg)."""
+    from c64_test_harness import read_bytes, write_bytes
+    if not rig.has_chip:
+        rig.chip_reset()
+        return
+    c, sz = rig.chip, rig.sersz
+    for name, n in (("chip_shd", 512), ("chip_log", 4 * LOG_ENTRIES),
+                    ("chip_ser", sz)):
+        write_bytes(rig.t, c[name], bytes([0xEE]) * n)
+    for name in ("chip_logn", "chip_sern", "chip_nopen"):
+        write_bytes(rig.t, c[name], b"\x34\x12")
+    rig.chip_reset()
+    for name, n in (("chip_shd", 512), ("chip_log", 4 * LOG_ENTRIES),
+                    ("chip_ser", sz), ("chip_logn", 2), ("chip_sern", 2),
+                    ("chip_nopen", 2)):
+        got = bytes(read_bytes(rig.t, c[name], n))
+        if any(got):
+            nz = [i for i, b in enumerate(got) if b]
+            fails.append(f"{tag}: chip_reset left {name} non-zero at {len(nz)} "
+                         f"byte(s), first offsets {nz[:6]}")
+
+
 def run_leg(rig: Rig, leg: Leg) -> list[str]:
     fails: list[str] = []
     exe = hunk.parse(_build(leg.words))
     chunks, man = image.build_image(exe)
     rig.sess.stage(chunks)
     seed(rig, leg.seeds)
-    rig.chip_reset()
+    reset_checked(rig, fails, leg.name)
     if leg.sern0:
         from c64_test_harness import write_bytes
         write_bytes(rig.t, rig.chip["chip_sern"], struct.pack("<H", leg.sern0))
@@ -829,6 +856,10 @@ CHIP_MUTANTS = {
     # bits ignored, every byte to page 0)
     "ser_mod256": [("        lda chip_sern+1         ; X = slot bits 7-0, the page = count bits 9-8\n",
                     "        lda #0                  ; MUTANT\n")],
+    # round 1, R5: chip_reset clears only the ring's first page (the 256 B
+    # ring's clear)
+    "ser_clr0": [("        sta chip_ser+256,x\n        sta chip_ser+512,x\n"
+                  "        sta chip_ser+768,x\n", "")],
     # c64u ser-ring: pages 1 and 2 swapped (count bits 8 and 9 read the
     # wrong way round)
     "ser_pageswap": [("s2:     sta chip_ser+512,x      ; page 2\n",
