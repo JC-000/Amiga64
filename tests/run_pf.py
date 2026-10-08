@@ -77,17 +77,25 @@ VARIANTS = {
     "trace": ["DISP_TRACE=1"],
     # red for the LUT-trap leg: the LUT in guest-visible REU (the first proposal)
     "lutram": ["disp_lut=0x800000"],
+    # W12-V: the colour choice, the matrix checksum, the run-length LUT
+    "w12ord": ["DISP_MUT_W12ORD=1"], "w12onepass": ["DISP_MUT_W12ONEPASS=1"],
+    "w12ocs": ["DISP_MUT_W12OCS=1"], "w12up": ["DISP_MUT_W12UP=1"],
+    "w12mck": ["DISP_MUT_W12MCK=1"], "w12rle": ["DISP_MUT_W12RLE=1"],
+    "w12run": ["DISP_MUT_W12RUN=1"],
 }
 NOT_TEETH = ("stub", "lutram", "trace")
 TEETH = [k for k in VARIANTS if k not in NOT_TEETH]
-ALL_LEGS = ["shim", "fixture", "wrap", "dosbuf", "live", "gap"]
+ALL_LEGS = ["shim", "fixture", "wrap", "dosbuf", "live", "gap", "cols"]
 # the legs each mutant runs (--teeth): the ones meant to catch it
 MUTANT_LEGS = {"bitorder": ["shim", "fixture"], "pal": ["shim", "fixture"],
                "gen": ["shim"], "ppord": ["shim", "fixture"],
                "mod": ["shim", "fixture"], "straddle": ["shim"], "clr": ["shim"],
                "budget": ["shim"], "bank": ["shim", "fixture"],
                "dirty": ["shim", "wrap"],
-               "efrom": ["gap"]}            # W11-A (supervisor grant, efrom)
+               "efrom": ["gap"],
+               "w12ord": ["shim"], "w12onepass": ["shim"], "w12ocs": ["shim"],
+               "w12up": ["shim"], "w12mck": ["shim"], "w12rle": ["shim"],
+               "w12run": ["shim"]}            # W11-A (supervisor grant, efrom)
 
 
 def build(prg: str, name: str, defines: list[str], shim: bool) -> str:
@@ -206,6 +214,15 @@ def steps() -> list[dict]:
     s.append({"name": "refresh", "conv": True, "action": "refresh",
               "st": dict(mc2, gen=12, color=pal(21)),
               "pre": {"mach_in": 0, "restage": (0x100000, 0x4000, 22)}})
+    # W12-V: dark palettes the nearest-colour LUT maps to one colour; the
+    # hires one with every pen in use, equal OCS pens (1, 15) and junk bits
+    s.append({"name": "mc2-dark", "conv": True,
+              "st": dict(mc2, gen=14, color=[0x000, 0x111, 0x222, 0x024] + [0] * 28)})
+    s.append({"name": "hires-dark", "conv": True, "st": dict(
+        STD, gen=15, bplcon0=0xC200, bplpt=[0x120000 + p * 80 for p in range(4)],
+        bpl1mod=240, bpl2mod=240, ddfstrt=0x3C, ddfstop=0xD4,
+        color=[0x000, 0x111, 0x222, 0x024, 0x042, 0x057, 0x555, 0xAAA, 0x0AA,
+               0x547, 0xCCC, 0xBEF, 0xFFF, 0x07F, 0xA7F, 0xF111] + [0] * 16)})
     return s
 
 
@@ -235,7 +252,7 @@ class Pf(C.Session):
                   "disp_nconv", "disp_nblank", "disp_laste", "disp_bud",
                   "mach_in", "mach_s", "mach_init", "mach_etime", "mach_et",
                   "mem_rec_dirty", "DISP_N", "mem_write8", "mem_write16",
-                  "mem_write32", "chip_nopen", "disp_lut"):
+                  "mem_write32", "chip_nopen", "disp_lut", "disp_mck"):
             self.lab[k] = lookup_label(labels, k)
         self.timeout = 600.0
 
@@ -480,6 +497,9 @@ def run_step(s: Pf, step: dict, mem: Mem, lut: bytes, shown: bool):
         for a, v in exp.items():
             if vic[a] != v & VIC_MASK[a]:
                 f.append(f"VIC ${a:04X} = ${vic[a]:02X}, want ${v & VIC_MASK[a]:02X}")
+        mck = int.from_bytes(s.read_ram(s.lab["disp_mck"], 2), "little")   # W12-V
+        if mck != want["mck"]:
+            f.append(f"disp_mck ${mck:04X}, want ${want['mck']:04X}")
         want_st = {"mode": d["mode"], "why": 0, "nconv": before["nconv"] + 1,
                    "nblank": before["nblank"]}
         shown = True
@@ -1021,6 +1041,164 @@ def leg_gap(prg: str) -> list[str]:
     return M.session(prg, body)
 
 
+# --- leg "cols" (W12-V fix round 1): disp_cols vs c2v_ref.separate, fuzzed ------
+
+COLS_N = 1500
+COLS_TRAMP = 0xC780
+
+
+def _bank_tramp(target: int, x: int) -> bytes:
+    """lda $01 / pha / lda #$36 / sta $01 / ldx #x / jsr target / pla / sta $01 / rts"""
+    return bytes([0xA5, 0x01, 0x48, 0xA9, 0x36, 0x85, 0x01, 0xA2, x,
+                  0x20, target & 0xFF, target >> 8, 0x68, 0x85, 0x01, 0x60])
+
+
+def leg_cols(prg: str, perf: bool = False) -> list[str]:
+    """rev-vis's twin fuzz, one VICE session: COLS_N disp_cols calls (random,
+    dark, one-LUT-colour, few-values, two-class and near-equal palettes; every
+    count shape incl. all-255 ties; random LUT 1 case in 5) against
+    c2v_ref.separate, plus injectivity over the pens in use and pens not in
+    use left at their LUT colour; 200 mc2-shape calls (X = 3: pens 4-15
+    untouched); c2v_hires's pens and counts on adversarial layouts.  --perf:
+    the cycles of those layouts, disp_msum and c2v_hfill."""
+    from c64_test_harness import (Labels, UnifiedManager, ViceConfig, read_bytes,
+                                  write_bytes)
+    from tests.harness_util import REU_VICE_ARGS, lookup_label
+    from tests.run_vectors import prepare_target
+    labels = Labels.from_file(os.path.splitext(prg)[0] + ".lbl")
+    lab = {k: lookup_label(labels, k) for k in ("disp_cols", "disp_msum", "c2v_args",
+                                                "c2v_v_col", "c2v_v_cnt", "c2v_hfill")}
+    real = R.build_lut()
+    rnd = random.Random(0x5EED)
+    rlut = bytes(rnd.randrange(16) for _ in range(4096))
+    luts = {C.LUT_REAL: real, C.LUT_RAND: rlut}
+    pre: dict[int, list[int]] = {}
+    for c in range(4096):
+        pre.setdefault(real[c], []).append(c)
+    fails: list[str] = []
+    cfg = ViceConfig(prg_path=prg, warp=True, sound=False, extra_args=list(REU_VICE_ARGS))
+    with UnifiedManager(backend="vice", vice_config=cfg) as mgr:
+        target = mgr.acquire()
+        try:
+            prepare_target(target, prg)
+            s = C.Session(target, labels)
+            s.stage(C.LUT_REAL, real)
+            s.stage(C.LUT_RAND, rlut)
+            C.call_checked(s, "c2v_init", fails)
+
+            def run_cols(pal, cnt, lut_addr, x=15):
+                s.write_ram(lab["c2v_args"] + 12, lut_addr.to_bytes(3, "little"))
+                s.write_ram(lab["c2v_args"] + 16, b"".join(c.to_bytes(2, "little") for c in pal))
+                s.write_ram(lab["c2v_v_cnt"], bytes(cnt))
+                write_bytes(s.T, COLS_TRAMP, _bank_tramp(lab["disp_cols"], x))
+                s.call(COLS_TRAMP)
+                return list(s.read_ram(lab["c2v_v_col"], 16))
+
+            def gen(i):
+                kind, lut_addr = i % 6, (C.LUT_RAND if i % 5 == 4 else C.LUT_REAL)
+                if kind == 0:
+                    pal = [rnd.randrange(0x10000) for _ in range(16)]
+                elif kind == 1:
+                    pal = [rnd.randrange(0x10000) & 0xF333 for _ in range(16)]
+                elif kind == 2:                   # 16 distinct OCS, one LUT colour
+                    v = rnd.choice([k for k in pre if len(pre[k]) >= 16])
+                    pal = [c | (rnd.randrange(16) << 12) for c in rnd.sample(pre[v], 16)]
+                    lut_addr = C.LUT_REAL
+                elif kind == 3:
+                    base = [rnd.randrange(4096) for _ in range(3)]
+                    pal = [rnd.choice(base) | (rnd.randrange(16) << 12) for _ in range(16)]
+                elif kind == 4:
+                    a, b = rnd.sample([k for k in pre if len(pre[k]) >= 8], 2)
+                    pal = [rnd.choice(pre[rnd.choice((a, b))]) for _ in range(16)]
+                    lut_addr = C.LUT_REAL
+                else:
+                    g = rnd.randrange(16)
+                    pal = [((g + rnd.randrange(-1, 2)) % 16) * 0x111 for _ in range(16)]
+                mode = rnd.randrange(4)
+                if mode == 0:
+                    cnt = [rnd.choice([0, 1, 2, 3, 254, 255]) for _ in range(16)]
+                elif mode == 1:
+                    cnt = [255] * 16
+                elif mode == 2:
+                    cnt = [rnd.choice([0, 1]) for _ in range(16)]
+                else:
+                    cnt = [rnd.randrange(256) for _ in range(16)]
+                cnt[0] = rnd.randrange(256)       # pen 0's count must not matter
+                return pal, cnt, lut_addr, luts[lut_addr]
+
+            nbad = 0
+            for i in range(COLS_N):
+                pal, cnt, lut_addr, lut = gen(i)
+                got = run_cols(pal, cnt, lut_addr)
+                want = R.separate(pal, lut, cnt)
+                use = [0] + [p for p in range(1, 16) if cnt[p]]
+                bad = [p for p in use if got[p] != want[p]]
+                bad += [p for p in range(16) if p not in use and got[p] != lut[pal[p] & 0xFFF]]
+                inj = all((got[a] == got[b]) == ((pal[a] & 0xFFF) == (pal[b] & 0xFFF))
+                          for a in use for b in use)
+                if bad or not inj:
+                    nbad += 1
+                    if nbad <= 5:
+                        fails.append(f"case {i}: pal {[hex(c) for c in pal]} cnt {cnt}: "
+                                     f"got {got} want {want} (bad pens {bad}, injective {inj})")
+            print(f"  disp_cols fuzz: {COLS_N} cases, {nbad} mismatch(es)")
+            for i in range(200):
+                pal = [rnd.randrange(0x10000) & (0xF333 if i % 2 else 0xFFFF) for _ in range(16)]
+                cnt = [0, 1, 1, 1] + [0] * 12
+                s.write_ram(lab["c2v_v_col"], bytes(range(16)))
+                got = run_cols(pal, cnt, C.LUT_REAL, x=3)
+                want = R.separate(pal, real, cnt)
+                if got[:4] != want[:4] or got[4:] != list(range(4, 16)):
+                    fails.append(f"mc2 case {i}: got {got} want {want[:4]}")
+            print("  mc2 shape: 200 cases")
+            lines = s.rows * 8
+            nh = lines * R.HIRES_ROW
+            z = bytes(nh)
+            cases = {
+                "allpen1": [bytes([0xFF]) * nh, z, z, z],
+                "random": [bytes(rnd.randrange(256) for _ in range(nh)) for _ in range(4)],
+                "right-bit0": [bytes([0, 1] * (nh // 2)), z, z, z],
+                "right-bit0-p15": [bytes([0, 1] * (nh // 2))] * 4,
+                "left-bit7": [bytes([0x80, 0] * (nh // 2)), z, z, z],
+                "last-line-bit0": [bytes(([0] * 80) * 7 + [0, 1] * 40) * (lines // 8), z, z, z],
+                "empty": [z] * 4,
+            }
+            pal = [0x000, 0xFFF, 0xF00, 0x0F0] + [0x111 * k for k in range(4, 16)]
+            for name, planes in cases.items():
+                for p in range(4):
+                    s.stage(C.HIRES_SRC[p], planes[p])
+                s.write_ram(lab["c2v_args"], R.pack_args(C.HIRES_SRC, C.LUT_REAL, pal))
+                C.call_checked(s, "c2v_hires", fails)
+                cnt = list(s.read_ram(lab["c2v_v_cnt"], 16))
+                ref = R.convert_hires(planes, pal, real, rows=s.rows)
+                colram = bytes(b & 15 for b in read_bytes(s.T, 0xD800, 1000))
+                if cnt != ref["cnt"]:
+                    fails.append(f"hires {name}: cnt {cnt} want {ref['cnt']}")
+                if colram[:s.rows * 40] != bytes(ref["pens"]):
+                    fails.append(f"hires {name}: colour RAM pens differ")
+                if perf:
+                    print(f"  perf c2v_hires {name:16s} {C.measure(s, 'c2v_hires'):9d} cycles")
+            if perf:
+                for name in ("disp_msum", "c2v_hfill"):
+                    write_bytes(s.T, COLS_TRAMP, _bank_tramp(lab[name], 0))
+                    write_bytes(s.T, C.TRAMP, C.perf_tramp(COLS_TRAMP))
+                    s.call(C.TRAMP)
+                    print(f"  perf {name:24s} {int.from_bytes(read_bytes(s.T, C.PERF_OUT, 4), 'little'):9d}"
+                          " cycles (incl. ~25 tramp)")
+                v = max(pre, key=lambda k: len(pre[k]))
+                s.write_ram(lab["c2v_args"] + 16, b"".join(c.to_bytes(2, "little")
+                                                           for c in rnd.sample(pre[v], 16)))
+                s.write_ram(lab["c2v_v_cnt"], bytes([0] + list(range(1, 16))))
+                write_bytes(s.T, COLS_TRAMP, _bank_tramp(lab["disp_cols"], 15))
+                write_bytes(s.T, C.TRAMP, C.perf_tramp(COLS_TRAMP))
+                s.call(C.TRAMP)
+                print(f"  perf disp_cols worst (16 pens, one LUT colour) "
+                      f"{int.from_bytes(read_bytes(s.T, C.PERF_OUT, 4), 'little')} cycles")
+        finally:
+            mgr.release(target)
+    return fails
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--prg", required=True)
@@ -1055,6 +1233,9 @@ def main(argv=None) -> int:
             tp = p if has_label(p, "disp_gmin") else build(p, "trace", VARIANTS["trace"], True)
             print(f"run_pf gap leg: {tp}")
             fails += [f"gap: {x}" for x in leg_gap(tp)]
+        if "cols" in legs:               # W12-V (fix round 1, rev-vis's fuzz)
+            print(f"run_pf cols leg: {p}")
+            fails += [f"cols: {x}" for x in leg_cols(p, a.perf)]
         if "live" in legs or "live:s0" in legs:
             print(f"run_pf live leg: {p}")
             cases = ([(0, True, "irq")] if "live:s0" in legs and "live" not in legs

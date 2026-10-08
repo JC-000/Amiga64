@@ -929,7 +929,7 @@ spec: `docs/C2V.md` "Row skip", "Display refresh (S3.5)". Reference:
 - **Policy v0:** a change is `gen` ≠ the last value seen **or** `dirty` ≠ 0
   (F1); it converts if the copied fields differ from the last snapshot.
   Inside `mach_run` (`mach_in` ≠ 0) a conversion starts only when
-  `DISP_N` × 14188 guest E ticks (20 frames' worth) have passed since the
+  `DISP_N` × 14188 guest E ticks (24 frames' worth since W12-V; was 20) have passed since the
   previous conversion **ended** (`mach_etime` at its end; F3: a frame count
   was eaten by the catch-up after each long conversion, livelocking the
   guest at s ≤ 1). E going backwards (`mach_init`) opens the budget. A
@@ -953,11 +953,63 @@ spec: `docs/C2V.md` "Row skip", "Display refresh (S3.5)". Reference:
   frames that passed during one pass, as in W10-P's copper catch-up
   ("Machine loop" / "Copper"). A guest that counts VERTB interrupts to
   keep time sees fewer of them while the display converts.
-- **Modes:** 2-plane lores → `c2v_mc2s` (exact); 4-plane hires →
-  `c2v_hiress` (silhouette); anything else, DMA off, an empty DIW, a
-  short DDF or a row crossing a 512 KB line → blank (`disp_why` 1–6). Once
-  a picture has been shown, a blank sets `$D011` = `$0B` and `$D020` =
-  LUT[COLOR00]. Before that, a blank only logs.
+- **Modes:** 2-plane lores → `c2v_mc2s` (exact pixels); 4-plane hires →
+  `c2v_hiress` (silhouette pixels, per-cell colours, W12-V); anything
+  else, DMA off, an empty DIW, a short DDF or a row crossing a 512 KB
+  line → blank (`disp_why` 1–6). Once a picture has been shown, a blank
+  sets `$D011` = `$0B` and `$D020` = LUT[COLOR00]. Before that, a blank
+  only logs.
+- **Colour choice (W12-V).** Reference `host/c2v_ref.separate`; tests
+  `host/tests/test_disp_colour.py`, `tests/run_pf.py` steps `mc2-dark` /
+  `hires-dark`. The LUT (nearest VIC colour in CIE L\*a\*b\*) alone
+  maps every dark OCS colour to black, so the insert-disk screen's pens
+  ($111, $222, $024 on $000) were black on black. The rule:
+  - **Cell pen (hires).** For each 8×8 cell (16 hires pixels per line),
+    on the first of its 8 lines with a set pixel, the colour index of the
+    leftmost set pixel (plane bytes 2cx then 2cx+1, bit 7 first); 0 if
+    the cell has none. All 200 converted lines count, also those below
+    DIWSTOP that `disp_clrlines` clears afterwards. `c2v_hiress` leaves
+    the pens in colour RAM (unused by the VIC in hires) and counts cells
+    per pen (`c2v_v_cnt`, saturating at 255).
+  - **Pens in use:** pen 0 always; mc2: pens 1–3; hires: every cell pen.
+    **Order:** pen 0, then by cell count descending, ties by lower pen
+    (mc2: 1, 2, 3).
+  - **Pass 1:** in order, each pen takes its LUT colour unless a pen with
+    a different OCS colour (COLORxx & `$FFF`) already holds it. **Pass
+    2:** in order, each pen still without a colour walks the luma ladder
+    (`c2v_ref.LADDER` = `disp_lad`: 0 6 9 2 11 4 8 14 12 10 5 15 3 7 13
+    1) from its LUT colour's place k: k+1, k−1, k+2, k−2, … (places off
+    the ladder skipped), and takes the first colour no pen with a
+    different OCS colour holds.
+  - **Guarantees:** pen 0 keeps LUT[COLOR00] (the background and border
+    are unchanged); pens with equal OCS colours share a colour; pens in
+    use with different OCS colours never do (≤ 16 pens, 16 colours: pass
+    2 always finds one). In hires "in use" means a **cell pen**: a pen
+    that is never the leftmost pixel of a cell's first line with pixels
+    (on the insert-disk screen pen 3, $024) is not separated and does not
+    show. Colour fidelity is best effort: a pen that loses its nearest
+    colour gets the nearest free one in luma, any hue.
+  - **Output:** mc2: the four colours as before (`$D021`, matrix nibbles,
+    colour RAM). Hires: matrix cell = colour(pen) << 4 | colour(pen 0),
+    colour RAM = the cell pen (0 on any blank rows), via `c2v_hfill`
+    after `c2v_lookn` and `disp_cols` (the rule).
+  - **Matrix checksum (V2):** after every shown conversion `disp_msum`
+    reads the 1000 matrix bytes back (`$01` = `%xx100` one page at a
+    time, IRQs masked per page; the NMI vector already guarded by the
+    fill; a matrix at or above $A000 is always read banked, the NMI vector
+    set first) into `disp_mck` (BSS, u16 LE: Fletcher sums mod 255 with
+    end-around carry, s1 = Σ b, s2 = Σ s1, `c2v_ref.screen_sum`; fix
+    round 1: mod 256 kept only ~8 bits of a palette error, which moves
+    high nibbles only). The host reads it where it cannot read the RAM
+    under I/O (the Ultimate, m3). Proven: every one-bit error of one pen's
+    colour and every pen swap on a frame-345-like screen changes it
+    (`host/tests/test_disp_colour.py`); in general it is a 16-bit
+    checksum, so 1 wrong palette in ~65k can still collide.
+  - **LUT carriage:** `disp_lutp` holds the LUT run-length packed
+    (`c2v_ref.rle_lut`: byte = (run − 1) << 4 | colour, 821 bytes, was
+    2048 nibble-packed; supervisor-approved); `disp_init` unpacks it, once,
+    into the same 4096 REU bytes at `disp_lut` and stops at exactly 4096
+    entries (`disp_init` 126,616 φ2 cycles, base 120,006–120,225).
 - **C64 resources:** writes the c2v regions (bitmap, matrix under I/O,
   colour RAM, `c2v_stage` during `disp_init`, `c2v_args`), `$D011`,
   `$D016`, `$D018`, `$D020`, `$D021`, and `$DD00` bits 1–0 (bits 7–2 and
@@ -1223,11 +1275,24 @@ Tests: `tests/aros_boot.py` (legs `m1`, `m2`, `m3`, `ablate`, `wkhook`,
   its vblanks, first seen at frame ≥ 345, the logo with its icons). On
   the U64E the hash leaves the screen matrix out (it lies under the I/O
   window and the running guest's `$01` is never touched; the model side
-  hashes the same way, `nomatrix`); on VICE the 6510 is halted for the
+  hashes the same way); on VICE the 6510 is halted for the
   snapshot and `$01` is switched to `$34` and back to the value read.
-  Blind spot of the U64E hash: a screen with the right pixels but a wrong
-  palette differs only in the matrix (the hires cell colours), so the U64E
-  leg cannot see it; VICE's full hash covers it. The U64E leg re-hashes on
+  W12-V narrowed the U64E hash's blind spot (a right-pixel, wrong-palette
+  screen differed only in the matrix): its hash now carries `disp_mck`,
+  the 16-bit matrix checksum disp.s keeps in BSS (model key `u64`; a
+  wrong palette collides with probability ~2⁻¹⁶, tested exactly for
+  one-pen errors and swaps), and VICE checks `disp_mck` against the
+  matrix it reads. The U64E/C64U bitmap and colour RAM are read in
+  1000-byte GETs and read again if `disp_nconv` changed meanwhile. The
+  matched model frame must show ≥ 3 distinct non-background colours
+  (`visible`, asserted by `model_frames.py` for every insert-disk
+  conversion and by the leg), and the leg renders the frame to
+  `build/aros/m3_vice.png` or `m3_u64.png` (both Ultimates write the
+  same name). On VICE the PNG is the C64's bitmap and matrix; on the
+  Ultimates the matrix is not readable, so the PNG takes the bitmap and
+  the cell pens from C64 memory and the pen colours from the model's
+  `vic_pens`, and is written only if that matrix's sums equal the C64's
+  `disp_mck`. The U64E leg re-hashes on
   every 2 s poll (not only after a new conversion), so one torn read of
   the final, static screen cannot make it time out. m3
   needs the blitter (W11-B): green on the merged tree (VICE s = 9: 174 s,
