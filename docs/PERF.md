@@ -723,6 +723,47 @@ with its gen snapshot: ~5k) fills most of the 14188-cycle frame; every
 case still reaches HALT (no livelock). At 48 MHz the same work is ~2% of a
 frame. The boot profile's s is chosen per host for speed (U64E 4, VICE 9).
 
+## (m) Visible display: per-cell colours and the colour choice (W12-V)
+
+CONTRACTS "Display refresh (S3.5)", "Colour choice (W12-V)". VICE x64sc PAL,
+the CIA2 TA→TB count of (j) [MEASURED VICE]; base = `wave12/integration`
+(e9c8cdd / 0bc9c15) built in a clean copy; evidence
+`build/evidence/w12-vis/perf/` and `tests/run_pf.py --leg cols --perf`
+(fix round 1: the worst cases were found by review rev-vis).
+
+| Entry | base | W12-V |
+|---|---:|---:|
+| `c2v_hires`, empty planes | – | 729,587 |
+| `c2v_hires`, run_c2v's random case | 683,591 | 932,225 |
+| `c2v_hires`, **worst**: one set pixel per cell line at bit 0 of the right byte | – | **1,030,057** |
+| `c2v_mc2` | 365,991 | 364,591 |
+| `disp_msum` (mod 255) / `c2v_hfill` / `disp_cols` worst (16 pens, one LUT colour) | – | 37,270 / 41,324 / 26,409 (each incl. ~25 tramp) |
+| `disp_refresh`, hires4, random | 770,351 | 1,091,729 |
+| `disp_refresh`, hires4, **worst** (the random refresh + the kernel's worst − random) | – | **1,189,561** |
+| `disp_refresh`, mc2 | 422,481 | 461,488 |
+| `disp_frame`, gen unchanged / fields equal; refresh blank | 100 / 2,205; 2,251 | 100 / 2,205; 2,336 |
+
+Where the hires cost goes: +3 cycles per empty cell line, +9 per cell line
+whose cell already has a pen; `c2v_pick` once per cell with pixels (up to
+~150 cycles: the right byte and bit 0 are its slow path); `c2v_hrow` ~1,000
+per char row; per conversion `c2v_lookn` for 16 pens, `disp_cols`,
+`c2v_hfill` and `disp_msum`. The insert-disk screen has 81–132 cells with
+pixels (the boot model's frames 345–397), far from the worst case.
+
+**Duty budget: `DISP_N` 20 → 24** (fix round 1). (j)'s formula at s = 4,
+hires4 changing every frame, worst case: 1,189,561 / (1,189,561 + 24 ×
+14188 × 16) = **17.9%** before badlines (S3_PLAN §2.3: ≤ 20%); N = 20 would
+give 20.7%. With the display on, badlines take 25 × 40 of a PAL frame's
+19,656 cycles (5.1%), so the conversion runs ~5.4% longer: **18.7%**. mc2
+worst: 7.8%. At 48/64 MHz the conversion is ≤ 0.6% of guest time. The
+interpreter is untouched (`perf_cycles --max-delta 0`).
+
+MAIN: the run-length LUT (821 B instead of 2,048; supervisor-approved) pays
+for the new code: c2v CODE +1 page ($500 → $600), disp CODE −4 pages
+($E00 → $A00), disp BSS unchanged (1 page): MAIN −768 B (BSS end $9DEE →
+$9AEE). The LUT is unpacked once, in `disp_init`: 126,616 φ2 cycles against
+120,006–120,225 on the base (+5.4%, once per boot; `perf/disp_init_cycles.txt`).
+
 ## (e) Caveats
 
 - Every number above comes from **hand-written cycle comments**, not
