@@ -732,11 +732,41 @@ replacement, page-low map at $B000.
 **Per-instruction paths** [MEASURED VICE, `perf_cycles --base` main,
 `--max-delta 0`]: every row ≤ 0 in both modes (run: mem −6.16, stream 0,
 rmw −1.50, copy −1.50, alu −0.33, stack −1.00 cycles per instruction;
-step: the same). The fetch hit path is unchanged. The word/long write check
-went from 16 to 13 cycles. The byte write check went from 9 to 13 cycles
-(**+4 per byte write**; no perf row writes bytes). The −6/−0.3 on rows
-without writes are layout (page-cross) effects. One-off per run: +277
-cycles (`emu_reset` → `code_invall`).
+step: the same). The fetch hit path is unchanged; the word/long write
+check went from 16 to 13 cycles, the byte write check from 9 to 13 (+4).
+The −6/−0.3 on rows without writes are layout (page-cross) effects.
+One-off per run: +277 cycles (`emu_reset` → `code_invall`).
+
+**Write check per size** [MEASURED, `run_cwin` leg bytew: MOVE.B/W/L
+D1,(A0) + DBRA, cycles per instruction (VICE) / µs per instruction (C64U
+64 MHz); data page: "other" = no cached page has its low byte; "evicted"
+= its low byte was cached and evicted (asserted equal to "other");
+"p+1 cached" = the next page-low is cached (bit 6); "alias" = the cached
+code page's low byte in another bank (the map ignores the bank)]:
+
+| | byte | word | long |
+|---|---:|---:|---:|
+| main, VICE | 521.2 | 541.6 | 566.2 |
+| W12-C, VICE, other | 522.8 | 540.6 | 564.6 |
+| W12-C, VICE, evicted | 523.4 | 540.6 | 563.7 |
+| W12-C, VICE, p+1 cached | 523.2 | 591.5 | 615.5 |
+| W12-C, VICE, alias | 601.4 | 618.6 | 642.8 |
+| W12-C, C64U, other / alias | 9.04 / 9.39 | 8.65 / 10.86 | 9.57 / 11.47 |
+
+So a slow-path write costs ~+102 cycles (p+1 cached, word/long) or ~+156
+(alias, any size) on VICE. On the AROS boot (counter build, VICE) the
+slow path runs ~42k times to m3 (~0.012 per instruction). A first
+version left the hint bits in a map entry whose count dropped to 0, which
+sent every later word/long write to that page-low down the slow path
+(rev-cwin: 397k of 509k write checks m1→m3, more 6502 cycles than the
+cache saved); fixed (`cw_drop` keeps only bit 6), guarded by `run_cwin`
+smc/map, bytew `evicted` and mutant `stalehint`. A slow path entered with
+BASIC ROM in (host staging through `test_load_chunk` at $37, where the map
+byte read was a ROM byte) banks BASIC out for the check and restores the
+caller's $01 (tests rely on $37 staying), so staging at $37 pays ~+150
+cycles for about half of its byte writes (~504k on the 1 MB AROS staging
+through test_load_chunk, ~75 s of 1 MHz time; VICE and the C64U's
+test_load_chunk fallback only; the Ultimate stages by SocketDMA).
 
 **Page change** [MEASURED; `run_cwin` leg bench: a K-page ring against
 the same instructions in one page, two-point delta]:
@@ -770,22 +800,24 @@ and inside the brief's 58–68% (§4.5, which measured the WB boots). N = 8
 (CWCODE, $A800) and 7 windows.
 
 **AROS boot wall-clock** [MEASURED HW, `aros_boot --legs m1,m2,m3`,
-s = 3, one hold per row, config IDENTICAL after each]:
+s = 3, one hold per run, config IDENTICAL after each;
+`build/evidence/w12-cwin/hw/`, `hw2/`, `hw3/`]:
 
 | | m1 | m2 | m3 |
 |---|---:|---:|---:|
-| C64U 64 MHz, main (same day) | 15.3 s | 45.2 s | 76.1 s |
-| C64U 64 MHz, W12-C | 14.8 s | 39.6 s | 59.7 s |
-| U64E 48 MHz, main | 20.2 s | 59.6 s | 95.5 s |
-| U64E 48 MHz, W12-C | 19.4 s | 55.4 s | 93.4 s |
+| C64U 64 MHz, main (3 runs) | 15.3 / 15.3 / 15.4 s | 45.2 / 45.3 / 45.3 s | 76.1 / 76.7 / 76.4 s |
+| C64U 64 MHz, W12-C before the stale-hint fix (4 runs) | 14.8–15.0 s | 38.5–39.6 s | 59.7 / 70.3 / 60.1 / 81.4 s |
+| C64U 64 MHz, W12-C final (4 runs) | 15.3 / 14.8 / 14.9 / 14.9 s | 38.8 / 38.6 / 38.6 / 38.7 s | 70.2 / 69.5 / 69.8 / 81.8 s |
+| U64E 48 MHz, main (2 runs) | 20.2 / 20.0 s | 59.6 / 60.2 s | 95.5 / 100.6 s |
+| U64E 48 MHz, W12-C final (3 runs) | 19.4 / 19.4 / 19.8 s | 57.1 / 51.3 / 53.3 s | 90.6 / 84.3 / 86.7 s |
 
-The refill arithmetic predicts about −6.4 s at m2 (measured −5.6 s) and about
-−9 s at m3. The measured −16.4 s at m3 includes the quantised m3 instant
-(DISP_N conversion budget and poll, ±6 s per (l)), and a guest that keeps
-pace with frames needs fewer frames to reach the no-media screen (guest
-frame 612 against 688). On the U64E the gain is smaller (m2 −4.2 s, m3
-−2.1 s): after m2 the boot there is bound by guest time at s = 3 (PERF (l)),
-so fewer refills buy little.
+C64U: m2 −6.6 s (−15%; the refill arithmetic predicts −6.4 s) in every
+run. m3 is the first display conversion whose hash equals a model frame;
+conversions come ~100 guest frames (~10 s at s = 3) apart, so m3 is
+quantised: three final runs at 69.5–70.2 s (guest frame 626–633), one at
+81.8 s (one conversion later), against main's steady 76.1–76.7 s. U64E:
+m2 −5.6 s and m3 −10.3 s on average. (hw3 = the final code except the
+slow path's $01 restore; hw4 = the final tree.)
 
 ## (e) Caveats
 

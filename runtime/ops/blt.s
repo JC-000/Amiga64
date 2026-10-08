@@ -44,10 +44,10 @@
 ; address counter carries only through bit 18, core.s "512 KB straddles"),
 ; combined in C64 RAM (blt_abuf/blt_cbuf, rc ram.inc, under BASIC ROM:
 ; BASIC is banked out for the blit, the caller's $01 restored) and stored
-; as one D row.  The REC use ends with mem_rec_dirty (C1).  A D row that
-; lands in the guest page of r_pc invalidates the instruction window (one
-; mem_read8/mem_write8 of the same byte through the memory API at the end
-; of the blit: core.s's WINCHK), so a blit over code about to run is seen.
+; as one D row.  The REC use ends with mem_rec_dirty (C1).  W12-C
+; (supervisor-approved): before each D row is stored, blt_dpage drops every
+; cached code window of the row's first and last page (core.s code_invpg),
+; so a blit over code in any cached window is seen.
 ;
 ; ABI: blt_w from c_wrw only (trap context or the copper's MOVE path):
 ; Y kept, A/X clobbered; m_addr, m_val, t_tmp and chip_a are preserved (a
@@ -373,7 +373,7 @@ row:    jsr blt_row
         bne row
         jsr blt_done
         jsr mem_rec_dirty       ; C1: the REC was ours
-        lda #1                  ; blt_w raises INTREQ BLIT
+fin:    lda #1                  ; blt_w raises INTREQ BLIT
         rts
 .endproc
 
@@ -973,7 +973,11 @@ o:      ror blt_fr
         and #BLT_BANKS
         tax                     ; W12-C (supervisor-approved)
         lda blt_t
+.ifdef CWIN_MUT_BLTFIRST
+        rts                     ; W12-C mutant (tests/run_cwin.py): first page only
+.else
         jmp code_invpg          ; last page (tail call)
+.endif
 .endproc
 
 ; ---------------------------------------------------------------------------
