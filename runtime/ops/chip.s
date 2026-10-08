@@ -56,7 +56,14 @@
 ;                     offset $000-$1FE, CIA-A $0A00+reg, CIA-B $0B00+reg;
 ;                     entry k lives at 4 * (k mod 64)
 ;   chip_logn  u16    entries ever logged (mod 65536)
-;   chip_ser   256 B  SERDAT ring: byte k at k mod 256
+;   chip_ser   1 KiB  SERDAT ring (CHIP_SERSZ = 1024 bytes, exported):
+;                     byte k at k mod 1024, i.e. slot = chip_sern & $3FF
+;                     at the time of the store; 1024 divides 65536, so the
+;                     slot stays continuous across the u16 count's wrap.
+;                     The byte is stored first, then the count bumped.
+;                     MAIN BSS on purpose: the host reads it over REST/
+;                     the monitor, and RAM under BASIC (BBSS) is not
+;                     host-readable on the C64 Ultimate.
 ;   chip_sern  u16    SERDAT bytes ever written (mod 65536)
 ;   chip_nopen u16    open-bus byte/word accesses (reads and writes)
 ; ===========================================================================
@@ -67,6 +74,7 @@
 .export chip_split, chip_reset
 .export chip_shd, chip_log, chip_logn, chip_ser, chip_sern
 .export chip_nopen
+.export CHIP_SERSZ              ; host: the chip_ser ring size (tests/aros_boot.py, run_chip.py)
 .import m_scmd                  ; core.s mio_split: REC command of the split
 .import mach_on, mach_beam, mach_bv, mach_bh    ; W8-L mach.s: S3.2 beam
 .import cia_read, cia_write, cia_reset          ; W9-C cia.s: S3.4 CIA-A/B
@@ -78,6 +86,7 @@
 
 CHIP_LOGN_MASK = 63     ; @value log ring entries - 1
 CHIP_SERDAT    = $30    ; @value SERDAT register offset
+CHIP_SERSZ     = 1024   ; @value chip_ser ring bytes (4 pages; slot = count & $3FF)
 CHIP_RO_END    = $20    ; @value read-only slots are $000-$01E
 CHIP_DENISEID  = $7C    ; @value DENISEID (read-only, OCS: floats $FFFF)
 CHIP_ID_CIAA   = $0A    ; @value log id high byte, CIA-A
@@ -94,7 +103,7 @@ CHIP_BLITREQ   = $40    ; @value INTREQ low byte: BLIT (bit 6); W11-B blt
 .segment "BSS"
 chip_shd:   .res 512
 chip_log:   .res 256
-chip_ser:   .res 256
+chip_ser:   .res CHIP_SERSZ
 chip_logn:  .res 2
 chip_sern:  .res 2
 chip_nopen: .res 2
@@ -275,6 +284,9 @@ lp:     sta chip_shd,x
         sta chip_shd+256,x
         sta chip_log,x
         sta chip_ser,x
+        sta chip_ser+256,x
+        sta chip_ser+512,x
+        sta chip_ser+768,x
         inx
         bne lp
         ldx #6 - 1              ; chip_logn .. chip_nopen are contiguous
@@ -284,6 +296,8 @@ lp2:    sta chip_logn,x
         jmp cia_reset           ; W9-C: the CIAs to power-up
 .endproc
 .assert chip_nopen = chip_logn + 4, error, "chip_reset: BSS layout"
+.assert chip_logn = chip_ser + CHIP_SERSZ, error, "chip_ser: ring size"
+.assert CHIP_SERSZ = 1024, error, "chip_reset/ser: written for a 4-page ring"
 
 ; ---------------------------------------------------------------------------
 ; Internals.  Address in chip_a; A/X clobbered, Y untouched.
@@ -536,11 +550,6 @@ kick:   bit chip_vh             ; a SET may make an interrupt deliverable:
         bpl done                ; act at the next instruction boundary
         jmp mach_ichk
         ; --- end W9-I irq
-ser:    ldx chip_sern           ; SERDAT: low byte -> the serial ring
-        sta chip_ser,x
-        inc chip_sern
-        bne done
-        inc chip_sern+1
 done:   rts
 cop:    cpx #CHIP_BLT0          ; W11-B blt: $040-$074 to the blitter
         bcc cop0                ; W11-B blt
@@ -548,6 +557,28 @@ cop:    cpx #CHIP_BLT0          ; W11-B blt: $040-$074 to the blitter
         bcs cop0                ; W11-B blt
         jmp blt_w               ; W11-B blt: BLTSIZE blits, BLTBDAT shifts
 cop0:   jmp cop_w0              ; W10-P cop: COPxLC/COPJMP/DIW/DDF/DMACON/BPLxPT
+        ; --- SERDAT, out of line (keeps the branches above in reach of done)
+ser:    ldx chip_sern           ; SERDAT: chip_vl -> chip_ser[count & $3FF]:
+        lda chip_sern+1         ; X = slot bits 7-0, the page = count bits 9-8
+        lsr                     ; C = bit 8
+        bcs s13
+        lsr                     ; C = bit 9
+        lda chip_vl             ; the byte (lda keeps C)
+        bcs s2
+        sta chip_ser,x          ; page 0
+        bcc sinc                ; always (C = 0)
+s2:     sta chip_ser+512,x      ; page 2
+        bcs sinc                ; always (C = 1)
+s13:    lsr                     ; C = bit 9
+        lda chip_vl
+        bcs s3
+        sta chip_ser+256,x      ; page 1
+        bcc sinc                ; always
+s3:     sta chip_ser+768,x      ; page 3
+sinc:   inc chip_sern           ; then the count (u16; the store came first)
+        bne done
+        inc chip_sern+1
+        rts
 .endproc
 
 ; W11-B blt: chip_blitirq -- a finished blit raises INTREQ BLIT as the Paula

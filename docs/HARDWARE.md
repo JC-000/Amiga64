@@ -922,14 +922,16 @@ tools/s3probe/sampler/sampler.py --backend u64 --out DIR`.
 ## Reading a running C64's RAM over REST at 48 MHz (W11-A, 2026-10-06)
 
 Question (W11 review, HIGH-2): the first U64E AROS boots captured the
-guest's serial ring (`chip_ser`, 256 B, plus the u16 count `chip_sern`)
-with NULs and foreign bytes. Is the U64's host read path corrupting bytes
+guest's serial ring (`chip_ser`, 256 B at the time -- 1024 B since the
+c64u ser-ring change, see the end of this section -- plus the u16 count
+`chip_sern`) with NULs and foreign bytes. Is the U64's host read path corrupting bytes
 at turbo, or was the capture racing the running guest?
 
 **Path.** `c64_test_harness.read_bytes` → `Ultimate64Transport.read_memory`
 → `Ultimate64Client.read_mem` = REST `GET /v1/machine:readmem` (a DMA read
 of C64 memory while the 6510 keeps running); `read_bytes` splits a read
-above 256 bytes into 256-byte requests. No debug or data stream, no UCI,
+above 256 bytes into 128-byte GETs (`c64_test_harness.memory`
+`read_bytes_chunked`, chunk 128, threshold 256). No debug or data stream, no UCI,
 no SocketDMA is involved in any read (SocketDMA `REUWRITE` is used only to
 stage the ROM into the REU, before the boot).
 
@@ -1011,3 +1013,37 @@ dispatcher is plain RAM at `$CE00`). Harness-reserved RAM `$C400-$C87D`
 `buf_case` only above `$C400`; the AROS driver (`$C000-$C181`), the
 experiment's writer (`$C200-$C245`) and the boot's P/R blocks
 (`$C900-$C96F`) stay clear of it.
+
+**C64 Ultimate: a 1024-byte ring (c64u ser-ring, 2026-10-07).** On the
+C64U (fw 1.1.0, fpga 122, core 1.49; 64 MHz) one REST read takes ~112 ms
+(~53 ms RTT), and AROS writes 257 serial bytes (count 130 -> 387) inside
+one read, so the 256-byte ring lapped before the host saw it and m2 failed
+with a capture error (`build/evidence/c64u/boot64/run.log`: "no consistent
+serial snapshot in 64 tries (last counts 387, 387, seen 130)"). No host
+polling can fix that (and the harness's `read_bytes` split of a read above
+256 bytes into 128-byte GETs only adds GETs). `chip_ser` is now 1024 bytes (`CHIP_SERSZ`, still in
+MAIN BSS: RAM under BASIC is not host-readable on the C64U), more than
+the whole 416-byte m2 text. The host reads only the slots between the
+last seen count and the new one, each contiguous segment in ONE readmem GET
+(the transport's `read_memory`, not `read_bytes`; round 1, R3).
+
+One GET of up to 1024 bytes was verified first [MEASURED HW, one
+DeviceLock hold each, config restored IDENTICAL;
+`build/evidence/c64u-ser/round1/probe-{c64u,u64e}/`]: a random 1024-byte
+pattern written into `chip_ser` (idle runner) read back equal in one GET at
+128, 256, 257, 384, 512, 768, 1000 and 1024 bytes, 20 of 20 each, and
+1024 bytes of the runner's CODE at `$1000` equal to the PRG 10 of 10, on
+the C64U (fw 1.1.0, fpga 122, core 1.49, 64 MHz; median 104-122 ms per GET,
+about the same for 128 and 1024 bytes) and on the U64E (fw 3.15, fpga 126,
+core 1.50, 48 MHz; median 29-44 ms that day). A fake-guest sweep of the
+capture (`host/tests/test_aros_serial.py`, `round1/headroom.txt`) holds a
+steady rate below 160 bytes per GET with one GET per segment, against
+below 80 with the 128-byte split. Because a +-256 torn count can now fit
+inside a 1024-byte bracket, a count whose low byte is $FF/$00 is trusted
+only if a second read agrees. After `mach_run` returns, one final read
+takes the bytes printed after the last poll. Result: m1, m2 (416 bytes
+equal to the model) and m3 PASS on the C64U at 64 MHz, config restored
+IDENTICAL (`build/evidence/c64u-ser/c64u64/run.log`, `c64u64-run2/`); with
+one GET per segment (round 1) again on the C64U at 64 MHz (m2 at 45 s, 0
+capture retries) and on the U64E at 48 MHz (m2 at 60 s, 0 retries), both
+IDENTICAL (`build/evidence/c64u-ser/round1/{c64u64,u64e48}/`).
