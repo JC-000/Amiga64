@@ -560,6 +560,8 @@ independent of PAL/NTSC, and the guest always keeps the rest:
 | 1 | 28,376 | 42.7% | 57.6% |
 | 0 | 14,188 | 59.8% | 73.1% |
 
+**Superseded (Wave 12):** W12-V's colour work made hires conversion dearer, and DISP_N is now 24. The current figures are in (m); the table and text here describe the Wave 10 code.
+
 N = 20 keeps hires4 under S3_PLAN §2.3's 20% duty at the default s = 4,
 with margin for badlines (+2–4% with the display on) and for layout (±1.5%).
 At s ≤ 3 a display that changes every frame exceeds 20%, but the display
