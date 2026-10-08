@@ -49,6 +49,8 @@
 .import uci_begin, uci_put, uci_exec, uci_ok, dosio_uci_init
 .import dosio_uci_max, dosio_uci_rn, dosio_uci_st
 .import dosio_buf, dosio_name, dosio_nlen
+.import code_invall             ; W12-C (core.s): A1, after a load
+UREU_PIX   = 105                ; @value disp_st's pixel epoch offset (CONTRACTS)
 
 UREU_TGT   = 1                  ; DOS target 1 (dos.cc:11)
 UREU_LOAD  = $21                ; dos.h:29
@@ -126,7 +128,12 @@ ureu_sv:
 ureu_ldh:
         lda #UREU_FRD
         ldx #UREU_LOAD
-        bne ureu_one            ; always
+        jsr ureu_one
+        php                     ; A1: whatever landed (a failure may be partial)
+        jsr code_invall         ; guest code may have changed (W12-C, I1)
+        inc disp_st + UREU_PIX  ; guest pixels may have changed (I2's epoch)
+        plp
+        rts
 ureu_svh:
         lda #UREU_FWR
         ldx #UREU_SAVE

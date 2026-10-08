@@ -34,12 +34,12 @@ pytestmark = pytest.mark.skipif(shutil.which("cl65") is None,
 
 SHIM = U.SHIM + """
 .export mach_fhook, mach_now, mach_rdc, mach_run, emu_reset, disp_init
-.export mem_rec_dirty, calls
+.export mem_rec_dirty, calls, code_invall
 .segment "BSS"
 mach_fhook: .res 2
 mach_now:   .res 4
 .segment "SBSS"               ; (after all BSS: outside the image)
-calls:      .res 5            ; mach_rdc, mach_run, emu_reset, disp_init, rec_dirty
+calls:      .res 6            ; mach_rdc, mach_run, emu_reset, disp_init, rec_dirty, code_invall
 .segment "CODE"
 mach_rdc:   inc calls+0
             rts
@@ -51,6 +51,9 @@ disp_init:  inc calls+3
             rts
 mem_rec_dirty:
             inc calls+4
+            rts
+code_invall:
+            inc calls+5
             rts
 """
 
@@ -79,7 +82,12 @@ BID = bytes(range(0x11, 0x19))
 @pytest.fixture(scope="module")
 def build(tmp_path_factory):
     d = tmp_path_factory.mktemp("snapf")
-    (d / "first.s").write_text('.segment "BSS"\ncode_win: .res 257   ; __BSS_RUN__ = code_win, as in the runner\n')
+    # as in the runner since W12-C: the 256-byte resume scratch at
+    # __BSS_RUN__ overlaps dosio_uci.s's BSS, which the file loads use
+    # (sized so dosio_uci_max, written by every LOAD_REU chunk, lies exactly
+    # on the copy's state sum, header +96: test_layout_... pins it)
+    (d / "first.s").write_text('.segment "BSS"\nbss0: .res $32\n')
+    (d / "pad.s").write_text('.segment "BSS"\nbss1: .res $20\n')
     (d / "shim.s").write_text(SHIM)
     (d / "t.cfg").write_text(CFG)
     out, lbl = d / "s.bin", d / "s.lbl"
@@ -87,7 +95,8 @@ def build(tmp_path_factory):
         ["cl65", "-t", "none", "-C", str(d / "t.cfg"), "-o", str(out), "-Ln", str(lbl),
          "--asm-define", "DOSIO_UCI_FENCE_OUTER=1", "--asm-define", "DOSIO_UCI_FENCE_INNER=1",
          "--asm-define", "DOSIO_UCI_POLLS_HI=4",
-         str(d / "first.s"), str(d / "shim.s"), str(ROOT / "runtime/ops/dosio_uci.s"),
+         str(d / "first.s"), str(ROOT / "runtime/ops/dosio_uci.s"), str(d / "pad.s"),
+         str(d / "shim.s"),
          str(ROOT / "runtime/ops/snap.s"), str(ROOT / "runtime/ops/ureu.s")],
         capture_output=True, text=True, cwd=ROOT)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -181,6 +190,16 @@ def machine_state(r: Rig):
         r.reu_w(a, pat(n, 17 + i))
 
 
+def test_layout_scratch_overlaps_uci_state(build):
+    """The fixture reproduces the runner's hazard (dosio_uci's BSS inside
+    the 256-byte scratch at __BSS_RUN__), so the resume tests below run
+    with the UCI loads writing into the loaded-header copy."""
+    _, lab = build
+    lo = lab["__BSS_RUN__"]
+    assert lab["dosio_uci_max"] == lo + F.H_SSUM
+    assert lab["dosio_buf"] >= lo + 0x100
+
+
 def test_file_suspend_writes_the_spans_in_order(build):
     r = Rig(build)
     machine_state(r)
@@ -231,7 +250,7 @@ def fresh(build, fbytes: bytes) -> Rig:
     r.bus.ram[lo:hi] = bytes([0x55]) * (hi - lo)
     r.bus.ram[0x10:0x9A] = bytes([0xAA]) * 0x8A
     r.bus.ram[DISP_ST:DISP_ST + 256] = bytes(256)
-    r.poke("calls", bytes(5))
+    r.poke("calls", bytes(6))
     r.name("snap.a64")
     return r
 
@@ -244,6 +263,7 @@ def test_file_resume_restores_everything(build):
     assert r.st() == F.ST_RES
     assert r.peek("calls", 5)[1] == 1                  # mach_run entered
     assert r.peek("calls", 5)[2] == 1 and r.peek("calls", 5)[3] == 1   # emu_reset, disp_init
+    assert r.peek("calls", 6)[5] == 1                  # I1: code_invall, after the restore
     assert bytes(r.bus.ram[lo:hi]) == r0.img
     assert bytes(r.bus.ram[0x10:0x80]) == pat(0x8A, 5)[:0x70]
     assert bytes(r.bus.ram[0x88:0x9A]) == pat(0x8A, 5)[0x78:]

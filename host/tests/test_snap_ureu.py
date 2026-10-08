@@ -103,7 +103,15 @@ class ReuDevice(U.UciDevice):
         self.fake_text = None
 
 
-SHIM = U.SHIM
+SHIM = U.SHIM + """
+.export code_invall, ci_calls
+.segment "BSS"
+ci_calls: .res 1
+.segment "CODE"
+code_invall:                    ; W12-C stand-in: counts the calls (A1)
+        inc ci_calls
+        rts
+"""
 
 CFG = """
 MEMORY {
@@ -220,6 +228,24 @@ def test_load_multi_chunk_exact_bytes(build):
     assert log[-1] == b"\x01\x03"
     assert h.peek("ureu_rl", 4) == bytes(4)
     U.assert_clean(h)
+
+
+def test_load_invalidates_code_and_bumps_the_epoch(build):
+    """A1: after any ureu_ld (even a failing one: a partial load may have
+    landed) the code windows are invalidated and disp_st's pixel epoch
+    (+105) moves, so neither a stale code window nor a stale picture
+    survives a load into guest memory."""
+    for fs, rl, ok in (({"x.bin": bytearray(pattern(0x100))}, 0x100, 0),
+                       ({"x.bin": bytearray(pattern(0x80))}, 0x100, 1)):
+        h = H(build, fs=fs)
+        h.bus.ram[0xB800 + 105] = 0x41
+        assert h.run("ureu_ld", "x.bin", 0x1000, rl) == ok
+        assert h.peek("ci_calls", 1)[0] == 1
+        assert h.bus.ram[0xB800 + 105] == 0x42
+    h = H(build, fs={"x.bin": bytearray(pattern(0x100))})
+    h.bus.ram[0xB800 + 105] = 0x41
+    assert h.run("ureu_sv", "y.bin", 0x1000, 0x100) == 0     # a save: nothing
+    assert h.peek("ci_calls", 1)[0] == 0 and h.bus.ram[0xB800 + 105] == 0x41
 
 
 def test_save_round_trip(build):

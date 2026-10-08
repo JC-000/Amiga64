@@ -36,9 +36,8 @@
 ;
 ; Test-only variants (tests/aros_resume.py mutants, ≤ 10): SNAP_MUT_NOZP,
 ; SNAP_MUT_NODST, SNAP_MUT_NOBSS, SNAP_MUT_NOCIA, SNAP_MUT_NOEPOCH,
-; SNAP_MUT_NOEXC (no emu_reset patch), SNAP_MUT_NOHSUM, SNAP_MUT_NOBID,
-; SNAP_MUT_NOSSUM.  (NOBID takes the build ID bytes from the loaded
-; header instead of snap_bid: the build ID goes unchecked; size-neutral.)
+; SNAP_MUT_NOEXC (no emu_reset patch), SNAP_MUT_NOHSUM, SNAP_MUT_NOSSUM,
+; SNAP_MUT_NOINVALL (no code_invall after the restore, I1).
 ; ===========================================================================
 
 .include "../macros.inc"
@@ -49,6 +48,7 @@
 .export SNAP_VER
 .import mach_fhook, mach_rdc, mach_now, mach_run
 .import emu_reset, mem_rec_dirty, disp_init
+.import code_invall             ; I1 (W12-C, core.s)
 .import dosio_buf
 .import ureu_bank, ureu_open, ureu_xfer, ureu_close
 .import ureu_ra, ureu_rl
@@ -122,7 +122,9 @@ snap_n:   .res 1                ; bytes summed by snap_sumb (0 = 256)
 snap_rq:  .res 1                ; snap_req as taken
 snap_i:   .res 1
 snap_cmd: .res 1
-snap_sx:  .res 1                ; snap_xs: end offset
+snap_sx:  .res 1
+snap_ss:  .res 4                ; the loaded header's state sum (the scratch
+                                ; at __BSS_RUN__ is not kept past the compare)                ; snap_xs: end offset
 
 .segment "DATA"                 ; in the PRG (stamped), never in the image
 snap_bid:   .res 8              ; build ID: host/snapfmt.py stamps the PRG
@@ -264,11 +266,7 @@ snap_mkhdr:
         dex
         bpl :-
         ldx #7                  ; build ID
-.ifdef SNAP_MUT_NOBID
-:       lda SNAP_SCR+H_BID,x    ; MUTANT (resume only): the loaded header's own
-.else
 :       lda snap_bid,x
-.endif
         sta dosio_buf+H_BID,x
         dex
         bpl :-
@@ -457,7 +455,12 @@ snap_res:
         bcc @f
         lda #SNAP_E_LAY
 @f:     jmp snap_fail
-@ok:    bit snap_rq             ; the file: span 1, the state
+@ok:    ldx #3                  ; keep the state sum: the scratch overlaps BSS
+:       lda SNAP_SCR+H_SSUM,x   ; that the UCI loads below use (dosio_uci's)
+        sta snap_ss,x
+        dex
+        bpl :-
+        bit snap_rq             ; the file: span 1, the state
         bvc @st
         lda #UREU_LOAD
         ldx #7
@@ -467,9 +470,14 @@ snap_res:
 @st:
 .ifndef SNAP_MUT_NOSSUM
         jsr snap_ssum
-        ldy #H_SSUM
-        jsr snap_fcmp
-        beq :+
+        ldx #3
+:       lda snap_fa,x
+        cmp snap_ss,x
+        bne :+
+        dex
+        bpl :-
+        bmi :++                 ; always: equal
+:
         lda #SNAP_E_SSUM
         jmp snap_fail
 :
@@ -571,7 +579,9 @@ snap_rest:
 .ifndef SNAP_MUT_NOEPOCH
         inc disp_st + DISP_ST_PIX ; I2: one conversion rebuilds the screen
 .endif
-        jsr snap_invall         ; I1
+.ifndef SNAP_MUT_NOINVALL
+        jsr code_invall         ; I1 (W12-C): AFTER the BSS restore -- the
+.endif                          ; image holds cw_val/tags/hand, not CWIN/cwin_map
         jsr snap_kill           ; M1: consumed (a second resume refuses: E2)
         jsr mem_rec_dirty       ; C1
         lda #SNAP_S_RES
@@ -588,12 +598,6 @@ snap_kill:
         ldy #D_KILL
         jsr snap_dma
         jmp mem_rec_dirty       ; C1
-
-; I1 STUB (W12-T): until W12-C's code_invall (core.s) lands.  emu_reset
-; above already set w_inv, which invalidates the single code window; at
-; merge this becomes `.import code_invall` / `jsr code_invall`.
-snap_invall:
-        rts
 
 ; --- tables (SCODE is RAM: snap_ssum patches D_SUM's page) ---
 snap_dt:                        ; C64 addr, REU addr u24, length

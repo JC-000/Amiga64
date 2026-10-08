@@ -42,11 +42,12 @@ sys.path.insert(0, ROOT)
 
 from host import machine  # noqa: E402
 
-ORG, TX, OUT, BLK, STAT, TXN, R = 0xC000, 0xC180, 0xC200, 0xC600, 0xC680, 0xC6A0, 0xC6B0
+ORG, TX, OUT, BLK, STAT, TXN, R = 0xC000, 0xC780, 0xC200, 0xC600, 0xC680, 0xC6A0, 0xC6B0
 STUB, SBUF = 0xC700, 0xCB00
 REU_AT = 0x800000
 MAX_BYTES = 4 << 20
-SYMS = ("uci_begin", "uci_put", "dosio_uci_init")
+SYMS = ("uci_begin", "uci_put", "dosio_uci_init", "mem_rec_dirty")
+SP, R2 = 0xC6C0, 0xC6C8         # p_sum: REU addr u24 + pages u16 / fletcher a, b
 
 DRV = """
 .ifndef PF_INNER
@@ -55,12 +56,14 @@ PF_INNER = 217                  ; the turbo fence (dosio_uci.s, c64-https uci_re
 UCI_CTL = $DF1C
 UCI_RSP = $DF1E
 UCI_STA = $DF1F
-TX   = $C180                    ; command bytes (<= 128)
+TX   = $C780                    ; command bytes (<= 128)
 OUT  = $C200                    ; reply data, $C200-$C5FF
 BLK  = $C600                    ; block end offsets (u16, <= 64)
 STAT = $C680                    ; status bytes (<= 32)
 TXN  = $C6A0
 R    = $C6B0                    ; +0 done, +1/2 bytes, +3 blocks, +4 status bytes, +5 err
+SP   = $C6C0
+R2   = $C6C8
 OUTHI = $04                     ; OUT holds $0400 bytes
 .segment "CODE"
 p_tx:   lda #0
@@ -180,6 +183,57 @@ fi:     sec
         tax
         pla
         rts
+; p_sum: host/machine.fletcher of SP+3/4 pages of REU from SP (u24) -> R2
+p_sum:  lda #0
+        sta R2
+        sta R2+1
+        sta R2+2
+        sta R2+3
+ps:     lda SP+3
+        ora SP+4
+        beq pd
+        lda #<OUT
+        sta $DF02
+        lda #>OUT
+        sta $DF03
+        lda SP
+        sta $DF04
+        lda SP+1
+        sta $DF05
+        lda SP+2
+        sta $DF06
+        lda #0
+        sta $DF07
+        sta $DF0A
+        lda #1
+        sta $DF08
+        lda #$91
+        sta $DF01
+        ldy #0
+pb:     lda OUT,y
+        clc
+        adc R2
+        sta R2
+        bcc :+
+        inc R2+1
+:       lda R2
+        clc
+        adc R2+2
+        sta R2+2
+        lda R2+1
+        adc R2+3
+        sta R2+3
+        iny
+        bne pb
+        inc SP+1
+        bne :+
+        inc SP+2
+:       lda SP+3
+        bne :+
+        dec SP+4
+:       dec SP+3
+        jmp ps
+pd:     jmp mem_rec_dirty
 tmo:    .res 2
 """
 
@@ -195,13 +249,17 @@ def build_driver(lab, out_dir: str, extra=()) -> tuple[bytes, int]:
     with open(src, "w") as f:
         f.write(DRV)
     with open(cfg, "w") as f:
-        f.write("MEMORY { M: file = %%O, start = $%04X, size = $0180; }\n"
+        f.write("MEMORY { M: file = %%O, start = $%04X, size = $0200; }\n"
                 "SEGMENTS { CODE: load = M, type = rw; }\n" % ORG)
     defs = [x for n in SYMS for x in ("-D", f"{n}=${lab(n):04X}")]
-    for cmd in (["ca65", *defs, *extra, "-o", obj, src], ["ld65", "-C", cfg, "-o", out, obj]):
+    lbl = os.path.join(out_dir, "probe.lbl")
+    for cmd in (["ca65", "-g", *defs, *extra, "-o", obj, src],
+                ["ld65", "-C", cfg, "-o", out, "-Ln", lbl, obj]):
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode:
             raise RuntimeError(r.stdout + r.stderr)
+    global P_SUM
+    P_SUM = next(int(l.split()[1], 16) for l in open(lbl) if l.split()[2] == ".p_sum")
     return open(out, "rb").read(), ORG
 
 
@@ -284,6 +342,26 @@ class Probe:
         self.w(self.lab("ureu_err"), b"\xAA")
         t0 = time.monotonic()
         self.call(self.lab("ureu_ld"), timeout=900.0)
+        dt = time.monotonic() - t0
+        reply = self.r(self.lab("dosio_buf"), 40).split(b"\0")[0].decode("latin-1")
+        return self.r(self.lab("ureu_err"), 1)[0], dt, reply
+
+    def reu_sum(self, a: int, n: int) -> int:
+        """host/machine.fletcher of n (multiple of 256) REU bytes, on the C64."""
+        assert n % 256 == 0
+        self.w(SP, a.to_bytes(3, "little") + struct.pack("<H", n // 256))
+        self.call(P_SUM, timeout=600.0)
+        a_, b_ = struct.unpack("<HH", self.r(R2, 4))
+        return b_ << 16 | a_
+
+    def ureu_sv(self, name: str, ra: int, rl: int) -> tuple[int, float, str]:
+        self.w(self.lab("dosio_name"), name.encode())
+        self.w(self.lab("dosio_nlen"), bytes([len(name)]))
+        self.w(self.lab("ureu_ra"), ra.to_bytes(3, "little"))
+        self.w(self.lab("ureu_rl"), struct.pack("<I", rl))
+        self.w(self.lab("ureu_err"), b"\xAA")
+        t0 = time.monotonic()
+        self.call(self.lab("ureu_sv"), timeout=900.0)
         dt = time.monotonic() - t0
         reply = self.r(self.lab("dosio_buf"), 40).split(b"\0")[0].decode("latin-1")
         return self.r(self.lab("ureu_err"), 1)[0], dt, reply
@@ -385,11 +463,93 @@ def run(p: Probe, root: str, rep: dict) -> list[str]:
     return fails
 
 
+ADF_LOCAL = os.path.expanduser("~/Documents/Amiga Disk Images/amiga-os-310-workbench.adf")
+DEV_DIR = "/USB1/amiga64"
+ADF_NAME = "amiga-os-310-workbench.adf"
+SAVE_NAME = "probe-save.bin"            # created and deleted by this probe
+
+
+def ensure_adf(host: str, rep: dict) -> bytes:
+    """The ADF on the device (test input, it stays): uploaded once, else
+    verified by SHA-256 (never overwritten)."""
+    import hashlib
+    from pathlib import Path
+    from c64_test_harness import storage_get_file, storage_put_file
+    adf = open(ADF_LOCAL, "rb").read()
+    path = f"{DEV_DIR}/{ADF_NAME}"
+    try:
+        r = storage_put_file(host, path, Path(ADF_LOCAL), overwrite=False, verify=True)
+        rep["adf_upload"] = {"path": r.path, "size": r.size, "sha256": r.sha256,
+                             "verified": r.verified}
+        log(f"  uploaded {path}: {r.size} B, verified {r.verified}")
+    except FileExistsError:
+        dev = storage_get_file(host, path)
+        rep["adf_upload"] = {"path": path, "present": True,
+                             "same": hashlib.sha256(dev).digest() == hashlib.sha256(adf).digest()}
+        log(f"  {path} already on the device; same bytes: {rep['adf_upload']['same']}")
+        if not rep["adf_upload"]["same"]:
+            raise RuntimeError(f"{path} on the device differs from the local ADF")
+    return adf
+
+
+def run_adf(p: Probe, host: str, rep: dict) -> list[str]:
+    """LOAD_REU of the ADF (checksummed on the C64 against the host's), SAVE_REU
+    of the same REU range to a test file (read back over FTP, compared,
+    deleted), the past-end refusal."""
+    from c64_test_harness import storage_delete_file, storage_get_file
+    fails = []
+    adf = ensure_adf(host, rep)
+    size = len(adf)
+    st = p.cd(DEV_DIR)
+    rep["cd"] = st
+    if not st.startswith("00"):
+        return [f"CHANGE_DIR {DEV_DIR}: {st}"]
+    e0, t0, _ = p.ureu_ld(ADF_NAME, REU_AT, 0)
+    e1, t1, reply = p.ureu_ld(ADF_NAME, REU_AT, size)
+    want = machine.fletcher(adf)
+    got = p.reu_sum(REU_AT, size)
+    rep["load"] = {"size": size, "chunks": -(-size // 0x40000), "err": e1, "err_empty": e0,
+                   "t_s": round(t1, 3), "t_empty_s": round(t0, 3), "last_reply": reply,
+                   "fletcher_reu": f"${got:08X}", "fletcher_adf": f"${want:08X}",
+                   "throughput_kib_s": round(size / 1024 / max(t1 - t0, 1e-3), 1)}
+    log(f"  LOAD_REU {size} B: err {e1}, {t1:.2f} s (open+close {t0:.2f} s) -> "
+        f"{rep['load']['throughput_kib_s']} KiB/s; reply {reply!r}; fletcher "
+        f"REU ${got:08X} / ADF ${want:08X}")
+    import re
+    if e0 or e1 or got != want:
+        fails.append(f"LOAD: err {e0}/{e1}, fletcher REU ${got:08X} != ADF ${want:08X}")
+    if not re.match(r"^\$[0-9A-F]{6} BYTES LOADED TO REU \$[0-9A-F]{6}$", reply):
+        fails.append(f"reply text not small_printf's: {reply!r}")
+    e2, t2, reply2 = p.ureu_sv(SAVE_NAME, REU_AT, size)
+    try:
+        dev = storage_get_file(host, f"{DEV_DIR}/{SAVE_NAME}")
+    finally:
+        gone = storage_delete_file(host, f"{DEV_DIR}/{SAVE_NAME}", missing_ok=True)
+    rep["save"] = {"err": e2, "t_s": round(t2, 3), "last_reply": reply2,
+                   "readback_equal": dev == adf, "readback_size": len(dev), "deleted": gone,
+                   "throughput_kib_s": round(size / 1024 / max(t2 - t0, 1e-3), 1)}
+    log(f"  SAVE_REU {size} B: err {e2}, {t2:.2f} s -> {rep['save']['throughput_kib_s']} KiB/s; "
+        f"reply {reply2!r}; FTP read-back equal {dev == adf}; deleted {gone}")
+    if e2 or dev != adf:
+        fails.append(f"SAVE: err {e2}, read-back equal {dev == adf} ({len(dev)} B)")
+    if not re.match(r"^\$[0-9A-F]{6} BYTES SAVED FROM REU \$[0-9A-F]{6}$", reply2):
+        fails.append(f"save reply text not small_printf's: {reply2!r}")
+    e3, _, reply3 = p.ureu_ld(ADF_NAME, REU_AT, size + 1)
+    rep["short"] = {"err": e3, "reply": reply3}
+    log(f"  one byte past the end: err {e3} (want 5), reply {reply3!r}")
+    if e3 != 5:
+        fails.append(f"a request past the end gave ureu_err {e3}, want 5")
+    return fails
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--prg", required=True)
     ap.add_argument("--mhz", type=int, default=64)
     ap.add_argument("--root", default=None, help="/SD (C64U) or /USB1 (U64E)")
+    ap.add_argument("--adf", action="store_true",
+                    help="the ADF mode (U64E, storage writes allowed): upload/verify the ADF, "
+                         "LOAD + checksum, SAVE + FTP read-back + delete")
     ap.add_argument("--out", default=os.path.join(ROOT, "build", "evidence", "w12-reu", "probe"))
     a = ap.parse_args(argv)
     from c64_test_harness import Labels
@@ -400,7 +560,7 @@ def main(argv=None) -> int:
     prg = os.path.abspath(a.prg)
     labels = Labels.from_file(os.path.splitext(prg)[0] + ".lbl")
     host = os.environ.get("U64_HOST", "?")
-    tag = f"{host}-{a.mhz}mhz"
+    tag = f"{host}-{a.mhz}mhz" + ("-adf" if a.adf else "")
     out = os.path.join(a.out, tag)
     os.makedirs(out, exist_ok=True)
     drv, _ = build_driver(lambda n: lookup_label(labels, n), out)
@@ -427,7 +587,7 @@ def main(argv=None) -> int:
         try:
             p = Probe(tg, labels, drv)
             p.call(lookup_label(labels, "dosio_uci_init"))
-            fails = run(p, root, rep)
+            fails = run_adf(p, host, rep) if a.adf else run(p, root, rep)
         except Exception as e:
             fails = [f"INFRA: {type(e).__name__}: {e}"]
         finally:

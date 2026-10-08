@@ -13,8 +13,8 @@ freezes (sei).  Then the machine is RESET and the runner loaded FRESH
 (VICE: harness reset + run_prg_via_sys; U64: harness reset + run_prg), the
 ROM id written again and snap_resume launched.  REU-resident: the guest
 ranges and the snapshot stay in the REU across the reset.  The file path
-(snap_req bit 6: SAVE_REU/LOAD_REU) needs device storage writes and is not
-driven from here yet; host/tests/test_snap_file.py pins it on the host.
+(snap_req bit 6: SAVE_REU/LOAD_REU) is leg m3file (U64E: device storage
+writes allowed there); host/tests/test_snap_file.py pins it on the host.
 
 Legs:
   mid    suspend early in the boot, at guest frame SUSPEND_FRAME (before
@@ -33,6 +33,12 @@ Legs:
            E2 one header byte corrupted in the REU (the flags byte, which
               the layout compare skips: only the checksum sees it)
            E5 one byte of the state image corrupted in the REU
+  m3file (U64E) variant B: suspend at m3 to /USB1/amiga64/snap-test.bin,
+         the file read back over FTP and checked, reset + fresh load, the
+         WHOLE REU zeroed, resume from the file, picture within budget;
+         the test file deleted
+  (VICE, both legs: right after the resume W12-C's code-window directory
+  must agree with its page-low map, cwin_check: I1)
   --mutants  snap.s test-only variants (<= 10 with ureu.s's host mutant),
          each built once and stamped with the base build's ID (only SCODE
          differs; the MAIN bytes are checked equal): a block left out of
@@ -220,24 +226,32 @@ def fresh_load(m: AB.Machine, prg: str) -> None:
     scrub(m)
 
 
+SCRUB_PAGES = ((0xA9, 0xB0),     # W12-C code windows $A900-$AFFF (invalid on a fresh load)
+               (0xB6, 0xC0),     # blt rows, disp_st, c2v tables/args
+               (0xE0, 0xFF))     # the VIC bitmap
+
+
+def scrub_code(base: int) -> bytes:
+    """6502: fill every page range of SCRUB_PAGES with $55 (stores under
+    ROM land in RAM), rts."""
+    code = bytearray([0xA9, 0x55, 0xA0, 0x00])          # lda #$55 / ldy #0
+    for lo, hi in SCRUB_PAGES:
+        at = base + len(code)
+        code += bytes([0x99, 0x00, lo,                  # sta lo00,y
+                       0xC8, 0xD0, 0xFA,                # iny / bne
+                       0xEE, (at + 2) & 0xFF, (at + 2) >> 8,   # inc hi
+                       0xAE, (at + 2) & 0xFF, (at + 2) >> 8,   # ldx hi
+                       0xE0, hi, 0xD0, 0xF0])           # cpx #hi / bne
+    return bytes(code + b"\x60")
+
+
 def scrub(m: AB.Machine) -> None:
-    """Fill the runtime's RAM outside the PRG ($B600-$BFFF: blt rows,
-    disp_st, c2v tables/args; $E000-$FF3F: the VIC bitmap) with $55: RAM
-    outlives a reset, but a resume must not depend on it (another
-    power-on has none of it).  A 6502 loop: stores under ROM land in RAM."""
+    """Fill the runtime's RAM outside the PRG's meaningful bytes with $55:
+    RAM outlives a reset, and another power-on has none of it; the W12-C
+    windows load as zeros but are don't-care until a fetch fills one (a
+    resume that left stale window tags valid would execute this)."""
     from tests.harness_util import call_runner
-    code = bytes([
-        0xA9, 0x55, 0xA0, 0x00,                         # lda #$55, ldy #0
-        0x99, 0x00, 0xB6, 0xC8, 0xD0, 0xFA,             # sta $B600,y / iny / bne
-        0xEE, STUB + 6 & 0xFF, (STUB + 6) >> 8,         # inc hi
-        0xAE, STUB + 6 & 0xFF, (STUB + 6) >> 8,         # ldx hi
-        0xE0, 0xC0, 0xD0, 0xF0,                         # cpx #$C0 / bne
-        0x99, 0x00, 0xE0, 0xC8, 0xD0, 0xFA,             # sta $E000,y / iny / bne
-        0xEE, STUB + 22 & 0xFF, (STUB + 22) >> 8,       # inc hi
-        0xAE, STUB + 22 & 0xFF, (STUB + 22) >> 8,       # ldx hi
-        0xE0, 0xFF, 0xD0, 0xF0,                         # cpx #$FF / bne
-        0x60])
-    m.w(STUB, code)
+    m.w(STUB, scrub_code(STUB))
     call_runner(m.tg, STUB, 30.0)
 
 
@@ -317,7 +331,7 @@ def model_sets(m: AB.Machine) -> tuple[str, set]:
     mf, why = AB.model_frames()
     if mf is None:
         raise RuntimeError(f"no model frames: {why}")
-    key = (lambda h, v: h) if m.vice else (lambda h, v: v["nomatrix"])
+    key = (lambda h, v: h) if m.vice else (lambda h, v: v["u64"])   # = aros_boot.leg_m3 (W12-V)
     ok = {key(h, v) for h, v in mf["hashes"].items()
           if v["frame"] >= mf["insert_disk_frame"]}
     return mf["serial"], ok
@@ -326,6 +340,42 @@ def model_sets(m: AB.Machine) -> tuple[str, set]:
 # --------------------------------------------------------------------------
 # legs
 # --------------------------------------------------------------------------
+
+def cwin_check(m: AB.Machine, rep: dict, tries: int = 4) -> list[str]:
+    """VICE (BHI is not host-readable on the Ultimate): right after a resume
+    W12-C's directory must agree with its page-low map (core.s "W12-C
+    code-window cache": bits 2-0 = valid windows with page-low p, bit 7 =
+    any, bit 6 = any with page-low p+1; valid tags unique).  The image
+    restores cw_val/tags but not the map, so only code_invall after the
+    restore (I1) makes them agree.  Read in one monitor stop (the guest
+    halted); an inconsistent read is retried (a stop inside cw_drop), a
+    persistent one fails."""
+    from c64_test_harness import read_bytes
+    n = m.lab("CWIN_N")
+    bad = ""
+    for _ in range(tries):
+        val = read_bytes(m.t, m.lab("cw_val"), n)
+        tlo = read_bytes(m.t, m.lab("cw_tlo"), n)
+        thi = read_bytes(m.t, m.lab("cw_thi"), n)
+        mp = read_bytes(m.t, m.lab("cwin_map"), 256)     # $01 = $35 in mach_run
+        m.t.resume()
+        lows = [tlo[k] for k in range(n) if val[k]]
+        tags = [(tlo[k], thi[k]) for k in range(n) if val[k]]
+        bad = ""
+        if len(set(tags)) != len(tags):
+            bad = f"duplicate valid tags {tags}"
+        for p in range(256):
+            c, c1 = lows.count(p), lows.count((p + 1) & 0xFF)
+            if (mp[p] & 7) != c or bool(mp[p] & 0x80) != (c > 0) or bool(mp[p] & 0x40) != (c1 > 0):
+                bad = bad or (f"page-low ${p:02X}: map ${mp[p]:02X}, {c} valid window(s) "
+                              f"(+1: {c1})")
+        if not bad:
+            rep["cwin_check"] = {"valid": len(tags), "ok": True}
+            return []
+        time.sleep(0.1)
+    rep["cwin_check"] = {"ok": False, "why": bad}
+    return [f"cwin: W12-C's directory and map disagree after the resume: {bad}"]
+
 
 def leg_mid(m: AB.Machine, rom, rid: bytes, s: int, prg_resume: str,
             rep: dict, timeout: float = 600.0) -> list[str]:
@@ -356,6 +406,10 @@ def leg_mid(m: AB.Machine, rom, rid: bytes, s: int, prg_resume: str,
     rep["resume_st"], rep["resume_s"] = f"${v:02X}", round(dt, 2)
     if v != F.ST_RES:
         return [f"mid: resume refused: ${v:02X} ({F.ST_ERR.get(v)})"]
+    if m.vice:
+        f = cwin_check(m, rep)
+        if f:
+            return f
     c = m.count()
     log(f"  resumed in {dt:.2f} s; serial count {c} (frozen at {n})")
     if (c - n) & 0xFFFF > m.sersz:
@@ -519,6 +573,8 @@ def leg_m3(m: AB.Machine, rom, rid: bytes, s: int, prg_resume: str, rep: dict,
     rep["resume_st"], rep["resume_s"] = f"${v:02X}", round(rdt, 2)
     if v != F.ST_RES:
         return fails + [f"m3: resume refused: ${v:02X} ({F.ST_ERR.get(v)})"]
+    if m.vice:
+        fails += cwin_check(m, rep)
     if ep0 is not None:
         # VICE (BHI is not host-readable on the Ultimate): resume bumps the
         # epoch (I2).  The animated insert-disk screen converts by itself
@@ -538,6 +594,84 @@ def leg_m3(m: AB.Machine, rom, rid: bytes, s: int, prg_resume: str, rep: dict,
     else:
         log(f"  m3 picture again {dt:.2f} s after launching the resume "
             f"(resume itself {rdt:.2f} s)")
+    return fails
+
+
+SNAP_FILE = "/USB1/amiga64/snap-test.bin"     # created and deleted by m3file
+
+
+def leg_m3file(m: AB.Machine, rom, rid: bytes, s: int, prg_resume: str, rep: dict,
+               timeout: float = 900.0) -> list[str]:
+    """Variant B (U64E: device storage writes allowed there, fix round 1):
+    boot to m3, suspend WITH the file (SAVE_REU of every span to
+    SNAP_FILE), read the file back over FTP and check its header, reset +
+    fresh load, ZERO THE WHOLE REU (the resume can only come from the
+    file), LOAD_REU + resume: m3's picture again within M3_BUDGET_S of the
+    launch.  The test file is deleted afterwards (the ADF is not touched)."""
+    if m.vice:
+        return ["m3file: Ultimate only (VICE has no UCI)"]
+    from c64_test_harness import storage_delete_file, storage_get_file
+    host = os.environ["U64_HOST"]
+    cl = m.t.client
+    cat, item = "C64 and Cartridge Settings", "Command Interface"
+    rep["ci"] = [cl.get_config_value(cat, item)]
+    cl.set_config_item(cat, item, "Enabled")    # inside the hold: u64_hold restores it
+    rep["ci"].append(cl.get_config_value(cat, item))
+    log(f"  Command Interface {rep['ci'][0]} -> {rep['ci'][1]} (restored by the hold)")
+    fails: list[str] = []
+    try:
+        _, ok = model_sets(m)
+        sn = Snap(m, m_prg(m), rid)
+        boot(m, rom, s, rep, sn)
+        t0 = time.monotonic()
+        dt = hash_wait(m, ok, t0, timeout)
+        if dt is None:
+            return [f"m3file: no insert-disk picture ({timeout:.0f} s)"]
+        rep["boot_m3_s"] = round(dt, 1)
+        log(f"  m3 reached in {dt:.1f} s (frame {m.frames()})")
+        name = SNAP_FILE.encode()
+        m.w(m.lab("dosio_name"), name)
+        m.w(m.lab("dosio_nlen"), bytes([len(name)]))
+        t1 = time.monotonic()
+        sn.request(F.RQ_SUS | F.RQ_FILE)
+        v = sn.wait_st(lambda v: v == F.ST_SUSF or v in F.ST_ERR, 300.0)
+        rep["suspend_file_s"], rep["suspend_st"] = round(time.monotonic() - t1, 2), f"${v:02X}"
+        if v != F.ST_SUSF:
+            return [f"m3file: suspend to the file failed: snap_st ${v:02X}"]
+        data = storage_get_file(host, SNAP_FILE)
+        h = F.parse_header(data[:256])
+        sp = F.spans(h["keep"])
+        rep["file"] = {"size": len(data), "spans_total": sum(n for _, n in sp),
+                       "sum_ok": h["sum_ok"], "flags": h["flags"], "bid": h["bid"].hex(),
+                       "state_sum_ok": F.fletcher(data[256:256 + sp[1][1]]) == h["state_sum"]}
+        log(f"  suspended to {SNAP_FILE} in {rep['suspend_file_s']} s: {rep['file']}")
+        if (len(data) != rep["file"]["spans_total"] or not h["sum_ok"]
+                or not rep["file"]["state_sum_ok"] or h["flags"] != F.RQ_FILE):
+            fails.append(f"m3file: the file is not a whole snapshot: {rep['file']}")
+        fresh_load(m, prg_resume)
+        m.w(AB.P, bytes([0, 0]))                # aros_fill: every REU bank
+        m.call("aros_fill")
+        sn = Snap(m, prg_resume, rid)
+        sn.declare_rid()
+        rep["reu_header_after_fill"] = sn.reu_read(F.SNAP_BASE, 4).hex()
+        m.w(m.lab("dosio_name"), name)
+        m.w(m.lab("dosio_nlen"), bytes([len(name)]))
+        t2 = time.monotonic()
+        v, rdt = sn.resume(F.RQ_FILE, timeout=300.0)
+        rep["resume_st"], rep["resume_file_s"] = f"${v:02X}", round(rdt, 2)
+        if v != F.ST_RES:
+            return fails + [f"m3file: resume from the file refused: ${v:02X} ({F.ST_ERR.get(v)})"]
+        dt = hash_wait(m, ok, t2, max(M3_BUDGET_S * 4, 60.0))
+        rep["m3_again_s"] = None if dt is None else round(dt, 2)
+        if dt is None or dt > M3_BUDGET_S:
+            fails.append(f"m3file: the picture came back after "
+                         f"{'never' if dt is None else f'{dt:.1f} s'} (budget {M3_BUDGET_S:.0f} s)")
+        else:
+            log(f"  from the file: resume {rdt:.2f} s (LOAD_REU included), picture again "
+                f"{dt:.2f} s after the launch")
+    finally:
+        rep["deleted"] = storage_delete_file(host, SNAP_FILE, missing_ok=True)
+        log(f"  {SNAP_FILE} deleted: {rep['deleted']}")
     return fails
 
 
@@ -566,7 +700,7 @@ MUTANTS = {                     # name -> (define, leg)
     "noexc": ("SNAP_MUT_NOEXC", "mid"),
     "noepoch": ("SNAP_MUT_NOEPOCH", "m3"),
     "nohsum": ("SNAP_MUT_NOHSUM", "accept:E2"),
-    "nobid": ("SNAP_MUT_NOBID", "accept:E3"),
+    "noinvall": ("SNAP_MUT_NOINVALL", "mid"),   # I1 (replaces nobid; E3 is the m3 leg's refusal)
     "nossum": ("SNAP_MUT_NOSSUM", "accept:E5"),
 }
 
@@ -717,7 +851,8 @@ def main(argv=None) -> int:
         t0 = time.monotonic()
         log(f"[{leg}] {a.backend}")
         fn = {"mid": lambda m: leg_mid(m, rom, rid, s, a.prg, r),
-              "m3": lambda m: leg_m3(m, rom, rid, s, a.prg, r)}[leg]
+              "m3": lambda m: leg_m3(m, rom, rid, s, a.prg, r),
+              "m3file": lambda m: leg_m3file(m, rom, rid, s, a.prg, r)}[leg]
         try:
             f = session(a.prg, a.backend, os.path.join(a.out, f"{a.backend}-{leg}"),
                         a.mhz, fn)

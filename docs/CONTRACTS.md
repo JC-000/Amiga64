@@ -1421,14 +1421,25 @@ Tests: `host/tests/test_snap_ureu.py` (byte-level, the UCI model of
   than `00` = 3 (`ureu_us` keeps its first two bytes); no reply = 2 (the
   handshake is aborted); open refused = 1; close refused = 6. On a failure
   `ureu_ra`/`ureu_rl` point at the failing chunk.
+- **After a load (A1)**: `ureu_ld` ends EVERY load, failing ones too (a
+  partial chunk may have landed), with `code_invall` (W12-C: no code window
+  may serve the old bytes) and `disp_st+105` += 1 (the pixel epoch: the
+  next frame converts the picture again, I2's rule). Any other caller of
+  `ureu_xfer` with `$21` into guest memory carries the same obligation
+  (snap.s's resume: its restore runs `code_invall` and the epoch bump).
+  `ureu_sv` changes no guest byte and does neither.
 - **Scratch**: the 8-byte command payload and the check's shift register
   sit in `dosio_buf + $F0..` (a reply keeps at most 40 bytes at its start).
   ureu is never used while an HLE dos.library file is open (machine mode
   has none).
 - **Storage**: C64U `/SD/amiga64/`, U64E `/USB1/amiga64/`; never `/Flash` or
   `/Temp`. Device storage writes wait for the harness owner's decision
-  (Wave 12 brief). **SAVE_REU is unverified on hardware** until then;
-  LOAD_REU: the read-only probe (`tests/ureu_probe.py`, HARDWARE.md).
+  (Wave 12 brief). Verified on the U64E (`tests/ureu_probe.py --adf`, the
+  harness storage API c1a2095): LOAD_REU of a 901,120-byte ADF checksummed
+  on the C64, SAVE_REU read back over FTP, both at 48 and 1 MHz
+  (HARDWARE.md). The C64U has no medium. A probe enables the Command
+  Interface inside its `u64_hold` (both devices keep it Disabled; the
+  hold restores it).
 
 ## Suspend/resume (W12-T)
 
@@ -1449,9 +1460,12 @@ the UCI model).
   guest freezes (`sei`, spin): a REU-resident snapshot is valid only while
   nothing runs. `snap_st`: `$10` suspended, `$11` + file,
   `$20` resumed, `$E1-$EA` refused (`host/snapfmt.ST_ERR`).
-- **The file path (bit 6) is UNVERIFIED ON HARDWARE until the storage
-  decision**: SAVE_REU/LOAD_REU of the spans in order, the refusals and the
-  restore are pinned at host level only (`test_snap_file.py`).
+- **The file path (bit 6)**: pinned at host level (`test_snap_file.py`:
+  the spans in order, a resume from the file, the refusals) and verified on
+  the U64E (fw 3.15, 48 MHz, `aros_resume` leg `m3file`): suspend at m3 to
+  `/USB1/amiga64/snap-test.bin` (5.2 MB, 3.1 s), reset, the whole REU
+  zeroed, resume from the file (1.2 s), picture again in 3.7 s. Not run on
+  the C64U (no medium).
 - **Consumed (M1)**: a successful resume, and a suspend that continues the
   guest (bit 7), overwrite the REU header's first magic byte
   (`snap_kill`): the REU-resident snapshot can then never be resumed over
@@ -1472,9 +1486,24 @@ the UCI model).
   at `+$2FE0` `$E4`; an all-zero declared ROM id `$EA`); then (file) span 1, the state checksum (`$E5`), then
   the guest ranges. Restore: `disp_init`; `st_exc` from the image, then
   `emu_reset`; zero page; `disp_st`; the BSS image; the CIA #2 counter;
-  the pixel epoch `disp_st+105` += 1 (I2); `code_invall` (I1; until W12-C
-  lands a stub: `emu_reset` already set `w_inv`); `snap_kill` (M1);
+  the pixel epoch `disp_st+105` += 1 (I2); `code_invall` (I1, W12-C: AFTER
+  the BSS restore -- the image holds `cw_val`/`cw_tlo`/`cw_thi`/`cw_hand`/
+  `cw_mok`, while the windows (CWIN) and `cwin_map` are not in it, so the
+  restored tags would otherwise claim windows the fresh load never filled:
+  duplicate valid tags and a map that no longer counts them. Checked on
+  VICE right after every resume (`aros_resume` `cwin_check`: W12-C's
+  directory against its page-low map); mutant `noinvall` fails it); `snap_kill` (M1);
   `mem_rec_dirty`; then `mach_run` (`mach_on` = 1: no `mach_init`).
+- **Resume scratch**: before the restore every byte of the image range is
+  free, so the loaded header is fetched to `__BSS_RUN__` for the layout
+  compare. Since W12-C that page also holds `cw_*`, `m_scmd` and
+  dosio_uci.s's state, which the file loads that follow write: only the
+  compare uses the copy; its state sum is kept in SBSS (`snap_ss`) first.
+- **`mach_s` after a resume (A3)**: `mach_s` (DATA) is not in the image: a
+  resumed runner's `mach_s` holds the fresh-load default, not the shift the
+  machine runs at. The E-clock shift in force is `mach_sl` (BSS, latched
+  by `mach_init`, restored with the image): host tools and code must read
+  `mach_sl`, never `mach_s`, to learn the shift of a resumed machine.
 - **What `mach_run`'s entry overwrites** (the image's values of these never
   take effect): `mach_port` := the caller's `$01`; `mach_ev` := `ev_pend`,
   `ev_pend` := 0 (a pending event is serviced by the entry pass, as at any
@@ -1541,7 +1570,7 @@ before `snap_keep`).
 | `ev_pend`, `mach_frames` | zp `$95-$99` | image | restored | pending events, the frame count |
 | loader scratch, `$00/$01`, free zp | zp `$00-$0F`, `$9A-$FF` | image (not used) | not restored | runner/harness or hardware, not guest state |
 | step-loop patch (`nx_br`, `step_jv`, `run_jv`) | CODE (SMC) | — | rebuilt: `emu_reset` with the image's `st_exc` | the only persistent self-modification (others are per instruction) |
-| `code_win` (+ W12-C windows in CWIN) | BSS / `$A800-$B0FF` | image | invalidated (`code_invall`) | a cache of guest memory |
+| W12-C code cache: `cw_val`/`cw_tlo`/`cw_thi`/`cw_hand`/`cw_mok` (BSS); the windows (CWIN) and `cwin_map` | BSS / CWIN | BSS part in the image; windows and map not | `code_invall` after the BSS restore drops every window | a cache of guest memory: refilled on demand |
 | chip shadow, serial ring + count, log | `chip.s` BSS | image | restored | Paula/INTREQ/INTENA state; the ring continues the text |
 | CIA-A/B state (timers, ICR, TOD, ports) | `cia.s` BSS | image | restored | guest CIAs live in E time (event slots) |
 | copper state, `cop_dhook`, `cop_sh` | `cop.s` BSS | image (`cop_dhook` re-set by `disp_init`, then overwritten by the image) | restored | the copper |
@@ -1551,7 +1580,7 @@ before `snap_keep`).
 | machine loop (deadlines, slots, `mach_on`, `mach_fhook`, `mach_now`, `mach_chi`) | `mach.s` BSS | image (`mach_rdc` first) | restored | event seam and frame timing, absolute in the time base below |
 | `snap_chain` | `snap.s` BSS (before `snap_keep`) | image | restored | the chained frame hook |
 | HLE / dos / con / mem state | `hle*.s`, `dosio_*.s` BSS | image | restored | inert in machine mode (no HLE traps); restoring keeps them consistent |
-| group scratch (`v_*`), `mach_s` | DATA | not saved | fresh load | `v_*` per instruction; `mach_s` is read by `mach_init` only (latched in `mach_sl`) |
+| group scratch (`v_*`), `mach_s` | DATA | not saved | fresh load | `v_*` per instruction; `mach_s` is read by `mach_init` only (latched in `mach_sl`): after a resume read `mach_sl` (A3) |
 | CIA #2 TA/TB (the time base) | hardware | in the image as `mach_now` | reloaded to `~mach_now` (TA ≥ `$0100`: ≤ 255 φ2 earlier) | every deadline is absolute in this counter |
 | CIA #1 TA one-shot, ICR mask, IRQ/NMI vectors, `$01` | hardware / `$FFFA` | — | rebuilt by `mach_run`'s entry (`mach_vec`, `mach_svc` re-arms) | mach_run's own entry contract |
 | VIC registers, `$DD00` bank, bitmap, matrix, colour RAM | hardware / `$D000`, `$E000` | — | rebuilt by the forced conversion (I2) | derived from `disp_st` + guest memory |
