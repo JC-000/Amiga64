@@ -69,6 +69,7 @@
 .import chip_shd, chip_vl, chip_vh, chip_blitirq        ; chip.s
 .import cop_sh                                          ; cop.s: C1 copy (+1 dmacon)
 .import mem_rec_dirty, mem_read8, mem_write8            ; core.s
+.import code_invpg                                      ; core.s: W12-C (supervisor-approved)
 
 BLT_CON0  = $40         ; @value BLTCON0 register offset
 BLT_CON1  = $42         ; @value BLTCON1
@@ -122,8 +123,6 @@ blt_l0:    .res 1
 blt_q1:    .res 1
 blt_q0:    .res 1
 blt_sh:    .res 1
-blt_smc:   .res 1       ; nonzero: a D row hit the page of r_pc
-blt_sv:    .res 12      ; m_addr, m_val, t_tmp around the window invalidation
 ; --- per blit ---
 blt_en:    .res 1       ; USEA..USED (BLTCON0 bits 11-8)
 blt_lf:    .res 1       ; minterm
@@ -374,44 +373,10 @@ row:    jsr blt_row
         bne row
         jsr blt_done
         jsr mem_rec_dirty       ; C1: the REC was ours
-        lda blt_smc
-        beq fin
-        jsr blt_winv
-fin:    lda #1                  ; blt_w raises INTREQ BLIT
+        lda #1                  ; blt_w raises INTREQ BLIT
         rts
 .endproc
 
-; ---------------------------------------------------------------------------
-.proc blt_winv
-        ldx #3
-sv:     lda m_addr,x
-        sta blt_sv,x
-        lda m_val,x
-        sta blt_sv+4,x
-        lda t_tmp,x
-        sta blt_sv+8,x
-        dex
-        bpl sv
-        lda #0
-        sta m_addr
-        sta m_addr+3
-        lda r_pc+1
-        sta m_addr+1
-        lda r_pc+2
-        sta m_addr+2
-        jsr mem_read8
-        jsr mem_write8
-        ldx #3
-rs:     lda blt_sv,x
-        sta m_addr,x
-        lda blt_sv+4,x
-        sta m_val,x
-        lda blt_sv+8,x
-        sta t_tmp,x
-        dex
-        bpl rs
-        rts
-.endproc
 
 ; ---------------------------------------------------------------------------
 ; blt_setup — decode the registers, channel addresses and steps, prefill
@@ -424,7 +389,6 @@ rs:     lda blt_sv,x
 :       lda #0
         sta blt_nz
         sta blt_nzf
-        sta blt_smc
         lda chip_shd+BLT_CON0
         and #$0F
         sta blt_en
@@ -987,17 +951,18 @@ o:      ror blt_fr
 .endproc
 
 ; ---------------------------------------------------------------------------
-; blt_dpage — blt_smc := 1 if the D row touches the guest page of r_pc.
+; blt_dpage — drop every cached code window the D row touches: its first
+; and last guest page (a row is <= 128 bytes).  W12-C (supervisor-approved):
+; with several cached windows, flagging only r_pc's page left a blit into a
+; non-current cached window stale.
 ; ---------------------------------------------------------------------------
 .proc blt_dpage
-        lda blt_r2+BLT_JD
+        lda blt_r2+BLT_JD       ; W12-C (supervisor-approved)
         and #BLT_BANKS
-        cmp r_pc+2
-        bne e
+        tax
         lda blt_r1+BLT_JD
-        cmp r_pc+1
-        beq hit
-e:      lda blt_r0+BLT_JD
+        jsr code_invpg          ; first page: A = bits 15-8, X = bits 23-16
+        lda blt_r0+BLT_JD
         clc
         adc blt_wbm1
         lda blt_r1+BLT_JD
@@ -1006,14 +971,9 @@ e:      lda blt_r0+BLT_JD
         lda blt_r2+BLT_JD
         adc #0
         and #BLT_BANKS
-        cmp r_pc+2
-        bne no
+        tax                     ; W12-C (supervisor-approved)
         lda blt_t
-        cmp r_pc+1
-        bne no
-hit:    lda #1
-        sta blt_smc
-no:     rts
+        jmp code_invpg          ; last page (tail call)
 .endproc
 
 ; ---------------------------------------------------------------------------

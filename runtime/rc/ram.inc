@@ -35,6 +35,17 @@ SCREEN     = $0400      ; 40x25 screen RAM; hle.s cursor offset 0-999
 ; BSS ends at $9DEE with it (was $9AEE with the 256 B ring; build/runner.map).
 
 ; @region core $A000-$B5FF BCODE/BBSS: banked code, runs only with BASIC ROM out (shared; W11-B first user)
+; W12-C cwin: the code-window cache in the shared region above (RAM under BASIC ROM; core.s's refill banks
+; BASIC out before the first window is valid, docs/CONTRACTS.md "Code-window cache"), c64.cfg area CWIN
+; $A800-$B0FF.  $A800-$A8FF: core.s's CWCODE segment (the cache's banked code; asserted to end below
+; cwin_base).  Window k (0..CWIN_N-1) at cwin_base + k*$100 (page-aligned: in-window offset = PC low
+; byte); cwin_map is the page-low summary the write check reads.
+.ifndef cwin_base
+cwin_base  = $A900      ; W12-C cwin: up to 7 page-aligned 256-byte code windows, $A900-$AFFF
+.endif
+.ifndef cwin_map
+cwin_map   = $B000      ; W12-C cwin: 256-byte page-low map ($B000-$B0FF; also the last window's guard byte)
+.endif
 ; W11-B blt: the blitter's row buffers (RAM under BASIC ROM; blt.s banks BASIC out for a blit, REU DMA in/out)
 ; @region blt $B600-$B7FF blitter channel rows: A, B, C, D, 128 bytes each (one row of up to 64 words, guest byte order)
 .ifndef blt_abuf

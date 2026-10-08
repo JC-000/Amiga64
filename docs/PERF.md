@@ -723,6 +723,70 @@ with its gen snapshot: ~5k) fills most of the 14188-cycle frame; every
 case still reaches HALT (no livelock). At 48 MHz the same work is ~2% of a
 frame. The boot profile's s is chosen per host for speed (U64E 4, VICE 9).
 
+## (m) Code-window cache (W12-C)
+
+Contract: CONTRACTS.md "Code-window cache". Evidence:
+`build/evidence/w12-cwin/`. N = 7 windows (CWIN area, $A900–$AFFF), FIFO
+replacement, page-low map at $B000.
+
+**Per-instruction paths** [MEASURED VICE, `perf_cycles --base` main,
+`--max-delta 0`]: every row ≤ 0 in both modes (run: mem −6.16, stream 0,
+rmw −1.50, copy −1.50, alu −0.33, stack −1.00 cycles per instruction;
+step: the same). The fetch hit path is unchanged. The word/long write check
+went from 16 to 13 cycles. The byte write check went from 9 to 13 cycles
+(**+4 per byte write**; no perf row writes bytes). The −6/−0.3 on rows
+without writes are layout (page-cross) effects. One-off per run: +277
+cycles (`emu_reset` → `code_invall`).
+
+**Page change** [MEASURED; `run_cwin` leg bench: a K-page ring against
+the same instructions in one page, two-point delta]:
+
+| | VICE (cycles) | C64U 64 MHz (µs) | U64E 48 MHz (µs) |
+|---|---:|---:|---:|
+| main: refill (every page change) | 358 | 75.0–77.1 | 91.6 |
+| W12-C: switch to a cached window (K ≤ 7) | 129 | 1.5–1.9 | 2.4–2.9 |
+| W12-C: refill (K ≥ 8) | 589 | 78.8 | 96.4–97.0 |
+
+This settles WB_BOOT §4.5's 90 µs estimate: a refill costs ~76 µs on the
+C64U at 64 MHz, almost all of it the REC/DMA, not CPU cycles. The cache's
+own work is ~2–3 µs per refill and ~1.7 µs per switch (U64E 48 MHz: a
+refill ~92 µs, the cache's work ~5 µs per refill and ~2.4 µs per switch).
+On the U64E the first timed run of a session read back invalid (negative
+or 729 µs, twice); the leg now discards a warm-up run.
+
+**Refills on the AROS boot** [MEASURED VICE, counter build `-D CWIN_COUNT`,
+s = 9; at the boot model's instruction counts; model = the boot model's
+page trace replayed through LRU/FIFO, `policy.txt`]:
+
+| to m3 (3.43 M instr) | page changes | refills | per instr | vs N = 1 | model (LRU / FIFO) |
+|---|---:|---:|---:|---:|---:|
+| N = 1 | 209,351 | 209,351 | 0.0610 | – | 207,007 |
+| N = 4 | 210,276 | 124,569 | 0.0363 | −40.5% | 113,699 / 122,076 |
+| N = 7 | 211,234 | 84,138 | 0.0245 | −59.8% | 89,717 / 90,631 |
+
+The measured N = 7 cut (−59.8%) is close to the model's −56.2% (FIFO)
+and inside the brief's 58–68% (§4.5, which measured the WB boots). N = 8
+(model LRU −59.7%) does not fit: CWIN holds the cache's banked code
+(CWCODE, $A800) and 7 windows.
+
+**AROS boot wall-clock** [MEASURED HW, `aros_boot --legs m1,m2,m3`,
+s = 3, one hold per row, config IDENTICAL after each]:
+
+| | m1 | m2 | m3 |
+|---|---:|---:|---:|
+| C64U 64 MHz, main (same day) | 15.3 s | 45.2 s | 76.1 s |
+| C64U 64 MHz, W12-C | 14.8 s | 39.6 s | 59.7 s |
+| U64E 48 MHz, main | 20.2 s | 59.6 s | 95.5 s |
+| U64E 48 MHz, W12-C | 19.4 s | 55.4 s | 93.4 s |
+
+The refill arithmetic predicts about −6.4 s at m2 (measured −5.6 s) and about
+−9 s at m3. The measured −16.4 s at m3 includes the quantised m3 instant
+(DISP_N conversion budget and poll, ±6 s per (l)), and a guest that keeps
+pace with frames needs fewer frames to reach the no-media screen (guest
+frame 612 against 688). On the U64E the gain is smaller (m2 −4.2 s, m3
+−2.1 s): after m2 the boot there is bound by guest time at s = 3 (PERF (l)),
+so fewer refills buy little.
+
 ## (e) Caveats
 
 - Every number above comes from **hand-written cycle comments**, not
