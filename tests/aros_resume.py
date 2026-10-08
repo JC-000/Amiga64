@@ -332,8 +332,10 @@ def model_sets(m: AB.Machine) -> tuple[str, set]:
     if mf is None:
         raise RuntimeError(f"no model frames: {why}")
     key = (lambda h, v: h) if m.vice else (lambda h, v: v["u64"])   # = aros_boot.leg_m3 (W12-V)
-    ok = {key(h, v) for h, v in mf["hashes"].items()
-          if v["frame"] >= mf["insert_disk_frame"]}
+    sys.path.insert(0, os.path.join(ROOT, "tests", "aros"))
+    import model_frames as MF
+    ok = {key(h, v) for h, v in mf["hashes"].items()     # F8: aros_boot's guard
+          if v["frame"] >= mf["insert_disk_frame"] and v.get("visible", 0) >= MF.MIN_VISIBLE}
     return mf["serial"], ok
 
 
@@ -354,6 +356,7 @@ def cwin_check(m: AB.Machine, rep: dict, tries: int = 4) -> list[str]:
     n = m.lab("CWIN_N")
     bad = ""
     for _ in range(tries):
+        hand = read_bytes(m.t, m.lab("cw_hand"), 1)[0]
         val = read_bytes(m.t, m.lab("cw_val"), n)
         tlo = read_bytes(m.t, m.lab("cw_tlo"), n)
         thi = read_bytes(m.t, m.lab("cw_thi"), n)
@@ -362,6 +365,8 @@ def cwin_check(m: AB.Machine, rep: dict, tries: int = 4) -> list[str]:
         lows = [tlo[k] for k in range(n) if val[k]]
         tags = [(tlo[k], thi[k]) for k in range(n) if val[k]]
         bad = ""
+        if hand >= n:
+            bad = f"cw_hand {hand} >= CWIN_N {n}"
         if len(set(tags)) != len(tags):
             bad = f"duplicate valid tags {tags}"
         for p in range(256):
@@ -449,6 +454,27 @@ def m_prg(m: AB.Machine) -> str:
     return getattr(m, "_prg")
 
 
+def scratch_page(m: AB.Machine) -> bytes:
+    return m.r(m.lab("__BSS_RUN__"), 0x100)
+
+
+def scratch_bad(m: AB.Machine, page0: bytes) -> str:
+    """F1: after a refusal the scratch page (W12-C's cw_* lie there) is as
+    it was; a fresh load's cache directory: every cw_val 0, cw_hand < N."""
+    n = m.lab("CWIN_N")
+    val, hand = m.r(m.lab("cw_val"), n), m.r(m.lab("cw_hand"), 1)[0]
+    page = scratch_page(m)
+    why = []
+    if page != page0:
+        k = next(i for i in range(0x100) if page[i] != page0[i])
+        why.append(f"scratch page changed (first at +${k:02X})")
+    if hand >= n:
+        why.append(f"cw_hand {hand} >= {n}")
+    if any(val):
+        why.append(f"cw_val {val.hex()} not all 0")
+    return ", ".join(why)
+
+
 def refusals(m: AB.Machine, sn: Snap, rep: dict) -> list[str]:
     """The red cases on a frozen-then-reset machine whose REU holds a good
     snapshot; each restores what it broke.  mach_on stays 0: nothing
@@ -477,14 +503,18 @@ def refusals(m: AB.Machine, sn: Snap, rep: dict) -> list[str]:
          lambda: sn.reu_write(st1, st1v), 0xE5),
     ]
     rep["refusals"] = {}
+    page0 = scratch_page(m)
     for name, brk, fix, want in cases:
         brk()
         v, dt = sn.resume(timeout=60.0)
         on = m.r(m.lab("mach_on"), 1)[0]
+        f1 = scratch_bad(m, page0)
         fix()
-        rep["refusals"][name] = {"st": f"${v:02X}", "mach_on": on, "s": round(dt, 2)}
-        if v != want or on:
-            fails.append(f"refuse {name}: snap_st ${v:02X} (want ${want:02X}), mach_on {on}")
+        rep["refusals"][name] = {"st": f"${v:02X}", "mach_on": on, "s": round(dt, 2),
+                                 "scratch": f1 or "intact"}
+        if v != want or on or f1:
+            fails.append(f"refuse {name}: snap_st ${v:02X} (want ${want:02X}), mach_on {on}"
+                         + (f"; {f1}" if f1 else ""))
         else:
             log(f"  refused as expected: {name} -> ${v:02X}")
     if sn.reu_read(F.SNAP_BASE, 256) != hdr:
@@ -699,7 +729,7 @@ MUTANTS = {                     # name -> (define, leg)
     "nocia": ("SNAP_MUT_NOCIA", "mid"),
     "noexc": ("SNAP_MUT_NOEXC", "mid"),
     "noepoch": ("SNAP_MUT_NOEPOCH", "m3"),
-    "nohsum": ("SNAP_MUT_NOHSUM", "accept:E2"),
+    "noscr": ("SNAP_MUT_NOSCR", "refuse:E2"),     # F1 (replaces nohsum: E2 is pinned by the refusal legs)
     "noinvall": ("SNAP_MUT_NOINVALL", "mid"),   # I1 (replaces nobid; E3 is the m3 leg's refusal)
     "nossum": ("SNAP_MUT_NOSSUM", "accept:E5"),
 }
@@ -768,6 +798,28 @@ def accept_leg(m: AB.Machine, rom, rid: bytes, s: int, mprg: str, what: str,
     return [f"accepted the corruption ({what})"] if v == F.ST_RES else []
 
 
+def refuse_leg(m: AB.Machine, rom, rid: bytes, s: int, mprg: str, what: str,
+               rep: dict) -> list[str]:
+    """Suspend early, corrupt the header's flags byte, resume with the
+    mutant: it must refuse (E2) AND leave the scratch page as it was (F1);
+    a changed page kills the mutant."""
+    sn = Snap(m, m_prg(m), rid)
+    boot(m, rom, s, rep, sn)
+    t0 = time.monotonic()
+    while m.frames() < 20 and time.monotonic() - t0 < 300:
+        time.sleep(0.5)
+    suspend(m, sn, rep)
+    fresh_load(m, mprg)
+    sn = Snap(m, mprg, rid)
+    sn.declare_rid()
+    page0 = scratch_page(m)
+    sn.reu_write(F.SNAP_BASE + F.H_FLAGS, b"\x01")
+    v, _ = sn.resume(timeout=60.0)
+    rep["st"] = f"${v:02X}"
+    bad = scratch_bad(m, page0)
+    return [f"refused ${v:02X} but {bad}"] if bad else []
+
+
 def teeth(prg: str, only, s: int, out: str, jobs: int = 3) -> int:
     rom, why = machine.find_rom()
     if rom is None:
@@ -791,6 +843,10 @@ def teeth(prg: str, only, s: int, out: str, jobs: int = 3) -> int:
             elif leg == "m3":
                 f = session(prg, "vice", out, 0,
                             lambda m: leg_m3(m, rom, rid, s, built[n], r, red=False))
+            elif leg.startswith("refuse:"):
+                f = session(prg, "vice", out, 0,
+                            lambda m: refuse_leg(m, rom, rid, s, built[n],
+                                                 leg.split(":")[1], r))
             else:
                 f = session(prg, "vice", out, 0,
                             lambda m: accept_leg(m, rom, rid, s, built[n],

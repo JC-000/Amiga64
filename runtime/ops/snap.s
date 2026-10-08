@@ -36,8 +36,9 @@
 ;
 ; Test-only variants (tests/aros_resume.py mutants, ≤ 10): SNAP_MUT_NOZP,
 ; SNAP_MUT_NODST, SNAP_MUT_NOBSS, SNAP_MUT_NOCIA, SNAP_MUT_NOEPOCH,
-; SNAP_MUT_NOEXC (no emu_reset patch), SNAP_MUT_NOHSUM, SNAP_MUT_NOSSUM,
-; SNAP_MUT_NOINVALL (no code_invall after the restore, I1).
+; SNAP_MUT_NOEXC (no emu_reset patch), SNAP_MUT_NOSSUM,
+; SNAP_MUT_NOINVALL (no code_invall after the restore, I1), SNAP_MUT_NOSCR
+; (a refusal leaves the loaded header in the scratch page, F1).
 ; ===========================================================================
 
 .include "../macros.inc"
@@ -64,7 +65,8 @@ SNAP_RID  = snap_base + $2FE0   ; the ROM id the host/stager declares (32 bytes;
 SNAP_KEEP = snap_keep - __BSS_RUN__
 SNAP_KEEPR = (SNAP_KEEP + $FF) & $FF00 ; the image in whole pages (stash, sum, file)
 SNAP_NPG  = 2 + SNAP_KEEPR / $100 ; state span pages: zp, disp_st, image
-SNAP_SCR  = __BSS_RUN__         ; resume scratch (code_win), before the restore
+SNAP_SCR  = __BSS_RUN__         ; resume scratch (BSS start: cw_* ... since W12-C), before the restore
+SNAP_SAV  = snap_base + $2E00   ; F1: the scratch page as it was at snap_res entry (in no file span)
 SNAP_NSP  = 6                   ; @value file spans: header, state, 4 guest ranges
 ; header offsets (= host/snapfmt.py)
 SNAP_HSUM = 252                 ; @value header checksum (u32)
@@ -80,6 +82,7 @@ H_SSUM    = 96                  ; @value state checksum (u32)
 .assert ureu_rl = ureu_ra + 3, lderror, "snap_xs copies 7 bytes into ureu_ra/ureu_rl"
 .assert SNAP_BSS + SNAP_KEEPR <= SNAP_RID, lderror, "the BSS image must end below the declared ROM id"
 .assert dosio_buf >= SNAP_SCR + $100, lderror, "the resume scratch (the loaded header) must not overlap dosio_buf"
+.assert SNAP_BSS + SNAP_KEEPR <= SNAP_SAV && SNAP_SAV + $100 <= SNAP_RID, lderror, "F1: the scratch save must lie between the image and the ROM id (no file span)"
 .assert SNAP_NPG < 256, lderror, "state span page count must fit a byte"
 
 ; snap_req bits / snap_st codes (= host/snapfmt.py)
@@ -122,9 +125,9 @@ snap_n:   .res 1                ; bytes summed by snap_sumb (0 = 256)
 snap_rq:  .res 1                ; snap_req as taken
 snap_i:   .res 1
 snap_cmd: .res 1
-snap_sx:  .res 1
+snap_sx:  .res 1                ; snap_xs: end offset
 snap_ss:  .res 4                ; the loaded header's state sum (the scratch
-                                ; at __BSS_RUN__ is not kept past the compare)                ; snap_xs: end offset
+                                ; at __BSS_RUN__ is not kept past the compare)
 
 .segment "DATA"                 ; in the PRG (stamped), never in the image
 snap_bid:   .res 8              ; build ID: host/snapfmt.py stamps the PRG
@@ -173,6 +176,7 @@ snap_resume:
 ; ===========================================================================
 .segment "SCODE"
 
+.segment "CODE"                 ; (MAIN: SNAPHI is full; called with BASIC out)
 ; snap_dma — Y = descriptor offset (snap_dt), X = REC command.  Keeps X.
 snap_dma:                       ; ($DF02-$DF08 are consecutive: rc ram.inc)
         txa
@@ -191,6 +195,7 @@ snap_dma:                       ; ($DF02-$DF08 are consecutive: rc ram.inc)
         stx REC_COMMAND
         rts
 .assert REC_LENHI = REC_C64LO + 6, error, "snap_dma: REC registers must be consecutive"
+.segment "SCODE"
 
 ; snap_sum0 / snap_sumb — Fletcher (host/snapfmt.fletcher): reset, then add
 ; dosio_buf[0 .. A-1] (A = 0: 256 bytes)
@@ -370,10 +375,15 @@ snap_sus:
 ; snap_res — the resume checks and restore (snap_resume, BASIC out).
 ; C=1: refused, snap_st = SNAP_E_*, nothing restored.  Before the restore,
 ; every byte of the BSS image range is scratch (the restore rewrites it):
-; the loaded header is kept at __BSS_RUN__ (code_win).
+; the loaded header is kept at __BSS_RUN__ (W12-C's cw_* lie there).  F1:
+; that page is saved to SNAP_SAV at entry and put back on EVERY refusal,
+; so a refused resume leaves the runner byte for byte as it was.
 ; ===========================================================================
 snap_res:
         sei
+        ldx #REU_CMD_STASH      ; F1: the scratch page, for every refusal
+        ldy #D_SAV
+        jsr snap_dma
         lda snap_req
         sta snap_rq
         lda #0
@@ -405,7 +415,6 @@ snap_res:
         jsr snap_dma
         ldy #D_HSC              ; -> the scratch
         jsr snap_dma
-.ifndef SNAP_MUT_NOHSUM
         jsr snap_sum0           ; header checksum
         lda #SNAP_HSUM
         jsr snap_sumb
@@ -415,7 +424,6 @@ snap_res:
         lda #SNAP_E_HSUM
         jmp snap_fail
 :
-.endif
         jsr snap_mkhdr          ; dosio_buf := what this build would write
         ldx #31                 ; M3: a declared ROM id is never all zero
         lda #0
@@ -498,7 +506,13 @@ snap_fail:                      ; A = SNAP_E_*; the file (if any) closed
         bit snap_rq
         bvc :+
         jsr ureu_close          ; ("84,NO FILE TO CLOSE" after a close: fine)
-:       jsr mem_rec_dirty
+:
+.ifndef SNAP_MUT_NOSCR
+        ldx #REU_CMD_FETCH      ; F1: the scratch page back (cw_*, dosio_uci
+        ldy #D_SAV              ; state ...): the runner as it was at entry
+        jsr snap_dma
+.endif
+        jsr mem_rec_dirty
         sec
         rts
 
@@ -633,6 +647,10 @@ D_RID = * - snap_dt
         .word dosio_buf + H_RID
         .faraddr SNAP_RID
         .word 32
+D_SAV = * - snap_dt             ; F1: the scratch page <-> its save
+        .word SNAP_SCR
+        .faraddr SNAP_SAV
+        .word $0100
 D_KILL = * - snap_dt            ; M1: one byte that is not 'A' over the magic
         .word snap_dt + D_ZPS   ; (D_ZPS's C64 address low byte: $00)
         .faraddr SNAP_HDR

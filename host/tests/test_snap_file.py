@@ -81,7 +81,16 @@ BID = bytes(range(0x11, 0x19))
 
 @pytest.fixture(scope="module")
 def build(tmp_path_factory):
-    d = tmp_path_factory.mktemp("snapf")
+    return _build(tmp_path_factory.mktemp("snapf"))
+
+
+@pytest.fixture(scope="module")
+def build_noscr(tmp_path_factory):
+    """Mutant SNAP_MUT_NOSCR: a refusal does not put the scratch page back."""
+    return _build(tmp_path_factory.mktemp("snapf-noscr"), ["SNAP_MUT_NOSCR=1"])
+
+
+def _build(d, defines=()):
     # as in the runner since W12-C: the 256-byte resume scratch at
     # __BSS_RUN__ overlaps dosio_uci.s's BSS, which the file loads use
     # (sized so dosio_uci_max, written by every LOAD_REU chunk, lies exactly
@@ -95,6 +104,7 @@ def build(tmp_path_factory):
         ["cl65", "-t", "none", "-C", str(d / "t.cfg"), "-o", str(out), "-Ln", str(lbl),
          "--asm-define", "DOSIO_UCI_FENCE_OUTER=1", "--asm-define", "DOSIO_UCI_FENCE_INNER=1",
          "--asm-define", "DOSIO_UCI_POLLS_HI=4",
+         *[x for dd in defines for x in ("--asm-define", dd)],
          str(d / "first.s"), str(ROOT / "runtime/ops/dosio_uci.s"), str(d / "pad.s"),
          str(d / "shim.s"),
          str(ROOT / "runtime/ops/snap.s"), str(ROOT / "runtime/ops/ureu.s")],
@@ -330,7 +340,12 @@ def test_file_refusals(build, case, code):
         r.dev.fs.clear()
     elif case == "build id":
         r.poke("snap_bid", bytes([BID[0] ^ 1]) + BID[1:])
+    scr = r.lab["__BSS_RUN__"]
+    page = bytes(r.bus.ram[scr:scr + 0x100])
     assert r.resume(F.RQ_FILE) == 1
+    # F1: the scratch page (cw_*, dosio_uci's state in the runner) is
+    # byte-identical after every refusal, whether the header fetch ran or not
+    assert bytes(r.bus.ram[scr:scr + 0x100]) == page, "scratch page changed"
     assert r.st() == code, f"${r.st():02X}"
     c = r.peek("calls", 5)                             # nothing restored:
     assert c[1] == 0 and c[2] == 0 and c[3] == 0       # no mach_run/emu_reset/disp_init
@@ -338,6 +353,58 @@ def test_file_refusals(build, case, code):
     assert bytes(r.bus.ram[DISP_ST:DISP_ST + 256]) == bytes(256)
     assert r.dev.targets[1].file is None               # the file is closed
     U.assert_clean(r)
+
+
+REU_CASES = [("header byte", 0xE2), ("state byte", 0xE5), ("rom id", 0xE4),
+             ("zero rom id", 0xEA), ("build id", 0xE3), ("unstamped", 0xE8),
+             ("layout", 0xE2)]
+
+
+def reu_refusal(build, case) -> tuple[Rig, bytes, bytes]:
+    """A REU-resident snapshot (frozen suspend), then one corruption, then
+    snap_resume: -> (rig, scratch page before, after)."""
+    r = Rig(build)
+    machine_state(r)
+    r.poke("snap_req", bytes([F.RQ_SUS]))
+    with pytest.raises(AssertionError, match="did not return"):
+        r.call("snap_fhook", limit=2_000_000)
+    if case == "header byte":
+        r.dev.reu[F.SNAP_BASE + F.H_FLAGS] ^= 0x01
+    elif case == "state byte":
+        r.dev.reu[F.SNAP_BASE + F.OFF_BSS + 0x40] ^= 0xFF
+    elif case == "rom id":
+        r.reu_w(F.SNAP_BASE + F.OFF_RID, hashlib.sha256(b"another ROM").digest())
+    elif case == "zero rom id":
+        r.reu_w(F.SNAP_BASE + F.OFF_RID, bytes(32))
+    elif case == "build id":
+        r.poke("snap_bid", bytes([BID[0] ^ 1]) + BID[1:])
+    elif case == "unstamped":
+        r.poke("snap_bid", bytes(8))
+    elif case == "layout":
+        r.dev.reu[F.SNAP_BASE + 6] ^= 0x01              # KEEP (also breaks the sum)
+    scr = r.lab["__BSS_RUN__"]
+    r.bus.ram[scr:scr + 0x100] = bytes((i * 37 + 11) & 0xFF for i in range(0x100))
+    before = bytes(r.bus.ram[scr:scr + 0x100])
+    assert r.resume(0) == 1
+    return r, before, bytes(r.bus.ram[scr:scr + 0x100])
+
+
+@pytest.mark.parametrize("case,code", REU_CASES)
+def test_reu_refusals_leave_the_scratch_page(build, case, code):
+    """F1: a refused REU-resident resume leaves the scratch page (W12-C's
+    cw_val/cw_hand/cw_mok ... in the runner) byte for byte as it was."""
+    r, before, after = reu_refusal(build, case)
+    assert r.st() == code, f"${r.st():02X}"
+    assert after == before
+
+
+def test_mutant_noscr_is_caught(build_noscr):
+    """Mutant SNAP_MUT_NOSCR (<= 10 per package): the refusal leaves the
+    loaded header in the scratch page -- the test above must see it."""
+    r, before, after = reu_refusal(build_noscr, "header byte")
+    assert r.st() == 0xE2
+    assert after != before, "mutant must change the page"
+    assert after[:4] == b"A64S"                         # the loaded header
 
 
 def test_unstamped_build_refuses_before_any_uci(build):

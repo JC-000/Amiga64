@@ -1499,6 +1499,16 @@ the UCI model).
   compare. Since W12-C that page also holds `cw_*`, `m_scmd` and
   dosio_uci.s's state, which the file loads that follow write: only the
   compare uses the copy; its state sum is kept in SBSS (`snap_ss`) first.
+  **Refusal guarantee (fix round 3, F1)**: `snap_res` saves that whole page
+  to the REU at snapshot `+$2E00` (`SNAP_SAV`, between the BSS image and the
+  declared ROM id, in no file span) before anything else, and `snap_fail`
+  puts it back on EVERY refusal (`$E1-$EA`), after the file is closed: a
+  refused resume leaves the scratch page, and with it W12-C's `cw_val`/
+  `cw_hand`/`cw_mok` and dosio_uci.s's state, byte for byte as they were,
+  so a fallback boot on the same load (refuse, then `aros_boot`) starts
+  from a sane cache. Tests: `test_snap_file` (every file and REU-resident
+  refusal), the `m3` leg's refusals on every backend (`cw_val` all 0,
+  `cw_hand` < `CWIN_N`, the page unchanged), mutant `noscr`.
 - **`mach_s` after a resume (A3)**: `mach_s` (DATA) is not in the image: a
   resumed runner's `mach_s` holds the fresh-load default, not the shift the
   machine runs at. The E-clock shift in force is `mach_sl` (BSS, latched
