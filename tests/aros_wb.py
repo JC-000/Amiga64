@@ -591,6 +591,9 @@ def run(a, rom, raw: bytes) -> tuple[list[str], dict]:
                 fails += leg_resume(m, rom, disk, s, r, a.vol, a.timeout, a.keep)
             elif leg == "demo":
                 fails += leg_demo(m, rom, r, a.vol, a.hold_s)
+            elif leg == "cost":
+                fails += (leg_cost(m, r) if a.legs[0] == "cost" else
+                          ["cost: run it first in the session (--legs cost,...): see leg_cost"])
             elif leg == "nohle":
                 fails += leg_nohle(m, rom, disk, s, r, a.vol, a.timeout)
             else:
@@ -736,6 +739,13 @@ def resume_workbench(m: WbMachine, rom, path: str | None, rep: dict) -> float:
     from tests import aros_resume as RS
     _resume(m, m.prg, RS.rom_id(rom), path, rep)
     t1 = rep.pop("t_launch")
+    try:                                # W13-I (when merged): the snapshot carries
+        a = m.lab("inp_src")            # inp_src; after a resume the launcher picks
+    except KeyError:                    # the real joystick (0) for the demo
+        a = None
+    if a is not None:
+        m.w(a, b"\0")
+        rep["inp_src"] = 0
     fr0 = m.frames()
     while time.monotonic() - t1 < 60 and m.frames() <= fr0 + 2:
         time.sleep(0.25)
@@ -785,6 +795,73 @@ def refuse_other_module(m: WbMachine, rid: bytes, path: str | None, rep: dict) -
         return []
     finally:
         m.mods = good
+
+
+COST_STUB = 0xCC80                    # leg cost: the timing stub (buf_result, after aros_resume's $CC00)
+COST_RES = 0xCCE0
+
+
+def leg_cost(m: WbMachine, rep: dict) -> list[str]:
+    """rev-wb L7: the 6502 cycles td_call takes for a quick CMD_READ (the
+    whole BeginIO trap: decode, copy, io_Error/io_Actual, RTS), measured
+    with CIA #2 timer A on a fresh runner (VICE: phi2 exact), minus an
+    empty jsr; BASIC out ($01 = $35) as inside mach_run.  Run it FIRST in a
+    session (or alone): after a boot or resume leg the machine loop's
+    IRQ/NMI vectors and one-shot are still armed and its handlers run
+    between the host's writes (gate3: a stale r_a7)."""
+    from tests import aros_resume as RS
+    from tests.harness_util import call_runner
+    if not m.vice:
+        return ["cost: VICE only (exact phi2)"]
+    sn = RS.Snap(m, m.prg, b"")
+    m.load_driver()                                   # mboot + the modules
+    call_runner(m.tg, m.lab("emu_reset"), 30.0)       # the code-window map (cw_mok)
+    m.w(m.lab("td_on"), b"\1")
+    call_runner(m.tg, 0xC200, 30.0)                   # td_arm
+    io, sp, slot, ret = 0xC23F00, 0xC08000, 0xC0E4C6, 0xF81234
+    rts_at = COST_RES + 4
+    m.w(rts_at, b"\x60")
+
+    def stub(target: int) -> bytes:
+        return bytes([0xA5, 0x01, 0x48, 0xA9, 0x35, 0x85, 0x01, 0x78,      # lda $01/pha/lda #$35/sta $01/sei
+                      0xA9, 0x7F, 0x8D, 0x0D, 0xDD, 0xA9, 0x00, 0x8D, 0x0E, 0xDD,
+                      0xA9, 0xFF, 0x8D, 0x04, 0xDD, 0x8D, 0x05, 0xDD,
+                      0xA9, 0x11, 0x8D, 0x0E, 0xDD,                      # force load, start
+                      0xA9, 0x5A, 0xA2, 0x2D, 0x20, target & 0xFF, target >> 8,
+                      0xA9, 0x00, 0x8D, 0x0E, 0xDD,                      # stop
+                      0xAD, 0x04, 0xDD, 0x8D, COST_RES & 0xFF, COST_RES >> 8,
+                      0xAD, 0x05, 0xDD, 0x8D, (COST_RES + 1) & 0xFF, COST_RES >> 8,
+                      0x68, 0x85, 0x01, 0x60])
+
+    def run(target: int) -> int:
+        m.w(COST_STUB, stub(target))
+        call_runner(m.tg, COST_STUB, 30.0)
+        lo, hi = m.r(COST_RES, 2)
+        return 0xFFFF - (lo | hi << 8)
+
+    base = run(rts_at)
+    out = {}
+    for name, length, data in (("512 aligned", 512, 0x3000), ("1024 aligned", 1024, 0x3000),
+                               ("1024 unaligned", 1024, 0x3058), ("512 unaligned", 512, 0x3058)):
+        req = bytearray(48)
+        struct.pack_into(">HBB", req, 28, 2, 1, 0)
+        struct.pack_into(">III", req, 36, length, data, 512 * 10)
+        sn.reu_write(io, bytes(req))
+        sn.reu_write(sp, struct.pack(">I", ret))
+        m.w(m.lab("td_slot"), slot.to_bytes(3, "little"))
+        m.w(0x8D, slot.to_bytes(4, "little"))        # st_ipc
+        m.w(0x34, io.to_bytes(4, "little"))          # r_a1
+        m.w(0x4C, sp.to_bytes(4, "little"))          # r_a7
+        c = run(m.lab("td_call")) - base
+        act = struct.unpack(">I", sn.reu_read(io + 32, 4))[0]
+        pc = int.from_bytes(m.r(0x50, 4), "little")
+        out[name] = {"cycles": c, "us_at_64mhz": round(c / 64, 1), "io_actual": act,
+                     "pc_after": f"${pc:06X}"}
+        log(f"  cost {name}: {c} cycles ({c / 64:.1f} us at 64 MHz), io_Actual {act}, PC ${pc:06X}")
+        if act != length or pc != ret:
+            return [f"cost: the measured read did not complete ({out[name]})"]
+    rep["cost"], rep["baseline_cycles"] = out, base
+    return []
 
 
 def leg_nohle(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol, timeout) -> list[str]:

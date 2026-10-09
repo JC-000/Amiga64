@@ -139,3 +139,86 @@ def test_reu_writes_cover_overlay_at_base():
     ov = O.make_overlay(img, "trim")
     ws = O.reu_writes(ov, 0x200000)
     assert ws == [(0x200000 + k * O.BLOCK, b) for k, b in ov.blocks]
+
+
+def big_file_image(n: int = 100, ffs: bool = True) -> tuple[bytes, bytes]:
+    """A synthetic image with a file "Big" of n > 72 data blocks: its header
+    holds 72, an extension block (T_LIST) the rest (rev-wb L3)."""
+    img = bytearray(image(ffs))
+    content = bytes((i * 31 + (i >> 9)) & 0xFF for i in range(n * O.BLOCK))
+    hk, ek, d0 = 1500, 1501, 1502
+    data = list(range(d0, d0 + n))
+    per = O.BLOCK if ffs else O.BLOCK - 24
+    content = content[:per * n]
+
+    def blk(k):
+        return memoryview(img)[k * O.BLOCK:(k + 1) * O.BLOCK]
+    h = blk(hk)
+    struct.pack_into(">IIII", h, 0, O.T_HEADER, hk, O.HT_SIZE, data[0])
+    for i in range(O.HT_SIZE):
+        struct.pack_into(">I", h, 24 + 4 * (O.HT_SIZE - 1 - i), data[i])
+    struct.pack_into(">I", h, O.BLOCK - 188, len(content))
+    h[O.BLOCK - 80] = 3
+    h[O.BLOCK - 79:O.BLOCK - 76] = b"Big"
+    struct.pack_into(">I", h, O.BLOCK - 12, O.ROOT)
+    struct.pack_into(">I", h, O.BLOCK - 8, ek)
+    struct.pack_into(">i", h, O.BLOCK - 4, O.ST_FILE)
+    e = blk(ek)
+    struct.pack_into(">III", e, 0, O.T_LIST, ek, n - O.HT_SIZE)
+    for i in range(n - O.HT_SIZE):
+        struct.pack_into(">I", e, 24 + 4 * (O.HT_SIZE - 1 - i), data[O.HT_SIZE + i])
+    struct.pack_into(">I", e, O.BLOCK - 12, hk)
+    struct.pack_into(">i", e, O.BLOCK - 4, O.ST_FILE)
+    for i, k in enumerate(data):
+        d = blk(k)
+        chunk = content[i * per:(i + 1) * per]
+        if ffs:
+            d[:] = chunk
+        else:
+            struct.pack_into(">IIIII", d, 0, O.T_DATA, hk, i + 1, len(chunk),
+                             data[i + 1] if i + 1 < n else 0)
+            d[24:24 + len(chunk)] = chunk
+            struct.pack_into(">I", d, 20, O.block_checksum(d))
+    a = O.Adf(bytes(img))
+    slot = 24 + 4 * a.name_hash("Big")
+    r = blk(O.ROOT)
+    struct.pack_into(">I", h, O.BLOCK - 16, struct.unpack_from(">I", r, slot)[0])
+    struct.pack_into(">I", r, slot, hk)
+    for b in (h, e, r):
+        struct.pack_into(">I", b, 20, O.block_checksum(b))
+    return bytes(img), content
+
+
+@pytest.mark.parametrize("ffs", [False, True])
+def test_file_blocks_follow_extension_blocks(ffs):
+    img, content = big_file_image(100, ffs)
+    a = O.Adf(img)
+    hk = a.lookup("Big")
+    assert a.file_blocks(hk) == list(range(1502, 1602))
+    assert a.read_file(hk) == content
+    # the overlay tool still parses the disk (and its Startup-Sequence)
+    assert O.apply(img, O.make_overlay(img, "trim"))[1500 * 512:1602 * 512] == img[1500 * 512:1602 * 512]
+
+
+def test_bad_extension_block_refused():
+    img, _ = big_file_image(100, True)
+    img = bytearray(img)
+    img[1501 * 512 + 40] ^= 1                    # extension checksum broken
+    a = O.Adf(bytes(img))
+    with pytest.raises(O.AdfError, match="extension"):
+        a.file_blocks(a.lookup("Big"))
+
+
+@pytest.mark.parametrize("dostype", [4, 5, 6, 7])
+def test_dircache_and_later_dostypes_refused(dostype):
+    img = bytearray(image(True))
+    img[3] = dostype
+    with pytest.raises(O.AdfError, match="dostype"):
+        O.make_overlay(bytes(img), "trim")
+
+
+@pytest.mark.parametrize("dostype", [0, 1, 2, 3])
+def test_ofs_ffs_intl_accepted(dostype):
+    img = bytearray(image(dostype & 1 == 1))
+    img[3] = dostype
+    O.make_overlay(bytes(img), "trim")

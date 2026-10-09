@@ -45,7 +45,8 @@
 ;                              disk DMA exists: it would never complete)
 ; A read past the image's end, or one whose copy would land in bank $BF/$DF
 ; (the REU under the I/O banks, CONTRACTS "I/O trap" F2), gets io_Error 20
-; (TDERR_NotSpecified) and io_Actual = the bytes copied before it.
+; (TDERR_NotSpecified) and io_Actual 0 (chunks before a refused one were
+; copied).
 ;
 ; Copy: REU -> TD_BUF (blt.s's A/B row page: blits are synchronous inside a
 ; custom-register write, so none is in flight in this trap or the frame
@@ -158,6 +159,12 @@
 .ifndef td_wa
 .error "-D td_wa=... (runner.lbl)"
 .endif
+.ifndef td_zero
+.error "-D td_zero=... (runner.lbl)"
+.endif
+.ifndef TD_NZERO
+.error "-D TD_NZERO=... (runner.lbl)"
+.endif
 .ifndef td_whit
 .error "-D td_whit=... (runner.lbl)"
 .endif
@@ -208,19 +215,18 @@ rdl:    jsr ad
         lda m_val+3
         rts
 
-ad:     sta m_addr
+ad:     pha
+        clc
+        adc 0,x
+        sta m_addr
+        pla                     ; (pla/and keep C)
         and #$80                ; the offset's sign, extended
         beq :+
         lda #$FF
-:       sta m_addr+3
-        clc
-        lda m_addr
-        adc 0,x
-        sta m_addr
-        lda m_addr+3
+:       pha
         adc 1,x
         sta m_addr+1
-        lda m_addr+3
+        pla
         adc 2,x
         sta m_addr+2
         lda #0
@@ -233,6 +239,11 @@ ad:     sta m_addr
 ; ---------------------------------------------------------------------------
 td_arm: lda td_on
         beq rts1
+        lda #0                  ; L5: a clean drive and device each boot
+        ldy #TD_NZERO - 1
+:       sta td_zero,y
+        dey
+        bpl :-
         lda #$FF
         sta td_slot+2           ; no slot (a bank-$FF slot: the ROM, never)
         sta td_old
@@ -288,6 +299,8 @@ td_fhook:
         ldy #t_op1
         lda #4
         jsr rdl
+        jsr okram               ; L8: follow RAM pointers only
+        bcs rts1
         inc t_op1+1
         bne :+
         inc t_op1+2
@@ -297,6 +310,8 @@ td_fhook:
         lda #32
         sta t_res+3
 node:   ldx #t_ea               ; t_op2 := ln_Succ; 0: the tail sentinel
+        jsr okram               ; L8: a node outside chip/slow RAM ends the walk
+        bcs rts1
         ldy #t_op2
         lda #0
         jsr rdl
@@ -308,6 +323,8 @@ node:   ldx #t_ea               ; t_op2 := ln_Succ; 0: the tail sentinel
         ldy #t_op1
         jsr rdl
         ldx #t_op1
+        jsr okname              ; L8: a name in RAM or ROM only (never the I/O banks)
+        bcs next
         ldy #0
 cmp1:   tya
         jsr ad
@@ -324,10 +341,10 @@ cmp1:   tya
         jsr mem_read16
         lda m_val
         cmp #$F9
-        bne rts1
+        bne nopat
         lda m_val+1
         cmp #$4E
-        bne rts1
+        bne nopat
         lda #<(LVO_BIO + 2)       ; td_orig := its target
         ldy #t_op1
         jsr rdl
@@ -356,7 +373,7 @@ cmp1:   tya
         sta td_slot,y
         dey
         bpl :-
-        rts
+nopat:  rts
 next:   ldx #2                  ; t_ea := t_op2
 :       lda t_op2,x
         sta t_ea,x
@@ -368,16 +385,39 @@ next:   ldx #2                  ; t_ea := t_op2
 :       rts
 ch:     jmp (td_chain)
 
+; okram — C=0 iff the u24 at zp X lies in chip RAM ($000000-$1FFFFF) or
+; slow RAM ($C00000-$DBFFFF) (machine.inc), the only places exec builds
+; nodes; keeps X and Y.  (L8: a corrupt or early list never makes the walk
+; read the trapped $BF/$DF banks.)
+okram:  lda 2,x                 ; C=0: in RAM
+        cmp #^(AROS_CHIP_END + 1)
+        bcc @r                  ; chip RAM
+        sbc #^AROS_SLOW         ; (C=1) slow RAM: 0 .. its banks - 1
+        cmp #^(AROS_SLOW_END + 1 - AROS_SLOW)
+@r:     rts
+
+; okname — C=0 iff the u24 at zp X lies in RAM (okram) or a ROM bank
+; ($E00000-$E7FFFF, $F80000-$FFFFFF): AROS's resident names are in ROM.
+okname: jsr okram
+        bcc @r
+        lda 2,x
+        cmp #^AROS_ROM          ; Kickstart bank: C=1 here
+        bcs @rom
+        cmp #^AROS_EXT          ; below the extension bank: C=0
+        bcc @no
+        cmp #^(AROS_EXT_END + 1)  ; C=0 iff inside it
+@r:     rts
+@rom:   clc
+        rts
+@no:    sec
+        rts
+
 ; ---------------------------------------------------------------------------
 ; td_prb — CIA-B PRB write (cia.s, X = CIA_B), A = the written value.
 ; C=1: the BeginIO slot trapped and was served (nothing to store).
 ; X = CIA_B on every return; Y is free (cia.s restores it).
 ; ---------------------------------------------------------------------------
-td_prb: ldy td_on              ; the value: td_v (td_call)
-        bne :+
-        clc
-        rts
-:
+td_prb:                         ; the value: td_v (td_call; armed only with td_on)
         lda st_ipc
         cmp td_slot
         bne lines
@@ -543,7 +583,16 @@ copy:   lda t_res
         sec
         sbc t_op2
         sta t_op1+3
-        lda t_res+1             ; ... or n, if smaller
+        lda #0                  ; ... or 256 - src low, if smaller (H1: the REC
+        sec                     ; carries the REU address through bits 0-18
+        sbc t_op1               ; only, so a chunk must never cross a 512 KB
+        beq capn                ; line; a page piece never does)
+        ldy t_op1+3
+        beq :+
+        cmp t_op1+3
+        bcs capn
+:       sta t_op1+3
+capn:   lda t_res+1             ; ... or n, if smaller
         ora t_res+2
         bne full
         lda t_op1+3
@@ -581,22 +630,12 @@ full:   ldx #t_op1              ; fetch: source -> TD_BUF
         lda t_res+1
         sbc m_val+1
         sta t_res+1
-        bcs copy
+        bcs :+
         dec t_res+2
-        bcc copy                ; always
+:       jmp copy
 
-refuse: lda #TDERR_NS           ; io_Actual := what was copied
-        sta t_op2+3
-        sec
-        ldx #0
-        ldy #3
-:       lda td_len,x
-        sbc t_res,x
-        sta td_len,x
-        inx
-        dey
-        bne :-
-        beq dirty               ; always
+refuse: jsr mem_rec_dirty         ; (the REC was programmed)
+        jmp bad                 ; io_Error 20, io_Actual 0
 done:   inc td_nrd
         bne dirty
         inc td_nrd+1
@@ -630,8 +669,7 @@ fin:    ldx #t_ea               ; io_Error
         inc r_a7+1
         bne exit
         inc r_a7+2
-exit:   lda #0
-        sta r_pc+3
+exit:                           ; (r_pc+3 stays 0: only bits 0-23 are written)
 .ifdef TD_ZPJUNK                ; evidence build: $60-$6F are dead after the trap
         jsr zpjunk
 .endif

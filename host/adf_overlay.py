@@ -86,6 +86,8 @@ class Adf:
             raise AdfError(f"{len(data)} bytes, not a DD ADF ({ADF_SIZE})")
         if data[:3] != b"DOS":
             raise AdfError("no DOS boot block")
+        if data[3] >= 4:                # DOS\4.. dircache / long names: other block types
+            raise AdfError(f"dostype DOS\\{data[3]}: only OFS/FFS (DOS\\0-\\3) are supported")
         self.data = bytes(data)
         root = self.block(ROOT)
         if _l(root, 0) != T_HEADER or _sl(root, BLOCK - 4) != ST_ROOT or not checksum_ok(root):
@@ -147,14 +149,22 @@ class Adf:
         return _l(self.header(hk), BLOCK - 188)
 
     def file_blocks(self, hk: int) -> list[int]:
-        """Data blocks in file order: the header's table, then extensions."""
+        """Data blocks in file order: the header's table, then the extension
+        blocks' (type T_LIST, secondary type ST_FILE, parent = the header;
+        each holds up to 72 more, in the same reversed order)."""
         out, k = [], hk
-        for _ in range(BLOCKS):
+        for i in range(BLOCKS):
             if not k:
                 return out
-            b = self.header(k)
+            if i == 0:
+                b = self.header(k)
+            else:
+                b = self.block(k)
+                if (_l(b, 0) != T_LIST or _sl(b, BLOCK - 4) != ST_FILE
+                        or _l(b, BLOCK - 12) != hk or not checksum_ok(b)):
+                    raise AdfError(f"block {k}: not a valid extension block of {hk}")
             n = min(_l(b, 8), HT_SIZE)
-            out += [_l(b, 24 + 4 * (HT_SIZE - 1 - i)) for i in range(n)]
+            out += [_l(b, 24 + 4 * (HT_SIZE - 1 - j)) for j in range(n)]
             k = _l(b, BLOCK - 8)
         raise AdfError("extension chain loop")
 

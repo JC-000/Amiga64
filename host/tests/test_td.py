@@ -104,7 +104,7 @@ def build_td(d: Path, src: str | None = None, main_src: str | None = None) -> tu
     defs.update(SHIM_AT)
     defs.update(CIA_PIN=CIA_PIN, CIA_DDRB=CIA_DDRB, CIA_B=CIA_SZ, TD_ORG=TD_ORG)
     for n, v in lab.items():
-        if n.startswith("td_"):
+        if n.startswith(("td_", "TD_")):
             defs[n] = v
     mod = d / "td_mod.s"
     mod.write_text(src if src is not None else (ROOT / "tests/aros/td.s").read_text())
@@ -134,6 +134,41 @@ def test_module_layout(build):
     assert images[TD_ORG][0] == 0x4C and lab["td_arm"] == images[TD_ORG][1] | images[TD_ORG][2] << 8
 
 
+class WrapRecBus(U.Bus):
+    """The REU controller as the 17xx/Ultimate REU behaves (rev-wb H1): the
+    REU address auto-increments through bits 0-18 only -- a transfer that
+    runs past a 512 KB line wraps to the line's start -- and the address
+    control register (ACTRL, $DF0A) must be 0 (td.s clears it)."""
+
+    def __init__(self, dev):
+        super().__init__(dev)
+        self.rec = bytearray(16)
+        self.dmas = []
+
+    def write(self, a, v):
+        if 0xDF00 <= a <= 0xDF0A:
+            self.rec[a - 0xDF00] = v
+            if a == 0xDF01 and v & 0x80:
+                c = self.rec[2] | self.rec[3] << 8
+                r = self.rec[4] | self.rec[5] << 8 | self.rec[6] << 16
+                n = (self.rec[7] | self.rec[8] << 8) or 0x10000
+                assert self.rec[0x0A] == 0, "REC address control must be 0"
+                assert c + n <= 0x10000
+                line = r & ~0x7FFFF
+                addrs = [line | ((r + i) & 0x7FFFF) for i in range(n)]
+                if v & 3 == 0:
+                    for i, ra in enumerate(addrs):
+                        self.dev.reu[ra] = self.ram[c + i]
+                elif v & 3 == 1:
+                    for i, ra in enumerate(addrs):
+                        self.ram[c + i] = self.dev.reu[ra]
+                else:
+                    raise AssertionError(f"REC command ${v:02X}")
+                self.dmas.append((v & 3, c, r, n))
+            return
+        super().write(a, v)
+
+
 class Dev:
     def __init__(self):
         self.reu = bytearray(1 << 24)
@@ -145,7 +180,7 @@ class Rig:
     def __init__(self, build):
         self.images, self.lab = build
         self.dev = Dev()
-        self.bus = SF.RecBus(self.dev)
+        self.bus = WrapRecBus(self.dev)
         for at, img in self.images.items():
             self.bus.ram[at:at + len(img)] = img
         self.cpu = U.CPU(self.bus)
@@ -340,15 +375,15 @@ def test_pins_keep_bits_0_1_6_7(build):
 # =============================================================================
 
 def make_exec(r: Rig, names=("timer.device", "input.device", "trackdisk.device",
-                             "console.device"), base=DEVBASE, jmp=0x4EF9):
+                             "console.device"), base=DEVBASE, jmp=0x4EF9, name_at=0xC20000):
     r.g_l(4, SYSBASE)
     lh = SYSBASE + 350
     nodes = []
     for i, nm in enumerate(names):
         nb = base if nm == "trackdisk.device" else 0xC10000 + 0x200 * i
         nodes.append(nb)
-        r.g_w(0xC20000 + 0x40 * i, nm.encode() + b"\0")
-        r.g_l(nb + 10, 0xC20000 + 0x40 * i)
+        r.g_w(name_at + 0x40 * i, nm.encode() + b"\0")
+        r.g_l(nb + 10, name_at + 0x40 * i)
     for i, nb in enumerate(nodes):
         r.g_l(nb, nodes[i + 1] if i + 1 < len(nodes) else lh + 4)
     r.g_l(lh, nodes[0] if nodes else lh + 4)
@@ -393,6 +428,84 @@ def test_fhook_prefix_name_is_not_trackdisk(build):
     assert r.peek("td_slot", 3)[2] == 0xFF
 
 
+def test_fhook_skips_a_longer_name_with_a_jmp_slot(build):
+    """rev-wb L6 noNUL: "trackdisk.device.x" (with its own JMP slot) is not
+    trackdisk.device: the terminator is compared too."""
+    r = rig(build)
+    r.call("td_arm")
+    make_exec(r, names=("timer.device", "trackdisk.device.x", "trackdisk.device"))
+    decoy = 0xC10000 + 0x200 * 1
+    r.g_w(decoy - 30, struct.pack(">HI", 0x4EF9, 0xFB0000))
+    r.call("td_fcall")
+    assert int.from_bytes(r.peek("td_slot", 3), "little") == DEVBASE - 30
+    assert r.g_r(decoy - 30, 6) == struct.pack(">HI", 0x4EF9, 0xFB0000)
+
+
+@pytest.mark.parametrize("name_at", [0xF81000, 0xE00400, 0x001000])
+def test_fhook_finds_names_in_rom(build, name_at):
+    """AROS's resident names live in the ROM banks (the C64U run, fix round
+    1): a name pointer into ROM (or RAM) is followed."""
+    r = rig(build)
+    r.call("td_arm")
+    make_exec(r, name_at=name_at)
+    r.call("td_fcall")
+    assert int.from_bytes(r.peek("td_slot", 3), "little") == DEVBASE - 30
+
+
+@pytest.mark.parametrize("bad", [0xBF1234, 0xDFF000, 0xF80010, 0x200000])
+def test_fhook_walk_stays_in_ram(build, bad):
+    """rev-wb L8: a node, SysBase or name pointer outside chip/slow RAM ends
+    the walk (no read of the I/O banks, ROM or the disk region)."""
+    for where in ("node", "name", "sysbase"):
+        if where == "name" and bad >> 16 >= 0xE0:
+            continue                                     # names may be in ROM (above)
+        r = rig(build)
+        r.call("td_arm")
+        make_exec(r)
+        if where == "node":
+            r.g_l(SYSBASE + 350, bad)
+        elif where == "name":
+            r.g_l(0xC10000 + 10, bad)             # the first node's ln_Name
+        else:
+            r.g_l(4, bad)
+        r.calls.clear()
+        r.call("td_fcall")
+        reads = [c[1] for c in r.calls if c[0].startswith("mem_read")]
+        assert not [a for a in reads if (a >> 16) in (bad >> 16, 0xBF, 0xDF)], (where, reads)
+        if where != "name":
+            assert r.peek("td_slot", 3)[2] == 0xFF
+
+
+def test_rearm_starts_clean(build):
+    """rev-wb L5: a second boot in one session (td_arm again) starts with a
+    fresh drive and device state."""
+    r = armed(build)
+    r.g_w(TD_ADF, adf_pattern())
+    request(r)
+    trap(r)
+    prb(r, 0x77)
+    prb(r, 0x76)
+    prb(r, 0x75)                                           # cylinder 1, disk seen
+    assert r.b("td_cyl") and r.b("td_chg") and r.peek("td_nrd", 2) != b"\0\0"
+    r.poke("td_nqr", b"\3")
+    r.call("td_arm")
+    for n in ("td_cyl", "td_chg", "td_nqr", "td_npas", "td_whit"):
+        assert r.b(n) == 0, n
+    assert r.peek("td_nrd", 2) == b"\0\0" and r.peek("td_len", 3) == bytes(3)
+    assert r.b("td_mot") == 0xFF and r.b("td_old") == 0xFF
+    assert r.peek("td_slot", 3)[2] == 0xFF
+
+
+def test_actrl_is_cleared(served):
+    """rev-wb L6 noactrl: a REC address control left non-zero by someone
+    else (fixed C64/REU address) is cleared before the copy."""
+    r = served
+    r.bus.rec[0x0A] = 0xC0
+    request(r, length=1024, data=0x3000)
+    trap(r)
+    assert r.g_r(0x3000, 1024) == adf_pattern()[:1024]
+
+
 def test_fhook_refuses_a_non_jmp_slot(build):
     r = rig(build)
     r.call("td_arm")
@@ -417,8 +530,13 @@ def test_fhook_bounded_walk_on_a_cycle(build):
 # BeginIO
 # =============================================================================
 
+_ADF = random.Random(13).randbytes(ADF_SIZE)
+
+
 def adf_pattern():
-    return bytes((i * 7 + (i >> 9) * 13) & 0xFF for i in range(ADF_SIZE))
+    """NON-periodic (rev-wb H1: a pattern repeating mod $80000 hides a
+    512 KB wrap)."""
+    return _ADF
 
 
 def request(r: Rig, cmd=2, flags=1, off=0, length=512, data=0x3000):
@@ -455,9 +573,11 @@ def returned(r: Rig):
 
 @pytest.mark.parametrize("cmd", [2, 0x8002])
 @pytest.mark.parametrize("off,length,data", [
-    (0, 512, 0x3000), (512 * 879, 1024, 0xC1A0A2), (512 * 1759, 512, 0x1FFE00),
+    (0, 512, 0x3000), (512 * 879, 1024, 0xC1A0A2), (512 * 1759, 512, 0x1FFC00),
     (0, 0x10000, 0x40000), (1024, 1536, 0x3ab8), (0, 1, 0x5FF), (512, 257, 0xC23FFF),
-    (ADF_SIZE - 512, 512, 0x100)])
+    (ADF_SIZE - 512, 512, 0x100), (ADF_SIZE - 1, 1, 0x3001),
+    (1023 * 512, 1024, 0x3058), (1022 * 512, 2048, 0xC1A0A8),      # rev-wb H1: across $80000
+    (0x7FF00, 0x200, 0xC1FF80)])
 def test_quick_read_served(served, cmd, off, length, data):
     r = served
     adf = adf_pattern()
@@ -476,6 +596,7 @@ def test_quick_read_served(served, cmd, off, length, data):
     for kind, c64, reu, n in r.bus.dmas:
         assert c64 == TD_BUF and 1 <= n <= 256
         assert (reu >> 16) not in (0xBF, 0xDF)
+        assert reu >> 8 == (reu + n - 1) >> 8, "a chunk crosses a page (and maybe a 512 KB line)"
 
 
 def test_zero_length_read(served):
@@ -487,6 +608,7 @@ def test_zero_length_read(served):
 
 
 @pytest.mark.parametrize("off,length", [(ADF_SIZE - 512, 1024), (ADF_SIZE, 512),
+                                        (ADF_SIZE - 512, 513), (ADF_SIZE - 1, 2),
                                         (0x1000000, 512), (0, 0x1000000),
                                         (0xFFFFFE00, 512), (0xE00000, 512)])
 def test_read_past_the_image_refused(served, off, length):
@@ -505,8 +627,8 @@ def test_read_into_the_io_banks_stops(served, bank):
     request(r, length=1024, data=dst)
     trap(r)
     returned(r)
-    assert r.g_r(IO + 31, 1) == bytes([TDERR_NS]) and r.g_rl(IO + 32) == 256
-    assert r.g_r(dst, 256) == adf_pattern()[:256]
+    assert r.g_r(IO + 31, 1) == bytes([TDERR_NS]) and r.g_rl(IO + 32) == 0
+    assert r.g_r(dst, 256) == adf_pattern()[:256]           # copied before the stop
     assert r.g_r(bank << 16, 768) == bytes(768)
     assert r.n("mem_rec_dirty") == 1
 
@@ -590,14 +712,17 @@ def test_trap_before_patch_never_matches(build):
 # Teeth: each mutant (one build each) fails at least one check above
 # =============================================================================
 
-MUTANTS = {   # name: (original, replacement) in tests/aros/td.s (the module)
+MUTANTS = {   # name: (original, replacement) in tests/aros/td.s (the module); <= 10 with nomid
     "nohle":   ("        cmp #$F9\n", "        cmp #$00\n"),      # BeginIO never patched
     "offset":  ("        adc #^TD_ADF\n", "        adc #^TD_ADF\n        inc t_op1+1\n        inc t_op1+1\n"),
     "wpok":    ("wp:\n        lda #TDERR_WP\n", "wp:\n        lda #0\n"),
-    "nochg":   ("        sty td_chg\n", "        bit td_chg\n"),
     "noinv":   ("        jsr code_invpg\n", "        bit code_invpg\n"),
     "noguard": ("        cmp #$BF\n        beq refuse\n        cmp #$DF\n        beq refuse\n", ""),
-    "nopop":   ("        adc #4\n", "        adc #0\n"),
+    "nosrccap": ("        sbc t_op1               ; only, so a chunk must never cross a 512 KB\n",
+                 "        lda #0                  ; (mutant: no source cap)\n"),
+    "nonul":   ("        cpy #TD_NAMEN\n", "        cpy #TD_NAMEN - 1\n"),
+    "limit1":  ("        lda #<TD_LIMIT\n", "        lda #<(TD_LIMIT + 1)\n"),
+    "noactrl": ("        sta REC_ACTRL\n", "        bit REC_ACTRL\n"),
 }
 
 
@@ -610,6 +735,7 @@ def battery(build) -> list[str]:
         (test_step_tk0_and_change, {}),
         (test_lines_equal_the_boot_models_floppy, {"seed": 0}),
         (test_fhook_patches_beginio, {}),
+        (test_fhook_skips_a_longer_name_with_a_jmp_slot, {}),
     ]
     served_checks = [
         (test_others_go_to_the_native_beginio, {"cmd": 9, "flags": 1}),
@@ -619,6 +745,9 @@ def battery(build) -> list[str]:
         (test_read_into_the_io_banks_stops, {"bank": 0xBF}),
         (test_quick_write_is_write_protected, {"cmd": 3}),
         (test_watch_counts_reads_of_a_block, {}),
+        (test_quick_read_served, {"cmd": 2, "off": 1023 * 512, "length": 1024, "data": 0x3058}),
+        (test_read_past_the_image_refused, {"off": ADF_SIZE - 512, "length": 513}),
+        (test_actrl_is_cleared, {}),
     ]
     bad = []
     for fn, kw in checks + served_checks:

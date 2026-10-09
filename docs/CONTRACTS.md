@@ -1642,14 +1642,21 @@ lines in `cia.s`, rc `machine.inc` region `td`, `host/adf_overlay.py`,
 `tests/aros_wb.py`).
 Design and observations: `build/evidence/w13-wb/PROGRESS.md` (boot model,
 pinned ROM, 3.1 Workbench disk). Tests: `host/tests/test_td.py` (td.s on
-the in-process 6502 + REC model: the drive lines against the boot model's
-`Floppy`, the locate/patch, every request class, 7 mutants),
+the in-process 6502 + REC model with the REU's 512 KB address wrap: the
+drive lines against the boot model's `Floppy`, the locate/patch -- **L8
+guard: names may be in ROM** (`test_fhook_finds_names_in_rom`: AROS's
+resident names are in the ROM banks; a guard that refused them never
+patched BeginIO on the C64U, fix round 1) while nodes, SysBase and the
+I/O banks are refused (`test_fhook_walk_stays_in_ram`) --, every request
+class, reads across `$80000`, 10 mutants),
 `host/tests/test_adf_overlay.py`, `tests/aros_wb.py` (legs `w`, `nohle`,
 `resume`).
 
 - **Split (supervisor budget ruling).** MAIN holds only the cia.s hook,
   `td_call`/`td_fcall` and the state (all BSS, so the W12-T image carries
-  it): 94 B. The code is a machine-mode module, `tests/aros/td.s`,
+  it): 94 B (cia.o CODE +12, td.o CODE +50, BSS +32; but DATA now ends past
+  `$8BFF`, so the page-aligned BSS moved from `$8C00` to `$8D00`: BSS end
+  `$9C0B` -> `$9D2B`, +288 B of the space below `$9FFF`). The code is a machine-mode module, `tests/aros/td.s`,
   assembled at test time against `runner.lbl` (the `-D` symbols it lists
   with `.ifndef`/`.error`) at `TD_ORG` = `$C200` (end <= `$C600`; layout:
   mboot `$C000-$C1FF`, td `$C200-$C5FF`, W13-D's spr `$C600-$C8FF`),
@@ -1664,7 +1671,10 @@ the in-process 6502 + REC model: the drive lines against the boot model's
   `cia_reset`, `cop_reset`, `snap_arm`; `tests/aros_wb.py` assembles a
   variant of `mboot.s` with that one call): `td_arm` sets `td_vec`/`td_fvec`
   (the module's PRB and frame-hook entries), `td_mid` := the module ID,
-  chains `td_fcall` in front of the frame hook.
+  chains `td_fcall` in front of the frame hook. It also zeroes the drive
+  and device state (`td_zero` .. `TD_NZERO`: pins, motor, cylinder,
+  change, slot, counters; fix round 1 L5), so a second boot in one session
+  starts clean.
 - **Module ID (resume).** `td_call` and `td_fcall` compare `TD_ORG+3..6`
   with `td_mid` first. A different module (a resume after a rebuild):
   `td_call` calls nothing, `td_fcall` halts the machine with st_halt 1,
@@ -1685,7 +1695,11 @@ the in-process 6502 + REC model: the drive lines against the boot model's
 - **The overlay** (`host/adf_overlay.py`): `S/Startup-Sequence` replaced
   in the file's own data blocks (WB_BOOT §4.3 `trim`, default; `min`;
   `full` = none), byte for byte the boot model's `--startup` image. The
-  ADF and every device file stay untouched. Refused: a block outside
+  ADF and every device file stay untouched. Files over 72 blocks follow
+  their extension blocks (T_LIST, parent = the header, checksummed; fix
+  round 1 L3; on the user's disk Libs/asl.library and amigaguide.datatype).
+  Only OFS/FFS (`DOS\0`-`DOS\3`) images: dircache and later dostypes
+  are refused (L4). Refused: a block outside
   2..1759, not 512 bytes, a header or OFS data block whose checksum does
   not sum to 0, a header whose data-block table changed.
 - **The drive** (`td_prb`, the W13-W hook in `cia.s` `wr_prb`, CIA-B
@@ -1701,7 +1715,12 @@ the in-process 6502 + REC model: the drive lines against the boot model's
   writes are not hooked: the ROM writes DDRB = `$FF` once, before any
   meaningful PRB value (observed).
 - **The device.** `td_fhook` (chained in front of the frame hook) walks
-  `SysBase->DeviceList` (`$4`, +350; at most 32 nodes per frame) until
+  `SysBase->DeviceList` (`$4`, +350; at most 32 nodes per frame; SysBase,
+  every node and every name pointer must lie in chip RAM `$000000-$1FFFFF`
+  or slow RAM `$C00000-$DBFFFF` (a name pointer may also point into the
+  ROM banks, where AROS keeps its resident names), else the walk stops: it
+  never reads the trapped `$BF`/`$DF` banks or the disk region, fix round 1
+  L8; the name compare includes the terminator) until
   `trackdisk.device` appears, checks that its BeginIO slot (LVO -30) is
   `JMP abs.l`, keeps the target (`td_orig`) and rewrites the slot through
   `mem_write32`/`mem_write16` (W12-C's write check drops a cached window)
@@ -1721,6 +1740,12 @@ the in-process 6502 + REC model: the drive lines against the boot model's
     served, 7-9 requests passed, no write, no disk DMA.
   - `io_Offset + io_Length` beyond the image (or either >= 16 MB):
     `io_Error` 20 (TDERR_NotSpecified), `io_Actual` 0, nothing copied.
+  - **Limit (writes):** only QUICK `CMD_WRITE`/`TD_FORMAT`/`TD_RAWWRITE`
+    get TDERR_WriteProt here; non-quick ones go to the native path, and
+    nothing is proven about what it does with them (no disk DMA exists;
+    the drive lines say write-protected). The brief's "any write request
+    returns the write-protect error" holds for quick requests only. None
+    was observed (the filesystem sees TD_PROTSTATUS and never writes).
   - **Limit:** a NON-quick `CMD_READ`/`ETD_READ` goes to the native path,
     which needs disk DMA that does not exist: it would never complete. It is
     counted in `td_nqr`; `aros_wb` fails if it is not 0 (none observed in the
@@ -1738,8 +1763,18 @@ the in-process 6502 + REC model: the drive lines against the boot model's
   `mem_write*`); `mem_rec_dirty` at the end (C1). A chunk whose
   destination is bank `$BF` or `$DF` is never moved (the REU under the I/O
   banks, "I/O trap" F2): the request ends with `io_Error` 20 and
-  `io_Actual` = the bytes copied before it. Cost per read: two REU DMAs and
-  one `code_invpg` per 256 bytes.
+  `io_Actual` 0 (the chunks before it were copied). **Chunks** (fix round 1, H1):
+  `c = min(n, 256 - (dst & $FF), 256 - (src & $FF))` -- the REC carries the
+  REU address through bits 0-18 only, so a transfer running past a 512 KB
+  line wraps to the line's start; a chunk inside one 256-byte page on both
+  sides never crosses one (512 KB lines are page-aligned), on the image
+  side (TD_ADF + `$80000`: blocks 1023/1024, e.g. Libs/asl.library) and on
+  the guest side alike. Tested on a REC model with that wrap and a
+  non-periodic image (mutant `nosrccap`). **Cost** (VICE, phi2-exact, the
+  whole trap from `td_call` to the RTS, `aros_wb` leg `cost`): 512 B
+  3775 cycles (59 us at 64 MHz), 1024 B 5736 (90 us); with an unaligned
+  `io_Data` 4654 / 7437 (more chunks): ~1.8k fixed (decode, io fields,
+  RTS through the memory API) + ~1k per chunk (two DMAs, `code_invpg`).
 - **Scratch.** Inside the trap and the frame hook td.s uses the
   interpreter's EA/ALU operands `t_ea..t_res` (`$60-$6F`): dead at an
   instruction boundary and after `ea_store`'s tail call (`t_op1+3` the
