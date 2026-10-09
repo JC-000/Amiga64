@@ -1034,11 +1034,109 @@ spec: `docs/C2V.md` "Row skip", "Display refresh (S3.5)". Reference:
     2048 nibble-packed; supervisor-approved); `disp_init` unpacks it, once,
     into the same 4096 REU bytes at `disp_lut` and stops at exactly 4096
     entries (`disp_init` 126,616 φ2 cycles, base 120,006–120,225).
+- **1:1 view (W13-D).** Spec: `docs/C2V.md` "1:1 view (W13-D)", "Hires
+  with 1-3 planes (W13-D)".
+  - Reference: `c2v_ref.one_cells`, `convert_one`, `disp_decide_view`,
+    `disp_convert_view`.
+  - Tests: `tests/run_c2v.py` (kind `one`), `tests/run_pf.py` leg `view`,
+    `tests/run_spr.py` leg `aros1`, `host/tests/test_c2v_one.py`.
+  - **State.** All of it is in disp.s's BSS, so the snapshot carries it
+    (I2): `disp_view` (0 fit, 1 1:1), `disp_px` (the window's first byte,
+    0-40), `disp_py` (its first line, before clamping), `disp_ymax`, and
+    `disp_one` (the last decision is the 1:1 view). `disp_ymax` is
+    L − 200, or L − 100 with LACE, clamped to 0-255; every shown decision
+    sets it.
+  - **The toggle.** `inp_view` (I1; until W13-I lands, disp.s's stand-in
+    under `DISP_INPV_LOCAL`) bit 0 is an edge.
+    - `disp_frame` consumes it first, clearing bit 0 only.
+    - It flips `disp_view` and sets `disp_px` = 20 and `disp_py` =
+      `disp_ymax` / 2: the window is centred.
+    - It converts at once, ignoring gen, the snapshot compare and the duty
+      budget.
+  - **The decision.** For hires (BPU 1-4) with `disp_view` = 1:
+    - `disp_one` = 1 and `disp_crop` = min(`disp_py`, `disp_ymax`).
+    - With BPLCON0 LACE, each plane's row advance is halved (the two
+      fields interleave) and `disp_lines` = min(2 · `disp_lines`, 200).
+    - Known gap: the 512 KB check covers only the current field's rows.
+      The other field's rows in between are not checked; a straddling row
+      shows wrong pixels in that row only, since the DMA target is fixed.
+    - Any other decision leaves the fit view's.
+  - **The output.** A hires bitmap with a per-cell bg (the pen of the
+    cell's top-left pixel) and fg (the first other pen in raster order).
+    The matrix byte is colour(fg) << 4 | colour(bg), with colours by the
+    W12-V rule over every cell's bg and fg. Colour RAM is left as it was
+    (unused in hires). `disp_mck`, `disp_clrlines` and the VIC setup are
+    the fit hires view's.
+  - **Cells with 3+ pens are lossy:** the top-left pixel's pen becomes bg,
+    and every other pen shows as fg's colour. Pinned by run_c2v case
+    `three-pen`.
+  - **Frozen part.** The fit view's bitmap, matrix and colour RAM are
+    byte-identical to the base for every input it converted before: the
+    existing run_c2v/run_pf legs, and the AROS m3 hashes, unchanged.
+- **Hires with 1-3 planes (W13-D).** These decisions now convert (they
+  were DEPTH), in both views.
+  - An absent plane reads `disp_zero` (`$DF4000-$DF40FF` in the REU
+    under the trapped `$DF` bank, rc `guest.inc`/`machine.inc`, zeroed by
+    `disp_init`) with a row advance of 0.
+  - The guest cannot reach it: every guest access to bank `$DF` traps to
+    `chip.s`.
+- **Pointer sprite (W13-D, D2).** The pointer is a machine-mode module,
+  `tests/aros/spr.s`, at `$C600-$C8FF`.
+  - **Build and arm.** It is assembled at test time by
+    `tests/run_spr.py build_spr(out_dir, labels)` against the runner's
+    labels; it is not in the PRG. `run_spr.arm` arms it: `spr_vec` :=
+    `$C600` (high byte last) and `spr_id` := `"SPR1"` (`$31525053`; a
+    resume compares it, W13-W's loader).
+  - **Hook.** `disp_vw` (BHI) calls through `spr_vec` once per frame
+    hook when F1 is not pressed and `spr_vec` ≠ 0. The module returns
+    C = 1 when it moved the 1:1 window; `disp_frame` then converts at
+    once.
+  - **When it runs.** Inside `mach_run` only. It shows the pointer while
+    `disp_mode` is mc2 or hires, DMACON has DMAEN and SPREN, and VSTOP >
+    VSTART. A hidden → hidden frame writes nothing.
+  - **Per frame.** SPR0PT is read from `chip_shd` (bit 0 ignored), then
+    POS/CTL with one 4-byte REU fetch.
+  - **Image and colours** are read again only when SPR0PT, POS or CTL
+    changed, or `disp_nconv` (low byte) moved. The image is up to 21
+    lines of DATA/DATB; the colours are LUT[COLOR17-19], one byte DMA each
+    into `$D027-$D029`.
+  - **Sprites and memory.** VIC sprite 0 = DATA & ~DATB (colour 17),
+    1 = ~DATA & DATB (18), 2 = DATA & DATB (19). The masks are exclusive,
+    so the colours are exact at full width. Blocks are at `disp_sprb`
+    (`@under disp $D400-$D7FF`, VIC blocks $50-$52) and the pointers at
+    `c2v_screen + $3F8`, written at `$01` = `%xx100` under `sei`.
+  - **State** is in `c2v_args` + 180..211 plus the module's own two bytes,
+    which are zero when staged. After a resume the module is staged again
+    and rebuilds everything from `chip_shd` and guest memory.
+  - **Position.** In lores pixels: SX = HSTART + 1 − (2 · (DDFSTRT &
+    $FC) + 9), lores (DDFSTRT & $F8) + 17. These are the playfield's first
+    fetched pixel, which the fit view shows at C64 x = 0 (HRM: the sprite
+    pixel at hcount H shows with playfield hcount H + 1). SY = VSTART −
+    DIWSTRT V.
+    - Fit view: VIC X = 24 + SX, VIC Y = 50 + SY − `disp_crop`.
+    - 1:1 view: VIC X = 24 + 2 · (SX − 4 · `disp_px`) (X-expanded), VIC Y
+      = 50 + SY − `disp_crop`. With LACE, 50 + 2 · (SY − `disp_crop`),
+      Y-expanded.
+    - Off X 0-$1FF or Y 0-255, the pointer is hidden.
+  - **Pan (1:1).** When the pointer comes within 32 C64 pixels (16 lores;
+    LACE 16 field lines) of a window edge, the window re-centres on it:
+    `disp_px` := clamp(SX − 80, 0, 160) / 4 and `disp_py` := clamp(SY − 100,
+    LACE 50, 0, `disp_ymax`). C = 1 only if px or the window's line
+    changed, so a clamped edge never converts. Hysteresis: after a pan the
+    pointer is ≥ 48 C64 px from every edge.
+  - **Limits:**
+    - The height is capped at 21 lines (VIC; LACE 1:1 at 42 frame lines).
+    - The attach bit (sprite 1) is ignored.
+    - Sprite position is not dilated by BPLCON1 scroll.
+    - Sprites 1-7 are not shown.
 - **C64 resources:** writes the c2v regions (bitmap, matrix under I/O,
   colour RAM, `c2v_stage` during `disp_init`, `c2v_args`), `$D011`,
   `$D016`, `$D018`, `$D020`, `$D021`, and `$DD00` bits 1–0 (bits 7–2 and
   the DDR kept; `mach.s` never writes port A, "Machine loop"). State is in
-  disp.s's BSS (whole page), host-visible in `runner.lbl`.
+  disp.s's BSS (whole page), host-visible in `runner.lbl`. W13-D: the
+  pointer module (not disp.s) writes VIC `$D000-$D005`, `$D010`, `$D015`,
+  `$D017`, `$D01B`-`$D01D`, `$D027-$D029`, the sprite pointers
+  `$D3F8-$D3FA` and the blocks `$D400-$D4BF` (`@under disp $D400-$D7FF`).
 - **Guest resources:** `disp_lut` `$DF0000-$DF0FFF` (rc `guest.inc`,
   owner disp): the REU bytes under the trapped custom-chip bank. Every
   guest access to bank `$DF` goes to `chip.s` (open bus), never the REU,

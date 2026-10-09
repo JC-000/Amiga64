@@ -82,10 +82,13 @@ VARIANTS = {
     "w12ocs": ["DISP_MUT_W12OCS=1"], "w12up": ["DISP_MUT_W12UP=1"],
     "w12mck": ["DISP_MUT_W12MCK=1"], "w12rle": ["DISP_MUT_W12RLE=1"],
     "w12run": ["DISP_MUT_W12RUN=1"],
+    # W13-D: the 1:1 view (leg view)
+    "w13px": ["DISP_MUT_W13PX=1"],
+    "w13edge": ["DISP_MUT_W13EDGE=1"], "w13lace": ["DISP_MUT_W13LACE=1"],
 }
 NOT_TEETH = ("stub", "lutram", "trace")
 TEETH = [k for k in VARIANTS if k not in NOT_TEETH]
-ALL_LEGS = ["shim", "fixture", "wrap", "dosbuf", "live", "gap", "cols"]
+ALL_LEGS = ["shim", "fixture", "wrap", "dosbuf", "live", "gap", "cols", "view"]
 # the legs each mutant runs (--teeth): the ones meant to catch it
 MUTANT_LEGS = {"bitorder": ["shim", "fixture"], "pal": ["shim", "fixture"],
                "gen": ["shim"], "ppord": ["shim", "fixture"],
@@ -95,7 +98,9 @@ MUTANT_LEGS = {"bitorder": ["shim", "fixture"], "pal": ["shim", "fixture"],
                "efrom": ["gap"],
                "w12ord": ["shim"], "w12onepass": ["shim"], "w12ocs": ["shim"],
                "w12up": ["shim"], "w12mck": ["shim"], "w12rle": ["shim"],
-               "w12run": ["shim"]}            # W11-A (supervisor grant, efrom)
+               "w12run": ["shim"],            # W11-A (supervisor grant, efrom)
+               "w13px": ["view"], "w13edge": ["view"],
+               "w13lace": ["view"]}
 
 
 def build(prg: str, name: str, defines: list[str], shim: bool) -> str:
@@ -1199,6 +1204,266 @@ def leg_cols(prg: str, perf: bool = False) -> list[str]:
     return fails
 
 
+# --- leg "view" (W13-D): the 1:1 view through disp_frame / disp_refresh ---------
+
+VIEW_REGION = (0x140000, 0x20000, 5)            # 256 interleaved hires lines
+WB_BASE = 0x160000                              # W13-D: a 2-plane hires Workbench-like screen
+WB_PAL = [0xAAA, 0x000, 0xFFF, 0x68B]           # 3.1's Workbench colours (W13-W, boot model)
+
+
+def wb_planes(seed: int = 13) -> list[bytes]:
+    """W13-D: 640x256, 2 planes (80-byte rows, BPLxMOD 0): a title bar
+    (lines 0-10: pen 2 with pen-1 Topaz-like glyphs), then pen-0 background
+    with pen-1 glyphs and a few pen-3 cells."""
+    rng = random.Random(seed)
+    pl = [bytearray(256 * 80) for _ in range(2)]
+    for r in range(32):
+        for bx in range(80):
+            bg, fg = (2, 1) if r < 2 else ((0, 3) if rng.random() < 0.1 else (0, 1))
+            for y in range(r * 8, r * 8 + 8):
+                bits = rng.randrange(256) if y % 8 not in (0, 7) else 0
+                for x in range(8):
+                    pen = fg if bits >> (7 - x) & 1 else bg
+                    for p in range(2):
+                        if pen >> p & 1:
+                            pl[p][y * 80 + bx] |= 0x80 >> x
+    return [bytes(b) for b in pl]
+
+
+LACE_BASE = 0x180000                            # W13-D: a 640x512 interlaced 2-plane frame
+
+
+def lace_planes(seed: int = 21) -> list[bytes]:
+    """W13-D: a 640x512 2-plane frame image (frame line k at +80k), drawn
+    as 8-frame-line Topaz-like text: pen 1 on pen 0, a title band of pen 1
+    on pen 2.  Each field alone shows every other glyph line."""
+    rng = random.Random(seed)
+    pl = [bytearray(512 * 80) for _ in range(2)]
+    for r in range(64):
+        for bx in range(80):
+            bg = 2 if r < 3 else 0
+            for y in range(r * 8, r * 8 + 8):
+                bits = rng.randrange(256) if y % 8 else 0
+                for x in range(8):
+                    pen = 1 if bits >> (7 - x) & 1 else bg
+                    for p in range(2):
+                        if pen >> p & 1:
+                            pl[p][y * 80 + bx] |= 0x80 >> x
+    return [bytes(b) for b in pl]
+
+
+LACE_ST = dict(STD, bplcon0=0xA204, bplpt=[LACE_BASE, LACE_BASE + 0xA000],
+               bpl1mod=80, bpl2mod=80, ddfstrt=0x3C, ddfstop=0xD4,
+               diwstrt=0x2C81, diwstop=0x2CC1, color=[0xAAA, 0x000, 0xFFF, 0x68B] + [0] * 28)
+
+
+WB_ST = dict(STD, bplcon0=0xA200, bplpt=[WB_BASE, WB_BASE + 0x5000], bpl1mod=0, bpl2mod=0,
+             ddfstrt=0x3C, ddfstop=0xD4, diwstrt=0x2C81, diwstop=0x2CC1,
+             color=WB_PAL + [0x123] * 28)
+VIEW_HIRES = dict(STD, bplcon0=0xC200, bplpt=[0x140000 + p * 80 for p in range(4)],
+                  bpl1mod=240, bpl2mod=240, ddfstrt=0x3C, ddfstop=0xD4,
+                  diwstrt=0x2C81, diwstop=0x2CC1,          # 256 lines (PAL)
+                  color=[0x000, 0x111, 0x222, 0x024, 0x0AAA, 0xFFF, 0xF00, 0x0F0,
+                         0x00F, 0xFF0, 0x0FF, 0xF0F, 0x888, 0x444, 0xCCC, 0x123] + [0] * 16)
+
+
+def view_steps() -> list[dict]:
+    """(name, action, host writes before, the model's view (view, px, py) or
+    None for no conversion).  action: kick (disp_frame through shim_kick) or
+    refresh."""
+    st = dict(VIEW_HIRES, gen=0x21)
+    mc2 = dict(STD, gen=0x24, bplpt=[0x100000, 0x102000], color=pal(40))
+    return [
+        {"name": "fit", "st": st, "act": "refresh", "view": (0, 20, 0)},
+        {"name": "f1-to-1:1", "st": st, "act": "kick", "pre": {"inp_view": 0x81},
+         "view": (1, 20, 28)},                  # centred: px 20, the fit crop
+        {"name": "same-no-conv", "st": st, "act": "kick", "pre": {"inp_view": 0x80},
+         "view": None},
+        {"name": "test-offset", "st": st, "act": "refresh",
+         "pre": {"disp_px": 0, "disp_py": 3}, "view": (1, 0, 3)},
+        {"name": "right-bottom", "st": st, "act": "refresh",
+         "pre": {"disp_px": 40, "disp_py": 200}, "view": (1, 40, 56)},   # clamped
+        {"name": "new-gen-1:1", "st": dict(st, gen=0x22, color=pal(41)), "act": "kick",
+         "pre": {"disp_px": 7, "disp_py": 9}, "view": (1, 7, 9)},
+        {"name": "f1-back-fit", "st": dict(st, gen=0x22, color=pal(41)), "act": "kick",
+         "pre": {"inp_view": 1}, "view": (0, 20, 9)},
+        {"name": "mc2-in-1:1", "st": mc2, "act": "kick",
+         "pre": {"disp_view": 1}, "view": (1, 20, 0)},  # lores: the fit view
+        {"name": "dark-1:1", "st": dict(st, gen=0x25), "act": "kick",
+         "pre": {"disp_view": 1, "disp_px": 20, "disp_py": 28}, "view": (1, 20, 28)},
+        # W13-D: hires BPU 1-3 convert (were BLANK, why DEPTH); the Workbench's 2 planes
+        {"name": "wb2-fit", "st": dict(WB_ST, gen=0x26), "act": "kick",
+         "pre": {"disp_view": 0}, "view": (0, 20, 0), "exact": True},
+        {"name": "wb2-1:1-title", "st": dict(WB_ST, gen=0x27), "act": "refresh",
+         "pre": {"disp_view": 1, "disp_px": 3, "disp_py": 0}, "view": (1, 3, 0),
+         "exact": True},
+        {"name": "wb1-1:1", "st": dict(WB_ST, gen=0x28, bplcon0=0x9200), "act": "kick",
+         "pre": {"disp_view": 1, "disp_px": 40, "disp_py": 56}, "view": (1, 40, 56),
+         "exact": True},
+        {"name": "wb3-fit", "st": dict(WB_ST, gen=0x29, bplcon0=0xB200,
+                                       bplpt=[WB_BASE, WB_BASE + 0x5000, 0x140000]),
+         "act": "kick", "pre": {"disp_view": 0}, "view": (0, 20, 0)},
+        # W13-D: LACE in the 1:1 view (both fields); the fit view keeps one field
+        {"name": "lace-fit", "st": dict(LACE_ST, gen=0x2A), "act": "kick",
+         "pre": {"disp_view": 0}, "view": (0, 20, 0)},
+        {"name": "lace-f1-centre", "st": dict(LACE_ST, gen=0x2A), "act": "kick",
+         "pre": {"inp_view": 1}, "view": (1, 20, 78), "exact": True},   # ymax 156
+        {"name": "lace-odd-top", "st": dict(LACE_ST, gen=0x2B,
+                                            bplpt=[LACE_BASE + 80, LACE_BASE + 0xA050]),
+         "act": "refresh", "pre": {"disp_px": 0, "disp_py": 0}, "view": (1, 0, 0),
+         "exact": True},
+        {"name": "nolace-after", "st": dict(WB_ST, gen=0x2C), "act": "kick",
+         "pre": {"disp_py": 40}, "view": (1, 0, 40), "exact": True},
+    ]
+
+
+def leg_view(prg: str, perf: bool = False) -> list[str]:
+    from c64_test_harness import Labels, UnifiedManager, ViceConfig
+    from tests.harness_util import REU_VICE_ARGS, lookup_label
+    from tests.run_vectors import prepare_target
+    labels = Labels.from_file(os.path.splitext(prg)[0] + ".lbl")
+    lut = R.build_lut()
+    fails: list[str] = []
+    cfg = ViceConfig(prg_path=prg, warp=True, sound=False,
+                     extra_args=list(REU_VICE_ARGS))
+    with UnifiedManager(backend="vice", vice_config=cfg) as mgr:
+        target = mgr.acquire()
+        try:
+            prepare_target(target, prg)
+            s = Pf(target, labels)
+            try:
+                for k in ("inp_view", "disp_view", "disp_px", "disp_py", "disp_one",
+                          "disp_ymax", "disp_crop"):
+                    s.lab[k] = lookup_label(labels, k)
+            except KeyError as e:
+                print(f"  view: FAIL ({e}: no 1:1 view in this PRG)")
+                return [str(e)]
+            mem = Mem()
+            for base, n, seed in REGIONS + [VIEW_REGION]:
+                data = rnd(seed, n)
+                s.stage(base, data)
+                mem.put(base, data)
+            wb = b"".join(wb_planes())                  # W13-D
+            s.stage(WB_BASE, wb)
+            mem.put(WB_BASE, wb)
+            lc = b"".join(lace_planes())
+            s.stage(LACE_BASE, lc)
+            mem.put(LACE_BASE, lc)
+            f: list[str] = []
+            C.call_checked(s, "disp_init", f)
+            fails += [f"init: {x}" for x in f]
+            for step in view_steps():
+                f = view_step(s, step, mem, lut)
+                fails += [f"{step['name']}: {x}" for x in f]
+            if perf:                     # PERF (o): fit vs 1:1, the same picture
+                st = dict(VIEW_HIRES, gen=0x30)
+                s.write_ram(s.lab["disp_st"], R.pack_disp_st(st))
+                for name, view in (("fit hires4", 0), ("1:1 centred", 1),
+                                   ("fit hires4 (again)", 0)):
+                    s.wr(s.lab["disp_view"], bytes([view]))
+                    s.wr(s.lab["disp_px"], bytes([R.PX_CENTRE]))
+                    s.wr(s.lab["disp_py"], bytes([28]))
+                    cyc = C.measure(s, "disp_refresh")
+                    print(f"  perf disp_refresh {name:20s} {cyc:9d} cycles")
+        finally:
+            mgr.release(target)
+    return fails
+
+
+def pixel_exact(s: Pf, st: dict, mem: Mem, d: dict, px: int) -> list[str]:
+    """W13-D: every cell of the 1:1 window drawn in at most two pens shows
+    each pixel in its pen's colour (read from the C64: bitmap, matrix)."""
+    bmp = s.read_ram(s.bitmap, 8000)
+    scr = s.read_ram(s.screen, 1000)
+    vic = R.separate(st["color"][:16], R.build_lut(), R.one_cells(
+        [R.disp_rows(mem.read, (d["src"][p] + px) & 0xFFFFFF, R.ONE_ROW,
+                     d["width"] + d["skip"][p] - R.ONE_ROW) for p in range(d["planes"])]
+        + [bytes(200 * R.ONE_ROW)] * (4 - d["planes"]))[2])
+    rows = [R.disp_rows(mem.read, (d["src"][p] + px) & 0xFFFFFF, R.ONE_ROW,
+                        d["width"] + d["skip"][p] - R.ONE_ROW) for p in range(d["planes"])]
+    bad = cells = 0
+    for c in range(1000):
+        r, cx = divmod(c, 40)
+        pix = [[sum(1 << p for p in range(d["planes"])
+                    if rows[p][y * R.ONE_ROW + cx] & (0x80 >> x)) for x in range(8)]
+               for y in range(r * 8, r * 8 + 8)]
+        if len({v for row in pix for v in row}) > 2:
+            continue
+        cells += 1
+        for y in range(8):
+            b = bmp[r * 320 + cx * 8 + y]
+            for x in range(8):
+                shown = scr[c] >> 4 if b & (0x80 >> x) else scr[c] & 15
+                bad += shown != vic[pix[y][x]]
+    return [f"pixel-exact: {bad} pixel(s) wrong in {cells} two-pen cells"] if bad else []
+
+
+def view_step(s: Pf, step: dict, mem: Mem, lut: bytes) -> list[str]:
+    for k, v in step.get("pre", {}).items():
+        s.wr(s.lab[k], bytes([v]))
+    st = dict(step["st"])
+    full = {**{k: 0 for k in ("bplcon1", "bplcon2", "bpl1mod", "bpl2mod")}, **st}
+    full["bplpt"] = list(st.get("bplpt", [])) + [0] * 6
+    full["color"] = list(st.get("color", [])) + [0] * 32
+    before = state(s)
+    pix = s.read_ram(s.lab["disp_st"] + PIX_OFF, 1)
+    g = C.guard_fill(s, zlib.crc32(("view/" + step["name"]).encode()))
+    s.write_ram(s.lab["disp_st"] + PIX_OFF, pix)
+    g["pix"] = pix[0]
+    s.write_ram(s.lab["disp_st"], R.pack_disp_st(st))
+    f: list[str] = []
+    C.call_checked(s, "disp_refresh" if step["act"] == "refresh" else "shim_kick", f)
+    after = state(s)
+    iv = s.rd(s.lab["inp_view"], 1)[0]
+    if iv & 1:
+        f.append(f"inp_view = ${iv:02X}: bit 0 not consumed")
+    want_iv = step.get("pre", {}).get("inp_view", iv) & 0xFE
+    if "inp_view" in step.get("pre", {}) and iv != want_iv:
+        f.append(f"inp_view = ${iv:02X}, want ${want_iv:02X} (only bit 0 is D's)")
+    if step["view"] is None:
+        top, io = C.expected_blocks(s, g, {"bitmap": b"", "screen": b""})
+        top = bytearray(top)
+        top[C.NMIVEC - 0xE000:C.NMIVEC - 0xE000 + 2] = g["top"][
+            C.NMIVEC - 0xE000:C.NMIVEC - 0xE000 + 2]
+        f = [x for x in f if "m_rok = 1" not in x]
+        f += C.diff("RAM $E000-$FFFF", s.read_ram(0xE000, 0x2000), bytes(top), 0xE000)
+        f += C.diff("RAM under I/O", s.read_ram(0xD000, 0x1000), io, 0xD000)
+        if after != before:
+            f.append(f"state {after}, want {before} (no conversion)")
+    else:
+        view, px, py = step["view"]
+        want = R.disp_convert_view(full, mem.read, lut, view, px, py)
+        if want["colram"] is None:      # the 1:1 view leaves colour RAM alone
+            want["colram"] = g["col"]
+        f += check_outputs(s, g, want, R.pack_disp_st({**st, "dirty": 0}))
+        vic = s.vic()
+        exp = dict(want["vic"])
+        exp[0xDD00] = 0
+        for a, v in exp.items():
+            if vic[a] != v & VIC_MASK[a]:
+                f.append(f"VIC ${a:04X} = ${vic[a]:02X}, want ${v & VIC_MASK[a]:02X}")
+        mck = int.from_bytes(s.read_ram(s.lab["disp_mck"], 2), "little")
+        if mck != want["mck"]:
+            f.append(f"disp_mck ${mck:04X}, want ${want['mck']:04X}")
+        d = want["decide"]
+        got = {k: s.rd(s.lab[k], 1)[0] for k in ("disp_view", "disp_one", "disp_crop",
+                                                 "disp_ymax")}
+        exp_s = {"disp_view": view, "disp_one": int(d["one"]),
+                 "disp_crop": d["crop"], "disp_ymax": d["ymax"]}
+        if got != exp_s:
+            f.append(f"view state {got}, want {exp_s}")
+        if d["one"] and s.rd(s.lab["disp_px"], 1)[0] != px:
+            f.append(f"disp_px {s.rd(s.lab['disp_px'], 1)[0]}, want {px}")
+        if after["nconv"] != before["nconv"] + 1:
+            f.append(f"nconv {after['nconv']}, want {before['nconv'] + 1}")
+        if step.get("exact") and d["one"]:
+            f += pixel_exact(s, full, mem, d, px)
+    print(f"  {step['name']:16s} {'OK' if not f else 'FAIL'}")
+    for x in f:
+        print(f"      {x}")
+    return f
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--prg", required=True)
@@ -1236,6 +1501,10 @@ def main(argv=None) -> int:
         if "cols" in legs:               # W12-V (fix round 1, rev-vis's fuzz)
             print(f"run_pf cols leg: {p}")
             fails += [f"cols: {x}" for x in leg_cols(p, a.perf)]
+        if "view" in legs:               # W13-D: the 1:1 view
+            sp = p if has_label(p, "shim_kick") else build(p, "shim", [], True)
+            print(f"run_pf view leg: {sp}")
+            fails += [f"view: {x}" for x in leg_view(sp, a.perf)]
         if "live" in legs or "live:s0" in legs:
             print(f"run_pf live leg: {p}")
             cases = ([(0, True, "irq")] if "live:s0" in legs and "live" not in legs

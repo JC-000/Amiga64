@@ -54,6 +54,10 @@
 ;   c2v_hfill      (W12-V disp) matrix from the cell pens in colour RAM
 ;   c2v_hires also (W12-V) leaves each cell's pen in colour RAM and the
 ;                  cells per pen in c2v_v_cnt (c2v_pick, c2v_hrow)
+;   c2v_ones       (W13-D disp; BASIC out) the 1:1 view's counting pass:
+;                  bitmap, per-cell bg and fg, c2v_v_cnt
+;   c2v_ofin       (W13-D disp; BASIC out) its second pass, after the colour
+;                  choice: bitmap again and the matrix from c2v_v_col
 ;   c2v_mc2s, c2v_hiress  (W10-V disp) the same, but row n+1 of plane p
 ;                  starts width + c2v_a_skip[p] bytes after row n (BPLxMOD;
 ;                  docs/C2V.md "Row skip"); the two entries above zero
@@ -78,6 +82,8 @@
 ; C2V_MUT_NMI (the RAM NMI vector is not set before the $01=$34 fill);
 ; W12-V: C2V_MUT_PICKR (the rightmost pixel's pen), C2V_MUT_HROW (pens not
 ; cleared between char rows), C2V_MUT_HFILLBG (matrix low nibble = the pen's).
+; W13-D (1:1): C2V_MUT_OMASK (bg from the second pixel), C2V_MUT_OFG (fg
+; re-picked every line), C2V_MUT_OFIN (the fg pen in both nibbles).
 ; (tests/run_c2v.py's nmiack variant is MACH_MUT_NMIACK in runtime/ops/mach.s.)
 ; ===========================================================================
 
@@ -87,6 +93,7 @@
 .export c2v_mc2s, c2v_hiress                ; W10-V disp: per-plane row skip
 .export c2v_lookn, c2v_setmc2, c2v_hfill    ; W12-V disp: the colour choice
 .export c2v_v_col, c2v_v_cnt, c2v_v_tab     ; W12-V
+.export c2v_ones, c2v_ofin                   ; W13-D disp: the 1:1 view
 .export c2v_args, c2v_bitmap, c2v_screen   ; labels for the host (runner.lbl)
 .export C2V_ROWS
 .import mem_rec_dirty, mach_nmi
@@ -173,6 +180,8 @@ c2v_hiress:
 c2v_lookn:                      ; W12-V
 c2v_setmc2:                     ; W12-V
 c2v_hfill:                      ; W12-V
+c2v_ones:                       ; W13-D
+c2v_ofin:                       ; W13-D
         rts
 .else
 
@@ -649,6 +658,7 @@ c2v_pick:
         ora P2,y
         ora P3,y
 :       sta c2v_v_pm
+c2v_pick1:                      ; W13-D: c2v_ones enters here (c2v_v_pm, _py, _px set)
 .ifdef C2V_MUT_PICKR
         lda #$01                ; mutant: the rightmost set pixel
 :       bit c2v_v_pm
@@ -773,6 +783,220 @@ c2v_rowhi:
 .repeat C2V_ROWS, i
         .byte >(c2v_bitmap + i * 320)
 .endrepeat
+
+; ===========================================================================
+; W13-D: the 1:1 view (docs/C2V.md "1:1 view (W13-D)", c2v_ref.convert_one).
+; One Amiga hires pixel = one C64 hires pixel: the first 40 of each 80-byte
+; plane row (disp.s points c2v_a_src at the window's first byte).  Per 8x8
+; cell: bg = the pen of the cell's top-left pixel; a C64 pixel is set iff
+; its pen <> bg, i.e. the OR over the planes of (plane XOR bg's bit as
+; $00/$FF); fg = the pen of the first set pixel in raster order (c2v_pick's
+; tail), $FF if none.  Any cell drawn in two pens is pixel-exact.  Two
+; passes over the same rows: c2v_ones counts (c2v_v_cnt: every cell's bg,
+; and its fg if it has one) for disp_cols; c2v_ofin converts again and
+; writes each finished char row's matrix cells, c2v_v_col[fg] << 4 |
+; c2v_v_col[bg] (bg in both nibbles without an fg), at $01 = %xx100 under
+; sei.  Colour RAM is not touched (unused in hires).  Needs C2V_ROWS = 25.
+; ===========================================================================
+C2V_OMK = $40                   ; @value W13-D: plane p's cell masks at P_p + C2V_OMK
+C2V_OBG = P0 + $D0              ; W13-D: bg pen per cell (fg at C2V_CP + cx)
+c2v_v_emit = c2v_args + 144     ; W13-D: bit 7: c2v_ofin's pass (write the matrix)
+.assert <c2v_screen = 0, error, "W13-D: c2v_ones clears c2v_v_cnt with <c2v_screen"
+.assert C2V_CP + 40 <= C2V_OBG, error, "W13-D: fg and bg pens overlap"
+
+; c2v_ofin — W13-D (disp, after c2v_ones and disp_cols): c2v_a_bgc :=
+; c2v_v_col[0], then the second pass.
+c2v_ofin:
+        lda c2v_v_col
+        sta c2v_a_bgc
+        lda #$80
+        .byte $2C               ; bit abs: skip the lda #0
+; c2v_ones — W13-D: the counting pass (args as c2v_hiress; rows 80 bytes
+; apart plus c2v_a_skip, 40 bytes fetched).
+c2v_ones:
+        lda #0
+        sta c2v_v_emit
+        lda CPU_PORT            ; c2v_leave's $01 (call with BASIC out)
+        pha
+        ldx #80
+        jsr c2v_setup           ; advance = 80 + skip, as the fit view's
+        lda #40
+        sta REC_LENLO           ; the window: 40 bytes per row
+        lda #>c2v_screen        ; c2v_orow's matrix row
+        sta c2v_orw+2
+        lda #<c2v_screen
+        sta c2v_orw+1
+        ldx #15                 ; (A = 0)
+:       sta c2v_v_cnt,x
+        dex
+        bpl :-
+@ln:    ldx #0                  ; fetch planes 0-3 (a loop: C2V_FETCH's
+        ldy #>P0                ; unrolled form is 4x the bytes); Y = page
+@f:     sty REC_C64HI
+        clc
+        lda c2v_v_pp,x
+        sta REC_REULO
+        adc c2v_v_adl - >P0,y
+        sta c2v_v_pp,x
+        lda c2v_v_pp+1,x
+        sta REC_REUHI
+        adc c2v_v_adh - >P0,y
+        sta c2v_v_pp+1,x
+        lda c2v_v_pp+2,x
+        sta REC_REUBANK
+        adc c2v_v_adb - >P0,y
+        sta c2v_v_pp+2,x
+        lda #REU_CMD_FETCH_AL
+        sta REC_COMMAND
+        inx
+        inx
+        inx
+        iny
+        cpy #>P0 + 4
+        bne @f
+        lda c2v_v_line
+        and #7
+        bne :+
+        jsr c2v_omask           ; a char row starts: bg pens and masks
+:       jsr c2v_setln
+        sta @o+1
+        stx @o+2
+        ldx #0                  ; output offset (cell * 8)
+        ldy #0                  ; cell
+@c:     lda P0,y
+        eor P0+C2V_OMK,y
+        sta @a+1
+        lda P1,y
+        eor P1+C2V_OMK,y
+        sta @b+1
+        lda P2,y
+        eor P2+C2V_OMK,y
+        sta @d+1
+        lda P3,y
+        eor P3+C2V_OMK,y
+@a:     ora #0                  ; immediates patched
+@b:     ora #0
+@d:     ora #0
+@o:     sta c2v_bitmap,x        ; operand patched
+        beq @e
+        sta c2v_v_pm            ; the set pixels
+        lda C2V_CP,y
+.ifndef C2V_MUT_OFG
+        bpl @e                  ; fg already chosen (mutant: picked every line)
+.endif
+        sty c2v_v_py
+        stx c2v_v_px
+        jsr c2v_pick1           ; C2V_CP,y := fg, counted
+@e:     iny
+        txa
+        clc
+        adc #8
+        tax
+        bne :+
+        inc @o+2                ; cells 32-39 one page up
+:       cpy #40
+        bne @c
+        inc c2v_v_line
+        lda c2v_v_line
+        and #7
+        bne :+
+        jsr c2v_orow
+:       lda c2v_v_line
+        cmp #C2V_LINES
+        beq :+
+        jmp @ln
+:       jmp c2v_leave           ; C1
+
+; c2v_omask — W13-D: from the char row's first line: C2V_OBG,x := the pen
+; of cell x's top-left pixel, plane p's mask := $FF if that pen has bit p,
+; C2V_CP,x := $FF (no fg yet).
+c2v_omask:
+        ldx #39
+:       lda #0
+        sta C2V_OBG,x
+        lda #$FF                ; no fg yet
+        sta C2V_CP,x
+        dex
+        bpl :-
+        lda #>P3                ; plane 3 first: it ends in bit 3
+@p:     sta @r+2
+        sta @w+2
+        ldx #39
+@r:     lda P3,x                ; operand high byte patched
+.ifdef C2V_MUT_OMASK
+        and #$40                ; mutant: bg from the second pixel
+.else
+        and #$80
+.endif
+        beq :+
+        lda #$FF
+:
+@w:     sta P3+C2V_OMK,x        ; operand high byte patched
+        asl
+        rol C2V_OBG,x
+        dex
+        bpl @r
+        ldy @r+2
+        dey
+        tya
+        cpy #>P0 - 1
+        bne @p
+        rts
+
+; c2v_orow — W13-D: the finished char row.  Counting pass: each cell's bg
+; counted.  c2v_ofin's pass: the row's 40 matrix cells (RAM under I/O:
+; NMI guard as c2v_fill, then $01 = %xx100 under sei); the row + 40.
+c2v_orow:
+        ldy #39
+        bit c2v_v_emit
+        bmi @em
+:       ldx C2V_OBG,y
+        inc c2v_v_cnt,x
+        bne @n
+        dec c2v_v_cnt,x         ; hold at 255
+@n:     dey
+        bpl :-
+        rts
+@em:    lda #<mach_nmi
+        sta mach_vnmi
+        lda #>mach_nmi
+        sta mach_vnmi+1
+        php
+        sei
+        lda CPU_PORT
+        sta c2v_v_port
+        and #$F8
+        ora #$04
+        sta CPU_PORT
+c2v_orc:
+        ldx C2V_CP,y            ; fg ($FF: none -> bg)
+        bpl :+
+        ldx C2V_OBG,y
+:       lda c2v_v_col,x
+        asl
+        asl
+        asl
+        asl
+.ifdef C2V_MUT_OFIN
+        ldx C2V_CP,y            ; mutant: the fg pen in the low nibble too
+        bpl @m
+.endif
+        ldx C2V_OBG,y
+@m:     ora c2v_v_col,x
+c2v_orw:
+        sta c2v_screen,y        ; operand: the row (patched)
+        dey
+        bpl c2v_orc
+        lda c2v_v_port
+        sta CPU_PORT
+        plp
+        clc
+        lda c2v_orw+1
+        adc #40
+        sta c2v_orw+1
+        bcc :+
+        inc c2v_orw+2
+:       rts
 .endif
 
 ; Pad to whole pages: modules linked after this one keep their page offsets.

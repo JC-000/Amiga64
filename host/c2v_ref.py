@@ -356,7 +356,7 @@ def disp_decide(st: dict) -> dict:
       NOSTATE  valid (+103) is not COP_VALID: cop_reset never ran
       DMA      DMACON lacks DMAEN or BPLEN
       HAMDPF   BPLCON0 HAM (bit 11) or DBLPF (bit 10)
-      DEPTH    not (lores, BPU 2) and not (hires, BPU 4)
+      DEPTH    not (lores, BPU 2) and not (hires, BPU 1-4) (W13-D: was BPU 4)
       DIW      DIWSTOP's line <= DIWSTRT's (V8 of stop = NOT V7; start V8 = 0)
       DDF      DDFSTOP < DDFSTRT, the fetch narrower than the kernel's row
                (40 B lores / 80 B hires), or a row skip outside s16
@@ -383,8 +383,8 @@ def disp_decide(st: dict) -> dict:
         return r
     if (hires, bpu) == (False, 2):
         mode, width, n = MODE_MC2, LORES_ROW, 2
-    elif (hires, bpu) == (True, 4):
-        mode, width, n = MODE_HIRES, HIRES_ROW, 4
+    elif hires and 1 <= bpu <= 4:       # W13-D: BPU 1-3 too, absent planes 0
+        mode, width, n = MODE_HIRES, HIRES_ROW, bpu
     else:
         r["why"] = WHY_DEPTH
         return r
@@ -418,7 +418,7 @@ def disp_decide(st: dict) -> dict:
                 return r
             a = (a + width + skip[p]) & 0xFFFFFF
     r.update(mode=mode, src=src + [0] * (4 - n), skip=skip + [0] * (4 - n),
-             lines=min(lines, C2V_LINES), width=width, fetch=fetch)
+             lines=min(lines, C2V_LINES), width=width, fetch=fetch, planes=n)
     return r
 
 
@@ -438,9 +438,11 @@ def disp_convert(st: dict, read, lut: bytes) -> dict:
     d = disp_decide(st)
     if d["mode"] == MODE_BLANK:
         return {"decide": d, "border": lut[st["color"][0] & 0xFFF]}
-    n = 2 if d["mode"] == MODE_MC2 else 4
+    n = d["planes"]
     planes = [disp_rows(read, d["src"][p], d["width"], d["skip"][p])
               for p in range(n)]
+    if d["mode"] == MODE_HIRES:         # W13-D: absent planes read the zero row
+        planes += [bytes(C2V_LINES * HIRES_ROW)] * (4 - n)
     pal = st["color"][:16]
     if d["mode"] == MODE_MC2:                       # W12-V: pens 0-3 in use
         vic = separate(pal, lut, [0, 1, 1, 1] + [0] * 12)
@@ -469,3 +471,204 @@ def pack_skip(skip: list[int]) -> bytes:
     """c2v_a_skip (c2v_args + 72): 4 x s16 LE."""
     skip = list(skip) + [0] * (4 - len(skip))
     return struct.pack("<4h", *skip)
+
+
+# ===========================================================================
+# W13-D: the 1:1 view (runtime/ops/c2v.s c2v_ones / c2v_ofin, disp.s
+# disp_vcrop / disp_one1).  docs/C2V.md "1:1 view (W13-D)".  Additive.
+# ===========================================================================
+
+ONE_ROW = 40                    # bytes of each plane row in the window
+LACE = 0x0004                   # BPLCON0 bit 2: interlace (1:1 view: both fields)
+PX_CENTRE, PX_MAX = 20, 40      # disp_px: the window's first byte (centred / last)
+NO_FG = 0xFF                    # c2v_ones: a cell without a second pen
+
+
+def one_cells(planes: list[bytes], rows: int = C2V_ROWS):
+    """The 1:1 kernel's pass: bitmap, every cell's (fg, bg) and the counts.
+
+    Per 8x8 cell: bg = the pen of the cell's top-left pixel (bit 7 of the
+    first line's byte); a pixel is set iff its pen <> bg; fg = the pen of
+    the first set pixel in raster order (NO_FG if none).  cnt: every
+    cell's bg and every fg, saturating at CNT_MAX."""
+    bmp = bytearray(rows * 320)
+    cnt = [0] * 16
+    cells = []
+    for r in range(rows):
+        for cx in range(40):
+            bg = sum(1 << p for p in range(4) if planes[p][r * 8 * ONE_ROW + cx] & 0x80)
+            fg = NO_FG
+            for y in range(r * 8, r * 8 + 8):
+                o = y * ONE_ROW + cx
+                v = 0
+                for p in range(4):
+                    v |= planes[p][o] ^ (0xFF if bg >> p & 1 else 0)
+                bmp[_cell_offset(y, cx)] = v
+                if v and fg == NO_FG:
+                    m = 0x80
+                    while not v & m:
+                        m >>= 1
+                    fg = sum(1 << p for p in range(4) if planes[p][o] & m)
+                    cnt[fg] = min(CNT_MAX, cnt[fg] + 1)
+            cnt[bg] = min(CNT_MAX, cnt[bg] + 1)
+            cells.append((fg, bg))
+    return bytes(bmp), cells, cnt
+
+
+def convert_one(planes: list[bytes], pal: list[int], lut: bytes,
+                rows: int = C2V_ROWS) -> dict:
+    """1:1: 4 planes of rows * 8 window rows (40 bytes each) -> hires 320.
+
+    one_cells, then separate() on its counts gives the pens' colours; the
+    matrix cell = vic[fg] << 4 | vic[bg] (vic[bg] in both nibbles without
+    an fg).  Colour RAM is not written ("colram": None)."""
+    bmp, cells, cnt = one_cells(planes, rows)
+    vic = separate(pal, lut, cnt)
+    screen = bytes((vic[bg if fg == NO_FG else fg] << 4) | vic[bg] for fg, bg in cells)
+    return {"bitmap": bmp, "screen": screen, "colram": None, "bgc": vic[0],
+            "vic_pens": vic, "cnt": cnt, "cells": cells}
+
+
+def disp_decide_view(st: dict, view: int = 0, px: int = PX_CENTRE,
+                     py: int = 0) -> dict:
+    """disp_decide plus W13-D's view: for a hires picture with view 1 the
+    window starts at line min(py, ymax) and byte px of every row; "one"
+    says the 1:1 kernel runs.  ymax = L - 200 (LACE: L - 100), clamped to
+    0-255.  With LACE the 1:1 window is 200 frame lines from field line
+    crop: each row advance is halved ((skip + 80) // 2 - 80, the two fields
+    interleaved) and lines = min(2 * lines, 200).  "crop" is the first
+    (field) line shown in either view (the pointer's vertical reference)."""
+    d = disp_decide(st)
+    d["one"] = False
+    if d["mode"] == MODE_BLANK:
+        return d
+    vstart = (st["diwstrt"] >> 8) & 0xFF
+    vstop = ((st["diwstop"] >> 8) & 0xFF) | ((~st["diwstop"] >> 7) & 0x100)
+    lines = vstop - vstart
+    lace = bool(st["bplcon0"] & LACE)
+    d["ymax"] = min(255, max(0, lines - (C2V_LINES // 2 if lace else C2V_LINES)))
+    d["crop"] = max(0, (lines - C2V_LINES) // 2)
+    d["lace"] = lace
+    if view and d["mode"] == MODE_HIRES:
+        crop = min(py, d["ymax"])
+        n = d["planes"]
+        adv = [d["width"] + d["skip"][p] for p in range(n)]
+        base = [(st["bplpt"][p] & 0xFFFFFE) for p in range(n)]
+        d["src"] = [((base[p] + crop * adv[p]) & 0xFFFFFF) for p in range(n)]
+        d["one"], d["crop"], d["px"] = True, crop, px
+        if lace:                # 200 frame lines: the fields interleave
+            d["skip"] = [(k + HIRES_ROW) // 2 - HIRES_ROW for k in d["skip"][:n]] \
+                + d["skip"][n:]
+            d["lines"] = min(2 * d["lines"], C2V_LINES)
+    return d
+
+
+def disp_convert_view(st: dict, read, lut: bytes, view: int = 0,
+                      px: int = PX_CENTRE, py: int = 0) -> dict:
+    """disp_convert with W13-D's view (the fit view: disp_convert itself)."""
+    d = disp_decide_view(st, view, px, py)
+    if not d["one"]:
+        out = disp_convert(st, read, lut)
+        out["decide"].update(one=False, crop=d.get("crop", 0), ymax=d.get("ymax", 0))
+        return out
+    planes = [disp_rows(read, (d["src"][p] + px) & 0xFFFFFF, ONE_ROW,
+                        d["width"] + d["skip"][p] - ONE_ROW) for p in range(d["planes"])]
+    planes += [bytes(C2V_LINES * ONE_ROW)] * (4 - d["planes"])
+    out = convert_one(planes, st["color"][:16], lut)
+    bmp = bytearray(out["bitmap"])
+    for y in range(d["lines"], C2V_LINES):           # below DIWSTOP: 0
+        for cx in range(40):
+            bmp[_cell_offset(y, cx)] = 0
+    out["bitmap"] = bytes(bmp)
+    out["decide"] = d
+    out["mck"] = screen_sum(out["screen"])
+    out["vic"] = {0xD011: VIC_D011_ON, 0xD016: VIC_D016[MODE_HIRES],
+                  0xD018: VIC_D018, 0xD020: out["bgc"], 0xD021: out["bgc"]}
+    return out
+
+
+# ===========================================================================
+# W13-D D2: the pointer (Amiga sprite 0) as VIC sprites 0-2, the machine-mode
+# module tests/aros/spr.s.  docs/CONTRACTS.md "Pointer sprite (W13-D)".
+# ===========================================================================
+
+SPR_LINES = 21                  # the VIC's sprite height
+SPR_EDGE_X = (16, 144)          # lores: the 1:1 window's inner band (32 C64 px)
+SPR_EDGE_Y = {False: (32, 168, 100), True: (16, 84, 50)}   # LACE: field lines
+
+
+def spr_decode(pos: int, ctl: int) -> tuple[int, int, int]:
+    """(HSTART, VSTART, VSTOP), 9 bits each, from SPRxPOS / SPRxCTL."""
+    hstart = ((pos & 0xFF) << 1) | (ctl & 1)
+    vstart = (pos >> 8) | ((ctl >> 2) & 1) << 8
+    vstop = (ctl >> 8) | ((ctl >> 1) & 1) << 8
+    return hstart, vstart, vstop
+
+
+def spr_first_pixel(cur: dict, hires: bool) -> int:
+    """hcount (lores) of the playfield's first fetched pixel: 2 * DDFSTRT + 9
+    (hires, DDFSTRT & $FC) or + 17 (lores, & $F8)."""
+    if hires:
+        return 2 * (cur["ddfstrt"] & 0xFC) + 9
+    return 2 * (cur["ddfstrt"] & 0xF8) + 17
+
+
+def spr_place(cur: dict, pos: int, ctl: int, hires: bool, one: bool, px: int,
+              crop: int, ymax: int) -> dict:
+    """One frame of spr_frame's position logic.  Returns {"hidden": True},
+    {"pan": (px, py)} (the window moves; no VIC write this frame), or the
+    VIC values {"x", "y", "msb", "xexp", "yexp", "height"}."""
+    hstart, vstart, vstop = spr_decode(pos, ctl)
+    h = vstop - vstart
+    if h <= 0:
+        return {"hidden": True}
+    sy = vstart - ((cur["diwstrt"] >> 8) & 0xFF)
+    sx = hstart + 1 - spr_first_pixel(cur, hires)
+    lace = one and bool(cur["bplcon0"] & LACE)
+    wy = sy - crop
+    wx = sx - (4 * px if one else 0)
+    if one:
+        npx, npy = px, crop
+        if not SPR_EDGE_X[0] <= wx < SPR_EDGE_X[1]:
+            npx = min(max(sx - 80, 0), 160) // 4
+        lo, hi, half = SPR_EDGE_Y[lace]
+        if not lo <= wy < hi:
+            npy = min(max(sy - half, 0), ymax)
+        if (npx, npy) != (px, crop):
+            return {"pan": (npx, npy)}
+    y = 50 + (2 * wy if lace else wy)
+    x = 24 + (2 * wx if one else wx)
+    if not 0 <= y <= 255 or not 0 <= x <= 0x1FF:
+        return {"hidden": True}
+    return {"x": x & 0xFF, "y": y, "msb": 7 if x > 255 else 0,
+            "xexp": 7 if one else 0, "yexp": 7 if lace else 0,
+            "height": min(h, SPR_LINES)}
+
+
+def spr_settle(cur: dict, pos: int, ctl: int, hires: bool, one: bool, px: int,
+               py: int, ymax: int, steps: int = 4) -> tuple[dict, int, int, int]:
+    """spr_place frame after frame until the window stops moving (each pan
+    converts: crop := min(py, ymax)).  Returns (placement, px, py, pans)."""
+    pans = 0
+    crop = min(py, ymax) if one else (cur.get("crop", 0))
+    for _ in range(steps):
+        r = spr_place(cur, pos, ctl, hires, one, px, crop, ymax)
+        if "pan" not in r:
+            return r, px, py, pans
+        px, py = r["pan"]
+        crop = min(py, ymax)
+        pans += 1
+    raise AssertionError("the window does not settle")
+
+
+def spr_blocks(data: list[tuple[int, int]], height: int) -> bytes:
+    """The three 64-byte VIC blocks: sprite 0 = DATA & ~DATB (colour 17),
+    1 = ~DATA & DATB (18), 2 = DATA & DATB (19); 16 px in bytes 0-1 of
+    each line, line >= height and the rest 0."""
+    blk = [bytearray(64) for _ in range(3)]
+    for ln in range(min(height, SPR_LINES)):
+        a, b = data[ln]
+        for k, v in enumerate((a & ~b, ~a & b, a & b)):
+            v &= 0xFFFF
+            blk[k][3 * ln], blk[k][3 * ln + 1] = v >> 8, v & 0xFF
+    return bytes(blk[0] + blk[1] + blk[2])

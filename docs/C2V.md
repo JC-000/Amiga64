@@ -491,3 +491,126 @@ blank border look it up with one byte DMA each.
 `disp.s` links after `cia.s` and before `mach.s` (Makefile). Its CODE
 (including the 2 KB LUT) and its BSS are each padded to whole pages, and it
 has no RODATA or DATA, so `mach.s` moves by whole pages only.
+
+## 1:1 view (W13-D)
+
+Wave 13, package W13-D (`docs/WAVE13_BRIEF.md` D1). This is a second
+display mode next to the fit view, for reading text. **One Amiga hires
+pixel is one C64 hires pixel and one Amiga line is one C64 line.** The
+window is 320×200 of the Amiga screen; with LACE it is 200 *frame* lines,
+so both fields are shown.
+
+- Host reference: `c2v_ref.one_cells`, `convert_one`, `disp_decide_view`,
+  `disp_convert_view`.
+- Contract: `docs/CONTRACTS.md` "Display refresh (S3.5)", "1:1 view
+  (W13-D)".
+- The fit view's code paths are unchanged, so its output is
+  byte-identical. `c2v_pick1` is a new label inside `c2v_pick`; no
+  instruction changed.
+
+### The kernel (`c2v_ones` / `c2v_ofin`, `c2v.s`)
+
+- **Fetch.** `c2v_setup` runs with an 80-byte width, so a row advances
+  80 + `c2v_a_skip[p]`, exactly as in the fit view. The REC length is then
+  set to 40: each line fetches 40 bytes of each of the 4 planes from
+  `c2v_a_src[p]`, which disp.s points at the window's first byte. The
+  fetch is a loop, not `C2V_FETCH`'s unrolled form: about a quarter of the
+  bytes, ~50 more cycles per line.
+- **Per 8×8 cell:**
+  - **bg** is the pen of the cell's top-left pixel (bit 7 of the cell's
+    first line). `c2v_omask` takes it once per char row and also builds
+    the cell's four plane masks ($FF where bg has the bit).
+  - **A C64 pixel is set iff its pen ≠ bg**: OR over p of (plane p XOR
+    mask p).
+  - **fg** is the pen of the first set pixel in raster order. It is found
+    by `c2v_pick`'s tail (`c2v_pick1`), once per cell. A cell with one pen
+    has no fg ($FF) and shows bg in both nibbles.
+- **Two-pen cells are pixel-exact**, whichever of the two pens the
+  top-left pixel has. Examples: Topaz on the insert-disk screen, and the
+  title bar's pen-1 text on pen 2.
+- **Three or more pens: lossy.** The top-left pixel's pen is bg. Every
+  other pixel shows in fg's colour (the first non-bg pixel's pen).
+  `run_c2v` case `three-pen` and `host/tests/test_c2v_one.py` pin this.
+- **Colours: the W12-V rule, two passes over the same rows.**
+  1. `c2v_ones` converts and counts every cell's bg and every fg in
+     `c2v_v_cnt`.
+  2. disp.s runs `disp_cols` on all 16 pens, the fit view's rule.
+  3. `c2v_ofin` sets `c2v_a_bgc` and converts again. At each char row's
+     end (`c2v_orow`) it writes the row's 40 matrix bytes,
+     `c2v_v_col[fg]` << 4 | `c2v_v_col[bg]`, at `$01` = `%xx100` under
+     `sei` with the NMI guard (as `c2v_fill`).
+
+  Nothing limits the number of (fg, bg) combinations. A first design with
+  a 16-entry pair table was dropped: AROS's eyes used all 16 entries
+  before the text rows, so the text lost its colour. The second pass
+  doubles the kernel time (PERF (o)).
+- **Colour RAM** is not written. The VIC does not read it in hires; it
+  keeps whatever the fit view left.
+- **Entries.** `c2v_ones` and `c2v_ofin` are called with BASIC banked
+  out, as disp.s calls them. `run_c2v.py`'s `port_tramp` calls them at
+  `$36`.
+- **Work RAM:**
+  - plane masks at `P_p + $40`;
+  - bg pens at `P0 + $D0`;
+  - fg pens at `C2V_CP`;
+  - the pass flag at `c2v_args` + 144.
+
+  All of these are in c2v's own regions, past the 40-byte rows.
+- `C2V_ROWS` must be 25.
+
+### Window, LACE and the toggle (disp.s)
+
+- **Applies to:** a hires decision only (BPU 1-4, below). An mc2 (lores)
+  picture stays in the fit view, which already shows every lores pixel's
+  colour.
+- **Window, without LACE:** bytes `disp_px` .. `disp_px` + 39 (0 ≤ px ≤
+  40) of every 80-byte row, from line `disp_crop` = min(`disp_py`,
+  `disp_ymax`), where `disp_ymax` = L − 200, or 0 if L ≤ 200.
+- **With LACE (BPLCON0 bit 2):**
+  - The 1:1 window is 200 frame lines from field line `disp_crop`, that is
+    frame line 2·crop (or 2·crop + 1 on the odd field's pointers).
+  - Each row advance is halved: skip := (skip + 80) / 2 − 80, which for
+    BPLxMOD = 80 is advance 80. The two fields interleave in memory.
+  - `disp_ymax` = L − 100.
+  - `disp_lines` := min(2 · L, 200).
+  - `disp_decide`'s 512 KB check covers only the current field's rows.
+    The other field's rows in between are unchecked: a straddling row
+    could only show wrong pixels in that row (the DMA target is fixed).
+  - The fit view still shows one field (frozen).
+- **Toggle:** F1 (`inp_view` bit 0, W13-I's I1 byte). Until W13-I lands,
+  disp.s defines a stand-in under `DISP_INPV_LOCAL`.
+  - It flips `disp_view` and centres the window: `disp_px` = 20,
+    `disp_py` = `disp_ymax` / 2.
+  - It converts at once, past the duty budget, because it is user-paced.
+  - Only bit 0 is cleared.
+- **A test sets the offset** with `disp_px`/`disp_py`. The next conversion
+  (a field change, the pixel epoch, `disp_refresh`) uses it.
+- **The pointer module** moves the window itself (re-centring: CONTRACTS
+  "Pointer sprite (W13-D)").
+
+## Hires with 1-3 planes (W13-D)
+
+- **What converts.** `disp_decide` now converts hires with BPU 1, 2, 3 or
+  4 (before: 4 only; the rest was DEPTH). This applies to both views.
+  Example: 3.1's Workbench, BPLCON0 $A200.
+- **Absent planes read the zero row.** For each plane past BPU,
+  `disp_args` sets source = `disp_zero` and skip = −80, so the row advance
+  is 0 and the plane reads `disp_zero`. That is 256 zero bytes in the REU
+  under the trapped `$DF` bank (`$DF4000-$DF40FF`, rc `guest.inc` /
+  `machine.inc`, split off the io region), stashed by `disp_init`. The
+  kernels are unchanged, and no stale plane pointer is ever read.
+- **Unchanged:** lores BPU 2, hires BPU 4, and every BLANK reason.
+- **Changed expectations:**
+  - `host/tests/test_disp_ref.py`'s DEPTH case "hires 2 planes" ($A200)
+    is now "hires 0 planes" ($8200).
+  - `host/tests/test_aros_profile.py` expects the io region to start at
+    `$DF4100` and the `disp` zero row at `$DF4000`.
+
+### Memory
+
+- c2v CODE +1 page ($600 → $700, 9 bytes spare).
+- disp CODE +1 page ($A00 → $B00).
+- disp BSS: 12 bytes inside its page (`disp_view`, `disp_px`, `disp_py`,
+  `disp_ymax`, `disp_one`, `inp_view`, `spr_vec`, `spr_id`).
+- The F1 toggle and the `spr_vec` hook are in BHI's tail (`BCODE`).
+- MAIN: BSS end $9C0B → $9E0B (+512 B; budget 544 B).
