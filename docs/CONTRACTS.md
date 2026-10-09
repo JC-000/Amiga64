@@ -1436,8 +1436,9 @@ Tests: `host/tests/test_snap_ureu.py` (byte-level, the UCI model of
   `/Temp`. Device storage writes wait for the harness owner's decision
   (Wave 12 brief). Verified on the U64E (`tests/ureu_probe.py --adf`, the
   harness storage API c1a2095): LOAD_REU of a 901,120-byte ADF checksummed
-  on the C64, SAVE_REU read back over FTP, both at 48 and 1 MHz
-  (HARDWARE.md). The C64U has no medium. A probe enables the Command
+  on the C64, SAVE_REU read back over FTP, both at 48 and 1 MHz; and on the
+  C64U (`/SD`, harness f384ad0) at 64 and 1 MHz (HARDWARE.md). The file
+  legs take `--vol` (default `/USB1`; the C64U: `/SD`). A probe enables the Command
   Interface inside its `u64_hold` (both devices keep it Disabled; the
   hold restores it).
 
@@ -1464,8 +1465,9 @@ the UCI model).
   the spans in order, a resume from the file, the refusals) and verified on
   the U64E (fw 3.15, 48 MHz, `aros_resume` leg `m3file`): suspend at m3 to
   `/USB1/amiga64/snap-test.bin` (5.2 MB, 3.1 s), reset, the whole REU
-  zeroed, resume from the file (1.2 s), picture again in 3.7 s. Not run on
-  the C64U (no medium).
+  zeroed, resume from the file (1.2 s), picture again in 3.7 s; and on the
+  C64U (fw 1.1.0, 64 MHz, `--vol /SD`): `/SD/amiga64/snap-test.bin` in
+  15.4 s, resume from the file 5.6 s, picture again in 10.7 s.
 - **Consumed (M1)**: a successful resume, and a suspend that continues the
   guest (bit 7), overwrite the REU header's first magic byte
   (`snap_kill`): the REU-resident snapshot can then never be resumed over
@@ -1555,7 +1557,9 @@ the UCI model).
 - **Builds the hardware legs ran on**: the U64E file legs (ADF probe,
   `m3file`) and the U64E/C64U REU-resident legs of fix round 2 on
   `d371b5987ec1cf7e`; the C64U REU-resident legs of fix round 3
-  (`c64u/final7.log`) on `d5b5c8149c639820` (= 6886c98's runner).
+  (`c64u/final7.log`) on `d5b5c8149c639820` (= 6886c98's runner); the
+  C64U file legs (ADF probe at 64/1 MHz, `m3file`, volume `/SD`,
+  `c64u-sd/`) on `d5b5c8149c639820`.
 - **Link order** (L6): snap.s then ureu.s link last (Makefile), so the
   image `__BSS_RUN__ .. snap_keep` holds every other module's BSS and none
   of W12-T's scratch. `snapfmt --stamp` refuses a runner whose BSS does not

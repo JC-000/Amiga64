@@ -33,7 +33,8 @@ Legs:
            E2 one header byte corrupted in the REU (the flags byte, which
               the layout compare skips: only the checksum sees it)
            E5 one byte of the state image corrupted in the REU
-  m3file (U64E) variant B: suspend at m3 to /USB1/amiga64/snap-test.bin,
+  m3file (Ultimate) variant B: suspend at m3 to <vol>/amiga64/snap-test.bin
+         (--vol, default /USB1: the U64E; the C64U: /SD),
          the file read back over FTP and checked, reset + fresh load, the
          WHOLE REU zeroed, resume from the file, picture within budget;
          the test file deleted
@@ -630,7 +631,22 @@ def leg_m3(m: AB.Machine, rom, rid: bytes, s: int, prg_resume: str, rep: dict,
     return fails
 
 
-SNAP_FILE = "/USB1/amiga64/snap-test.bin"     # created and deleted by m3file
+SNAP_FILE = "/USB1/amiga64/snap-test.bin"     # created and deleted by m3file (--vol)
+
+def check_vol(vol: str) -> str:
+    """The device storage volume for the file legs: absolute, one
+    component, never Flash or Temp (test rule; the harness refuses writes
+    there too)."""
+    if not vol.startswith("/") or vol.count("/") != 1 or len(vol) < 2:
+        raise ValueError(f"--vol {vol!r}: one absolute volume, e.g. /USB1 or /SD")
+    if vol[1:].lower() in ("flash", "temp"):
+        raise ValueError(f"--vol {vol!r}: Flash and Temp are never used")
+    return vol
+
+
+def set_vol(vol: str) -> None:
+    global SNAP_FILE
+    SNAP_FILE = f"{check_vol(vol)}/amiga64/snap-test.bin"
 
 
 def leg_m3file(m: AB.Machine, rom, rid: bytes, s: int, prg_resume: str, rep: dict,
@@ -888,8 +904,11 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default=os.path.join(EVID, "resume"))
     ap.add_argument("--mutants", action="store_true")
     ap.add_argument("--only")
+    ap.add_argument("--vol", default="/USB1",
+                    help="m3file: the storage volume (U64E /USB1, C64U /SD)")
     ap.add_argument("--jobs", type=int, default=3, help="--mutants: VICE sessions at once")
     a = ap.parse_args(argv)
+    set_vol(a.vol)
     s = a.s if a.s is not None else (AB.BOOT_S_VICE if a.backend == "vice" else AB.BOOT_S_U64)
     if a.mutants:
         return teeth(a.prg, a.only.split(",") if a.only else None, s, a.out, a.jobs)

@@ -1122,8 +1122,7 @@ Logs: `build/evidence/w12-reu/probe-*.log`, `probe/*/probe.json`.
 Runner build `d371b5987ec1cf7e`. Harness `c64-test-harness` master **c1a2095** (PR #526: `storage_put_file`,
 `storage_get_file`, `storage_delete_file`), every call under the DeviceLock
 (inside `u64_hold`); the Command Interface Enabled inside the hold, restored
-IDENTICAL. The C64U has no medium (its `/SD` slot is empty): its file legs
-are not run. Logs: `build/evidence/w12-reu/probe-adf-10.43.23.81-{48,1}.log`,
+IDENTICAL. The C64U's file legs (on `/SD`, 2026-10-09) follow below. Logs: `build/evidence/w12-reu/probe-adf-10.43.23.81-{48,1}.log`,
 `u64e/final5.log` (m3file).
 
 | U64E fw 3.15 | 48 MHz | 1 MHz |
@@ -1146,3 +1145,33 @@ harness reset, fresh runner load, the WHOLE REU zeroed (`aros_fill`), then
 insert-disk picture again **3.65 s** after the launch (budget 15 s; first
 run 3.70 s, `u64e/m3file.log`). The
 test file was deleted afterwards.
+
+**C64U file legs (2026-10-09), runner build `d5b5c8149c639820`, volume `/SD`**
+(a 32 GB microSD card; harness f384ad0; one `u64_hold` per step, the
+Command Interface Enabled inside it, every hold IDENTICAL 1/1;
+`build/evidence/w12-reu/c64u-sd/`). First try: `storage_mkdir('/SD/amiga64')`
+refused (FTP `553`, any non-OK FRESULT from `f_mkdir`) while
+`storage_list_dir('/SD')` returned `[]` without an error (fw 1.1.0 lists an
+unrecognised or unmountable card as empty too). After the user unlocked
+the card and reformatted it as MBR + FAT32 (which of the two was the
+cause is not known), the same `storage_mkdir` succeeded.
+
+| C64U fw 1.1.0 | 64 MHz | 1 MHz |
+|---|---|---|
+| ADF uploaded to `/SD/amiga64/amiga-os-310-workbench.adf` (901,120 B, verified; stays) | uploaded | present, same SHA-256 |
+| LOAD_REU of the ADF (4 chunks) | 1.26 s (open+close 0.42 s, ~1 MB/s) | 5.63 s (1.72 s) |
+| fletcher of the REU copy (on the C64) = the ADF's | `$AC4CA4E6` = `$AC4CA4E6` | equal |
+| SAVE_REU to `/SD/amiga64/probe-save.bin` | 2.98 s (~340 KiB/s) | 7.48 s (~150 KiB/s) |
+| its FTP read-back = the ADF; then deleted | equal; deleted | equal; deleted |
+| one byte past the end | refused (`ureu_err` 5) | refused |
+
+**Variant B on the C64U, 64 MHz** (`aros_resume --legs m3file --vol
+/SD`): AROS to m3 in 63.7 s (frame 575); suspend with the file: 5,182,208
+bytes SAVE_REU'd to `/SD/amiga64/snap-test.bin` in **15.38 s** (~340 KB/s,
+SD writes; FTP read-back: size = the spans, header and state checksums
+valid); reset, fresh load, the whole REU zeroed, resume from the file in
+**5.58 s** (LOAD_REU included), the insert-disk picture again **10.66 s**
+after the launch (budget 15 s). The test file was deleted; `/SD/amiga64`
+then holds only the ADF. (The ROM staging of that boot fell back to
+`test_load_chunk`, 1393 s: the SocketDMA service was off after the
+morning's power-cycle, the fw 1.1.0 behaviour in the Wave 12 brief.)

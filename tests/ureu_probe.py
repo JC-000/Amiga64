@@ -464,9 +464,27 @@ def run(p: Probe, root: str, rep: dict) -> list[str]:
 
 
 ADF_LOCAL = os.path.expanduser("~/Documents/Amiga Disk Images/amiga-os-310-workbench.adf")
-DEV_DIR = "/USB1/amiga64"
+DEV_VOL = "/USB1"                       # --vol (U64E default; the C64U: /SD)
+DEV_DIR = f"{DEV_VOL}/amiga64"
 ADF_NAME = "amiga-os-310-workbench.adf"
 SAVE_NAME = "probe-save.bin"            # created and deleted by this probe
+
+
+def check_vol(vol: str) -> str:
+    """The device storage volume for the file legs: absolute, one
+    component, never Flash or Temp (test rule; the harness refuses writes
+    there too)."""
+    if not vol.startswith("/") or vol.count("/") != 1 or len(vol) < 2:
+        raise ValueError(f"--vol {vol!r}: one absolute volume, e.g. /USB1 or /SD")
+    if vol[1:].lower() in ("flash", "temp"):
+        raise ValueError(f"--vol {vol!r}: Flash and Temp are never used")
+    return vol
+
+
+def set_vol(vol: str) -> None:
+    global DEV_VOL, DEV_DIR
+    DEV_VOL = check_vol(vol)
+    DEV_DIR = f"{DEV_VOL}/amiga64"
 
 
 def ensure_adf(host: str, rep: dict) -> bytes:
@@ -550,8 +568,11 @@ def main(argv=None) -> int:
     ap.add_argument("--adf", action="store_true",
                     help="the ADF mode (U64E, storage writes allowed): upload/verify the ADF, "
                          "LOAD + checksum, SAVE + FTP read-back + delete")
+    ap.add_argument("--vol", default="/USB1",
+                    help="--adf: the storage volume (U64E /USB1, C64U /SD); files under <vol>/amiga64")
     ap.add_argument("--out", default=os.path.join(ROOT, "build", "evidence", "w12-reu", "probe"))
     a = ap.parse_args(argv)
+    set_vol(a.vol)
     from c64_test_harness import Labels
     from c64_test_harness.backends.ultimate64_helpers import get_reu_config, reboot
     from tests.bench.u64_session import u64_hold
