@@ -25,6 +25,8 @@ Legs:
           leg_real) never reach inp_joy and make their key unknown (it
           keeps its last state: no phantom F1/C=); readable rows read up;
           CIA1 left DDRA = $FF, DDRB = $00; nothing held = all idle.
+  cost    VICE: 6502 cycles of one inp_frame (CIA1 timer B): the real scan,
+          the override idle and with every input bit; the worst case.
   noinj   Ultimate only: the harness inject_joystick writes the CIA1 PRA
           latch ($DC00, c64_test_harness backends/ultimate64.py
           inject_joystick); inp.s reads port 2 with DDRA = $00, so the
@@ -36,10 +38,20 @@ Legs:
     U64_HOST=10.53.21.158 python3 -m tests.run_inp --prg ... --backend u64 \
         [--mhz 64]                      # api, guest, noinj on the device
     U64_HOST=10.53.21.158 python3 -m tests.run_inp --prg ... --attended \
-        [--seconds 60] [--mhz 64]       # the user moves the real stick
+        [--seconds 60] [--mhz 64]       # the user moves the real stick, then
+                                        # holds F3 alone, then C= alone (5 s each)
+    ... --backend u64 --allow-held 0x01 # a hardware port with a stuck direction:
+                                        # WARN line + "warn" in --json, not a fail
+
+Every leg that reads the real port first takes the undriven reading: it
+must be $00 (bits --allow-held names may be held: a WARN line, and "warn"
+in --json).  The scan's positive path (a real key or stick press through
+CIA1) is covered only by --attended: VICE cannot hold a matrix key and
+ignores JOYPORT_SET, and the Ultimate's inject_joystick writes the PRA
+latch only.
 
 Exit 0 = every selected leg passed (--mutants: every mutant killed;
---attended: every input was seen).
+--attended: every input was seen and the F3/C= check passed).
 """
 
 from __future__ import annotations
@@ -66,9 +78,11 @@ JOY0 = 0x0A               # JOY0DAT in chip_shd (inp.s INP_JOY0)
 LOG = 0x20000             # fixtures/inp/inp_log.s LOG
 FRAMES = 16               # fixtures/inp/inp_log.s FRAMES
 GUEST_S = 2               # mach_s for the guest runs (18 frames/s on NTSC phi2)
-ALL_LEGS = ["api", "guest", "real"]
+ALL_LEGS = ["api", "guest", "real", "cost"]
 U64_LEGS = ["api", "guest", "real", "noinj"]
 VERBOSE = False
+ALLOW_HELD = 0            # --allow-held: stick bits a hardware port may read held
+WARNS: list[str] = []     # the WARN lines of this run (summary / --json "warn")
 
 
 def log(msg: str) -> None:
@@ -188,11 +202,16 @@ def script_random(seed: int, n: int) -> list[tuple[int, int, bool]]:
 def leg_api(rig: Rig, nrand: int = 160) -> list[str]:
     rig.need()
     f: list[str] = []
-    for name, sc in (("fixed", script_fixed()), ("random", script_random(13, nrand))):
+    # pins 0-5 must be kept (2-5 are W13-W's /CHNG, /WPRO, /TK0, /RDY) and
+    # /FIR1 forced high: each script runs from two complementary pin patterns
+    for name, sc, pin in (("fixed", script_fixed(), 0x2A),
+                          ("fixed", script_fixed(), 0x15),
+                          ("random", script_random(13, nrand), 0x15),
+                          ("random", script_random(13, nrand), 0x2A)):
+        name = f"{name}/pins${pin:02X}"
         rig.reset(src=1)
-        # pins 0-5 must be kept and /FIR1 forced high: start from pins $2A
-        rig.w(rig.pin, b"\x2A")
-        m = Inp(pin=0x2A)
+        rig.w(rig.pin, bytes([pin]))
+        m = Inp(pin=pin)
         for i, (joy, key, clr) in enumerate(sc):
             rig.set_input(joy, key)
             rig.frame()
@@ -284,6 +303,24 @@ def leg_guest(rig: Rig) -> list[str]:
     return f
 
 
+def undriven(rig: Rig, leg: str, f: list[str]) -> int:
+    """inp_joy with nothing driven (inp_src = 0).  Must be $00, except for
+    bits --allow-held names (the C64U's port 2, 2026-10-09: Up held at every
+    speed, even with PA0 driven high); a held bit is a loud WARN either way."""
+    rig.frame()
+    base = rig.state()["joy"]
+    if base:
+        w = (f"WARN: port 2 reads ${base:02X} with nothing driven ({leg}): a "
+             "direction or fire is held at the port (stuck stick?)")
+        print(w, flush=True)
+        WARNS.append(w)
+    if base & ~ALLOW_HELD:
+        f.append(f"{leg}: port 2 reads ${base:02X} with nothing driven; only "
+                 f"--allow-held ${ALLOW_HELD:02X} may be (a stuck stick, or the "
+                 "stick read is broken: e.g. its polarity)")
+    return base
+
+
 # --------------------------------------------------------------------------
 # real: VICE joystick ports through the real CIA1 scan
 # --------------------------------------------------------------------------
@@ -299,11 +336,7 @@ def leg_real(rig: Rig) -> list[str]:
     f: list[str] = []
     rig.reset(src=0)
     DDRB, PRB = 0xDC03, 0xDC01
-    rig.frame()
-    base = rig.state()["joy"]      # a real stick may be held (C64U 2026-10-09:
-    if base:                       # port 2 PA0 low at 1 and 64 MHz, even driven)
-        log(f"  real: port 2 reads ${base:02X} with nothing driven: a physical "
-            "stick input; the legs compare against it")
+    base = undriven(rig, "real", f)
 
     def frame(drive: int, prev: int) -> int:
         rig.w(rig.src + 2, bytes([prev]))         # inp_key: the last state
@@ -334,10 +367,18 @@ def leg_real(rig: Rig) -> list[str]:
             if got != want:
                 f.append(f"real: rows ${drive:02X} low, inp_key ${prev:02X} before: "
                          f"${got:02X} after, want ${want:02X}")
+        # CIA1 port A as the caller had it: DDRA $F0, latch $5A -> reads
+        # $5F (inputs high), less any bit held low at the port
+        rig.w(0xDC00, b"\x5A")
+        rig.w(0xDC02, b"\xF0")
         rig.frame()
-        ddra, ddrb = rig.r(0xDC02, 2)
-        if (ddra, ddrb) != (0xFF, 0x00):
-            f.append(f"real: CIA1 left DDRA ${ddra:02X} DDRB ${ddrb:02X}, want $FF $00")
+        pra, _, ddra, ddrb = rig.r(0xDC00, 4)
+        want = 0x5F & ~(base & 0x1F)
+        if (pra, ddra, ddrb) != (want, 0xF0, 0x00):
+            f.append(f"real: CIA1 left PRA ${pra:02X} DDRA ${ddra:02X} DDRB "
+                     f"${ddrb:02X}, want ${want:02X} $F0 $00 (the caller's)")
+        rig.w(0xDC02, b"\xFF")
+        rig.w(0xDC00, b"\xFF")
         st = rig.state()
         if not base and (st["joy"] or st["key"] or st["joy0dat"] or st["pra"] != 0xEB):
             f.append(f"real: nothing held, yet {st}")
@@ -355,8 +396,7 @@ def leg_noinj(rig: Rig) -> list[str]:
     rig.need()
     f: list[str] = []
     rig.reset(src=0)
-    rig.frame()
-    base = rig.state()["joy"]               # the physical stick, if held
+    base = undriven(rig, "noinj", f)
     seen = []
     for v in (RIGHT, DOWN | FIRE, 31):
         rig.t.inject_joystick(2, v)
@@ -370,7 +410,52 @@ def leg_noinj(rig: Rig) -> list[str]:
     return f
 
 
-LEGS = {"api": leg_api, "guest": leg_guest, "real": leg_real, "noinj": leg_noinj}
+# --------------------------------------------------------------------------
+# cost: 6502 cycles per inp_frame (CIA1 timer B, phi2 = one cycle in VICE)
+# --------------------------------------------------------------------------
+
+CSTUB, COUT = 0xC740, 0xC7E0
+
+
+def cycles(rig: Rig, target: int) -> int:
+    """php/sei; TB := $FFFF one-shot, started; jsr target; TB stopped;
+    TB -> COUT; plp.  Returns $FFFF - TB (fixed overhead included)."""
+    lo, hi = target & 0xFF, target >> 8
+    rig.w(CSTUB, bytes([0x08, 0x78, 0xA9, 0x00, 0x8D, 0x0F, 0xDC,
+                        0xA9, 0xFF, 0x8D, 0x06, 0xDC, 0x8D, 0x07, 0xDC,
+                        0xA9, 0x19, 0x8D, 0x0F, 0xDC,          # load, one-shot, go
+                        0x20, lo, hi,
+                        0xA9, 0x00, 0x8D, 0x0F, 0xDC,          # stop
+                        0xAD, 0x06, 0xDC, 0x8D, COUT & 0xFF, COUT >> 8,
+                        0xAD, 0x07, 0xDC, 0x8D, (COUT + 1) & 0xFF, COUT >> 8,
+                        0x28, 0x60]))
+    rig.cia.call(CSTUB)
+    tb = struct.unpack("<H", rig.r(COUT, 2))[0]
+    return 0xFFFF - tb
+
+
+def leg_cost(rig: Rig) -> list[str]:
+    """Cycles of one inp_frame: the real scan with nothing held, the
+    override idle and with every input bit (all four direction bits: the
+    mouse loop's worst case; an F1 edge).  The worst case is the real scan
+    plus the input-dependent part: real0 + (ovr_all - ovr0)."""
+    rig.need()
+    rig.w(0xC7F8, b"\x60")                      # an rts: the stub's overhead
+    over = cycles(rig, 0xC7F8)
+    rig.reset(src=0)
+    real0 = cycles(rig, rig.frame_addr) - over
+    rig.reset(src=1)
+    ovr0 = cycles(rig, rig.frame_addr) - over
+    rig.set_input(0x1F, F1 | CBM)
+    ovr_all = cycles(rig, rig.frame_addr) - over
+    worst = real0 + ovr_all - ovr0
+    log(f"  cost: inp_frame real scan {real0}, override idle {ovr0}, override all "
+        f"bits {ovr_all} cycles; worst case {worst} cycles (stub overhead {over})")
+    rig.reset(src=1)
+    return [] if 0 < worst < 1000 else [f"cost: implausible {worst} cycles"]
+
+
+LEGS = {"api": leg_api, "guest": leg_guest, "real": leg_real, "noinj": leg_noinj, "cost": leg_cost}
 
 
 def run_legs(rig: Rig, legs: list[str]) -> list[str]:
@@ -484,11 +569,7 @@ def attended(rig: Rig, seconds: float) -> int:
           "right; press fire; hold C= and move the stick at the same time;\n"
           f"tap F1 twice.  {seconds:.0f} s.  (Ctrl-C ends early.)")
     print("=" * 72)
-    rig.frame()
-    idle = rig.state()["joy"]
-    if idle:
-        print(f"  NOTE: port 2 reads ${idle:02X} before anything is touched "
-              "(a held direction: check the stick)")
+    idle = undriven(rig, "attended", [])
     t_end = time.monotonic() + seconds
     try:
         while time.monotonic() < t_end:
@@ -520,12 +601,35 @@ def attended(rig: Rig, seconds: float) -> int:
                 last = cur
     except KeyboardInterrupt:
         print("  (ended early)")
+    # The turbo phantom check: F3 (column 0, row 5) must never read as C=
+    # (column 7, row 5); then C= alone must.  rev-inp measured instant row
+    # recovery on the C64U; this is the key-held confirmation.
+    def window(what: str, secs: float = 5.0) -> int:
+        print(f"  >>> in 3 s: HOLD {what} ALONE for {secs:.0f} s (nothing else)", flush=True)
+        time.sleep(3.0)
+        print(f"  >>> HOLD {what} NOW", flush=True)
+        cbm, t1 = 0, time.monotonic() + secs
+        while time.monotonic() < t1:
+            rig.w(AFLAGS, b"\0\0\0")
+            rig.cia.call(ASTUB)
+            cbm += bool(rig.r(AFLAGS + 1, 1)[0] & CBM)
+        print(f"  >>> release {what}: C= seen in {cbm} batch(es)", flush=True)
+        return cbm
+    phantom = None
+    try:
+        f3, cb = window("F3"), window("C=")
+        phantom = "FAIL: F3 read as C= (turbo phantom)" if f3 else \
+            ("INCOMPLETE: C= never seen in its window" if not cb else "PASS")
+        print(f"F3/C= CHECK: {phantom}")
+    except KeyboardInterrupt:
+        print("  (F3/C= check ended early)")
     want = ["up", "down", "left", "right", "left button (fire)", "right button (C=)",
             "right button + move", "F1", "JOY0DAT moved"]
     missing = [w for w in want if w not in seen]
     print(f"ATTENDED VERDICT: {'PASS' if not missing else 'INCOMPLETE'}: seen "
-          f"{sorted(seen)}{'; missing ' + str(missing) if missing else ''}")
-    return 0 if not missing else 1
+          f"{sorted(seen)}{'; missing ' + str(missing) if missing else ''}; "
+          f"F3/C= {phantom or 'not run'}")
+    return 0 if not missing and phantom == "PASS" else 1
 
 
 # --------------------------------------------------------------------------
@@ -538,15 +642,16 @@ MUTANTS = {
     "nocall": (MACH, [("        jsr inp_frame           ; W13-I: joystick -> mouse, once per hooked frame\n", "")]),
     # the step never caps
     "nocap": (INP, [("        cpy #INP_NMAX\n", "        cpy #$FF\n")]),
-    # centring does not reset the acceleration
-    "noreset": (INP, [("        bne :+\n        sta inp_n\n", "        bne :+\n        nop\n        nop\n        nop\n")]),
     # the direction bits add where they subtract and vice versa
     "sign": (INP, [("        bcs add                 ; C = 1: + (step - 1) + 1\n",
                     "        bcc add                 ; C = 1: + (step - 1) + 1\n")]),
     # fire releases /FIR0 instead of pulling it low
     "fireinv": (INP, [("        eor #$C0\n", "        eor #$80\n")]),
-    # /FIR1 not forced high (pin 7 left as it was)
-    "nofir1": (INP, [("        and #$C0\n", "        and #$40\n")]),
+    # the pin write leaks into bit 4 (W13-W's /TK0) (rev-inp)
+    "pinleak4": (INP, [("        and #$C0\n", "        and #$D0\n")]),
+    # the stick read without its polarity flip (rev-inp R1)
+    "stickpol": (INP, [("        lda CIA1_PRA\n        eor #$FF\n        and #$1F\n",
+                        "        lda CIA1_PRA\n        and #$1F\n")]),
     # the right button on POTINP bit 11 instead of 10
     "potbit": (INP, [("        lsr\n        lsr\n        lsr\n        eor #$FF\n",
                       "        lsr\n        lsr\n        eor #$FF\n")]),
@@ -558,8 +663,18 @@ MUTANTS = {
     # the override is ignored: the real CIA1 is always scanned
     "nosrc": (INP, [("        lda inp_src\n        bne have\n", "")]),
 }
-MUTANT_LEGS = {"nocall": ["guest"], "nocap": ["api"], "noreset": ["api"],
-               "sign": ["api"], "fireinv": ["api"], "nofir1": ["api"],
+# One-off checks (--only), outside the <= 10 set: covered by the same legs
+EXTRA_MUTANTS = {
+    # centring does not reset the acceleration
+    "noreset": (INP, [("        bne :+\n        sta inp_n\n", "        bne :+\n        nop\n        nop\n        nop\n")]),
+    # /FIR1 not forced high (pin 7 left as it was)
+    "nofir1": (INP, [("        and #$C0\n", "        and #$40\n")]),
+    # the pin write leaks into bit 2 (W13-W's /CHNG) (rev-inp)
+    "pinleak2": (INP, [("        and #$C0\n", "        and #$C4\n")]),
+}
+EXTRA_LEGS = {"noreset": ["api"], "nofir1": ["api"], "pinleak2": ["api"]}
+MUTANT_LEGS = {"nocall": ["guest"], "nocap": ["api"], "pinleak4": ["api"],
+               "sign": ["api"], "fireinv": ["api"], "stickpol": ["real"],
                "potbit": ["api"], "noedge": ["api"], "noghost": ["real"],
                "nosrc": ["api"]}
 
@@ -568,7 +683,7 @@ def build_mutant(name: str, out_dir: str) -> str:
     import tests.run_mach as rm
     saved = rm.MUTANTS
     try:
-        rm.MUTANTS = MUTANTS
+        rm.MUTANTS = {**MUTANTS, **EXTRA_MUTANTS}
         return rm.build_mutant(name, out_dir)
     finally:
         rm.MUTANTS = saved
@@ -580,9 +695,10 @@ def teeth(prg: str, only: list[str] | None) -> int:
     bad = []
     for name in names:
         mprg = build_mutant(name, os.path.join(bdir, "inp-mut", name))
-        log(f"=== mutant {name} (legs {','.join(MUTANT_LEGS[name])})")
+        legs = {**MUTANT_LEGS, **EXTRA_LEGS}[name]
+        log(f"=== mutant {name} (legs {','.join(legs)})")
         try:
-            fails = vice(mprg, MUTANT_LEGS[name])
+            fails = vice(mprg, legs)
         except Exception as e:                    # noqa: BLE001
             fails = [f"{type(e).__name__}: {e}"]
         log(f"=== mutant {name}: {'KILLED' if fails else 'SURVIVED'}")
@@ -607,9 +723,18 @@ def main(argv=None) -> int:
     ap.add_argument("--only")
     ap.add_argument("--attended", action="store_true")
     ap.add_argument("--seconds", type=float, default=60.0)
+    ap.add_argument("--allow-held", default="0",
+                    help="stick bits port 2 may read held with nothing driven "
+                         "(hardware only, e.g. $01 for the C64U's stuck Up): a WARN")
+    ap.add_argument("--json", help="write {legs, fails, warn} here")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args(argv)
     VERBOSE = a.verbose
+    global ALLOW_HELD
+    ALLOW_HELD = int(a.allow_held.lstrip("$"), 16) if a.allow_held.startswith("$") \
+        else int(a.allow_held, 0)
+    if ALLOW_HELD and a.backend != "u64" and not a.attended:
+        ap.error("--allow-held is for a hardware port only")
     # a backgrounded job starts with SIGINT ignored; u64_hold's restore needs ^C
     import signal
     signal.signal(signal.SIGINT, signal.default_int_handler)
@@ -618,17 +743,26 @@ def main(argv=None) -> int:
     if a.mutants:
         rc = teeth(a.prg, a.only.split(",") if a.only else None)
     elif a.attended:
+        legs, fails = ["attended"], []
         rc = u64(a.prg, a.mhz, lambda rig: attended(rig, a.seconds), "attended")
     elif a.backend == "u64":
         legs = a.legs.split(",") if a.legs else U64_LEGS
         fails = u64(a.prg, a.mhz, lambda rig: run_legs(rig, legs), f"{a.mhz}mhz")
-        print(f"run_inp (u64 {a.mhz} MHz): {'PASS' if not fails else f'FAIL ({len(fails)})'}")
+        print(f"run_inp (u64 {a.mhz} MHz): {'PASS' if not fails else f'FAIL ({len(fails)})'}"
+              f"{f'  warn: {len(WARNS)}' if WARNS else ''}")
         rc = 1 if fails else 0
     else:
         legs = a.legs.split(",") if a.legs else ALL_LEGS
         fails = vice(a.prg, legs)
-        print(f"run_inp: {'PASS' if not fails else f'FAIL ({len(fails)})'}")
+        print(f"run_inp: {'PASS' if not fails else f'FAIL ({len(fails)})'}"
+              f"{f'  warn: {len(WARNS)}' if WARNS else ''}")
         rc = 1 if fails else 0
+    if a.json and not a.mutants:
+        import json
+        with open(a.json, "w") as fh:
+            json.dump({"legs": legs if not a.attended else ["attended"],
+                       "fails": fails if not a.attended else [], "rc": rc,
+                       "warn": WARNS, "allow_held": ALLOW_HELD}, fh, indent=1)
     print(f"run_inp: wall-clock {time.monotonic() - t0:.0f} s")
     return rc
 

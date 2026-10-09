@@ -25,12 +25,13 @@
 ;      row's key is unknown this frame and keeps its last state (F1 with
 ;      stick up; C= with S/F/H/K/F3 held while the stick moves);
 ;   3. F1: column 0 (PRA $FE), row 4; then C=: column 7 (PRA $7F), row 5.
-;      No settle wait between them (MAIN budget): a key at column 0 row 5
-;      (F3) recovers through its pull-up only, so at turbo, F3 held might
-;      read as C= too (UNVALIDATED, as hle_con's row settle; VICE cannot
-;      show it).  F3 reaches nothing else in this wave.
-;   Leaves CIA1 DDRA = $FF, DDRB = $00 (never written) and column 7
-;   selected: the next frame's step 1 releases every line first.
+;      No settle wait between them: rows recover at once on the C64U at 1,
+;      48 and 64 MHz, and a column 1 -> column 7 read shows no phantom
+;      (rev-inp probe, 2026-10-09; the U64E is unmeasured).  F3 alone
+;      reading as C= is checked by the attended script.
+;   CIA1 DDRA and PRA are restored to their values on entry (PRA as read:
+;   the 6526 returns the pins, so a bit an outside switch held low at entry
+;   comes back as a 0 in the latch).  DDRB is never written.
 ;
 ; Per frame, from inp_joy/inp_key:
 ;   - mouse: dir = joy & $0F; n = frames the same nonzero dir was held
@@ -67,20 +68,32 @@ inp_view: .res 1        ; I1: view edges (bit 0 = F1 pressed), W13-D clears
 inp_n:    .res 1        ; frames a direction was held (<= INP_NMAX)
 inp_kp:   .res 1        ; the last frame's inp_key
 
+; CODE layout: W13-I's CODE growth (this module + mach.s's 3-byte call) is
+; padded to exactly one page (inp_pad below).  RODATA follows CODE, and its
+; tables are read with abs,X on the per-instruction path; some straddle a
+; page (g5_flow's 32-byte table), so any other shift changes which entries
+; cross and costs cycles (perf_cycles: +1/3 "stack" at +207 B, +1/2
+; mem/stream/copy at +3).  A whole page keeps every page offset after CODE.
+; The pad costs no MAIN: BSS starts on a page anyway (end $9D11 either way).
 .segment "CODE"
+inp_beg:
 
 .proc inp_frame
         lda inp_src
         bne have
+        lda CIA1_DDRA           ; the caller's port A, restored below
+        pha
+        lda CIA1_PRA            ; (pins: the latch is not readable)
+        pha
         lda #0                  ; 1. the stick, nothing driven (DDRB is
         sta CIA1_DDRA           ; $00 throughout: nothing here sets it)
         lda CIA1_PRA
         eor #$FF
         and #$1F
         sta inp_joy
-        ldx #$FF                ; 2. idle rows, no column selected
-        stx CIA1_DDRA
-        stx CIA1_PRA
+        ldx #$FF                ; 2. idle rows, no column selected: the
+        stx CIA1_PRA            ; latch high first, then the outputs on
+        stx CIA1_DDRA           ; (no old-latch glitch on PA)
         lda CIA1_PRB
         sta inp_t
         lda #$FE                ; 3. F1: column 0, row 4
@@ -98,6 +111,10 @@ inp_kp:   .res 1        ; the last frame's inp_key
         and inp_t               ; last state: ((new ^ old) & idle) ^ old
         eor inp_key
         sta inp_key
+        pla                     ; the caller's port A back: latch first,
+        sta CIA1_PRA            ; then the direction
+        pla
+        sta CIA1_DDRA
 have:   lda inp_kp              ; F1 press edge -> inp_view bit 0
         eor #$FF
         and inp_key
@@ -161,3 +178,7 @@ nx:     inx
         sta chip_vh
         rts
 .endproc
+
+INP_MACH  = 3           ; @value mach.s's W13-I CODE growth (jsr inp_frame)
+inp_pad:  .res $100 - INP_MACH - (inp_pad - inp_beg), $EA
+.assert inp_pad - inp_beg + INP_MACH <= $100, error, "inp: CODE growth over one page"
