@@ -238,7 +238,17 @@ ev_pend     = $95       ; W8-L mach: pending events, bit 0 = CIA1 timer A (set b
 mach_frames = $96       ; W8-L mach: u32 LE guest frames (VERTBs) since mach_init
 .endif
 
-; @region free $9A-$FF UNALLOCATED - $9A-$F8 is still inside the ld65 ZEROPAGE pool (c64.cfg: start $0080 size $0079) but NOT usable by .res past $87 (core.s asserts); claim via this file + rescheck green
+; W13-I inp: scratch of inp_frame (runtime/ops/inp.s), live only inside one
+; call; not machine state (a snapshot need not carry it).
+; @region inp $9A-$9B joystick/keyboard scan scratch (inp_frame only)
+.ifndef inp_t
+inp_t       = $9A       ; W13-I inp: idle rows, then step - 1
+.endif
+.ifndef inp_u
+inp_u       = $9B       ; W13-I inp: key sample, then direction bits
+.endif
+
+; @region free $9C-$FF UNALLOCATED - $9A-$F8 is still inside the ld65 ZEROPAGE pool (c64.cfg: start $0080 size $0079) but NOT usable by .res past $87 (core.s asserts); claim via this file + rescheck green
 
 ; --- Contract invariants (assemble-time; keep true under -D relocation) ----
 .assert r_a0 = r_d0 + $20, error, "getreg/setreg do reg*4 indexing from r_d0 - A regs must follow D regs contiguously"

@@ -174,4 +174,6 @@ def test_makefile_stamps_the_runner():
     assert "host.snapfmt --stamp $@" in mk
     # snap.s and ureu.s link last (their BSS after every other module's)
     line = next(x for x in mk.splitlines() if x.startswith("RUNTIME_SRC"))
-    assert line.rstrip().endswith("runtime/ops/mach.s runtime/ops/snap.s runtime/ops/ureu.s")
+    # (W13-I: inp.s may link between mach.s and snap.s; snap/ureu stay last)
+    assert line.rstrip().endswith(" runtime/ops/snap.s runtime/ops/ureu.s")
+    assert line.rindex("runtime/ops/mach.s") < line.rindex("runtime/ops/snap.s")

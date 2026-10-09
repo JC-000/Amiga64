@@ -107,6 +107,7 @@ FILE_OWNERS = {
     "tests/aros/mboot.s": "aros",       # W11-A machine-mode boot driver (S3.7)
     "runtime/ops/snap.s": "snap",       # W12-T (supervisor-approved) suspend/resume
     "runtime/ops/ureu.s": "snap",       # W12-T (supervisor-approved) UCI REU I/O
+    "runtime/ops/inp.s": "inp",         # W13-I joystick -> mouse (machine-mode input)
 }
 
 # Owners by glob, for module families that grow by file (checked after the
