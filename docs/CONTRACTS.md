@@ -1137,10 +1137,22 @@ spec: `docs/C2V.md` "Row skip", "Display refresh (S3.5)". Reference:
     not re-stage the module, it clears `spr_vec`'s high byte (disarmed) and
     returns C = 0. Test: `run_spr` leg spr, case `guard-overwritten`.
   - **Hand-off rule.** Whoever launches a session stages the module at
-    `$C600` and arms it (`run_spr.arm`: `spr_vec`, `spr_id`, `$D01B`/`$D01C`
-    := 0) after the last stub, `test_load_chunk` or runner-helper write that
-    can touch `$C000-$C8FF`, and again after every resume. W13-W's loader
-    does this at the merge.
+    `$C600` and arms it after the last stub, `test_load_chunk` or
+    runner-helper write that can touch `$C000-$C8FF`, and again after every
+    resume. W13-W's loader does this at the merge.
+    - Arm order (`run_spr.arm`, fix round 2): `spr_vec` high := 0, then
+      `spr_id`, then `spr_vec` low, then `spr_vec` high (this last write
+      arms). Then `$D01B`/`$D01C` := 0.
+    - **A resume disarms the pointer module.** snap.s's restore clears
+      `spr_vec` high after the BSS image (supervisor, at the merge), and the
+      launcher re-stages and re-arms it.
+    - The ID guard catches a module whose ID bytes were overwritten. A stub
+      written inside the module that leaves `$C603-$C606` intact is not
+      caught (rev-vis round 2); only the rule above prevents that.
+    - On an ID mismatch the guard also hides VIC sprites 0-2 (`$D015` bits
+      0-2 := 0).
+  - **The module is full:** 768 B, `$C600-$C8FF`, 0 B spare; `sval`/`son`
+    are its last two bytes (`$C8FE`/`$C8FF`). Any growth must trim first.
   - **Pan gate (fix round 1).** The window re-centres only while the image
     has a pixel (the OR of its 4 · height bytes). An empty pointer, such as
     AROS's on the insert-disk screen, never moves the window: it keeps D1's

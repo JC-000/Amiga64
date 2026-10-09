@@ -771,6 +771,7 @@ def spr_guard(m, sbin: bytes, slab: dict, s: int) -> list[str]:
     m.w(SPR_ORG, sbin)
     arm(m.w, m.lab)
     m.w(SPR_ORG, bytes([0x00] * 0x40))                     # the ID (and code) overwritten
+    m.w(0xD015, b"\x07")                                  # sprites shown by the old arming
     m.w(A.R, b"\0")
     m.start(s)
     t0 = time.monotonic()
@@ -780,12 +781,13 @@ def spr_guard(m, sbin: bytes, slab: dict, s: int) -> list[str]:
         time.sleep(0.5)
     res = m.r(A.R, 3)
     hi = m.r(m.lab("spr_vec") + 1, 1)[0]
-    ok = res[1] == 1 and res[2] == 0 and hi == 0
+    en = m.r(0xD015, 1)[0] & 7
+    ok = res[1] == 1 and res[2] == 0 and hi == 0 and en == 0
     print(f"  {'guard-overwritten':20s} {'OK' if ok else 'FAIL'}  halt ${res[1]:02X} "
-          f"reason {res[2]} spr_vec hi ${hi:02X}")
+          f"reason {res[2]} spr_vec hi ${hi:02X} $D015&7 {en}")
     if not ok:
-        f.append(f"guard: halt ${res[1]:02X} reason {res[2]}, spr_vec hi ${hi:02X} "
-                 "(want HALT_OK and disarmed)")
+        f.append(f"guard: halt ${res[1]:02X} reason {res[2]}, spr_vec hi ${hi:02X}, "
+                 f"$D015&7 {en} (want HALT_OK, disarmed, sprites hidden)")
     return f
 
 
@@ -793,10 +795,10 @@ def arm(w, lab) -> None:
     """W13-D D2: arm the staged module: spr_vec := spr_frame (high byte last),
     spr_id := SPR_ID (a resume compares it; W13-W's loader does the same)."""
     entry = SPR_ORG                     # spr.s: jmp spr_frame at $C600
-    w(lab("spr_vec") + 1, b"\0")
-    w(lab("spr_vec"), bytes([entry & 0xFF]))
-    w(lab("spr_vec") + 1, bytes([entry >> 8]))
-    w(lab("spr_id"), SPR_ID.to_bytes(4, "little"))
+    w(lab("spr_vec") + 1, b"\0")       # (disarmed while it is written)
+    w(lab("spr_id"), SPR_ID.to_bytes(4, "little"))       # fix round 2: the ID first,
+    w(lab("spr_vec"), bytes([entry & 0xFF]))             # then the vector low,
+    w(lab("spr_vec") + 1, bytes([entry >> 8]))           # then high (arms)
     w(0xD01B, b"\0")                    # VIC sprite priority / multicolour: 0
     w(0xD01C, b"\0")                    # (hires sprites in front; the module never writes them)
 

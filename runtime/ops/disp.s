@@ -1281,6 +1281,9 @@ disp_vw:
         jmp (spr_vec)           ; its C = 1: the window moved, convert now
 @off:   lda #0
         sta spr_vec+1           ; disarmed
+        lda VIC_SPREN           ; fix round 2: and its sprites 0-2 hidden
+        and #$F8
+        sta VIC_SPREN
         clc
         rts
 @f1:    asl
