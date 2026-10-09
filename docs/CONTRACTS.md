@@ -535,7 +535,12 @@ no link dependency on any client.
   one instruction each), and there is no time floor, so a periodic client
   re-arming from its own deadline keeps a bounded lateness when its period
   exceeds a pass plus one instruction (`lag`: P = 3000 phi2 at s = 0,
-  max 2333 late; the round-1b floor drifted to 50k). A halt in that step
+  max 2333 late; the round-1b floor drifted to 50k). W13-I: the bound is
+  gated with the input override (`inp_src` = 1, the rig's default since
+  Wave 13): max 2921-3485 over 7 runs. The real CIA1 scan adds 111 cycles
+  to every frame hook (screen off). With it, `lag` reads max 4713-4826
+  phi2 at s = 0 (same 7 runs), over the 4096 bound. That run is recorded, not gated
+  ("Input (joystick -> mouse)"). A halt in that step
   (HALT, STOP, an odd vector) leaves through the normal halt path, and every
   `mach_run` exit rule holds. A delivery does not force a step: a higher
   level pending after a delivery nests before the handler's first
@@ -1613,3 +1618,149 @@ before `snap_keep`).
 | c2v pair tables, `c2v_args` | `$B900-$BAFF`, `$BF00` | — | `disp_init` → `c2v_init`; args per conversion | derived |
 | LUT | REU `$DF0000` | — | `disp_init` stashes it | derived |
 | guest memory | REU chip RAM, slow RAM + `$DC0000-$DEFFFF`, ROM banks | stays (REU-resident) / file spans 2-5 | stays / LOAD_REU | the guest's RAM. AROS WRITES `$DC0000-$DEFFFF` (unmapped in the profile; not zero after m3 on both Ultimates), so the slow-RAM span runs to `$DEFFFF`. `$200000-$BEFFFF` and `$E80000-$F7FFFF` read zero after m3 (`aros_resume` m3 leg, Ultimate) and are not filed: a resume needs them zero, as the boot does (`host/machine.ZERO_SPANS`) |
+
+## Input (joystick -> mouse) (W13-I)
+
+Owner: inp (`runtime/ops/inp.s`; in `chip.s` the POTINP read, now `jmp
+inp_pot` padded to its old size so no module moves, labelled `; W13-I`;
+one call line in `mach.s`). Design: `docs/WAVE13_BRIEF.md`
+"W13-I". Reference: `host/inp_ref.py` (`Inp.frame` the rule, `scan` the
+CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
+`host/tests/test_inp.py`.
+
+- **When.** `inp_frame` runs once per machine-loop service pass that
+  posted a VERTB: `mach.s` `fhook` calls it first (`jsr inp_frame ;
+  W13-I`), whether or not a frame hook (`mach_fhook`) is installed, with
+  `$01` = `$35`, A/X/Y clobbered. A pass that catches up several frames
+  runs it once, and VERTBs that pass during the hook are counted, not
+  hooked (the existing `fhk`/`skip` rule). So every VERTB the guest sees
+  has had exactly one `inp_frame` since the previous one (test `guest`).
+  Nothing is on the per-instruction path (`perf_cycles --max-delta 0`).
+- **Source.** `inp_src` = 0: the real CIA1 is scanned into `inp_joy` and
+  `inp_key`. Otherwise those two bytes are the host's override, the test
+  seam for VICE and unattended hardware legs. `inp_joy` bits 0-4 =
+  up/down/left/right/fire, 1 = pressed (the harness's `inject_joystick`
+  polarity). `inp_key`: `$10` = F1, `$20` = C= (the keys' matrix rows).
+- **Scan** (the only CIA1 port reader in machine mode). Port 2 drives the
+  keyboard's column lines (port A), so the scan keeps them apart like this:
+  1. **Stick.** DDRA = `$00`: nothing is driven, so only port 2 can pull
+     PA0-4 low. joy = `~PRA & $1F`. A held key cannot reach it, because no
+     row is low. DDRB is never written: it stays `$00` (KERNAL, hle_con).
+     The one way through is a row pulled low from outside (a port-1 stick)
+     *and* a key held on that row in columns 0-4: the stick then reads that
+     column's direction, as on any C64. On the C64U (2026-10-09), rows 6-7
+     driven low by a test read as DOWN (column 1), consistent with SHIFT
+     LOCK latched (column 1, row 7). Port 2 also read UP held at every
+     speed, even with PA0 driven high: something outside the CIA holds it,
+     the stick or its cable (`build/evidence/w13-inp/green/c64u_pa_diag.log`).
+  2. **Idle.** PRA = `$FF` first, then DDRA = `$FF` (the latch is high
+     before the outputs turn on, so the old latch never drives PA). A PRB bit low with no column
+     selected is a row held by port 1, or by a key in a column the stick
+     pulls. That key is *unknown* this frame and keeps its last state:
+     `key = ((new ^ old) & idle) ^ old`. Cases: F1 with the stick up; C=
+     while the stick pulls the column of S/F/H/K/F3 and that key is held.
+  3. **Keys.** F1 is read on column 0 (PRA `$FE`) row 4, then C= on column
+     7 (PRA `$7F`) row 5, with no settle wait between them.
+     - MEASURED (rev-inp, C64U, 2026-10-09: `build/evidence/w13-inp/settle/c64u_settle.log`,
+       probe `build/evidence/w13-inp/settle/settle.s`):
+       rows recover at once at 1, 48 and 64 MHz, and a column 1 → column 7
+       read shows no phantom.
+     - The U64E is unmeasured.
+     - A held F3 (column 0, row 5) reading as C= is checked by the attended
+       script's F3/C= step.
+  4. **Restore.** On exit the scan puts back CIA1 DDRA and PRA as they were
+     on entry: PRA first, then DDRA. The PRA value is the one *read* on
+     entry, because the 6526 returns the pins, not the latch. DDRB and PRB
+     are never written.
+     - The caller's CIA1 port A is unchanged by a frame, unless a port-2
+       switch is closed at entry. That latch bit then stays 0 until the
+       caller rewrites PRA. (Leg `real` checks DDRA `$F0`/PRA `$5A` →
+       `$F0`/`$5F`.)
+     - Callers that read CIA1 set it up themselves (`hle_con.s:401-405`),
+       and no runtime code calls the KERNAL. The restore is a precaution
+       kept under the page pad (supervisor, fix round 1).
+  - **Cost** (leg `cost`: 6502 cycles per call, VICE, screen off, the
+    minimum of 5; CPU speed does not change it):
+    - the real scan with nothing held: 277;
+    - the override, idle: 166;
+    - the override with every bit set: 245;
+    - worst case: 356 (the real scan plus all four mouse-loop bits);
+    - the real scan costs 111 more than the override.
+    rev-inp's independent measurement agrees (277/166/245/356).
+  - **Lateness.** `run_irq` `lag`'s 4096-phi2 bound (s = 0) is gated with
+    the override (max 2921-3485 phi2 over 7 runs). With the real scan the
+    measured max is 4713-4826 phi2 (the same 7 runs, 2026-10-09). That is recorded, not gated; see "Event seam".
+  - **Coverage gap.** A real key or stick press through CIA1 (the scan's
+    positive path) is covered only by the attended script
+    (`tests/run_inp.py --attended`):
+    - VICE cannot hold a matrix key and ignores JOYPORT_SET;
+    - the Ultimate's `inject_joystick` writes the PRA latch only;
+    - the C64U's stick reads Up held.
+    The unattended legs cover the scan's isolation: rows driven low, the
+    undriven reading, the CIA1 restore.
+  - The Ultimate's `inject_joystick` writes the PRA *latch* (c64-test-
+    harness `backends/ultimate64.py` `inject_joystick`). With DDRA = `$00`
+    the latch is not on the pins, so it cannot reach `inp_joy` (leg
+    `noinj`). VICE 3.10 ignores the harness's JOYPORT_SET: the probe on
+    2026-10-09 saw no change at `$DC00`/`$DC01` with any controlport or
+    joydev setting. The real-scan leg therefore holds rows low through
+    DDRB/PRB instead.
+- **Rule** (per frame, from `inp_joy`/`inp_key`; `host/inp_ref.Inp`):
+  - **Mouse.** dir = joy & `$0F`. n = `inp_n`, set to 0 when dir = 0.
+    step = 1 + n/2, then n += 1 while n < `INP_NMAX` (30). The steps run
+    1, 1, 2, 2, ..., `INP_CAP` = 16 counter units per frame.
+    - Up subtracts the step from JOY0DAT's Y counter (`chip_shd+$0A`, the
+      high byte), down adds it. Left and right do the same on the X
+      counter (`chip_shd+$0B`). Each counter is a u8 and wraps, as on the
+      Amiga.
+    - Opposite bits cancel. Diagonals move both axes. Changing direction
+      without centring keeps the speed. Centring resets it.
+  - **Left button** = fire. CIA-A PRA pin bit 6 (/FIR0) is low while fire
+    is held. Pin bit 7 (/FIR1) is forced high. Pins 0-5 (W13-W's 2-5) are
+    kept: read-modify-write of `cia_st+CIA_PIN`, mirrored as `INP_PIN`
+    (host test). After a `cia_reset` (pins `$EB`, both released) the pins
+    are back within one frame.
+  - **Right button** = C= (the Amiga has no C= key). The POTINP read
+    (`chip.s` → `inp_pot`) returns `$FB00` while `inp_key` bit 5 is set,
+    else `$FF00` as before
+    (bit 10, DATLY, low). The POTGO output bits are not modelled.
+  - **View key.** On an F1 press edge (down now, up the frame before),
+    `inp_view` |= 1. W13-D clears the bits it consumes (I1). No other C64
+    key reaches the guest in this wave.
+- **Resume (I2).** The snapshot image carries `inp_src`/`inp_joy`/`inp_key`
+  as they were at suspend; the resume path itself does not touch inp
+  state. The host that launches a resume owns `inp_src`:
+  - Real input: write `inp_src` = 0.
+  - Scripted input: write `inp_src` = 1 with `inp_joy`/`inp_key` = 0.
+  - Timing: snap_resume restores the image and continues mach_run without
+    returning, so the write must come after the restore. On the Ultimate
+    it is a memory write while the guest runs; VICE writes through the
+    monitor.
+  - Test boots: `tests/aros_boot.py` sets `inp_src` = 1 with no input right
+    after the runner loads (`--real-input` keeps 0), so a test snapshot
+    resumes scripted and idle.
+  - Who writes it: W13-W's I3 helper (`tests/aros_wb.py`) and the demo
+    resume must write `inp_src` = 0 after the resume for the user's stick
+    to work.
+- **State.** `inp_src`, `inp_joy`, `inp_key`, `inp_view`, `inp_n`,
+  `inp_kp` (MAIN BSS, in this order, zero = idle; inp.s links after
+  mach.s and before snap.s, so the W12-T snapshot image carries them, I2).
+  Scratch: rc zp `inp $9A-$9B` (`inp_t`, `inp_u`). It is live only inside
+  one call and not saved or restored: the "free zp" row of the
+  suspend/resume inventory now starts at `$9C`.
+- **Host-visible** (`runner.lbl`): `inp_frame`, `inp_pot`, `inp_src`,
+  `inp_joy`, `inp_key`, `inp_view`, `inp_n`.
+- **Link order.** inp.s links after mach.s and before snap.s (Makefile).
+  - chip.s keeps its size. Only mach.s grows (+3 B, the call), so only
+    snap.s and ureu.s move. core.s is unchanged.
+  - **Layout.** W13-I's CODE growth (inp.s plus mach.s's +3) is padded
+    (`inp_pad`) to exactly `$100`, so RODATA, DATA and BSS keep every page
+    offset. RODATA tables are read with abs,X on the per-instruction path,
+    and some straddle a page (g5_flow's 32-byte table). Any other shift
+    changes which entries cross: perf_cycles measured "stack" +1/3 cycle
+    per instruction at +207 B, and mem/stream/copy +1/2 at +3 B.
+  - **MAIN.** The segments grow by 262 B: inp code 198 B, pad 55 B, mach
+    3 B, BSS 6 B. The BSS end moves `$9C0B` → `$9D11`, the same as without
+    the pad, because BSS starts on a page.
+  - Any later CODE growth shifts RODATA again. That is a layout rule for the
+    supervisor (e.g. page-align RODATA in `runtime/c64.cfg`).

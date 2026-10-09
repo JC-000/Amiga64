@@ -907,7 +907,11 @@ def main(argv=None) -> int:
     ap.add_argument("--vol", default="/USB1",
                     help="m3file: the storage volume (U64E /USB1, C64U /SD)")
     ap.add_argument("--jobs", type=int, default=3, help="--mutants: VICE sessions at once")
+    ap.add_argument("--real-input", action="store_true",   # W13-I
+                    help="W13-I: boot with the real joystick/keys (default: idle "
+                         "override, inp_src = 1; the snapshot image carries it)")
     a = ap.parse_args(argv)
+    AB.REAL_INPUT = a.real_input        # W13-I: aros_boot.Machine writes inp_src
     set_vol(a.vol)
     s = a.s if a.s is not None else (AB.BOOT_S_VICE if a.backend == "vice" else AB.BOOT_S_U64)
     if a.mutants:

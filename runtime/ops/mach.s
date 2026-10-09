@@ -71,6 +71,7 @@
 .export mach_lvl, mach_ichk, mach_nirq, mach_stp
 .import exc_group2
 .importzp HALT_STOP
+.import inp_frame       ; W13-I inp: the per-frame input hook (fhook)
 
 MACH_FRAME_E  = 14188   ; @value E ticks per guest frame (709379 Hz / 50)
 MACH_S_DEF    = 4       ; @value power-up E-clock shift
@@ -457,6 +458,7 @@ fhook:  lda #0                  ; W10-P cop
         sta mach_fdue           ; W10-P cop
         lda #1                  ; W10-P cop
         sta mach_fran           ; W10-P cop
+        jsr inp_frame           ; W13-I: joystick -> mouse, once per hooked frame
         lda mach_fhook+1        ; W10-P cop: none installed: nothing
         beq :+                  ; W10-P cop
         sta mach_jv+1           ; W10-P cop

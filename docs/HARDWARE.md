@@ -1175,3 +1175,44 @@ after the launch (budget 15 s). The test file was deleted; `/SD/amiga64`
 then holds only the ADF. (The ROM staging of that boot fell back to
 `test_load_chunk`, 1393 s: the SocketDMA service was off after the
 morning's power-cycle, the fw 1.1.0 behaviour in the Wave 12 brief.)
+
+## Joystick port 2 and the keyboard matrix (W13-I, 2026-10-09)
+
+Package W13-I (`runtime/ops/inp.s`, contract "Input (joystick -> mouse)").
+Evidence: `build/evidence/w13-inp/green/` and the reviewer's
+`build/evidence/w13-inp/settle/` (rev-inp's probe `settle.s` and its C64U log).
+
+- **The harness's `inject_joystick` cannot reach a DDRA = `$00` read.**
+  [MEASURED HW, C64U and U64E]
+  - On the Ultimate it is a memory write of the CIA1 *PRA latch*: `$DC00`
+    for port 2, value ^ `$1F` (c64-test-harness `backends/ultimate64.py`
+    `inject_joystick`).
+  - A latch drives the pins only where DDRA = 1. inp.s reads port 2 with
+    DDRA = `$00`, so an injection never shows in `inp_joy` (leg `noinj`:
+    three injections, `inp_joy` unchanged on both devices).
+  - For an emulator that reads the stick this way, the injection is not a
+    joystick. Unattended legs use the inp.s override (`inp_src` = 1)
+    instead.
+- **VICE 3.10 ignores the harness's JOYPORT_SET** (binary monitor `$A2`).
+  - Ports 0/1 were accepted but changed neither `$DC00` nor `$DC01`, with
+    any `-controlport1device`/`-controlport2device`/`-joydev` setting and
+    after a delay. Ports 2/3 were refused (error `$01`).
+  - So no VICE leg can press a stick. The real-scan leg makes rows low with
+    the CIA itself (DDRB/PRB).
+- **Row recovery at turbo.** [MEASURED HW, C64U, rev-inp]
+  - After a column is deselected, rows read idle again at once at 1, 48
+    and 64 MHz: zero polls low after PRA = `$FF` or DDRA = `$00`.
+  - A column 1 → column 7 read shows no phantom.
+  - inp.s therefore reads its two key columns back to back. The U64E is
+    unmeasured.
+- **The C64U's port 2 reads Up held (2026-10-09).** [MEASURED HW]
+  - PA0 reads low at 1 and 64 MHz even with DDRA = `$FF`, PRA = `$FF`, so
+    something outside the CIA holds it: the stick or its cable
+    (`green/c64u_pa_diag.log`).
+  - Rows 6-7 driven low read as stick Down (column 1), consistent with
+    SHIFT LOCK latched (column 1 / row 7).
+  - The U64E's port 2 reads idle.
+  - Effect on a boot with the real input: the mouse moves every frame.
+    AROS reached m3 in 126 s at guest frame 1136, against 69.3 s at frame
+    628 for the base PRG on the same C64U session. Test boots now use the
+    idle override (`aros_boot`/`aros_resume`, `--real-input` to opt out).
