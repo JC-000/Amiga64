@@ -82,8 +82,8 @@
 ; C2V_MUT_NMI (the RAM NMI vector is not set before the $01=$34 fill);
 ; W12-V: C2V_MUT_PICKR (the rightmost pixel's pen), C2V_MUT_HROW (pens not
 ; cleared between char rows), C2V_MUT_HFILLBG (matrix low nibble = the pen's).
-; W13-D (1:1): C2V_MUT_OMASK (bg from the second pixel), C2V_MUT_OFG (fg
-; re-picked every line), C2V_MUT_OFIN (the fg pen in both nibbles).
+; W13-D (1:1): C2V_MUT_OMASK (bg from the second pixel), C2V_MUT_OFIN (the
+; fg pen in both nibbles).
 ; (tests/run_c2v.py's nmiack variant is MACH_MUT_NMIACK in runtime/ops/mach.s.)
 ; ===========================================================================
 
@@ -97,6 +97,7 @@
 .export c2v_args, c2v_bitmap, c2v_screen   ; labels for the host (runner.lbl)
 .export C2V_ROWS
 .import mem_rec_dirty, mach_nmi
+.import disp_ozero              ; W13-D (disp.s BHI): lines past c2v_v_olim read 0
 
 .ifndef C2V_ROWS
 C2V_ROWS   = 25                 ; char rows converted (20-25)
@@ -801,6 +802,8 @@ c2v_rowhi:
 C2V_OMK = $40                   ; @value W13-D: plane p's cell masks at P_p + C2V_OMK
 C2V_OBG = P0 + $D0              ; W13-D: bg pen per cell (fg at C2V_CP + cx)
 c2v_v_emit = c2v_args + 144     ; W13-D: bit 7: c2v_ofin's pass (write the matrix)
+c2v_v_olim = c2v_args + 145     ; W13-D: lines with data (disp_lines); later lines read 0
+.assert c2v_v_line = c2v_args + 68, error, "W13-D: disp_ozero reads c2v_v_line at c2v_args + 68"
 .assert <c2v_screen = 0, error, "W13-D: c2v_ones clears c2v_v_cnt with <c2v_screen"
 .assert C2V_CP + 40 <= C2V_OBG, error, "W13-D: fg and bg pens overlap"
 
@@ -854,6 +857,7 @@ c2v_ones:
         iny
         cpy #>P0 + 4
         bne @f
+        jsr disp_ozero          ; fix round 1: rows past the picture read 0
         lda c2v_v_line
         and #7
         bne :+
@@ -881,9 +885,7 @@ c2v_ones:
         beq @e
         sta c2v_v_pm            ; the set pixels
         lda C2V_CP,y
-.ifndef C2V_MUT_OFG
-        bpl @e                  ; fg already chosen (mutant: picked every line)
-.endif
+        bpl @e                  ; fg already chosen
         sty c2v_v_py
         stx c2v_v_px
         jsr c2v_pick1           ; C2V_CP,y := fg, counted

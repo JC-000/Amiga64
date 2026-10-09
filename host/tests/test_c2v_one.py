@@ -205,14 +205,45 @@ def test_lace_1to1_shows_both_fields_pixel_exact():
     st.update(bplcon0=0xA204, bplpt=base + [0] * 4, bpl1mod=80, bpl2mod=80,
               color=[0xAAA, 0x000, 0xFFF, 0x68B] + [0] * 28)
     d = R.disp_decide_view(st, 1, px=3, py=10)
-    assert d["one"] and d["lace"] and d["ymax"] == 156 and d["crop"] == 10
+    assert d["one"] and d["lace"] and d["ymax"] == 155 and d["crop"] == 10
     assert d["skip"][:2] == [0, 0] and d["lines"] == 200
     out = R.disp_convert_view(st, read, LUT, view=1, px=3, py=10)
     vic = out["vic_pens"]
     for y in range(200):
         for X in range(320):
             assert _shown(out, y, X) == vic[pens[20 + y, 24 + X]]   # frame line 2 * crop + y
-    assert R.disp_decide_view(st, 0)["ymax"] == 156
+    assert R.disp_decide_view(st, 0)["ymax"] == 155
     nl = dict(st, bplcon0=0xA200, bpl1mod=0, bpl2mod=0)
     d2 = R.disp_decide_view(nl, 1, px=3, py=10)
     assert d2["skip"][:2] == [0, 0] and d2["ymax"] == 56 and not d2["lace"]
+
+
+def test_rows_past_the_picture_read_zero():
+    """Fix round 1 (rev-vis case 165): L = 180: the 1:1 rows 180-199 add
+    nothing to the counts and show pen 0, as the fit view does."""
+    mem = bytearray(b"\xFF" * 0x30000)             # every pen 15 past the picture too
+
+    def read(a, n):
+        return bytes(mem[a - 0x8000:a - 0x8000 + n])
+    st = _st(180, bpu=4)
+    st["bplpt"] = [0x8000 + p * 0x6000 for p in range(6)]
+    out = R.disp_convert_view(st, read, LUT, view=1, px=0, py=0)
+    assert out["decide"]["lines"] == 180
+    # rows 0-179: every pixel pen 15 (one-pen cells, no fg); rows 180+: pen 0
+    assert all(c == (R.NO_FG, 15) for c in out["cells"][:22 * 40])
+    assert all(c == (0, 15) for c in out["cells"][22 * 40:23 * 40])   # the split row
+    assert all(c == (R.NO_FG, 0) for c in out["cells"][23 * 40:])
+    v0 = out["vic_pens"][0]
+    assert out["screen"][-1] == v0 << 4 | v0
+
+
+def test_lace_odd_field_bottom_clamp():
+    """Fix round 1: with LACE the window's last frame line, odd field
+    included, stays <= 2L - 1."""
+    st = _st(256, bpu=2)
+    st.update(bplcon0=0xA204, bpl1mod=80, bpl2mod=80)
+    for odd in (0, 1):
+        st["bplpt"] = [0x10000 + 80 * odd, 0x20000 + 80 * odd] + [0] * 4
+        d = R.disp_decide_view(st, 1, px=0, py=255)
+        last = 2 * d["crop"] + odd + d["lines"] - 1
+        assert last <= 2 * 256 - 1, (odd, d["crop"], last)

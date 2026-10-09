@@ -87,8 +87,7 @@ VARIANTS = {"stub": ["C2V_STUB=1"], "bitorder": ["C2V_MUT_BITORDER=1"],
             "pickr": ["C2V_MUT_PICKR=1"], "hrow": ["C2V_MUT_HROW=1"],
             "hfillbg": ["C2V_MUT_HFILLBG=1"],
             # W13-D (1:1 view, kind "one"): bg pixel, fg re-pick, pair key, matrix
-            "omask": ["C2V_MUT_OMASK=1"], "ofg": ["C2V_MUT_OFG=1"],
-            "ofin": ["C2V_MUT_OFIN=1"]}
+            "omask": ["C2V_MUT_OMASK=1"], "ofin": ["C2V_MUT_OFIN=1"]}
 OTHER_VARIANTS = {"layout-b": ["C2V_ROWS=22", "c2v_screen=0xFC00"],
                   "nofetch": ["C2V_PERF_NOFETCH=1"]}
 GUARD_REGS = (0xD011, 0xD016, 0xD018, 0xD020, 0xD021, 0xDD00)
@@ -449,6 +448,7 @@ def run_one(s, case: dict, luts: dict) -> list[str]:
     regs0 = read_regs(s.T)
     s.write_ram(s.lab["c2v_args"], R.pack_args(src, case_lut(case), case["pal"]))
     s.write_ram(s.lab["c2v_args"] + 72, R.pack_skip([0] * 4))
+    s.write_ram(s.lab["c2v_args"] + 145, bytes([200]))   # c2v_v_olim: every line has data
     fails: list[str] = []
     call_checked(s, "c2v_init", fails)
     call_banked(s, "c2v_ones", fails)

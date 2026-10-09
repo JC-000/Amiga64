@@ -42,8 +42,8 @@ from tests import aros_boot as A  # noqa: E402
 
 EVID = os.path.join(ROOT, "build", "evidence", "w13-vis")
 MODEL_VIEW = os.path.join(ROOT, "build", "aros", "model_view.json")
-OFFSET = (40, 78)               # the aros1 leg's test-set window: the text, right half
-VIEWS = ((20, 78), OFFSET)      # the 1:1 windows the aros1 leg shows: centred (LACE: ymax 156 / 2), the text
+OFFSET = (40, 77)               # the aros1 leg's test-set window: the text, right half
+VIEWS = ((20, 77), OFFSET)      # the 1:1 windows the aros1 leg shows: centred (LACE: ymax 156 / 2), the text
 
 
 def view_hash(bitmap: bytes, screen: bytes, vic: dict) -> str:
@@ -180,9 +180,8 @@ def leg_aros1(prg: str, s: int, timeout: float, out: str, rep: dict) -> list[str
         A.log(f"  fit: {h_fit[:12]} {st0}")
         if not sp["regs"][0x15] & 7:
             fails.append("pointer: not shown on the insert-disk screen (fit)")
-        # the 1:1 view's own checks run with the pointer module disarmed (its
-        # re-centring would move the window); it is re-armed below
-        m.w(m.lab("spr_vec") + 1, b"\0")
+        # fix round 1: the module stays armed; the insert-disk pointer's image
+        # is empty, so it never moves the window (no pan to an invisible pointer)
         # F1 -> 1:1
         n0 = struct.unpack("<H", m.r(m.lab("disp_nconv"), 2))[0]
         t0 = time.monotonic()
@@ -243,21 +242,20 @@ def leg_aros1(prg: str, s: int, timeout: float, out: str, rep: dict) -> list[str
             else:
                 A.log(f"  offset = model frame {hit['frame']} at {hit['view']}")
         png_cells(os.path.join(out, "insert_1to1_text.png"), raw2)
-        # the pointer module re-armed: the window follows the pointer
-        n0 = n1
+        # the pointer at the test offset: it follows only a visible pointer
         cur = m.r(m.lab("disp_cur"), 71)
         ST = m.lab("c2v_args") + 180
-        arm(m.w, m.lab)
-        wait_conv(m, n0, 60.0)
         time.sleep(2.0)
         sn = m.r(ST, 7)
         pos, ctl = (sn[3] << 8) | sn[4], (sn[5] << 8) | sn[6]
         u16 = lambda o: cur[o] | cur[o + 1] << 8          # noqa: E731
         c = {"ddfstrt": u16(34), "diwstrt": u16(30), "bplcon0": u16(2)}
         st4 = state(m)
-        want, wpx, wpy, pans = R.spr_settle(c, pos, ctl, True, True, OFFSET[0], OFFSET[1],
-                                            st4["disp_ymax"])
         sp4 = spr_read_live(m)
+        nonempty = any(sp4["blocks"])
+        want, wpx, wpy, pans = R.spr_settle(c, pos, ctl, True, True, OFFSET[0], OFFSET[1],
+                                            st4["disp_ymax"], nonempty=nonempty)
+        rep["pointer_image_nonempty"] = nonempty
         rep["follow"] = {"pos": f"${pos:04X}", "ctl": f"${ctl:04X}", "state": st4,
                          "want": [wpx, wpy, pans], "vic": sp4["regs"][:0x30].hex()}
         A.log(f"  pointer POS ${pos:04X} CTL ${ctl:04X}: window ({st4['disp_px']}, "
@@ -346,7 +344,7 @@ def leg_hw(prg: str, s: int, mhz: int, timeout: float, out: str, rep: dict) -> l
                 m.w(m.lab("spr_vec") + 1, b"\0")
             n0 = nconv(m)
             m.w(m.lab("inp_view"), b"\x01")
-            st = until(m, n0, 2 if armed else 1, 30.0)
+            st = until(m, n0, 1, 30.0)
             res[f"f1_{tag}_s"] = [round(x, 2) for x in st]
             res[f"win_{tag}"] = [rd("disp_view")[0], rd("disp_px")[0], rd("disp_py")[0]]
             res[f"pointer_1to1_{tag}"] = reg(0xD000, 0x30).hex()
@@ -354,8 +352,17 @@ def leg_hw(prg: str, s: int, mhz: int, timeout: float, out: str, rep: dict) -> l
                   f"{res[f'win_{tag}']}")
             if not st:
                 fails.append(f"F1 ({tag}): no conversion within 30 s")
-            if armed and len(st) < 2:
-                fails.append("pan: the pointer module did not move the window")
+            if res[f"win_{tag}"][1] != R.PX_CENTRE:
+                fails.append(f"F1 ({tag}): window {res[f'win_{tag}']}, want centred "
+                             "(the insert-disk pointer's image is empty: no pan)")
+            if armed:                     # a window move (as a pan makes one): time it
+                n0 = nconv(m)
+                m.w(m.lab("disp_px"), bytes([40]))
+                pix = bytes(m.t.read_memory(A_DISP_ST + PIX_OFF, 1))[0]
+                m.w(A_DISP_ST + PIX_OFF, bytes([(pix + 1) & 0xFF]))
+                mv = until(m, n0, 1, 30.0)
+                res["move_s"] = [round(x, 2) for x in mv]
+                A.log(f"  window move (px 40 + the pixel epoch): {res['move_s']} s")
             n0 = nconv(m)
             m.w(m.lab("inp_view"), b"\x01")
             back = until(m, n0, 1, 30.0)
@@ -385,7 +392,7 @@ SPR_SYMS = ("mach_in", "disp_mode", "chip_shd", "mem_rec_dirty", "disp_cur",
             "disp_nconv", "disp_one", "disp_px", "disp_py", "disp_crop",
             "disp_ymax", "spr_vec", "spr_id")
 SPR_ID = 0x31525053                 # "SPR1": tests/aros/spr.s SPR_ID
-SPR_MUTANTS = ("SPR_MUT_MASK", "SPR_MUT_PFH", "SPR_MUT_CACHE", "SPR_MUT_PAN")
+SPR_MUTANTS = ("SPR_MUT_MASK", "SPR_MUT_PFH", "SPR_MUT_NCONV", "SPR_MUT_PAN")
 
 
 def build_spr(out_dir: str, labels, defines: tuple = ()) -> tuple[bytes, dict]:
@@ -434,7 +441,11 @@ def model_view() -> dict | None:
             print(r.stdout + r.stderr)
             return None
     with open(MODEL_VIEW) as f:
-        return json.load(f)["hashes"]
+        d = json.load(f)
+    if [list(v) for v in d.get("views", [])] != [list(v) for v in VIEWS]:
+        os.remove(MODEL_VIEW)               # built for other windows: rebuild
+        return model_view()
+    return d["hashes"]
 
 
 # --------------------------------------------------------------------------
@@ -463,6 +474,8 @@ def ptr_words(hstart: int, vstart: int, height: int) -> tuple[int, int]:
 
 def arrow(seed: int, height: int) -> list[tuple[int, int]]:
     import random
+    if seed == 0:                               # an empty image (AROS's insert-disk pointer)
+        return [(0, 0)] * height
     r = random.Random(seed)
     return [(r.randrange(0x10000), r.randrange(0x10000)) for _ in range(height)]
 
@@ -491,8 +504,14 @@ def spr_cases() -> list[dict]:
         dict(name="1:1-pan-bottom", disp=hi2, view=(1, 20, 0), spr=(0x81 - 1 + 160, 0x2C + 190, 11, 6)),
         dict(name="1:1-hysteresis", disp=hi2, view=(1, 12, 28), spr=(0x81 - 1 + 100, 0x2C + 130, 11, 6)),
         dict(name="1:1-clamped-edge", disp=hi2, view=(1, 0, 28), spr=(0x81 - 1 + 4, 0x2C + 120, 11, 6)),
-        dict(name="1:1-lace", disp=dict(hi2, bplcon0=0xA204, lace=True), view=(1, 20, 78),
+        dict(name="1:1-lace", disp=dict(hi2, bplcon0=0xA204, lace=True), view=(1, 20, 77),
              spr=(0x81 - 1 + 160, 0x2C + 120, 11, 7)),
+        # fix round 1: an empty image never moves the window (the insert-disk
+        # pointer at the top-left); a palette change with a conversion re-reads
+        # the colours (nconv); the duty budget: 24 frames
+        dict(name="1:1-empty-no-pan", disp=hi2, view=(1, 20, 28), spr=(0x81 - 1, 0x2C, 16, 0)),
+        dict(name="fit-palette-change", disp=hi2, view=(0, 20, 0), spr=(0xC0, 0x60, 11, 1),
+             pal2=[0x0FF, 0xF0F, 0xFF0], scan=40),
     ]
 
 
@@ -519,10 +538,16 @@ def spr_prog(case: dict, pt: int) -> list[int]:
         mv_imm_abs_w(g, c, CUST + 0x1A2 + 2 * i)
     I.mv_l_imm_abs(g, pt, CUST + 0x120)
     mv_imm_abs_w(g, case.get("dma", 0x8320), CUST + 0x96)
-    for k in range(SPR_SCAN):
+    n = case.get("scan", SPR_SCAN)
+    for k in range(n):
         wait_vertb(g, f"w{k}")
         if k == SPR_SCAN // 2 and "spr2" in case:
             I.mv_l_imm_abs(g, pt + 0x200, CUST + 0x120)
+        if k == SPR_SCAN // 2 and "pal2" in case:
+            for i, c in enumerate(case["pal2"]):
+                mv_imm_abs_w(g, c, CUST + 0x1A2 + 2 * i)
+            mv_imm_abs_w(g, 0x123, CUST + 0x182)   # COLOR01 too: a conversion (COLOR17-19
+                                                    # alone are not display fields: a limit)
     g(HALT)
     return g.words()
 
@@ -547,7 +572,8 @@ def spr_expect(case: dict) -> dict:
     crop0 = min(py, ymax) if one else cur["crop"]
     pans = 0
     for _ in range(4):
-        r = R.spr_place(cur, pos, ctl, hires, one, px, crop0, ymax)
+        nonempty = any(a | b for a, b in arrow(seed, min(height, 21)))
+        r = R.spr_place(cur, pos, ctl, hires, one, px, crop0, ymax, nonempty)
         if "pan" not in r:
             break
         px, py = r["pan"]
@@ -555,7 +581,7 @@ def spr_expect(case: dict) -> dict:
         pans += 1
     r.update(px=px, py=py, pans=pans,
              blocks=R.spr_blocks(arrow(seed, height), height),
-             cols=[lut[c & 0xFFF] for c in SPR_PAL])
+             cols=[lut[c & 0xFFF] for c in case.get("pal2", SPR_PAL)])
     return r
 
 
@@ -729,6 +755,40 @@ def spr_calls(m, sbin: bytes, slab: dict, s: int) -> list[str]:
 RESULTS: dict = {}
 
 
+def spr_guard(m, sbin: bytes, slab: dict, s: int) -> list[str]:
+    """Fix round 1: spr_vec armed, then the module's bytes overwritten (a
+    tool stub, a resume without re-staging): the next frame hook must
+    disarm (spr_vec high byte 0) and the guest must run on to its HALT."""
+    from tests.run_program import Chunk, Session
+    case = spr_cases()[0]
+    f = spr_run_case(m, case, 0, sbin, slab, s)          # armed and working
+    hstart, vstart, height, seed = case["spr"]
+    pos, ctl = ptr_words(hstart, vstart, height)
+    prog = b"".join(w.to_bytes(2, "big") for w in spr_prog(case, SPRD))
+    sess = Session(target=m.tg, labels=m.labels, timeout=300.0)
+    sess.stage([Chunk(PROG, prog)])
+    m.load_driver()
+    m.w(SPR_ORG, sbin)
+    arm(m.w, m.lab)
+    m.w(SPR_ORG, bytes([0x00] * 0x40))                     # the ID (and code) overwritten
+    m.w(A.R, b"\0")
+    m.start(s)
+    t0 = time.monotonic()
+    while m.r(A.R, 1)[0] != 0xFF:
+        if time.monotonic() - t0 > 120:
+            return f + ["guard: the guest did not HALT (the overwritten module ran?)"]
+        time.sleep(0.5)
+    res = m.r(A.R, 3)
+    hi = m.r(m.lab("spr_vec") + 1, 1)[0]
+    ok = res[1] == 1 and res[2] == 0 and hi == 0
+    print(f"  {'guard-overwritten':20s} {'OK' if ok else 'FAIL'}  halt ${res[1]:02X} "
+          f"reason {res[2]} spr_vec hi ${hi:02X}")
+    if not ok:
+        f.append(f"guard: halt ${res[1]:02X} reason {res[2]}, spr_vec hi ${hi:02X} "
+                 "(want HALT_OK and disarmed)")
+    return f
+
+
 def arm(w, lab) -> None:
     """W13-D D2: arm the staged module: spr_vec := spr_frame (high byte last),
     spr_id := SPR_ID (a resume compares it; W13-W's loader does the same)."""
@@ -737,6 +797,8 @@ def arm(w, lab) -> None:
     w(lab("spr_vec"), bytes([entry & 0xFF]))
     w(lab("spr_vec") + 1, bytes([entry >> 8]))
     w(lab("spr_id"), SPR_ID.to_bytes(4, "little"))
+    w(0xD01B, b"\0")                    # VIC sprite priority / multicolour: 0
+    w(0xD01C, b"\0")                    # (hires sprites in front; the module never writes them)
 
 
 def leg_spr(prg: str, s: int, defines: tuple = ()) -> list[str]:
@@ -754,6 +816,7 @@ def leg_spr(prg: str, s: int, defines: tuple = ()) -> list[str]:
         for k, case in enumerate(spr_cases()):
             fails += spr_run_case(m, case, k, sbin, slab, s)
         fails += spr_calls(m, sbin, slab, s)
+        fails += spr_guard(m, sbin, slab, s)
         return fails
     return A.vice_session(prg, body)
 

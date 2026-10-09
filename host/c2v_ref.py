@@ -533,8 +533,9 @@ def disp_decide_view(st: dict, view: int = 0, px: int = PX_CENTRE,
                      py: int = 0) -> dict:
     """disp_decide plus W13-D's view: for a hires picture with view 1 the
     window starts at line min(py, ymax) and byte px of every row; "one"
-    says the 1:1 kernel runs.  ymax = L - 200 (LACE: L - 100), clamped to
-    0-255.  With LACE the 1:1 window is 200 frame lines from field line
+    says the 1:1 kernel runs.  ymax = L - 200 (LACE: L - 101), clamped to
+    0-255 (fix round 1: LACE L - 101, so the odd field's last frame line
+    stays inside the frame).  With LACE the 1:1 window is 200 frame lines from field line
     crop: each row advance is halved ((skip + 80) // 2 - 80, the two fields
     interleaved) and lines = min(2 * lines, 200).  "crop" is the first
     (field) line shown in either view (the pointer's vertical reference)."""
@@ -546,7 +547,7 @@ def disp_decide_view(st: dict, view: int = 0, px: int = PX_CENTRE,
     vstop = ((st["diwstop"] >> 8) & 0xFF) | ((~st["diwstop"] >> 7) & 0x100)
     lines = vstop - vstart
     lace = bool(st["bplcon0"] & LACE)
-    d["ymax"] = min(255, max(0, lines - (C2V_LINES // 2 if lace else C2V_LINES)))
+    d["ymax"] = min(255, max(0, lines - (C2V_LINES // 2 + 1 if lace else C2V_LINES)))
     d["crop"] = max(0, (lines - C2V_LINES) // 2)
     d["lace"] = lace
     if view and d["mode"] == MODE_HIRES:
@@ -574,6 +575,8 @@ def disp_convert_view(st: dict, read, lut: bytes, view: int = 0,
     planes = [disp_rows(read, (d["src"][p] + px) & 0xFFFFFF, ONE_ROW,
                         d["width"] + d["skip"][p] - ONE_ROW) for p in range(d["planes"])]
     planes += [bytes(C2V_LINES * ONE_ROW)] * (4 - d["planes"])
+    n = d["lines"] * ONE_ROW            # fix round 1: rows past the picture read 0
+    planes = [p[:n] + bytes(len(p) - n) for p in planes]
     out = convert_one(planes, st["color"][:16], lut)
     bmp = bytearray(out["bitmap"])
     for y in range(d["lines"], C2V_LINES):           # below DIWSTOP: 0
@@ -614,7 +617,7 @@ def spr_first_pixel(cur: dict, hires: bool) -> int:
 
 
 def spr_place(cur: dict, pos: int, ctl: int, hires: bool, one: bool, px: int,
-              crop: int, ymax: int) -> dict:
+              crop: int, ymax: int, nonempty: bool = True) -> dict:
     """One frame of spr_frame's position logic.  Returns {"hidden": True},
     {"pan": (px, py)} (the window moves; no VIC write this frame), or the
     VIC values {"x", "y", "msb", "xexp", "yexp", "height"}."""
@@ -627,7 +630,7 @@ def spr_place(cur: dict, pos: int, ctl: int, hires: bool, one: bool, px: int,
     lace = one and bool(cur["bplcon0"] & LACE)
     wy = sy - crop
     wx = sx - (4 * px if one else 0)
-    if one:
+    if one and nonempty:                # fix round 1: no pan to an invisible pointer
         npx, npy = px, crop
         if not SPR_EDGE_X[0] <= wx < SPR_EDGE_X[1]:
             npx = min(max(sx - 80, 0), 160) // 4
@@ -646,13 +649,14 @@ def spr_place(cur: dict, pos: int, ctl: int, hires: bool, one: bool, px: int,
 
 
 def spr_settle(cur: dict, pos: int, ctl: int, hires: bool, one: bool, px: int,
-               py: int, ymax: int, steps: int = 4) -> tuple[dict, int, int, int]:
+               py: int, ymax: int, steps: int = 4,
+               nonempty: bool = True) -> tuple[dict, int, int, int]:
     """spr_place frame after frame until the window stops moving (each pan
     converts: crop := min(py, ymax)).  Returns (placement, px, py, pans)."""
     pans = 0
     crop = min(py, ymax) if one else (cur.get("crop", 0))
     for _ in range(steps):
-        r = spr_place(cur, pos, ctl, hires, one, px, crop, ymax)
+        r = spr_place(cur, pos, ctl, hires, one, px, crop, ymax, nonempty)
         if "pan" not in r:
             return r, px, py, pans
         px, py = r["pan"]

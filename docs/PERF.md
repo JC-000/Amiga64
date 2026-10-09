@@ -874,7 +874,7 @@ hires-4 random picture, 200 lines converted:
 
 | Entry | fit | 1:1 |
 |---|---:|---:|
-| `disp_refresh`, hires4, random | 1,097,489 | 2,346,429 |
+| `disp_refresh`, hires4, random | 1,097,489 | 2,354,662 (fix round 1: + `disp_ozero`'s test per line) |
 | `disp_frame`, gen unchanged (W12-V: 100) | 130 | 130 |
 
 - **Why 1:1 costs 2.1×.** The 1:1 view converts twice over the same
@@ -899,9 +899,14 @@ hires-4 random picture, 200 lines converted:
 | C64U, 64 MHz, s = 4 | 0.27 s (module armed), 0.25 s (disarmed) | +0.14 s |
 | U64E, 48 MHz, s = 3 | 0.12 s (armed and disarmed) | +0.13 s |
 
-On the insert-disk screen AROS's pointer sits at the top-left, so the
-centred window re-centres on it at once: the second conversion is a real
-pan. The values are at the polls' resolution. The conversion itself is
+These are the first run's numbers. On the insert-disk screen AROS's
+pointer sits at the top-left, so the centred window re-centred on it at
+once, and that second conversion was a real pan. Since fix round 1 the pan
+follows only a pointer with a non-empty image, and AROS's insert-disk
+pointer is empty, so F1 converts once (C64U 0.23 s armed, 0.15 s disarmed:
+`fix1/hw/c64u_spr.txt`). A pan takes the same forced path as F1. A window
+move by a test-set offset plus the pixel epoch is not forced: it waits for
+the duty budget (24 guest frames ≈ 5.4 s at s = 4, measured 4.7 s). The values are at the polls' resolution. The conversion itself is
 ~37 ms at 64 MHz; the rest is the next frame hook and the poll.
 
 **The pointer, per `disp_frame` call** (`tests/run_spr.py --legs spr`,
@@ -909,12 +914,15 @@ pan. The values are at the polls' resolution. The conversion itself is
 
 | Case | φ2 |
 |---|---:|
-| no change (cache hit: PT/POS/CTL and `disp_nconv` equal) | 786 |
-| position change (POS/CTL: the image is read again, as the brief asks) | 4,467 |
-| the frame after it | 861 |
-| image change (SPR0PT) | 4,938 |
-| shown → hidden | 54 |
+| no change (cache hit: PT/POS/CTL and `disp_nconv` equal) | 839 |
+| position change (POS/CTL: the image is read again, as the brief asks) | 4,838 |
+| the frame after it | 839 |
+| image change (SPR0PT) | 5,539 |
+| shown → hidden | 63 |
 | hidden → hidden (no VIC write, checked) | 54 |
+
+Fix round 1 numbers. `disp_vw`'s ID guard adds ~50 φ2 per armed frame. The
+image read also ORs the image's bytes, for the pan gate.
 
 - **What a frame costs.** The common case is ~0.8k φ2: one 4-byte REU
   fetch, the decode and the VIC writes. Every move or image change adds
@@ -922,15 +930,16 @@ pan. The values are at the polls' resolution. The conversion itself is
   under `sei` (~3.6k).
 - **Against the frame.** At s = 4 a guest frame is 227k φ2: 0.35%, or 2%
   for a frame with a move. At 64 MHz this is noise.
-- **The module.** It is 766 bytes at `$C600-$C8FD`. Its state is in
-  `c2v_args` + 180..211.
+- **The module.** It is 768 bytes at `$C600-$C8FF` after fix round 1. Its
+  state is in `c2v_args` + 180..212.
 
 **Memory (MAIN).** The BSS end goes from $9C0B to $9E0B: **+512 B**
 (budget 544 B).
 - c2v CODE +1 page: the 1:1 kernel, 9 B spare.
 - disp CODE +1 page: LACE, hires BPU 1-3, the 1:1 hooks.
 - disp BSS: 12 B in its page.
-- BHI tail: $A778-$A79F (40 B: the F1 toggle and the `spr_vec` hook).
+- BHI tail: $A778-$A7DA (99 B: the F1 toggle, the `spr_vec` hook with its
+  ID guard, `disp_ozero`).
 - Every module after c2v moves by +$100 and every module after disp by
   +$200, by whole pages only (`build/evidence/w13-vis/mapdiff.txt`).
 - core.s is unchanged, and `perf_cycles --max-delta 0` passes against the

@@ -1044,8 +1044,8 @@ spec: `docs/C2V.md` "Row skip", "Display refresh (S3.5)". Reference:
     (I2): `disp_view` (0 fit, 1 1:1), `disp_px` (the window's first byte,
     0-40), `disp_py` (its first line, before clamping), `disp_ymax`, and
     `disp_one` (the last decision is the 1:1 view). `disp_ymax` is
-    L − 200, or L − 100 with LACE, clamped to 0-255; every shown decision
-    sets it.
+    L − 200, or L − 101 with LACE, clamped to 0-255; every shown decision
+    sets it. (Fix round 1: LACE L − 101.)
   - **The toggle.** `inp_view` (I1; until W13-I lands, disp.s's stand-in
     under `DISP_INPV_LOCAL`) bit 0 is an edge.
     - `disp_frame` consumes it first, clearing bit 0 only.
@@ -1056,7 +1056,14 @@ spec: `docs/C2V.md` "Row skip", "Display refresh (S3.5)". Reference:
   - **The decision.** For hires (BPU 1-4) with `disp_view` = 1:
     - `disp_one` = 1 and `disp_crop` = min(`disp_py`, `disp_ymax`).
     - With BPLCON0 LACE, each plane's row advance is halved (the two
-      fields interleave) and `disp_lines` = min(2 · `disp_lines`, 200).
+      fields interleave; an arithmetic shift, so negative modulos work) and
+      `disp_lines` = min(2 · `disp_lines`, 200). `disp_ymax` = L − 101, so
+      the odd field's last frame line read is ≤ 2L − 1.
+    - Rows past the picture (frame line ≥ `disp_lines`) read 0
+      (`disp_ozero`, BHI, from `c2v_ones` through `c2v_v_olim`): they add
+      nothing to the colour counts and show pen 0, as in the fit view. A
+      char row that straddles the picture's end shows the cell's bg below
+      it.
     - Known gap: the 512 KB check covers only the current field's rows.
       The other field's rows in between are not checked; a straddling row
       shows wrong pixels in that row only, since the DMA target is fixed.
@@ -1124,11 +1131,29 @@ spec: `docs/C2V.md` "Row skip", "Display refresh (S3.5)". Reference:
     LACE 50, 0, `disp_ymax`). C = 1 only if px or the window's line
     changed, so a clamped edge never converts. Hysteresis: after a pan the
     pointer is ≥ 48 C64 px from every edge.
+  - **Arming guard (fix round 1).** Before calling through `spr_vec`,
+    `disp_vw` (BHI) compares the module's ID at `spr_vec` + 3..6 with
+    `spr_id`. On a mismatch, for example a tool stub or a resume that did
+    not re-stage the module, it clears `spr_vec`'s high byte (disarmed) and
+    returns C = 0. Test: `run_spr` leg spr, case `guard-overwritten`.
+  - **Hand-off rule.** Whoever launches a session stages the module at
+    `$C600` and arms it (`run_spr.arm`: `spr_vec`, `spr_id`, `$D01B`/`$D01C`
+    := 0) after the last stub, `test_load_chunk` or runner-helper write that
+    can touch `$C000-$C8FF`, and again after every resume. W13-W's loader
+    does this at the merge.
+  - **Pan gate (fix round 1).** The window re-centres only while the image
+    has a pixel (the OR of its 4 · height bytes). An empty pointer, such as
+    AROS's on the insert-disk screen, never moves the window: it keeps D1's
+    centre or the test-set offset.
   - **Limits:**
     - The height is capped at 21 lines (VIC; LACE 1:1 at 42 frame lines).
     - The attach bit (sprite 1) is ignored.
     - Sprite position is not dilated by BPLCON1 scroll.
     - Sprites 1-7 are not shown.
+    - A pan converts at once, past the duty budget (user-paced, like F1).
+    - A pointer colour change alone (COLOR17-19, not display fields, so no
+      conversion), or an image edited in place at the same SPR0PT, stays
+      stale until the pointer moves (POS/CTL change) or the screen converts.
 - **C64 resources:** writes the c2v regions (bitmap, matrix under I/O,
   colour RAM, `c2v_stage` during `disp_init`, `c2v_args`), `$D011`,
   `$D016`, `$D018`, `$D020`, `$D021`, and `$DD00` bits 1–0 (bits 7–2 and
@@ -1642,7 +1667,8 @@ the UCI model).
 - **Nothing else writes the snapshot region**: the memory API traps every
   guest access to `$DF0000-$DFFFFF` to chip.s, which never addresses the
   REU (no REC programming in chip.s/cia.s/cop.s); the only REU users under
-  `$DF` are disp.s (the LUT, `$DF0000-$DF0FFF`) and snap.s (the snapshot
+  `$DF` are disp.s (the LUT, `$DF0000-$DF0FFF`, and W13-D's zero row
+  `disp_zero`, `$DF4000-$DF40FF`, all zero: `zero_check` still holds) and snap.s (the snapshot
   area, and `SNAP_SAV` `+$2E00-$2EFF`: snap_res's own save of the scratch
   page at every resume entry, F1). Checked after m3 on every backend: the
   REU from the end of the BSS image to `SNAP_SAV`, from `SNAP_SAV` + 256 to
@@ -1710,4 +1736,9 @@ before `snap_keep`).
 | VIC registers, `$DD00` bank, bitmap, matrix, colour RAM | hardware / `$D000`, `$E000` | — | rebuilt by the forced conversion (I2) | derived from `disp_st` + guest memory |
 | c2v pair tables, `c2v_args` | `$B900-$BAFF`, `$BF00` | — | `disp_init` → `c2v_init`; args per conversion | derived |
 | LUT | REU `$DF0000` | — | `disp_init` stashes it | derived |
+| W13-D zero row `disp_zero` | REU `$DF4000-$DF40FF` | — | `disp_init` stashes it | derived (zeros) |
+| W13-D view state `disp_view`/`px`/`py`/`ymax`/`one` | `disp.s` BSS | image | restored | the 1:1 view survives a resume |
+| W13-D D2 `spr_vec`, `spr_id` | `disp.s` BSS | image | restored as saved; the module they point at is NOT in the image: `disp_vw` compares the module's ID (`spr_vec` + 3..6) with `spr_id` every frame hook and disarms (`spr_vec` high byte := 0) on a mismatch | the hand-off rule below re-stages and re-arms |
+| W13-D D2 pointer module, its state | `$C600-$C8FF`, `c2v_args` + 180..212 | — | re-staged and re-armed by whoever launches the session (hand-off rule); its state is zero when staged and rebuilt from `chip_shd` + guest memory | test-time module, not in the PRG |
+| W13-D D2 sprite blocks, pointers | RAM under I/O `$D400-$D4BF`, `$D3F8-$D3FA` | — | rebuilt by the module's first image read | derived |
 | guest memory | REU chip RAM, slow RAM + `$DC0000-$DEFFFF`, ROM banks | stays (REU-resident) / file spans 2-5 | stays / LOAD_REU | the guest's RAM. AROS WRITES `$DC0000-$DEFFFF` (unmapped in the profile; not zero after m3 on both Ultimates), so the slow-RAM span runs to `$DEFFFF`. `$200000-$BEFFFF` and `$E80000-$F7FFFF` read zero after m3 (`aros_resume` m3 leg, Ultimate) and are not filed: a resume needs them zero, as the boot does (`host/machine.ZERO_SPANS`) |

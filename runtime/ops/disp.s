@@ -61,8 +61,8 @@
 ; walk never goes down), DISP_MUT_W12MCK (s2 not summed), DISP_MUT_W12RLE
 ; (LUT colour bit 3 lost), DISP_MUT_W12RUN (LUT run length bit 3 lost).
 ; W13-D: DISP_MUT_W13PX (the 1:1 window's byte offset lost),
-; DISP_MUT_W13EDGE (inp_view bit 0 never consumed), DISP_MUT_W13LACE (LACE's row advance not
-; halved).
+; DISP_MUT_W13EDGE (inp_view bit 0 never consumed), DISP_MUT_W13LSR (LACE's
+; advance halved by a logical shift), DISP_MUT_W13BPU5 (hires BPU 5 converts).
 ;
 ; Link layout: CODE and BSS are each padded to whole pages, no RODATA or
 ; DATA, so modules linked after this one move by whole pages only.
@@ -87,6 +87,7 @@
 .import c2v_ones, c2v_ofin                      ; W13-D: the 1:1 view
 .export disp_view, disp_px, disp_py, disp_one, disp_ymax ; W13-D: for the host
 .export spr_vec, spr_id, disp_t               ; W13-D D2: the pointer module's hook
+.export disp_ozero                              ; W13-D: c2v_ones' rows past the picture
 DISP_INPV_LOCAL = 1             ; W13-D: until W13-I lands; the supervisor deletes this line at the W13-I merge
 .ifdef DISP_INPV_LOCAL
 .export inp_view                ; W13-D: host-written stand-in for W13-I's (I1)
@@ -185,7 +186,7 @@ DISP_VHI       = $08              ; hires, 40 columns
 disp_view:  .res 1              ; W13-D: 0 fit, 1 the 1:1 view (F1 toggles)
 disp_px:    .res 1              ; W13-D: 1:1 window's first byte in the row (0-40)
 disp_py:    .res 1              ; W13-D: 1:1 window's first line (clamped to disp_ymax)
-disp_ymax:  .res 1              ; W13-D: lines past the 1:1 window (L - 200, LACE L - 100; 0-255)
+disp_ymax:  .res 1              ; W13-D: lines past the 1:1 window (L - 200, LACE L - 101; 0-255)
 disp_one:   .res 1              ; W13-D: the last decision is the 1:1 view
 spr_vec:    .res 2              ; W13-D D2: the pointer module's entry (LE; high byte 0 = none)
 spr_id:     .res 4              ; W13-D D2: the armed module's ID (a resume checks it)
@@ -646,7 +647,11 @@ disp_decide:
         bne @md
 @hi:    cmp #$90                ; W13-D: hires BPU 1-4 ($90-$C0); absent
         bcc @no                 ; W13-D: planes read disp_zero (disp_args)
+.ifdef DISP_MUT_W13BPU5
+        cmp #$E0                ; mutant: hires BPU 5 converts too
+.else
         cmp #$D0                ; W13-D
+.endif
         bcs @no                 ; W13-D
         lsr                     ; W13-D
         lsr                     ; W13-D
@@ -1247,6 +1252,7 @@ disp_alut:
 ; ===========================================================================
 DISP_PXC   = 20                 ; @value 1:1: the window centred (bytes)
 DISP_LACE  = $04                ; @value BPLCON0 low byte: LACE (bit 2)
+DISP_A_OLIM = c2v_args + 145    ; W13-D: the 1:1 kernel's lines with data (c2v_v_olim)
 .assert (spr_vec & $FF) <> $FF, error, "W13-D: jmp (spr_vec) must not straddle a page"
 
 ; BHI tail ($A778-$A7FF, W13-D; runtime/c64.cfg BCODE): disp runs with
@@ -1259,12 +1265,25 @@ DISP_LACE  = $04                ; @value BPLCON0 low byte: LACE (bit 2)
 disp_vw:
         lda inp_view
         lsr
-        bcs :+
+        bcs @f1
         lda spr_vec+1           ; D2: the pointer module (tests/aros/spr.s)
         beq @x                  ; none (C = 0)
+        sta @id+2               ; fix round 1: armed only while the module's
+        lda spr_vec             ; ID (+3..+6) still equals spr_id (a stub or
+        sta @id+1               ; a resume without re-staging overwrote it:
+        ldx #6                  ; disarm, no call)
+@id:    lda $FFFF,x             ; operand patched: the module's base
+        cmp spr_id - 3,x
+        bne @off
+        dex
+        cpx #3
+        bcs @id
         jmp (spr_vec)           ; its C = 1: the window moved, convert now
-:
-        asl
+@off:   lda #0
+        sta spr_vec+1           ; disarmed
+        clc
+        rts
+@f1:    asl
 .ifdef DISP_MUT_W13EDGE
         bit inp_view            ; mutant: the edge is never consumed
 .else
@@ -1282,11 +1301,29 @@ disp_vw:
 @x:     rts
 
 
+
+; disp_ozero — W13-D fix round 1 (from c2v_ones, after each line's fetch):
+; a line at or past c2v_v_olim (disp_lines: below DIWSTOP) reads 0 in all
+; four stage rows, so it adds nothing to the counts and shows pen 0.
+disp_ozero:
+        lda c2v_args + 68       ; c2v_v_line
+        cmp DISP_A_OLIM
+        bcc @r
+        lda #0
+        ldx #39
+:       sta c2v_stage,x
+        sta c2v_stage + $100,x
+        sta c2v_stage + $200,x
+        sta c2v_stage + $300,x
+        dex
+        bpl :-
+@r:     rts
+
 .segment "CODE"
 
 ; disp_vcrop — W13-D (disp_decide, after disp_lines): disp_ymax := L - W
-; clamped to 0-255, W = 200 lines, or 100 with BPLCON0 LACE (the 1:1 view
-; shows 200 frame lines = 100 field lines); disp_one := the decision is
+; clamped to 0-255, W = 200 lines, or 101 with BPLCON0 LACE (the 1:1 view
+; shows 200 frame lines = 100 field lines, +1 for the odd field); disp_one := the decision is
 ; hires and the view 1:1; then disp_crop := min(disp_py, disp_ymax) and,
 ; with LACE, disp_lines := min(2 * disp_lines, 200).
 disp_vcrop:
@@ -1300,7 +1337,8 @@ disp_vcrop:
         lda disp_cur + DISP_S_BPLCON0
         and #DISP_LACE
         beq :+
-        ldy #DISP_LINES / 2
+        ldy #DISP_LINES / 2 + 1 ; (fix round 1: L - 101, so the odd field's
+                                ; last frame line is <= 2L - 1)
 :       sty disp_t + 2
         sec                     ; X:A = L - W
         lda disp_cur + DISP_S_DIWSTOP + 1
@@ -1383,23 +1421,24 @@ disp_one1:
         tay
         lda DISP_A_SKIP+1,x
         adc #0
-.ifndef DISP_MUT_W13LACE
-        cmp #$80                ; (mutant: the advance not halved)
-        ror
-        sta DISP_A_SKIP+1,x
-        tya
-        ror
-.else
-        sta DISP_A_SKIP+1,x
-        tya
+.ifndef DISP_MUT_W13LSR
+        cmp #$80                ; arithmetic shift (mutant: logical, a
+.else                           ; negative advance turns positive)
+        clc
 .endif
+        ror
+        sta DISP_A_SKIP+1,x
+        tya
+        ror
         sec
         sbc #80
         sta DISP_A_SKIP,x
         bcs @h
         dec DISP_A_SKIP+1,x
         bcc @h                  ; (always)
-@k:     jsr c2v_ones
+@k:     lda disp_lines          ; fix round 1: rows past the picture read 0
+        sta DISP_A_OLIM         ; (disp_ozero)
+        jsr c2v_ones
         ldx #15
         jsr disp_cols
         jsr c2v_ofin

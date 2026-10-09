@@ -571,7 +571,8 @@ so both fields are shown.
     frame line 2·crop (or 2·crop + 1 on the odd field's pointers).
   - Each row advance is halved: skip := (skip + 80) / 2 − 80, which for
     BPLxMOD = 80 is advance 80. The two fields interleave in memory.
-  - `disp_ymax` = L − 100.
+  - `disp_ymax` = L − 101 (fix round 1: the odd field's last frame line
+    is ≤ 2L − 1).
   - `disp_lines` := min(2 · L, 200).
   - `disp_decide`'s 512 KB check covers only the current field's rows.
     The other field's rows in between are unchecked: a straddling row
@@ -581,6 +582,11 @@ so both fields are shown.
   disp.s defines a stand-in under `DISP_INPV_LOCAL`.
   - It flips `disp_view` and centres the window: `disp_px` = 20,
     `disp_py` = `disp_ymax` / 2.
+- **Rows past the picture** (frame line ≥ `disp_lines`) read 0 in all four
+  stage rows: `disp_ozero` (disp.s, BHI), called by `c2v_ones` after each
+  line's fetch, against `c2v_v_olim` (`c2v_args` + 145), which `disp_one1`
+  sets. They add nothing to the counts and show pen 0, as the fit view
+  does.
   - It converts at once, past the duty budget, because it is user-paced.
   - Only bit 0 is cleared.
 - **A test sets the offset** with `disp_px`/`disp_py`. The next conversion
@@ -612,5 +618,6 @@ so both fields are shown.
 - disp CODE +1 page ($A00 → $B00).
 - disp BSS: 12 bytes inside its page (`disp_view`, `disp_px`, `disp_py`,
   `disp_ymax`, `disp_one`, `inp_view`, `spr_vec`, `spr_id`).
-- The F1 toggle and the `spr_vec` hook are in BHI's tail (`BCODE`).
+- The F1 toggle, the `spr_vec` hook with its ID guard, and `disp_ozero`
+  are in BHI's tail (`BCODE`, $A778-$A7DA).
 - MAIN: BSS end $9C0B → $9E0B (+512 B; budget 544 B).

@@ -11,7 +11,7 @@
 ;
 ; Entries:
 ;   spr_arm    (JSR, host or loader) spr_vec := spr_frame (high byte last),
-;              spr_id := SPR_ID.  disp_frame then calls spr_frame through
+;              spr_id := SPR_MAGIC.  disp_frame then calls spr_frame through
 ;              spr_vec once per frame hook (disp_vw, when F1 is not pressed)
 ;   spr_frame  (from disp_vw: BASIC out, I/O in; clobbers A/X/Y) the
 ;              pointer; returns C = 1 when it moved the 1:1 window (disp_px,
@@ -46,15 +46,15 @@
 ; if px or the window's line changed (no conversion at a clamped edge).
 ;
 ; Mutants (tests/run_spr.py --mutants): SPR_MUT_MASK (sprite 2 = DATA),
-; SPR_MUT_PFH (DIWSTRT H instead of DDFSTRT), SPR_MUT_CACHE (the image
-; never re-read), SPR_MUT_PAN (no pan).
+; SPR_MUT_PFH (DIWSTRT H instead of DDFSTRT), SPR_MUT_NCONV (no re-read
+; after a conversion), SPR_MUT_PAN (no pan).
 ; ---------------------------------------------------------------------------
 
 .include "../../runtime/rc/zp.inc"
 .include "../../runtime/rc/ram.inc"
 .include "../../runtime/rc/machine.inc"
 
-SPR_ID     = $31525053          ; @value "SPR1" (LE): the module's ID in spr_id
+SPR_MAGIC     = $31525053          ; @value "SPR1" (LE): the module's ID in spr_id
 S_DMACON   = 1                  ; @value disp_st: DMACON (LE)
 S_COLOR17  = 39 + 34            ; @value disp_st: COLOR17 (LE)
 C_BPLCON0  = 2                  ; @value disp_cur: BPLCON0 (LE)
@@ -73,7 +73,7 @@ FETCH      = $91                ; @value REC: execute, REU -> C64
 spr_entry:
         jmp spr_frame           ; $C600: the frame entry (spr_vec)
 spr_idv:
-        .dword SPR_ID           ; $C603: the ID a resume compares
+        .dword SPR_MAGIC           ; $C603: the ID a resume compares
 
 ; ---------------------------------------------------------------------------
 ; State (c2v_args + 180 .., RAM under BASIC: not in the snapshot image; the
@@ -92,7 +92,8 @@ npx   = ST + 28
 npy   = ST + 29
 tmp   = ST + 30
 tmp2  = ST + 31
-.assert ST + 32 <= c2v_args + $100, error, "spr: state past c2v_args"
+sne   = ST + 32         ; nonzero: the image has a pixel (the pan follows only then)
+.assert ST + 33 <= c2v_args + $100, error, "spr: state past c2v_args"
 
 spr_frame:
         lda mach_in
@@ -149,12 +150,12 @@ spr_frame:
         sec                     ; height = VSTOP - VSTART: 1-21
         lda snew + 5
         sbc snew + 3
-        sta sh
+        tay
         txa
         sbc ST + O_SY + 1
         bmi @hid
         bne @h21
-        lda sh
+        tya
         beq @hid
         cmp #22
         bcc :+
@@ -193,17 +194,13 @@ spr_frame:
         ldx #6                  ; the image: SPR0PT, POS or CTL changed,
 :       lda snew,x              ; or a conversion since (the palette)?
         cmp sold,x
-.ifdef SPR_MUT_CACHE
-        bne @pos                ; mutant: a change never re-reads the image
-.else
         bne @img
-.endif
         dex
         bpl :-
         lda disp_nconv          ; (low byte: 256 conversions alias, harmless)
         cmp snc
-.ifdef SPR_MUT_CACHE
-        bne @pos
+.ifdef SPR_MUT_NCONV
+        bne @pos                ; mutant: a conversion never re-reads it
 .else
         bne @img
 .endif
@@ -236,6 +233,8 @@ spr_frame:
         sta npx
         lda disp_crop
         sta npy
+        lda sne                 ; an empty image (an invisible pointer):
+        beq @nopan              ; the window stays (D1's centre / the test offset)
 .ifndef SPR_MUT_PAN
         ldx #16                 ; x: re-centre if WX is off [16, 144)
         lda #144
@@ -249,25 +248,21 @@ spr_frame:
         lsr
         lsr
         sta npx
-:       ldx #32                 ; y: off [32, 168) (LACE: [16, 84))
-        lda #168
-        ldy lc
-        beq :+
-        ldx #16
-        lda #84
-:       ldy #O_WY
+:       ldy lc                  ; y: off [32, 168) (LACE: [16, 84))
+        ldx spr_ylo,y
+        lda spr_yhi,y
+        ldy #O_WY
         jsr spr_edge
-        bcc :++
-        lda #100                ; py := clamp(SY - 100 (LACE 50), 0, ymax)
-        ldy lc
-        beq :+
-        lda #50
-:       ldx disp_ymax
+        bcc :+
+        ldy lc                  ; py := clamp(SY - 100 (LACE 50), 0, ymax)
+        lda spr_yhalf,y
+        ldx disp_ymax
         ldy #O_SY
         jsr spr_rc
         sta npy
 :
 .endif
+@nopan:
         ldx npx
         lda npy
         cpx disp_px
@@ -306,12 +301,16 @@ spr_frame:
         bcc :+
         lda #7                  ; X bit 8 of sprites 0-2
 :       sta VIC_SPRMSB
-        stx VIC_SPR0X
-        stx VIC_SPR0X + 2
-        stx VIC_SPR0X + 4
-        sty VIC_SPR0X + 1
-        sty VIC_SPR0X + 3
-        sty VIC_SPR0X + 5
+        txa
+        ldx #4
+:       sta VIC_SPR0X,x         ; sprites 2, 1, 0: X, Y
+        pha
+        tya
+        sta VIC_SPR0X + 1,x
+        pla
+        dex
+        dex
+        bpl :-
         lda disp_one
         beq :+
         lda #7
@@ -326,6 +325,10 @@ spr_frame:
         clc
         rts
 @hidj:  jmp @hid
+
+spr_ylo:   .byte 32, 16         ; the y band's lower edge (LACE: field lines)
+spr_yhi:   .byte 168, 84        ; its upper edge
+spr_yhalf: .byte 100, 50        ; half the window
 
 ; spr_sb — the s16 at ST + Y -= A (unsigned).  Keeps Y.
 spr_sb:
@@ -412,6 +415,12 @@ spr_img:
         asl
         asl
         sta tmp                 ; 4 * height: the bytes converted
+        tay                     ; sne := OR of those bytes (0: an empty image)
+        lda #0
+:       ora SIMG - 1,y
+        dey
+        bne :-
+        sta sne
         php
         sei
         lda CPU_PORT
@@ -454,10 +463,8 @@ spr_img:
         pla
         sta CPU_PORT
         plp
-        lda #0
-        sta VIC_SPRMC           ; hires, in front
-        sta VIC_SPRPRI
-        rts                     ; (C1: spr_frame dirtied the REC already)
+        rts                     ; (C1: spr_frame dirtied the REC already;
+                                ; arming sets $D01B/$D01C = 0: hires, in front)
 
 ; spr_rf — REU fetch of X bytes to A:Y (the REU address as set).
 spr_rf:

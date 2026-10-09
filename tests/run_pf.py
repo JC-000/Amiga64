@@ -84,7 +84,8 @@ VARIANTS = {
     "w12run": ["DISP_MUT_W12RUN=1"],
     # W13-D: the 1:1 view (leg view)
     "w13px": ["DISP_MUT_W13PX=1"],
-    "w13edge": ["DISP_MUT_W13EDGE=1"], "w13lace": ["DISP_MUT_W13LACE=1"],
+    "w13edge": ["DISP_MUT_W13EDGE=1"], "w13lsr": ["DISP_MUT_W13LSR=1"],
+    "w13bpu5": ["DISP_MUT_W13BPU5=1"],
 }
 NOT_TEETH = ("stub", "lutram", "trace")
 TEETH = [k for k in VARIANTS if k not in NOT_TEETH]
@@ -100,7 +101,7 @@ MUTANT_LEGS = {"bitorder": ["shim", "fixture"], "pal": ["shim", "fixture"],
                "w12up": ["shim"], "w12mck": ["shim"], "w12rle": ["shim"],
                "w12run": ["shim"],            # W11-A (supervisor grant, efrom)
                "w13px": ["view"], "w13edge": ["view"],
-               "w13lace": ["view"]}
+               "w13lsr": ["view"], "w13bpu5": ["view"]}
 
 
 def build(prg: str, name: str, defines: list[str], shim: bool) -> str:
@@ -1307,13 +1308,30 @@ def view_steps() -> list[dict]:
         {"name": "lace-fit", "st": dict(LACE_ST, gen=0x2A), "act": "kick",
          "pre": {"disp_view": 0}, "view": (0, 20, 0)},
         {"name": "lace-f1-centre", "st": dict(LACE_ST, gen=0x2A), "act": "kick",
-         "pre": {"inp_view": 1}, "view": (1, 20, 78), "exact": True},   # ymax 156
+         "pre": {"inp_view": 1}, "view": (1, 20, 77), "exact": True},   # ymax 155
         {"name": "lace-odd-top", "st": dict(LACE_ST, gen=0x2B,
                                             bplpt=[LACE_BASE + 80, LACE_BASE + 0xA050]),
          "act": "refresh", "pre": {"disp_px": 0, "disp_py": 0}, "view": (1, 0, 0),
          "exact": True},
         {"name": "nolace-after", "st": dict(WB_ST, gen=0x2C), "act": "kick",
          "pre": {"disp_py": 40}, "view": (1, 0, 40), "exact": True},
+        # fix round 1: the odd field at the bottom clamp (the last frame line
+        # read <= 2L - 1); a LACE screen with a negative modulo (advance -80
+        # per frame line: the arithmetic shift); rev-vis case 165 (L = 180:
+        # rows past the picture read 0); hires BPU 5 stays BLANK (DEPTH)
+        {"name": "lace-odd-bottom", "st": dict(LACE_ST, gen=0x2D,
+                                               bplpt=[LACE_BASE + 80, LACE_BASE + 0xA050]),
+         "act": "refresh", "pre": {"disp_px": 40, "disp_py": 255}, "view": (1, 40, 255)},
+        {"name": "lace-negmod", "st": dict(LACE_ST, gen=0x2E, bpl1mod=-240 & 0xFFFF,
+                                           bpl2mod=-240 & 0xFFFF,
+                                           bplpt=[LACE_BASE + 511 * 80,
+                                                  LACE_BASE + 0xA000 + 511 * 80]),
+         "act": "refresh", "pre": {"disp_px": 8, "disp_py": 20}, "view": (1, 8, 20),
+         "exact": True},
+        {"name": "short-180", "st": dict(VIEW_HIRES, gen=0x2F, diwstop=0xE0C1),
+         "act": "refresh", "pre": {"disp_px": 5, "disp_py": 0}, "view": (1, 5, 0)},
+        {"name": "bpu5-blank", "st": dict(VIEW_HIRES, gen=0x30, bplcon0=0xD200),
+         "act": "kick", "pre": {}, "view": None, "blank": R.WHY_DEPTH},
     ]
 
 
@@ -1420,7 +1438,11 @@ def view_step(s: Pf, step: dict, mem: Mem, lut: bytes) -> list[str]:
     want_iv = step.get("pre", {}).get("inp_view", iv) & 0xFE
     if "inp_view" in step.get("pre", {}) and iv != want_iv:
         f.append(f"inp_view = ${iv:02X}, want ${want_iv:02X} (only bit 0 is D's)")
-    if step["view"] is None:
+    if step.get("blank"):
+        if (after["mode"], after["why"]) != (R.MODE_BLANK, step["blank"]):
+            f.append(f"state {after}: want BLANK, why {step['blank']}")
+        f = [x for x in f if "m_rok" not in x]
+    elif step["view"] is None:
         top, io = C.expected_blocks(s, g, {"bitmap": b"", "screen": b""})
         top = bytearray(top)
         top[C.NMIVEC - 0xE000:C.NMIVEC - 0xE000 + 2] = g["top"][
