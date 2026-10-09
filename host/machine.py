@@ -34,6 +34,8 @@ from dataclasses import dataclass
 # --- Profile (mirrors runtime/rc/machine.inc; host/rescheck.py checks) -------
 AROS_CHIP = 0x000000
 AROS_CHIP_END = 0x1FFFFF
+TD_ADF = 0x200000                    # W13-W: the staged DF0 disk (rc machine.inc)
+TD_ADF_END = 0x2DBFFF
 AROS_SLOW = 0xC00000
 AROS_SLOW_END = 0xDBFFFF
 AROS_EXT = 0xE00000

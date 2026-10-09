@@ -85,7 +85,7 @@ def test_snap_region_in_both_profiles_and_inside_the_io_bank():
 
 def test_ranges_are_the_machine_profile():
     assert F.RANGES == (
-        (machine.AROS_CHIP, machine.AROS_CHIP_END - machine.AROS_CHIP + 1),
+        (machine.AROS_CHIP, machine.TD_ADF_END - machine.AROS_CHIP + 1),   # W13-W: + the disk
         (machine.AROS_SLOW, 0xDF0000 - machine.AROS_SLOW),   # + $DC0000-$DEFFFF
         (machine.AROS_EXT, machine.AROS_EXT_END - machine.AROS_EXT + 1),
         (machine.AROS_ROM, machine.AROS_ROM_END - machine.AROS_ROM + 1))
@@ -93,6 +93,7 @@ def test_ranges_are_the_machine_profile():
     for sym in ("AROS_CHIP", "AROS_EXT", "AROS_ROM"):
         assert f".faraddr {sym}\n" in src, sym
     assert ".dword disp_lut - AROS_SLOW" in src
+    assert ".dword TD_ADF_END - AROS_CHIP + 1" in src           # W13-W
 
 
 def test_fletcher_is_machines():

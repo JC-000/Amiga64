@@ -106,9 +106,11 @@ FILE_OWNERS = {
     "tests/runner/run_program.s": "run",
     "tests/aros/mboot.s": "aros",       # W11-A machine-mode boot driver (S3.7)
     "tests/aros/spr.s": "disp",         # W13-D D2: the pointer module (machine-mode, test-time)
+    "tests/aros/td.s": "td",            # W13-W machine-mode module (HLE trackdisk)
     "runtime/ops/snap.s": "snap",       # W12-T (supervisor-approved) suspend/resume
     "runtime/ops/ureu.s": "snap",       # W12-T (supervisor-approved) UCI REU I/O
     "runtime/ops/inp.s": "inp",         # W13-I joystick -> mouse (machine-mode input)
+    "runtime/ops/td.s": "td",           # W13-W HLE trackdisk and the DF0 drive
 }
 
 # Owners by glob, for module families that grow by file (checked after the
