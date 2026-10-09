@@ -1009,15 +1009,25 @@ def leg_gap(prg: str) -> list[str]:
     from tests import run_mach as M
     from tests.run_mach import BASE, F_INIT, F_SUPER, clean
 
+    def ram(rig, fn):
+        """Wave 13 (supervisor; rev-vis round 3): the trace bytes live in BHI
+        (RAM under BASIC ROM), so the host reads and writes them with $01 =
+        $34 around the access; a plain read at $37 returns BASIC ROM."""
+        rig.t.write_memory(0x0001, bytes([0x34]), override="run_pf gap: RAM under BASIC")
+        try:
+            return fn()
+        finally:
+            rig.t.write_memory(0x0001, bytes([0x37]), override="run_pf gap: runner port")
+
     def body(rig):
         f: list[str] = []
         n_dn = rig.lab("DISP_N")
         rig.call(rig.lab("chip_reset"))
         rig.call(rig.lab("cop_reset"))
         rig.call(rig.lab("disp_init"))
-        rig.w(rig.lab("disp_gmin"), b"\xFF" * 4)
-        rig.w(rig.lab("disp_tval"), b"\0")
-        rig.w(rig.lab("disp_ngap"), b"\0\0")
+        ram(rig, lambda: (rig.w(rig.lab("disp_gmin"), b"\xFF" * 4),
+                          rig.w(rig.lab("disp_tval"), b"\0"),
+                          rig.w(rig.lab("disp_ngap"), b"\0\0")))
         pl0, pl1 = rnd(200, 8000), rnd(201, 8000)
         n0 = len(I.link(live_prog(0, 0, GAP_NV, n_dn + 4, True), BASE))
         lw, col1 = live_list(0, 0)
@@ -1031,8 +1041,8 @@ def leg_gap(prg: str) -> list[str]:
         res = rig.run(BASE, s=GAP_S, flags=F_INIT | F_SUPER)
         if not clean(res, "gap", f):
             return f
-        gmin = struct.unpack("<I", rig.r(rig.lab("disp_gmin"), 4))[0]
-        ngap = struct.unpack("<H", rig.r(rig.lab("disp_ngap"), 2))[0]
+        gmin = struct.unpack("<I", ram(rig, lambda: rig.r(rig.lab("disp_gmin"), 4)))[0]
+        ngap = struct.unpack("<H", ram(rig, lambda: rig.r(rig.lab("disp_ngap"), 2)))[0]
         nconv = struct.unpack("<H", rig.r(rig.lab("disp_nconv"), 2))[0]
         need = n_dn * FRAME_E
         print(f"  gap: frames {res['frames']} conversions {nconv} gaps {ngap} "
