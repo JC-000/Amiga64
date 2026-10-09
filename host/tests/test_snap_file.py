@@ -34,12 +34,13 @@ pytestmark = pytest.mark.skipif(shutil.which("cl65") is None,
 
 SHIM = U.SHIM + """
 .export mach_fhook, mach_now, mach_rdc, mach_run, emu_reset, disp_init
-.export mem_rec_dirty, calls, code_invall
+.export mem_rec_dirty, calls, code_invall, spr_vec
 .segment "BSS"
 mach_fhook: .res 2
 mach_now:   .res 4
 .segment "SBSS"               ; (after all BSS: outside the image)
 calls:      .res 6            ; mach_rdc, mach_run, emu_reset, disp_init, rec_dirty, code_invall
+spr_vec:    .res 2            ; W13-D: snap.s disarms it on resume (outside the image here)
 .segment "CODE"
 mach_rdc:   inc calls+0
             rts
@@ -66,6 +67,7 @@ MEMORY {
 SEGMENTS {
     ZEROPAGE: load = ZP, type = zp, optional = yes;
     CODE:     load = MAIN, type = ro;
+    LOWCODE:  load = MAIN, type = ro, optional = yes;   # Wave 13: ureu.s
     SCODE:    load = MAIN, type = ro;
     RODATA:   load = MAIN, type = ro, optional = yes;
     DATA:     load = MAIN, type = rw, optional = yes;

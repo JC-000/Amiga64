@@ -51,6 +51,7 @@
 .import mach_fhook, mach_rdc, mach_now, mach_run
 .import emu_reset, mem_rec_dirty, disp_init
 .import code_invall             ; I1 (W12-C, core.s)
+.import spr_vec                 ; W13-D (supervisor): a resume disarms the pointer module
 .import dosio_buf
 .import ureu_bank, ureu_open, ureu_xfer, ureu_close
 .import ureu_ra, ureu_rl
@@ -552,6 +553,9 @@ snap_rest:
         ldy #D_BSS              ; exact: snap_req.. after snap_keep untouched
         jsr snap_dma
 .endif
+        lda #0                  ; W13-D (supervisor, rev-vis option B): the image
+        sta spr_vec+1           ; carries spr_vec, the module is not in it: come up
+                                ; disarmed; the launcher re-stages and re-arms
 .ifndef SNAP_MUT_NOCIA
         ; CIA #2 time base := ~mach_now (mach.s: C = ~(TB:TA)).  Stopped,
         ; loaded (a TAHI/TBHI write to a stopped timer and the force-load

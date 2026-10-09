@@ -56,7 +56,11 @@ snap_base = $DF1000     ; W12-T (supervisor-approved): snapshot area (header at 
 .ifndef snap_end
 snap_end  = $DF3FFF     ; W12-T (supervisor-approved): last byte of the snapshot area (inclusive)
 .endif
-; @region io $DF4000-$DFFFFF custom-chip bank: trapped to chip.s by the memory API ; W12-T (supervisor-approved): was $DF1000-
+; @region disp $DF4000-$DF40FF W13-D: a zero row (256 B, stashed by disp_init) the hires kernels fetch for the planes a 1-3-plane hires picture lacks; under the trapped $DF bank (never guest-visible)
+.ifndef disp_zero
+disp_zero = $DF4000     ; W13-D disp: zero row for absent hires planes (row advance 0)
+.endif
+; @region io $DF4100-$DFFFFF custom-chip bank: trapped to chip.s by the memory API ; W12-T (supervisor-approved): was $DF1000- ; W13-D: was $DF4000- (disp zero row split off)
 
 ; @region aros $E00000-$E7FFFF extension ROM bank, 512 KB (aros-ext.bin, staged by host/machine.py)
 .ifndef AROS_EXT
@@ -81,3 +85,4 @@ AROS_ROM_END  = $FFFFFF ; last ROM byte (inclusive)
 .assert AROS_EXT_END - AROS_EXT + 1 = $80000, error, "the extension bank is 512 KB"
 .assert AROS_CHIP = 0,                        error, "chip RAM starts at 0 (the vector page and the reset longs)"
 .assert disp_lut = $DF0000,                   error, "disp_lut sits where guest.inc puts it (disp.s is profile-agnostic)"
+.assert disp_zero = $DF4000,                  error, "W13-D: disp_zero sits where guest.inc puts it"

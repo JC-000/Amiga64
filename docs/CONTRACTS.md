@@ -1039,11 +1039,146 @@ spec: `docs/C2V.md` "Row skip", "Display refresh (S3.5)". Reference:
     2048 nibble-packed; supervisor-approved); `disp_init` unpacks it, once,
     into the same 4096 REU bytes at `disp_lut` and stops at exactly 4096
     entries (`disp_init` 126,616 φ2 cycles, base 120,006–120,225).
+- **1:1 view (W13-D).** Spec: `docs/C2V.md` "1:1 view (W13-D)", "Hires
+  with 1-3 planes (W13-D)".
+  - Reference: `c2v_ref.one_cells`, `convert_one`, `disp_decide_view`,
+    `disp_convert_view`.
+  - Tests: `tests/run_c2v.py` (kind `one`), `tests/run_pf.py` leg `view`,
+    `tests/run_spr.py` leg `aros1`, `host/tests/test_c2v_one.py`.
+  - **State.** All of it is in disp.s's BSS, so the snapshot carries it
+    (I2): `disp_view` (0 fit, 1 1:1), `disp_px` (the window's first byte,
+    0-40), `disp_py` (its first line, before clamping), `disp_ymax`, and
+    `disp_one` (the last decision is the 1:1 view). `disp_ymax` is
+    L − 200, or L − 101 with LACE, clamped to 0-255; every shown decision
+    sets it. (Fix round 1: LACE L − 101.)
+  - **The toggle.** `inp_view` (I1; until W13-I lands, disp.s's stand-in
+    under `DISP_INPV_LOCAL`) bit 0 is an edge.
+    - `disp_frame` consumes it first, clearing bit 0 only.
+    - It flips `disp_view` and sets `disp_px` = 20 and `disp_py` =
+      `disp_ymax` / 2: the window is centred.
+    - It converts at once, ignoring gen, the snapshot compare and the duty
+      budget.
+  - **The decision.** For hires (BPU 1-4) with `disp_view` = 1:
+    - `disp_one` = 1 and `disp_crop` = min(`disp_py`, `disp_ymax`).
+    - With BPLCON0 LACE, each plane's row advance is halved (the two
+      fields interleave; an arithmetic shift, so negative modulos work) and
+      `disp_lines` = min(2 · `disp_lines`, 200). `disp_ymax` = L − 101, so
+      the odd field's last frame line read is ≤ 2L − 1.
+    - Rows past the picture (frame line ≥ `disp_lines`) read 0
+      (`disp_ozero`, BHI, from `c2v_ones` through `c2v_v_olim`): they add
+      nothing to the colour counts and show pen 0, as in the fit view. A
+      char row that straddles the picture's end shows the cell's bg below
+      it.
+    - Known gap: the 512 KB check covers only the current field's rows.
+      The other field's rows in between are not checked; a straddling row
+      shows wrong pixels in that row only, since the DMA target is fixed.
+    - Any other decision leaves the fit view's.
+  - **The output.** A hires bitmap with a per-cell bg (the pen of the
+    cell's top-left pixel) and fg (the first other pen in raster order).
+    The matrix byte is colour(fg) << 4 | colour(bg), with colours by the
+    W12-V rule over every cell's bg and fg. Colour RAM is left as it was
+    (unused in hires). `disp_mck`, `disp_clrlines` and the VIC setup are
+    the fit hires view's.
+  - **Cells with 3+ pens are lossy:** the top-left pixel's pen becomes bg,
+    and every other pen shows as fg's colour. Pinned by run_c2v case
+    `three-pen`.
+  - **Frozen part.** The fit view's bitmap, matrix and colour RAM are
+    byte-identical to the base for every input it converted before: the
+    existing run_c2v/run_pf legs, and the AROS m3 hashes, unchanged.
+- **Hires with 1-3 planes (W13-D).** These decisions now convert (they
+  were DEPTH), in both views.
+  - An absent plane reads `disp_zero` (`$DF4000-$DF40FF` in the REU
+    under the trapped `$DF` bank, rc `guest.inc`/`machine.inc`, zeroed by
+    `disp_init`) with a row advance of 0.
+  - The guest cannot reach it: every guest access to bank `$DF` traps to
+    `chip.s`.
+- **Pointer sprite (W13-D, D2).** The pointer is a machine-mode module,
+  `tests/aros/spr.s`, at `$C600-$C8FF`.
+  - **Build and arm.** It is assembled at test time by
+    `tests/run_spr.py build_spr(out_dir, labels)` against the runner's
+    labels; it is not in the PRG. `run_spr.arm` arms it: `spr_vec` :=
+    `$C600` (high byte last) and `spr_id` := `"SPR1"` (`$31525053`; a
+    resume compares it, W13-W's loader).
+  - **Hook.** `disp_vw` (BHI) calls through `spr_vec` once per frame
+    hook when F1 is not pressed and `spr_vec` ≠ 0. The module returns
+    C = 1 when it moved the 1:1 window; `disp_frame` then converts at
+    once.
+  - **When it runs.** Inside `mach_run` only. It shows the pointer while
+    `disp_mode` is mc2 or hires, DMACON has DMAEN and SPREN, and VSTOP >
+    VSTART. A hidden → hidden frame writes nothing.
+  - **Per frame.** SPR0PT is read from `chip_shd` (bit 0 ignored), then
+    POS/CTL with one 4-byte REU fetch.
+  - **Image and colours** are read again only when SPR0PT, POS or CTL
+    changed, or `disp_nconv` (low byte) moved. The image is up to 21
+    lines of DATA/DATB; the colours are LUT[COLOR17-19], one byte DMA each
+    into `$D027-$D029`.
+  - **Sprites and memory.** VIC sprite 0 = DATA & ~DATB (colour 17),
+    1 = ~DATA & DATB (18), 2 = DATA & DATB (19). The masks are exclusive,
+    so the colours are exact at full width. Blocks are at `disp_sprb`
+    (`@under disp $D400-$D7FF`, VIC blocks $50-$52) and the pointers at
+    `c2v_screen + $3F8`, written at `$01` = `%xx100` under `sei`.
+  - **State** is in `c2v_args` + 180..211 plus the module's own two bytes,
+    which are zero when staged. After a resume the module is staged again
+    and rebuilds everything from `chip_shd` and guest memory.
+  - **Position.** In lores pixels: SX = HSTART + 1 − (2 · (DDFSTRT &
+    $FC) + 9), lores (DDFSTRT & $F8) + 17. These are the playfield's first
+    fetched pixel, which the fit view shows at C64 x = 0 (HRM: the sprite
+    pixel at hcount H shows with playfield hcount H + 1). SY = VSTART −
+    DIWSTRT V.
+    - Fit view: VIC X = 24 + SX, VIC Y = 50 + SY − `disp_crop`.
+    - 1:1 view: VIC X = 24 + 2 · (SX − 4 · `disp_px`) (X-expanded), VIC Y
+      = 50 + SY − `disp_crop`. With LACE, 50 + 2 · (SY − `disp_crop`),
+      Y-expanded.
+    - Off X 0-$1FF or Y 0-255, the pointer is hidden.
+  - **Pan (1:1).** When the pointer comes within 32 C64 pixels (16 lores;
+    LACE 16 field lines) of a window edge, the window re-centres on it:
+    `disp_px` := clamp(SX − 80, 0, 160) / 4 and `disp_py` := clamp(SY − 100,
+    LACE 50, 0, `disp_ymax`). C = 1 only if px or the window's line
+    changed, so a clamped edge never converts. Hysteresis: after a pan the
+    pointer is ≥ 48 C64 px from every edge.
+  - **Arming guard (fix round 1).** Before calling through `spr_vec`,
+    `disp_vw` (BHI) compares the module's ID at `spr_vec` + 3..6 with
+    `spr_id`. On a mismatch, for example a tool stub or a resume that did
+    not re-stage the module, it clears `spr_vec`'s high byte (disarmed) and
+    returns C = 0. Test: `run_spr` leg spr, case `guard-overwritten`.
+  - **Hand-off rule.** Whoever launches a session stages the module at
+    `$C600` and arms it after the last stub, `test_load_chunk` or
+    runner-helper write that can touch `$C000-$C8FF`, and again after every
+    resume. W13-W's loader does this at the merge.
+    - Arm order (`run_spr.arm`, fix round 2): `spr_vec` high := 0, then
+      `spr_id`, then `spr_vec` low, then `spr_vec` high (this last write
+      arms). Then `$D01B`/`$D01C` := 0.
+    - **A resume disarms the pointer module.** snap.s's restore clears
+      `spr_vec` high after the BSS image (supervisor, at the merge), and the
+      launcher re-stages and re-arms it.
+    - The ID guard catches a module whose ID bytes were overwritten. A stub
+      written inside the module that leaves `$C603-$C606` intact is not
+      caught (rev-vis round 2); only the rule above prevents that.
+    - On an ID mismatch the guard also hides VIC sprites 0-2 (`$D015` bits
+      0-2 := 0).
+  - **The module is full:** 768 B, `$C600-$C8FF`, 0 B spare; `sval`/`son`
+    are its last two bytes (`$C8FE`/`$C8FF`). Any growth must trim first.
+  - **Pan gate (fix round 1).** The window re-centres only while the image
+    has a pixel (the OR of its 4 · height bytes). An empty pointer, such as
+    AROS's on the insert-disk screen, never moves the window: it keeps D1's
+    centre or the test-set offset.
+  - **Limits:**
+    - The height is capped at 21 lines (VIC; LACE 1:1 at 42 frame lines).
+    - The attach bit (sprite 1) is ignored.
+    - Sprite position is not dilated by BPLCON1 scroll.
+    - Sprites 1-7 are not shown.
+    - A pan converts at once, past the duty budget (user-paced, like F1).
+    - A pointer colour change alone (COLOR17-19, not display fields, so no
+      conversion), or an image edited in place at the same SPR0PT, stays
+      stale until the pointer moves (POS/CTL change) or the screen converts.
 - **C64 resources:** writes the c2v regions (bitmap, matrix under I/O,
   colour RAM, `c2v_stage` during `disp_init`, `c2v_args`), `$D011`,
   `$D016`, `$D018`, `$D020`, `$D021`, and `$DD00` bits 1–0 (bits 7–2 and
   the DDR kept; `mach.s` never writes port A, "Machine loop"). State is in
-  disp.s's BSS (whole page), host-visible in `runner.lbl`.
+  disp.s's BSS (whole page), host-visible in `runner.lbl`. W13-D: the
+  pointer module (not disp.s) writes VIC `$D000-$D005`, `$D010`, `$D015`,
+  `$D017`, `$D01B`-`$D01D`, `$D027-$D029`, the sprite pointers
+  `$D3F8-$D3FA` and the blocks `$D400-$D4BF` (`@under disp $D400-$D7FF`).
 - **Guest resources:** `disp_lut` `$DF0000-$DF0FFF` (rc `guest.inc`,
   owner disp): the REU bytes under the trapped custom-chip bank. Every
   guest access to bank `$DF` goes to `chip.s` (open bus), never the REU,
@@ -1549,7 +1684,8 @@ the UCI model).
 - **Nothing else writes the snapshot region**: the memory API traps every
   guest access to `$DF0000-$DFFFFF` to chip.s, which never addresses the
   REU (no REC programming in chip.s/cia.s/cop.s); the only REU users under
-  `$DF` are disp.s (the LUT, `$DF0000-$DF0FFF`) and snap.s (the snapshot
+  `$DF` are disp.s (the LUT, `$DF0000-$DF0FFF`, and W13-D's zero row
+  `disp_zero`, `$DF4000-$DF40FF`, all zero: `zero_check` still holds) and snap.s (the snapshot
   area, and `SNAP_SAV` `+$2E00-$2EFF`: snap_res's own save of the scratch
   page at every resume entry, F1). Checked after m3 on every backend: the
   REU from the end of the BSS image to `SNAP_SAV`, from `SNAP_SAV` + 256 to
@@ -1617,6 +1753,11 @@ before `snap_keep`).
 | VIC registers, `$DD00` bank, bitmap, matrix, colour RAM | hardware / `$D000`, `$E000` | — | rebuilt by the forced conversion (I2) | derived from `disp_st` + guest memory |
 | c2v pair tables, `c2v_args` | `$B900-$BAFF`, `$BF00` | — | `disp_init` → `c2v_init`; args per conversion | derived |
 | LUT | REU `$DF0000` | — | `disp_init` stashes it | derived |
+| W13-D zero row `disp_zero` | REU `$DF4000-$DF40FF` | — | `disp_init` stashes it | derived (zeros) |
+| W13-D view state `disp_view`/`px`/`py`/`ymax`/`one` | `disp.s` BSS | image | restored | the 1:1 view survives a resume |
+| W13-D D2 `spr_vec`, `spr_id` | `disp.s` BSS | image | restored as saved; the module they point at is NOT in the image: `disp_vw` compares the module's ID (`spr_vec` + 3..6) with `spr_id` every frame hook and disarms (`spr_vec` high byte := 0) on a mismatch | the hand-off rule below re-stages and re-arms |
+| W13-D D2 pointer module, its state | `$C600-$C8FF`, `c2v_args` + 180..212 | — | re-staged and re-armed by whoever launches the session (hand-off rule); its state is zero when staged and rebuilt from `chip_shd` + guest memory | test-time module, not in the PRG |
+| W13-D D2 sprite blocks, pointers | RAM under I/O `$D400-$D4BF`, `$D3F8-$D3FA` | — | rebuilt by the module's first image read | derived |
 | guest memory | REU chip RAM, slow RAM + `$DC0000-$DEFFFF`, ROM banks | stays (REU-resident) / file spans 2-5 | stays / LOAD_REU | the guest's RAM. AROS WRITES `$DC0000-$DEFFFF` (unmapped in the profile; not zero after m3 on both Ultimates), so the slow-RAM span runs to `$DEFFFF`. `$200000-$BEFFFF` and `$E80000-$F7FFFF` read zero after m3 (`aros_resume` m3 leg, Ultimate) and are not filed: a resume needs them zero, as the boot does (`host/machine.ZERO_SPANS`) |
 
 ## Input (joystick -> mouse) (W13-I)

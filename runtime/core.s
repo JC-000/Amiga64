@@ -121,6 +121,8 @@ HALT_ADDRESS = $05      ; @value odd PC from a vector / RTE (reason code only)
 
 ; --- Imports ---------------------------------------------------------------
 .import dispatch_lo, dispatch_hi        ; generated: build/gen/dispatch.s
+.import __DISPATCH_RUN__                ; Wave 13 (supervisor): DATA + LOWCODE share the slack before it
+.assert __DISPATCH_RUN__ = $0900, lderror, "DATA/LOWCODE pushed DISPATCH off $0900"
 .import main                            ; runner entry (tests/runner owns it)
 .import hle_aline                       ; HLE A-line dispatch (runtime/ops/hle.s or gen stub)
 .import chip_r8, chip_r16, chip_r32     ; W7-T I/O trap targets (runtime/ops/chip.s)

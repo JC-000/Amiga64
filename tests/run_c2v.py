@@ -85,7 +85,9 @@ VARIANTS = {"stub": ["C2V_STUB=1"], "bitorder": ["C2V_MUT_BITORDER=1"],
             "nmi": ["C2V_MUT_NMI=1"], "nmiack": ["MACH_MUT_NMIACK=1"],
             # W12-V: the cell pen, the row flush, the matrix byte
             "pickr": ["C2V_MUT_PICKR=1"], "hrow": ["C2V_MUT_HROW=1"],
-            "hfillbg": ["C2V_MUT_HFILLBG=1"]}
+            "hfillbg": ["C2V_MUT_HFILLBG=1"],
+            # W13-D (1:1 view, kind "one"): bg pixel, fg re-pick, pair key, matrix
+            "omask": ["C2V_MUT_OMASK=1"], "ofin": ["C2V_MUT_OFIN=1"]}
 OTHER_VARIANTS = {"layout-b": ["C2V_ROWS=22", "c2v_screen=0xFC00"],
                   "nofetch": ["C2V_PERF_NOFETCH=1"]}
 GUARD_REGS = (0xD011, 0xD016, 0xD018, 0xD020, 0xD021, 0xDD00)
@@ -161,11 +163,92 @@ def make_cases(lines: int) -> list[dict]:
         {"name": "one-plane/real-lut",
          "hires": [bytes(nh)] * 3 + [rnd(nh)], "mc2": [bytes(nl), rnd(nl)],
          "pal": [0x0000, 0x0FFF, 0x0444, 0x0999] + pal(12), "lut": "real"},
+        {"name": "text/real-lut", "hires": text_planes(rng, lines), "px": 0,
+         "pal": [0x0000, 0x0111, 0x0222, 0x0024, 0x0AAA, 0x0FFF, 0x0F80, 0x0048]
+         + pal(8), "lut": "real",
+         "mc2": [rnd(nl) for _ in range(2)]},
+        {"name": "three-pen/real-lut", "hires": three_pen_planes(lines), "px": 0,
+         "pal": [0x000, 0xF00, 0x0F0, 0x00F, 0xFF0] + pal(11), "lut": "real",
+         "mc2": [rnd(nl) for _ in range(2)]},      # W13-D: 3+ pens per cell (lossy, pinned)
         {"name": "bank-cross/bank-lut", "hires": [rnd(nh) for _ in range(4)],
          "mc2": [rnd(nl) for _ in range(2)], "lut": "bank",
          "pal": [0x07FF, 0x0800, 0x07FF, 0x0800] + pal(12),   # both LUT banks
          "hsrc": BANK_HSRC, "msrc": BANK_MSRC},
     ]
+
+
+def text_planes(rng: random.Random, lines: int) -> list[bytes]:
+    """W13-D: hires planes drawn like text: per 8x8 cell of the window
+    (and of the rest of each 80-byte row) a bg and an fg pen from a few
+    (title-bar-like pairs: bg <> 0 too), random glyph bits, a few cells
+    with a third pen."""
+    pens = [(0, 1), (0, 2), (2, 1), (3, 5), (0, 3), (1, 2), (7, 0)]
+    pl = [bytearray(lines * R.HIRES_ROW) for _ in range(4)]
+    for r in range(lines // 8):
+        for bx in range(R.HIRES_ROW):
+            bg, fg = rng.choice(pens)
+            third = bx >= 40 and rng.random() < 0.05     # outside the px-0 window
+            for y in range(r * 8, r * 8 + 8):
+                bits = rng.randrange(256)
+                for x in range(8):
+                    pen = fg if bits >> (7 - x) & 1 else bg
+                    if third and x == 3:
+                        pen = 6
+                    for p in range(4):
+                        if pen >> p & 1:
+                            pl[p][y * R.HIRES_ROW + bx] |= 0x80 >> x
+    return [bytes(b) for b in pl]
+
+
+def three_pen_planes(lines: int) -> list[bytes]:
+    """W13-D: every cell drawn in pens 1, 2, 3 (and 4 on odd cells), by column."""
+    pl = [bytearray(lines * R.HIRES_ROW) for _ in range(4)]
+    for y in range(lines):
+        for bx in range(R.HIRES_ROW):
+            for x in range(8):
+                pen = 1 + (x + y + (bx & 1)) % (3 + (bx & 1))
+                for p in range(4):
+                    if pen >> p & 1:
+                        pl[p][y * R.HIRES_ROW + bx] |= 0x80 >> x
+    return [bytes(b) for b in pl]
+
+
+def window(planes: list[bytes], px: int, lines: int) -> list[bytes]:
+    """W13-D: the 1:1 window's rows: bytes px .. px+39 of each 80-byte row."""
+    return [b"".join(p[y * R.HIRES_ROW + px:y * R.HIRES_ROW + px + R.ONE_ROW]
+                     for y in range(lines)) for p in planes]
+
+
+def port_tramp(target: int) -> bytes:
+    """W13-D: flag_tramp at $01 = $36 (c2v_ones / c2v_ofin: BASIC out, as
+    disp calls them); stores P, then $01 as returned, then restores $37."""
+    return bytes([0xA9, 0x7F, 0x8D, 0x0D, 0xDC, 0xAD, 0x0D, 0xDC,
+                  0xA9, 0x36, 0x85, 0x01,                # lda #$36 / sta $01
+                  0x58,
+                  0x20, target & 0xFF, target >> 8,
+                  0x08, 0x78, 0x68,
+                  0x8D, FLAGOUT & 0xFF, FLAGOUT >> 8,
+                  0xA5, 0x01,                            # lda $01
+                  0x8D, (FLAGOUT + 1) & 0xFF, (FLAGOUT + 1) >> 8,
+                  0xA9, PORT_RUN, 0x85, 0x01,            # $01 := $37
+                  0x60])
+
+
+def call_banked(s, entry: str, fails: list[str]) -> None:
+    """W13-D: call_checked through port_tramp: $01 must come back $36."""
+    from c64_test_harness import read_bytes, write_bytes
+    write_bytes(s.T, s.lab["m_rok"], b"\x01")
+    write_bytes(s.T, FLAGTRAMP, port_tramp(s.lab[entry]))
+    write_bytes(s.T, FLAGOUT, b"\xFF\xFF")
+    s.call(FLAGTRAMP)
+    rok = read_bytes(s.T, s.lab["m_rok"], 1)[0]
+    p, port = read_bytes(s.T, FLAGOUT, 2)
+    if p & 0x04:
+        fails.append(f"{entry}: I flag set after return (P=${p:02X})")
+    if rok != 0:
+        fails.append(f"{entry}: m_rok = {rok} after return (C1: must be 0)")
+    if port != 0x36:
+        fails.append(f"{entry}: $01 = ${port:02X} after return (want $36)")
 
 
 # --- VICE session --------------------------------------------------------------
@@ -179,7 +262,12 @@ class Session:
         self.lab = {k: lookup_label(labels, k) for k in (
             "c2v_init", "c2v_pal_mc2", "c2v_pal_hires", "c2v_mc2",
             "c2v_hires", "c2v_args", "test_load_chunk", "m_rok",
-            "c2v_hfill", "c2v_v_col")}                      # W12-V
+            "c2v_hfill", "c2v_v_col", "c2v_v_cnt")}         # W12-V
+        for k in ("c2v_ones", "c2v_ofin"):                  # W13-D (absent: red)
+            try:
+                self.lab[k] = lookup_label(labels, k)
+            except KeyError:
+                pass
         self.layout(labels)
 
     def layout(self, labels) -> None:
@@ -337,7 +425,66 @@ def hfill_ref(s: Session, ref: dict, col: list[int]) -> dict:
                 colram=ref["colram"][:n] + bytes(1000 - n), bgc=col[0])
 
 
+def one_ref(s, case: dict, luts: dict, col: list[int]) -> dict:
+    """W13-D: c2v_ones then c2v_ofin with c2v_v_col = col."""
+    px = case.get("px", 13)
+    ref = R.convert_one(window(case["hires"], px, s.rows * 8), case["pal"],
+                        luts[case["lut"]], rows=s.rows)
+    return dict(ref, screen=bytes((col[bg if fg == R.NO_FG else fg] << 4) | col[bg]
+                                  for fg, bg in ref["cells"]), bgc=col[0])
+
+
+def run_one(s, case: dict, luts: dict) -> list[str]:
+    """W13-D: the 1:1 kernel and its matrix pass, cell by cell."""
+    if "c2v_ones" not in s.lab:
+        print(f"  {case['name']:20s} one   FAIL  (no c2v_ones in this PRG)")
+        return ["no c2v_ones in this PRG (the 1:1 view is missing)"]
+    px = case.get("px", 13)
+    src = [a + px for a in case_src(case, "hires")]
+    col = random.Random(case["name"] + "/one").sample(range(16), 16)
+    ref = one_ref(s, case, luts, col)
+    g = guard_fill(s, zlib.crc32(f"{case['name']}/one".encode()))
+    ref["colram"] = g["col"]                        # not written by the 1:1 view
+    regs0 = read_regs(s.T)
+    s.write_ram(s.lab["c2v_args"], R.pack_args(src, case_lut(case), case["pal"]))
+    s.write_ram(s.lab["c2v_args"] + 72, R.pack_skip([0] * 4))
+    s.write_ram(s.lab["c2v_args"] + 145, bytes([200]))   # c2v_v_olim: every line has data
+    fails: list[str] = []
+    call_checked(s, "c2v_init", fails)
+    call_banked(s, "c2v_ones", fails)
+    cnt = list(s.read_ram(s.lab["c2v_v_cnt"], 16))
+    if cnt != ref["cnt"]:
+        fails.append(f"c2v_v_cnt {cnt} != {ref['cnt']}")
+    s.write_ram(s.lab["c2v_v_col"], bytes(col))
+    call_banked(s, "c2v_ofin", fails)
+    fails += check_outputs(s, g, ref, regs0)
+    # pixel by pixel: every two-pen cell shows its pens' colours exactly
+    bmp, scr = s.read_ram(s.bitmap, 8000), s.read_ram(s.screen, 1000)
+    win = window(case["hires"], px, s.rows * 8)
+    bad = 0
+    for cell in range(1000):
+        r, cx = divmod(cell, 40)
+        pix = [[sum(1 << p for p in range(4) if win[p][y * R.ONE_ROW + cx] & (0x80 >> x))
+                for x in range(8)] for y in range(r * 8, r * 8 + 8)]
+        if len({v for row in pix for v in row}) > 2:
+            continue                    # 3+ pens: best effort
+        for y in range(8):
+            b = bmp[r * 320 + cx * 8 + y]
+            for x in range(8):
+                shown = scr[cell] >> 4 if b & (0x80 >> x) else scr[cell] & 15
+                bad += shown != col[pix[y][x]]
+    if bad:
+        fails.append(f"pixel-exact: {bad} pixel(s) of two-pen cells show the wrong colour")
+    print(f"  {case['name']:20s} one   {'OK' if not fails else 'FAIL'}"
+          f"  (px {px}, {len(set(ref['cells']))} distinct (fg, bg))")
+    for f in fails:
+        print(f"      {f}")
+    return fails
+
+
 def run_kernel(s: Session, kind: str, case: dict, luts: dict) -> list[str]:
+    if kind == "one":                               # W13-D
+        return run_one(s, case, luts)
     kk = "hires" if kind == "hfill" else kind       # W12-V: hfill = hires + c2v_hfill
     lut_addr, src = case_lut(case), case_src(case, kk)
     ref = reference(s, kk, case, luts)
@@ -555,7 +702,7 @@ def session_run(prg: str, perf: bool, fetch: bool = True) -> tuple[list[str], di
                     s.stage(a, case["hires"][p])
                 for p, a in enumerate(case_src(case, "mc2")):
                     s.stage(a, case["mc2"][p])
-                for kind in ("mc2", "hires", "hfill"):
+                for kind in ("mc2", "hires", "hfill") + (("one",) if s.rows == 25 else ()):
                     fails += [f"{case['name']} {kind}: {f}"
                               for f in run_kernel(s, kind, case, luts)]
             if perf:
