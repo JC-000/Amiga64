@@ -33,7 +33,14 @@ AROS_CHIP     = $000000 ; first chip-RAM byte; the ROM's first 8 bytes are copie
 AROS_CHIP_END = $1FFFFF ; last chip-RAM byte (inclusive)
 .endif
 
-; @region free $200000-$BEFFFF unmapped on the machine; zero-filled; AROS probes it and finds nothing (Akiko at $B80002 reads 0)
+; @region td $200000-$2DBFFF W13-W: the staged DF0 disk image (880 KB ADF + Startup-Sequence overlay), read only by td.s's HLE trackdisk (REU DMA); never guest-visible: no guest access to $200000-$B7FFFF to the Workbench (boot-model watch, build/evidence/w13-wb); zero without a disk
+.ifndef TD_ADF
+TD_ADF        = $200000 ; W13-W: ADF byte 0 (block n at TD_ADF + 512 n)
+.endif
+.ifndef TD_ADF_END
+TD_ADF_END    = $2DBFFF ; W13-W: last ADF byte (inclusive; 901120 bytes)
+.endif
+; @region free $2DC000-$BEFFFF unmapped on the machine; zero-filled; AROS probes it and finds nothing (Akiko at $B80002 reads 0) ; W13-W: was $200000-
 ; @region io $BF0000-$BFFFFF CIA bank: trapped to chip.s/cia.s by the memory API, the REU under it unused
 
 ; @region aros $C00000-$DBFFFF slow RAM, 1.75 MB (AROS sizes it to $DC0000; SysBase lands here)
@@ -80,4 +87,6 @@ AROS_ROM_END  = $FFFFFF ; last ROM byte (inclusive)
 .assert AROS_ROM_END - AROS_ROM + 1 = $80000, error, "the Kickstart bank is 512 KB"
 .assert AROS_EXT_END - AROS_EXT + 1 = $80000, error, "the extension bank is 512 KB"
 .assert AROS_CHIP = 0,                        error, "chip RAM starts at 0 (the vector page and the reset longs)"
+.assert TD_ADF = AROS_CHIP_END + 1,            error, "W13-W: the disk follows chip RAM (one snapshot span)"
+.assert TD_ADF_END - TD_ADF + 1 = 901120,      error, "W13-W: a DD ADF"
 .assert disp_lut = $DF0000,                   error, "disp_lut sits where guest.inc puts it (disp.s is profile-agnostic)"

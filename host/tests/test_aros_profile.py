@@ -88,7 +88,7 @@ def test_teeth_guest_inc_old_free_region():
 
 def test_teeth_region_straddles_bank():
     t = PROFILE.read_text().replace(
-        "; @region free $200000-$BEFFFF", "; @region free $200000-$BF0FFF").replace(
+        "; @region free $2DC000-$BEFFFF", "; @region free $2DC000-$BF0FFF").replace(   # W13-W: was $200000-
         "; @region io $BF0000-$BFFFFF", "; @region io $BF1000-$BFFFFF")
     assert any("straddles the I/O bank" in e for e in _prof(t))
 

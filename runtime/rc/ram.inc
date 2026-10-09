@@ -47,6 +47,7 @@ cwin_base  = $A900      ; W12-C cwin: up to 7 page-aligned 256-byte code windows
 cwin_map   = $B000      ; W12-C cwin: 256-byte page-low map ($B000-$B0FF; also the last window's guard byte)
 .endif
 ; W11-B blt: the blitter's row buffers (RAM under BASIC ROM; blt.s banks BASIC out for a blit, REU DMA in/out)
+; W13-W pending supervisor: the td module (tests/aros/td.s) also uses $B600-$B6FF (blt_abuf) as its 256-byte REU bounce buffer (TD_BUF), only inside the BeginIO trap and its frame hook; blits run synchronously inside a custom-register write, so no blit is ever in flight there
 ; @region blt $B600-$B7FF blitter channel rows: A, B, C, D, 128 bytes each (one row of up to 64 words, guest byte order)
 .ifndef blt_abuf
 blt_abuf   = $B600      ; W11-B blt: A row ($B600) and B row ($B680): one page, X-indexed by blt_prep
@@ -75,6 +76,7 @@ c2v_args   = $BF00      ; W7-V c2v: argument block + converter state (layout: do
 .endif
 
 ; @region run $C000-$C7FF buf_case - harness writes test cases / load records here
+; W13-W pending supervisor: in machine mode buf_case is the machine-mode code area (test-time modules, never in the PRG): mboot $C000-$C1FF, td $C200-$C5FF (tests/aros/td.s), W13-D's spr $C600-$C8FF; staged by tests/aros_wb.py, re-staged before a resume
 .ifndef buf_case
 buf_case   = $C000
 .endif

@@ -321,12 +321,17 @@ def test_frozen_suspend_spins_with_the_snapshot_intact(build):
 
 @pytest.mark.parametrize("case,code", [
     ("header byte", 0xE2), ("state byte", 0xE5), ("truncated", 0xE7),
-    ("rom id", 0xE4), ("zero rom id", 0xEA), ("missing", 0xE6), ("build id", 0xE3)])
+    ("rom id", 0xE4), ("zero rom id", 0xEA), ("missing", 0xE6), ("build id", 0xE3),
+    ("version 1", 0xE1)])                               # W13-W: a SNAP_VER 1 file
 def test_file_refusals(build, case, code):
     f, _ = suspended_file(build)
     f = bytearray(f)
     if case == "header byte":
         f[F.H_FLAGS] ^= 0x01
+    elif case == "version 1":                          # W13-W: Wave 12's layout, consistently summed
+        f[4] = 1
+        struct.pack_into("<I", f, 10 + 2 * 7 + 3, 0x200000)    # its chip span
+        struct.pack_into("<I", f, F.HDR_SUM, F.fletcher(bytes(f[:F.HDR_SUM])))
     elif case == "state byte":
         f[256 + 0x340] ^= 0xFF
     elif case == "truncated":

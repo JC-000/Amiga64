@@ -1175,3 +1175,40 @@ after the launch (budget 15 s). The test file was deleted; `/SD/amiga64`
 then holds only the ADF. (The ROM staging of that boot fell back to
 `test_load_chunk`, 1393 s: the SocketDMA service was off after the
 morning's power-cycle, the fw 1.1.0 behaviour in the Wave 12 brief.)
+
+## Workbench 3.1 from the ADF (W13-W, 2026-10-09)
+
+`tests/aros_wb.py` on the final W13-W tree (gate PRG, build ID
+`b32b9a4597ae6674`), trim Startup-Sequence (WB_BOOT §4.3), mach_s 3,
+the user's `amiga-os-310-workbench.adf` LOAD_REU'd from device storage
+(`ureu_ld`, 901,120 bytes, count checked) plus the overlay's 5 blocks by
+the harness's REU write, `aros_sum` equal to the host's image. Times from
+the runner start (after the DeviceLock wait and the reboot):
+
+| Device | MHz | ADF load | w1 block 0 | w2 S-S block 408 | Workbench (Disk.info, block 886) |
+|---|---:|---:|---:|---:|---:|
+| C64U fw 1.1.0 (`/SD`) | 64 | 1.2-1.5 s | 76-91 s | 99-112 s | **130.5 s** (target 240 s) |
+| U64E fw 3.15 (`/USB1`) | 48 | 0.4 s | 74-82 s | 103-111 s | **147.1-154.8 s** |
+| C64U, `full` script | 64 | 1.3 s | 76.0 s | 98.7 s | **372.0 s** |
+
+At Workbench idle the guest (read from the REU) shows the screen "Workbook
+1.0  Chip: 1987k, Fast: 1530k" with a window (full script: "Fast: 1380k"),
+the BeginIO slot still patched, no MemHeader over the disk; the serial text
+equals the boot model's (416 bytes, no alert).
+
+**Suspend/resume through a file** (`/SD/amiga64/wb-snap-test.bin`, SNAP_VER
+2: 6.1 MB with the disk in the chip span): suspend 19.1-19.8 s; after a
+reset, a fresh runner load (modules re-staged) and the whole REU zeroed,
+resume 6.55-6.64 s (LOAD_REU included), the Workbench running with the same
+picture **9.4-9.8 s** after the launch (target 20 s). Suspended mid-boot
+(after w2), the resumed guest reads Disk.info 28 s later (10 reads served
+after the resume). U64E: suspend 3.4 s, resume 1.34-1.36 s, picture back
+3.8 s. A resume onto a different td module build halts with st_reason
+`$57` on both devices. Test files deleted; configs IDENTICAL after every
+hold (`build/evidence/w13-wb/SESSION.log`).
+
+**Left on the C64U for the demo:** `/SD/amiga64/wb-snap.bin` (build ID
+`b32b9a4597ae6674`, td module ID `0df7f472`): `python3 -m tests.aros_wb
+--prg build/<final>/runner.prg --legs demo --backend u64 --mhz 64 --vol
+/SD` resumes it (guest running 7.6 s after the launch). It needs a PRG
+with the same build ID and the same td module.

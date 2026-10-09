@@ -50,6 +50,9 @@
 
 .export cia_read, cia_write, cia_reset
 .export cia_st, cia_now, cia_ok
+.export CIA_PIN, CIA_DDRB         ; W13-W: td.s's view of cia_st
+.exportzp CIA_B                 ; W13-W
+.import td_call                 ; W13-W: the DF0 drive lines and the BeginIO trap (td.s -> the module)
 .import mach_on, mach_etime, mach_et, mach_arm, mach_disarm, mach_at
 .import mach_post, mach_cbv, mach_hold, mach_am, mach_dl
 .ifdef CIA_HOSTTIME
@@ -283,9 +286,14 @@ rd_crb: lda cia_st+CIA_CRB,x
 wr_pra: lda cia_v
         sta cia_st+CIA_PRA,x
         jmp wdone
-wr_prb: lda cia_v
+wr_prb: cpx #CIA_B               ; W13-W: CIA-B PRB drives DF0 (td.s)
+        bne @a                  ; W13-W
+        lda cia_v               ; W13-W
+        jsr td_call             ; W13-W: C=1: the BeginIO slot trapped, nothing stored
+        bcs @t                  ; W13-W
+@a:     lda cia_v
         sta cia_st+CIA_PRB,x
-        jmp wdone
+@t:     jmp wdone               ; W13-W (label)
 wr_ddra:
         lda cia_v
         sta cia_st+CIA_DDRA,x

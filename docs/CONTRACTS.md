@@ -1256,6 +1256,15 @@ Tests: `tests/aros_boot.py` (legs `m1`, `m2`, `m3`, `ablate`, `wkhook`,
   the serial ring and the counters while the guest runs and ends the
   session (VICE: the harness releases the instance; U64E: the DeviceLock
   hold's restore resets the C64).
+- **buf_case in machine mode (W13-W).** `$C000-$C8FF` is the machine-mode
+  code area, test-time only (never in the PRG): mboot `$C000-$C1FF`
+  (asserted: its link size), the td module `$C200-$C5FF`, W13-D's spr
+  `$C600-$C8FF`. mach_run is called from mboot and stays inside it, so the
+  area stays resident; a resume's fresh load re-stages it
+  (`tests/aros_wb.WbMachine.load_driver`). `tests/aros_resume.py`'s REU stub
+  moved from `$C700` to `$CC00` (buf_result, unused in machine mode;
+  `$CB00` is its data page); `tests/ureu_probe.py`'s stub stays at `$C700`
+  (it never runs with a module staged).
 - **`mach_s` per host** (measured, `docs/PERF.md` "AROS boot"), chosen
   for SPEED only: **3 on the U64E at 48 MHz** (fix round 2, L8: picked by
   the time to m3, the no-media screen, which is bound by guest time: s = 3
@@ -1577,6 +1586,15 @@ the UCI model).
   with the one declared now and refuses an all-zero tag (`$EA`). (In the REU, not MAIN: 32 bytes of
   DATA tipped the MAIN layout over a page, see the Wave 12 report.)
 
+- **W13-W module ID** (`SNAP_VER` 2): a snapshot taken with the td module
+  armed carries `td_vec`/`td_mid` in the image; the resume driver re-stages
+  the modules first, and a module whose ID differs is refused AFTER the
+  restore, by MAIN code: `td_call` calls nothing and the first frame hook
+  halts the machine with st_halt 1, st_reason `TD_HALT_MOD` = `$57`
+  (`snap_st` already reads `$20`). Snapshots without td (`td_vec` = 0) are
+  unaffected. A `SNAP_VER` 1 file is refused `$E1` (`test_snap_file`
+  case "version 1").
+
 ### State inventory
 
 Every C64-side byte the guest's progress depends on, and what happens to
@@ -1612,4 +1630,127 @@ before `snap_keep`).
 | VIC registers, `$DD00` bank, bitmap, matrix, colour RAM | hardware / `$D000`, `$E000` | — | rebuilt by the forced conversion (I2) | derived from `disp_st` + guest memory |
 | c2v pair tables, `c2v_args` | `$B900-$BAFF`, `$BF00` | — | `disp_init` → `c2v_init`; args per conversion | derived |
 | LUT | REU `$DF0000` | — | `disp_init` stashes it | derived |
-| guest memory | REU chip RAM, slow RAM + `$DC0000-$DEFFFF`, ROM banks | stays (REU-resident) / file spans 2-5 | stays / LOAD_REU | the guest's RAM. AROS WRITES `$DC0000-$DEFFFF` (unmapped in the profile; not zero after m3 on both Ultimates), so the slow-RAM span runs to `$DEFFFF`. `$200000-$BEFFFF` and `$E80000-$F7FFFF` read zero after m3 (`aros_resume` m3 leg, Ultimate) and are not filed: a resume needs them zero, as the boot does (`host/machine.ZERO_SPANS`) |
+| guest memory | REU chip RAM, slow RAM + `$DC0000-$DEFFFF`, ROM banks | stays (REU-resident) / file spans 2-5 | stays / LOAD_REU | the guest's RAM. AROS WRITES `$DC0000-$DEFFFF` (unmapped in the profile; not zero after m3 on both Ultimates), so the slow-RAM span runs to `$DEFFFF`. `$200000-$BEFFFF` (W13-W: `$2DC000-$BEFFFF`; the staged disk below it is in span 2) and `$E80000-$F7FFFF` read zero after m3 (`aros_resume` m3 leg, Ultimate) and are not filed: a resume needs them zero, as the boot does (`host/machine.ZERO_SPANS`) |
+| W13-W disk image | REU `$200000-$2DBFFF` (`TD_ADF`) | file span 2 (the chip span runs to `$2DBFFF`, `SNAP_VER` 2) / stays (REU-resident) | LOAD_REU / stays | the staged DF0 disk and its overlay travel with the snapshot; zero without a disk |
+| W13-W drive and device state (`td_*`) | `td.s` BSS | image | restored | drive lines, the patched slot and its original target; the CIA-A pins live in `cia_st` (image) |
+
+## HLE trackdisk and DF0 (W13-W)
+
+Owner: td (`runtime/ops/td.s` (MAIN: state and guarded entries),
+`tests/aros/td.s` (the machine-mode module: all the code), the `; W13-W`
+lines in `cia.s`, rc `machine.inc` region `td`, `host/adf_overlay.py`,
+`tests/aros_wb.py`).
+Design and observations: `build/evidence/w13-wb/PROGRESS.md` (boot model,
+pinned ROM, 3.1 Workbench disk). Tests: `host/tests/test_td.py` (td.s on
+the in-process 6502 + REC model: the drive lines against the boot model's
+`Floppy`, the locate/patch, every request class, 7 mutants),
+`host/tests/test_adf_overlay.py`, `tests/aros_wb.py` (legs `w`, `nohle`,
+`resume`).
+
+- **Split (supervisor budget ruling).** MAIN holds only the cia.s hook,
+  `td_call`/`td_fcall` and the state (all BSS, so the W12-T image carries
+  it): 94 B. The code is a machine-mode module, `tests/aros/td.s`,
+  assembled at test time against `runner.lbl` (the `-D` symbols it lists
+  with `.ifndef`/`.error`) at `TD_ORG` = `$C200` (end <= `$C600`; layout:
+  mboot `$C000-$C1FF`, td `$C200-$C5FF`, W13-D's spr `$C600-$C8FF`),
+  entry `TD_ORG` = `jmp td_arm`, ID at `TD_ORG+3` (4 bytes: SHA-1 of the
+  binary with them zero, stamped by `tests/aros_wb.build_module`). The
+  generic loader (`aros_wb.MODULES`) stages every module with the boot
+  driver and again on every fresh load before a resume.
+- **Off by default.** `td_vec` = 0 (program mode, a boot without a disk,
+  every existing suite and snapshot): `td_call` returns C=0 at once, CIA-A
+  PRA pins stay `$EB`. The module is armed only when the host set `td_on`
+  (a disk is staged) and the boot driver called `TD_ORG` (after
+  `cia_reset`, `cop_reset`, `snap_arm`; `tests/aros_wb.py` assembles a
+  variant of `mboot.s` with that one call): `td_arm` sets `td_vec`/`td_fvec`
+  (the module's PRB and frame-hook entries), `td_mid` := the module ID,
+  chains `td_fcall` in front of the frame hook.
+- **Module ID (resume).** `td_call` and `td_fcall` compare `TD_ORG+3..6`
+  with `td_mid` first. A different module (a resume after a rebuild):
+  `td_call` calls nothing, `td_fcall` halts the machine with st_halt 1,
+  st_reason `TD_HALT_MOD` (`$57`) -- see "Suspend/resume". Tests:
+  `test_td.test_other_module_id_refuses`, mutant `nomid`; VICE leg
+  `resume` (a `TD_VARIANT` build).
+- **The disk** (rc `td $200000-$2DBFFF`, `TD_ADF`): 901,120 bytes, block n
+  at `TD_ADF + 512 n`, right after chip RAM. Staged after the ROM: VICE by
+  `test_load_chunk` (image with the overlay applied); the Ultimates by the
+  runner's `ureu_ld` from `<vol>/amiga64/amiga-os-310-workbench.adf` (byte
+  count checked by ureu.s) plus the overlay's blocks by the harness's REU
+  write. Both: `aros_sum` of the 901,120 bytes must equal the host's image.
+  No guest instruction touches the region: the boot model's watch over the
+  whole boot to Workbench idle saw no access to banks `$20-$B7` (only `$B8`
+  Akiko, `$E8` autoconfig, `$F0` reads), and the region is never a RAM,
+  board or ROM candidate (AROS sizes chip RAM to `$200000`, finds no
+  autoconfig board). It reads zero without a disk.
+- **The overlay** (`host/adf_overlay.py`): `S/Startup-Sequence` replaced
+  in the file's own data blocks (WB_BOOT §4.3 `trim`, default; `min`;
+  `full` = none), byte for byte the boot model's `--startup` image. The
+  ADF and every device file stay untouched. Refused: a block outside
+  2..1759, not 512 bytes, a header or OFS data block whose checksum does
+  not sum to 0, a header whose data-block table changed.
+- **The drive** (`td_prb`, the W13-W hook in `cia.s` `wr_prb`, CIA-B
+  only, `A` = the written value): the boot model's `Floppy` on the pins
+  `PRB | ~DDRB`. `/SEL0` (bit 3) low selects DF0; `/MTR` (bit 7) is latched
+  at the `/SEL0` fall; a `/STEP` (bit 0) rise while selected moves the head
+  (DIR bit 1 high: towards cylinder 0, else in, clamped 0..83) and sets
+  `/CHNG` high (disk present). CIA-A PRA input pins (`cia_st+CIA_PIN`,
+  bits 2-5 only, read-modify-write; W13-I owns 6-7): `$3C` while DF0 is
+  deselected, else `/RDY` (5) high iff the motor is off, `/TK0` (4) high iff
+  not at cylinder 0, `/WPRO` (3) low (write-protected), `/CHNG` (2) high
+  once a step saw the disk. `td_arm` sets `$3C` after `cia_reset`. DDRB
+  writes are not hooked: the ROM writes DDRB = `$FF` once, before any
+  meaningful PRB value (observed).
+- **The device.** `td_fhook` (chained in front of the frame hook) walks
+  `SysBase->DeviceList` (`$4`, +350; at most 32 nodes per frame) until
+  `trackdisk.device` appears, checks that its BeginIO slot (LVO -30) is
+  `JMP abs.l`, keeps the target (`td_orig`) and rewrites the slot through
+  `mem_write32`/`mem_write16` (W12-C's write check drops a cached window)
+  to `move.b d0,$BFD100` -- a CIA-B PRB write of the same 6 bytes. When
+  that write reaches `td_prb` with `st_ipc` = the slot (`td_slot`; the
+  exception-mode loop's PC of the current instruction; `$FFxxxx` = none),
+  nothing is stored and `td_bio` serves the IORequest at A1 (exec/io.h):
+  - quick `CMD_READ` / `ETD_READ`: `io_Length` bytes of the image at
+    `io_Offset` copied to `io_Data`, `io_Actual` = `io_Length`,
+    `io_Error` 0; then the device's RTS (PC := [A7], A7 += 4);
+  - quick `CMD_WRITE`, `TD_FORMAT`, `TD_RAWWRITE` (and their `ETD_`
+    forms): `io_Error` 28 (TDERR_WriteProt), `io_Actual` 0, RTS;
+  - anything else (non-quick requests, `TD_MOTOR`, `TD_CHANGESTATE`,
+    `TD_PROTSTATUS`, `TD_GETGEOMETRY`, `TD_ADDCHANGEINT`, ...): PC :=
+    `td_orig`, AROS's own trackdisk.device, which sees the drive above
+    (write-protected). Observed with the trim script: 55 quick reads
+    served, 7-9 requests passed, no write, no disk DMA.
+  - `io_Offset + io_Length` beyond the image (or either >= 16 MB):
+    `io_Error` 20 (TDERR_NotSpecified), `io_Actual` 0, nothing copied.
+  - **Limit:** a NON-quick `CMD_READ`/`ETD_READ` goes to the native path,
+    which needs disk DMA that does not exist: it would never complete. It is
+    counted in `td_nqr`; `aros_wb` fails if it is not 0 (none observed in the
+    boot to Workbench idle: every read is a DoIO).
+  The trap is safe because MOVE stores last and `ea_store` tail-calls
+  `mem_write8`: after the store the instruction only retires, so the new
+  r_pc/r_a7 take effect as the next instruction (flags: MOVE's, which no
+  BeginIO caller relies on).
+- **The copy.** REU -> `TD_BUF` (`blt_abuf`, `$B600-$B6FF`, shared with
+  blt.s, supervisor-approved: blits run synchronously inside a
+  custom-register write, so none is in flight inside the BeginIO trap (a
+  CIA write) or the frame hook (a service pass)) -> REU, one chunk
+  per destination page piece (`c = min(n, 256 - dst & $FF)`), REC address
+  control 0; `code_invpg` for each chunk's page (the bytes bypass
+  `mem_write*`); `mem_rec_dirty` at the end (C1). A chunk whose
+  destination is bank `$BF` or `$DF` is never moved (the REU under the I/O
+  banks, "I/O trap" F2): the request ends with `io_Error` 20 and
+  `io_Actual` = the bytes copied before it. Cost per read: two REU DMAs and
+  one `code_invpg` per 256 bytes.
+- **Scratch.** Inside the trap and the frame hook td.s uses the
+  interpreter's EA/ALU operands `t_ea..t_res` (`$60-$6F`): dead at an
+  instruction boundary and after `ea_store`'s tail call (`t_op1+3` the
+  chunk length, `t_op2+3` io_Error, `t_res+3` the walk count). `m_addr`/
+  `m_val` are the memory API's. Evidence: the `zpjunk` VICE build (all 16
+  bytes set to junk at every trap/hook exit) boots to the same Workbench.
+- **Host-visible** (runner.lbl): `td_on` (host: 1 = disk staged), `td_vec`,
+  `td_mid`, `td_slot`, `td_orig`, `td_nrd` (u16 reads served), `td_npas`,
+  `td_nqr` (u8), `td_cyl`, `td_mot`, `td_chg`, and the block watch: `td_wa` (host: the
+  watched block's REU address bits 15-9 with bit 8 clear, bits 23-16),
+  `td_whit` (chunks read from it, mod 256).
+- **Snapshots.** All state is BSS (W12-T image) or `cia_st`; the disk is
+  in file span 2 (`SNAP_VER` 2). A snapshot taken before the slot is
+  patched resumes into the walk; after it, into the trap.
