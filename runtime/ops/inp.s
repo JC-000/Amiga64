@@ -68,13 +68,9 @@ inp_view: .res 1        ; I1: view edges (bit 0 = F1 pressed), W13-D clears
 inp_n:    .res 1        ; frames a direction was held (<= INP_NMAX)
 inp_kp:   .res 1        ; the last frame's inp_key
 
-; CODE layout: W13-I's CODE growth (this module + mach.s's 3-byte call) is
-; padded to exactly one page (inp_pad below).  RODATA follows CODE, and its
-; tables are read with abs,X on the per-instruction path; some straddle a
-; page (g5_flow's 32-byte table), so any other shift changes which entries
-; cross and costs cycles (perf_cycles: +1/3 "stack" at +207 B, +1/2
-; mem/stream/copy at +3).  A whole page keeps every page offset after CODE.
-; The pad costs no MAIN: BSS starts on a page anyway (end $9D11 either way).
+; CODE layout: no pad needed.  RODATA is page-aligned (c64.cfg, Wave 13
+; supervisor), so CODE growth no longer moves which abs,X table entries
+; straddle a page (perf_cycles stays at delta 0).
 .segment "CODE"
 inp_beg:
 
@@ -180,5 +176,3 @@ nx:     inx
 .endproc
 
 INP_MACH  = 3           ; @value mach.s's W13-I CODE growth (jsr inp_frame)
-inp_pad:  .res $100 - INP_MACH - (inp_pad - inp_beg), $EA
-.assert inp_pad - inp_beg + INP_MACH <= $100, error, "inp: CODE growth over one page"
