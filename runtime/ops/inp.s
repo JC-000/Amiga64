@@ -27,7 +27,7 @@
 ;   3. F1: column 0 (PRA $FE), row 4; then C=: column 7 (PRA $7F), row 5.
 ;      No settle wait between them: rows recover at once on the C64U at 1,
 ;      48 and 64 MHz, and a column 1 -> column 7 read shows no phantom
-;      (rev-inp probe, 2026-10-09; the U64E is unmeasured).  F3 alone
+;      (rev-inp, build/evidence/w13-inp/settle/; the U64E is unmeasured).  F3 alone
 ;      reading as C= is checked by the attended script.
 ;   CIA1 DDRA and PRA are restored to their values on entry (PRA as read:
 ;   the 6526 returns the pins, so a bit an outside switch held low at entry

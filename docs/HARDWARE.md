@@ -1180,7 +1180,7 @@ morning's power-cycle, the fw 1.1.0 behaviour in the Wave 12 brief.)
 
 Package W13-I (`runtime/ops/inp.s`, contract "Input (joystick -> mouse)").
 Evidence: `build/evidence/w13-inp/green/` and the reviewer's
-`scratchpad/rev-inp/probe/`.
+`build/evidence/w13-inp/settle/` (rev-inp's probe `settle.s` and its C64U log).
 
 - **The harness's `inject_joystick` cannot reach a DDRA = `$00` read.**
   [MEASURED HW, C64U and U64E]

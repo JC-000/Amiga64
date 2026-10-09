@@ -25,8 +25,9 @@ Legs:
           leg_real) never reach inp_joy and make their key unknown (it
           keeps its last state: no phantom F1/C=); readable rows read up;
           CIA1 left DDRA = $FF, DDRB = $00; nothing held = all idle.
-  cost    VICE: 6502 cycles of one inp_frame (CIA1 timer B): the real scan,
-          the override idle and with every input bit; the worst case.
+  cost    VICE: 6502 cycles of one inp_frame (CIA1 timer B, screen off,
+          min of 5): the real scan, the override idle and with every input
+          bit; the worst case.
   noinj   Ultimate only: the harness inject_joystick writes the CIA1 PRA
           latch ($DC00, c64_test_harness backends/ultimate64.py
           inject_joystick); inp.s reads port 2 with DDRA = $00, so the
@@ -440,17 +441,24 @@ def leg_cost(rig: Rig) -> list[str]:
     mouse loop's worst case; an F1 edge).  The worst case is the real scan
     plus the input-dependent part: real0 + (ovr_all - ovr0)."""
     rig.need()
-    rig.w(0xC7F8, b"\x60")                      # an rts: the stub's overhead
-    over = cycles(rig, 0xC7F8)
-    rig.reset(src=0)
-    real0 = cycles(rig, rig.frame_addr) - over
-    rig.reset(src=1)
-    ovr0 = cycles(rig, rig.frame_addr) - over
-    rig.set_input(0x1F, F1 | CBM)
-    ovr_all = cycles(rig, rig.frame_addr) - over
+    d011 = rig.r(0xD011, 1)[0]
+    rig.w(0xD011, bytes([d011 & ~0x10 & 0x7F]))  # screen off: no badline steals
+    try:
+        rig.w(0xC7F8, b"\x60")                  # an rts: the stub's overhead
+        best = lambda: min(cycles(rig, rig.frame_addr) for _ in range(5))
+        over = min(cycles(rig, 0xC7F8) for _ in range(5))
+        rig.reset(src=0)
+        real0 = best() - over
+        rig.reset(src=1)
+        ovr0 = best() - over
+        rig.set_input(0x1F, F1 | CBM)
+        ovr_all = min(cycles(rig, rig.frame_addr) for _ in range(5)) - over
+    finally:
+        rig.w(0xD011, bytes([d011 & 0x7F]))
     worst = real0 + ovr_all - ovr0
-    log(f"  cost: inp_frame real scan {real0}, override idle {ovr0}, override all "
-        f"bits {ovr_all} cycles; worst case {worst} cycles (stub overhead {over})")
+    log(f"  cost (screen off, min of 5): inp_frame real scan {real0}, override "
+        f"idle {ovr0}, override all bits {ovr_all} cycles; worst case {worst} "
+        f"cycles; the real scan adds {real0 - ovr0} (stub overhead {over})")
     rig.reset(src=1)
     return [] if 0 < worst < 1000 else [f"cost: implausible {worst} cycles"]
 

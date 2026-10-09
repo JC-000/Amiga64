@@ -535,7 +535,12 @@ no link dependency on any client.
   one instruction each), and there is no time floor, so a periodic client
   re-arming from its own deadline keeps a bounded lateness when its period
   exceeds a pass plus one instruction (`lag`: P = 3000 phi2 at s = 0,
-  max 2333 late; the round-1b floor drifted to 50k). A halt in that step
+  max 2333 late; the round-1b floor drifted to 50k). W13-I: the bound is
+  gated with the input override (`inp_src` = 1, the rig's default since
+  Wave 13): max 2921-3485 over 7 runs. The real CIA1 scan adds 111 cycles
+  to every frame hook (screen off). With it, `lag` reads max 4713-4826
+  phi2 at s = 0 (same 7 runs), over the 4096 bound. That run is recorded, not gated
+  ("Input (joystick -> mouse)"). A halt in that step
   (HALT, STOP, an odd vector) leaves through the normal halt path, and every
   `mach_run` exit rule holds. A delivery does not force a step: a higher
   level pending after a delivery nests before the handler's first
@@ -1656,7 +1661,8 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
      while the stick pulls the column of S/F/H/K/F3 and that key is held.
   3. **Keys.** F1 is read on column 0 (PRA `$FE`) row 4, then C= on column
      7 (PRA `$7F`) row 5, with no settle wait between them.
-     - MEASURED (rev-inp, C64U, 2026-10-09, `scratchpad/rev-inp/probe/c64u_settle.log`):
+     - MEASURED (rev-inp, C64U, 2026-10-09: `build/evidence/w13-inp/settle/c64u_settle.log`,
+       probe `build/evidence/w13-inp/settle/settle.s`):
        rows recover at once at 1, 48 and 64 MHz, and a column 1 → column 7
        read shows no phantom.
      - The U64E is unmeasured.
@@ -1664,17 +1670,26 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
        script's F3/C= step.
   4. **Restore.** On exit the scan puts back CIA1 DDRA and PRA as they were
      on entry: PRA first, then DDRA. The PRA value is the one *read* on
-     entry; the 6526 returns the pins, so a bit an outside switch held low
-     at entry comes back as 0 in the latch. DDRB and PRB are never written.
-     The caller's CIA1 port A is therefore unchanged by a frame, and nothing
-     in machine mode has to tolerate a scan's leftovers (leg `real` checks
-     DDRA `$F0`/PRA `$5A` → `$F0`/`$5F`).
-  - **Cost** (leg `cost`, 6502 cycles per call, VICE; CPU speed does not
-    change it):
-    - the real scan with nothing held: 320;
-    - the override, idle: 209;
+     entry, because the 6526 returns the pins, not the latch. DDRB and PRB
+     are never written.
+     - The caller's CIA1 port A is unchanged by a frame, unless a port-2
+       switch is closed at entry. That latch bit then stays 0 until the
+       caller rewrites PRA. (Leg `real` checks DDRA `$F0`/PRA `$5A` →
+       `$F0`/`$5F`.)
+     - Callers that read CIA1 set it up themselves (`hle_con.s:401-405`),
+       and no runtime code calls the KERNAL. The restore is a precaution
+       kept under the page pad (supervisor, fix round 1).
+  - **Cost** (leg `cost`: 6502 cycles per call, VICE, screen off, the
+    minimum of 5; CPU speed does not change it):
+    - the real scan with nothing held: 277;
+    - the override, idle: 166;
     - the override with every bit set: 245;
-    - worst case: 356 (the real scan plus all four mouse-loop bits).
+    - worst case: 356 (the real scan plus all four mouse-loop bits);
+    - the real scan costs 111 more than the override.
+    rev-inp's independent measurement agrees (277/166/245/356).
+  - **Lateness.** `run_irq` `lag`'s 4096-phi2 bound (s = 0) is gated with
+    the override (max 2921-3485 phi2 over 7 runs). With the real scan the
+    measured max is 4713-4826 phi2 (the same 7 runs, 2026-10-09). That is recorded, not gated; see "Event seam".
   - **Coverage gap.** A real key or stick press through CIA1 (the scan's
     positive path) is covered only by the attended script
     (`tests/run_inp.py --attended`):

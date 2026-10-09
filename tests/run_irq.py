@@ -246,6 +246,13 @@ class Rig:
             self.drv = build_driver(os.path.splitext(prg)[0] + ".lbl", d)
             self.dl = drv_labels(d)
             self.w(DRV_ORG, self.drv)        # a leg may dcall before any stage
+        self.inp(1)                     # W13-I: idle scripted input (no CIA1 scan)
+
+    def inp(self, src: int) -> None:    # W13-I: inp_src (1 = override, idle)
+        try:                            # W13-I
+            self.w(self.lab("inp_src"), bytes([src, 0, 0]))   # W13-I
+        except KeyError:                # W13-I: a PRG without W13-I
+            pass                        # W13-I
 
     def call(self, addr: int, timeout: float = 300.0) -> None:
         from tests.harness_util import call_runner
@@ -1340,12 +1347,30 @@ def leg_lag(rig: Rig) -> list[str]:
         if res["fires"][4] != 31 or len(lates) < 31:
             f.append(f"lag P={p}: {res['fires'][4]} firings, {len(lates)} logged")
             continue
+        if p == 3000:                                       # W13-I: every value reported
+            print(f"    lag P=3000 (override, gated): max lateness {max(lates)} phi2")  # W13-I
         if p == 3000 and max(lates) > SLACK_PHI2:
             f.append(f"lag P=3000: max lateness {max(lates)} phi2 > {SLACK_PHI2} "
                      "(the lateness grows: the client drifts)")
         if p == 1500 and (lates[-1] - lates[0]) / 30 > grow:
             f.append(f"lag P=1500: lateness grows {(lates[-1] - lates[0]) / 30:.0f} "
                      f"phi2 per period (> {grow})")
+    # W13-I: the bound is gated with the idle override (rig default); once
+    # more with the real CIA1 scan (inp_src = 0, +111 cycles per frame hook),
+    # recorded only (docs/CONTRACTS.md "Input")
+    try:                                                    # W13-I
+        rig.lab("inp_src")                                  # W13-I
+        rig.inp(0)                                          # W13-I
+        (pc,) = rig.stage(prog_busy(3000))                  # W13-I
+        res = rig.run(pc, s=0, slots={4: Slot(1000, period=3000, rearms=30)})  # W13-I
+        lates = [l for k, e, l in res["log"] if k == 4]     # W13-I
+        print(f"    lag P=3000 real input (W13-I, not gated): max lateness "   # W13-I
+              f"{max(lates) if lates else None} phi2 (bound {SLACK_PHI2} gated "
+              "with the override)")                         # W13-I
+    except KeyError:                                        # W13-I
+        pass                                                # W13-I
+    finally:                                                # W13-I
+        rig.inp(1)                                          # W13-I
     return f
 
 
