@@ -36,8 +36,8 @@ REGIONS = {  # name: (start marker, end marker) in runtime/core.s
 # Snapshot of the BASE source (wave6/integration:runtime/core.s).
 EXPECTED = {
     "dispatch_loop": (43, "23d798b7d4164ace"),
-    "fetch_word": (77, "1ca2fda98a5dc60f"),
-    "memory_api": (276, "aa3a66e6ef2c37cc"),   # W7-T trap hook (strip proof: test_chip_hotpath)
+    "fetch_word": (62, "b44789edad7c849e"),    # W12-C miss path -> cw_look (hit path pinned: test_cwin_hotpath)
+    "memory_api": (310, "b907cb75c12c719c"),   # W7-T trap hook, W12-C WINCHK (strip proofs: test_chip_hotpath, test_cwin_hotpath)
     "ea": (337, "6b52f2bbd7b65462"),
     "alu_ccr": (293, "ab83e441a4fe7cfe"),
 }

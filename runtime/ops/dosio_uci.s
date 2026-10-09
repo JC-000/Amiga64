@@ -54,6 +54,8 @@
 .export dosio_uci_detect, dosio_uci_init, dosio_uci_open, dosio_uci_close
 .export dosio_uci_size, dosio_uci_seek, dosio_uci_rdchunk, dosio_uci_wrchunk
 .export dosio_uci_wcheck, dosio_uci_setsize, dosio_uci_delete
+.export uci_begin, uci_put, uci_exec, uci_ok       ; W12-T: ureu.s (UCI REU I/O)
+.export dosio_uci_max, dosio_uci_rn, dosio_uci_st  ; W12-T: ureu.s reply / status
 
 .import dosio_buf, dosio_name, dosio_nlen, dosio_mode, dosio_slot
 .import dosio_len, dosio_arg, dosio_err

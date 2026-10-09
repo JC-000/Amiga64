@@ -68,7 +68,7 @@ TRAMP = R + 0x30                # VICE: jsr aros_boot / jmp * (goto target)
 ZP_FRAMES = 0x96                # rc zp mach_frames (u32 LE)
 DRV_SYMS = ("emu_reset", "mem_read32", "mem_rec_dirty", "mach_init",
             "mach_run", "mach_s", "chip_reset", "cia_reset", "cop_reset",
-            "disp_init")
+            "disp_init", "snap_arm")    # snap_arm: W12-T (mboot.s, supervisor-approved)
 MILESTONES = {"m1": b"ROMInfo: 1MiB ROM detected",
               "m2": b"romtaginit done"}
 # boot model (tools/s3probe/aros_boot_model.py, this ROM): the instruction
@@ -619,9 +619,12 @@ def c64_hash(m: "Machine") -> tuple[str, dict]:
     for the whole snapshot, so $01 is switched to $34 for the matrix and put
     back to the value READ, not to a constant (fix: the first m3 version
     restored $37, mapping the KERNAL in under the running guest).  U64E: the
-    6510 keeps running and $01 is never touched: the matrix is left out
-    (the model side hashes the same way, "nomatrix")."""
-    from c64_test_harness import read_bytes, write_bytes
+    6510 keeps running and $01 is never touched: the matrix is left out and
+    W12-V's disp_mck (disp.s BSS: the matrix's Fletcher sums, updated by
+    every conversion) stands in for it (model_frames.u64_hash), so a wrong
+    palette still fails.  The second value: the raw reads, for the PNG and
+    VICE's disp_mck cross-check."""
+    from c64_test_harness import read_bytes
     sys.path.insert(0, os.path.join(ROOT, "tests", "aros"))
     import model_frames as MF
     bm, sc = m.lab("c2v_bitmap"), m.lab("c2v_screen")
@@ -632,24 +635,87 @@ def c64_hash(m: "Machine") -> tuple[str, dict]:
         t.write_memory(0x0001, bytes([0x34]), override="aros_boot: read RAM under I/O")
         screen = read_bytes(t, sc, 1000)
         t.write_memory(0x0001, port, override="aros_boot: restore $01")
+        colram = read_bytes(t, 0xD800, 1000)
+        mck = struct.unpack("<H", bytes(read_bytes(t, m.lab("disp_mck"), 2)))[0]
     else:
-        bitmap, screen = read_bytes(t, bm, 8000), None
-    colram = read_bytes(t, 0xD800, 1000)
+        # W12-V: one REST GET per 1000 bytes (the transport's read_memory;
+        # read_bytes splits into 128-byte GETs, ~7 s for the bitmap on the
+        # C64U, while AROS converts every 2-3 s), bracketed by disp_nconv:
+        # a conversion in between makes it read again (at most 4 tries)
+        screen = None
+        nc = m.lab("disp_nconv")
+        for _ in range(4):
+            n0 = t.read_memory(nc, 2)
+            bitmap = b"".join(t.read_memory(bm + o, 1000) for o in range(0, 8000, 1000))
+            colram = t.read_memory(0xD800, 1000)
+            mck = struct.unpack("<H", bytes(t.read_memory(m.lab("disp_mck"), 2)))[0]
+            if t.read_memory(nc, 2) == n0:
+                break
     vic = {a: read_bytes(t, a, 1)[0] for a in MF.VIC_MASK}
     if m.vice:
         t.resume()
-    return MF.conv_hash(bitmap, screen, colram, vic), vic
+    raw = {"bitmap": bytes(bitmap), "screen": None if screen is None else bytes(screen),
+           "colram": bytes(colram), "vic": vic, "mck": mck}
+    if m.vice:
+        return MF.conv_hash(bitmap, screen, colram, vic), raw
+    return MF.conv_hash(bitmap, None, colram, vic, mck), raw
+
+
+M3_PNG_DIR = os.path.dirname(MODEL_JSON)     # build/aros (git-ignored)
+
+
+def m3_png(path: str, raw: dict, vic_pens: list | None) -> str:
+    """W12-V: render the C64's converted frame (hires, as read) to a PNG.
+    VICE: from the matrix read.  U64: the matrix is rebuilt from the pens in
+    colour RAM and the model's pen colours, and must match disp_mck."""
+    from PIL import Image
+    from host import c2v_ref as R
+    sc = raw["screen"]
+    if sc is None:
+        if not vic_pens:
+            return "no matrix and no model pen colours"
+        sc = bytes((vic_pens[c & 15] << 4) | vic_pens[0] for c in raw["colram"])
+        if R.screen_sum(sc) != raw["mck"]:
+            return f"rebuilt matrix sum ${R.screen_sum(sc):04X} != disp_mck ${raw['mck']:04X}"
+    hires = raw["vic"][0xD016] & 0x10 == 0
+    im = Image.new("RGB", (320, 200))
+    for c in range(1000):
+        r, cx = divmod(c, 40)
+        for y in range(8):
+            b = raw["bitmap"][r * 320 + cx * 8 + y]
+            for k in range(8 if hires else 4):
+                if hires:
+                    col = sc[c] >> 4 if b >> (7 - k) & 1 else raw["vic"][0xD021] & 15
+                    im.putpixel((cx * 8 + k, r * 8 + y), R.VIC_RGB[col])
+                else:
+                    v = b >> (6 - 2 * k) & 3
+                    col = [raw["vic"][0xD021] & 15, sc[c] >> 4, sc[c] & 15,
+                           raw["colram"][c] & 15][v]
+                    for d in range(2):
+                        im.putpixel((cx * 8 + 2 * k + d, r * 8 + y), R.VIC_RGB[col])
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    im.resize((960, 600), Image.NEAREST).save(path)
+    return ""
 
 
 def leg_m3(m: Machine, r: dict, timeout: float) -> list[str]:
     """Milestone 3: a conversion on the C64 equal to one of the model's
     insert-disk conversions (first seen at or after INSERT_DISK_FRAME).
     Needs the blitter (W11-B): without it the screen stays without pixels
-    (S3_PLAN §3.4: the boot logic completes, no picture)."""
+    (S3_PLAN §3.4: the boot logic completes, no picture).  W12-V: the model
+    frame matched must show >= MIN_VISIBLE distinct non-background colours;
+    on VICE disp_mck must equal the sums of the matrix read; the frame is
+    rendered to build/aros/m3_<backend>.png."""
+    from host import c2v_ref as R
+    sys.path.insert(0, os.path.join(ROOT, "tests", "aros"))
+    import model_frames as MF
     mf, why = model_frames()
     if mf is None:
         return [f"m3: no model reference: {why}"]
-    key = (lambda h, v: h) if m.vice else (lambda h, v: v["nomatrix"])
+    if mf.get("mck_version") != MF.MCK_VERSION:
+        return [f"m3: {MODEL_JSON} has disp_mck version {mf.get('mck_version')}, "
+                f"want {MF.MCK_VERSION} (W12-V): delete it to regenerate"]
+    key = (lambda h, v: h) if m.vice else (lambda h, v: v["u64"])
     every = {key(h, v): v for h, v in mf["hashes"].items()}
     ok = {key(h, v): v for h, v in mf["hashes"].items()
           if v["frame"] >= mf["insert_disk_frame"]}
@@ -662,7 +728,7 @@ def leg_m3(m: Machine, r: dict, timeout: float) -> list[str]:
         mode = m.r(m.lab("disp_mode"), 1)[0]
         if nconv != last or not m.vice:     # U64E: every poll (a torn read
             last = nconv                    # of a static screen heals)
-            h, vic = c64_hash(m)
+            h, raw = c64_hash(m)
             fr = struct.unpack("<I", m.r(ZP_FRAMES, 4))[0]
             if h not in seen:
                 seen[h] = fr
@@ -671,12 +737,26 @@ def leg_m3(m: Machine, r: dict, timeout: float) -> list[str]:
                     f"{h[:12]} {'= model frame ' + str(hit['frame']) if hit else '(not a model frame)'}")
             if h in ok:
                 el = time.monotonic() - t0 + r.get("wall_s", 0)
-                out.update(reached={"hash": h[:12], "model_frame": ok[h]["frame"],
+                v = ok[h]
+                out.update(reached={"hash": h[:12], "model_frame": v["frame"],
                                     "guest_frame": fr, "wall_s": round(el, 1),
-                                    "ips_est": round(MODEL_AT["m3"][0] / el)})
+                                    "ips_est": round(MODEL_AT["m3"][0] / el),
+                                    "visible": v["visible"], "disp_mck": f"${raw['mck']:04X}"})
                 r["at"]["m3"] = out["reached"]
-                log(f"  m3 reached: {el:.1f} s, guest frame {fr}")
-                return []
+                log(f"  m3 reached: {el:.1f} s, guest frame {fr}, {v['visible']} visible colours")
+                fails = []
+                if v["visible"] < MF.MIN_VISIBLE:
+                    fails.append(f"m3: model frame {v['frame']} shows {v['visible']} "
+                                 f"non-background colours (< {MF.MIN_VISIBLE})")
+                if m.vice and R.screen_sum(raw["screen"]) != raw["mck"]:
+                    fails.append(f"m3: disp_mck ${raw['mck']:04X} != the matrix's sums "
+                                 f"${R.screen_sum(raw['screen']):04X}")
+                png = os.path.join(M3_PNG_DIR, f"m3_{'vice' if m.vice else 'u64'}.png")
+                err = m3_png(png, raw, v.get("vic_pens"))
+                out["png"] = err or png
+                if err:
+                    fails.append(f"m3: PNG: {err}")
+                return fails
         time.sleep(2.0)
     out.update(seen={h[:12]: f for h, f in seen.items()}, nconv=last,
                mode=m.r(m.lab("disp_mode"), 1)[0], why=m.r(m.lab("disp_why"), 1)[0])

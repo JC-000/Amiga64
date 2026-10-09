@@ -194,6 +194,7 @@ aros_boot:
         jsr cia_reset           ; (again: the brief's explicit init step)
         jsr cop_reset           ; display state + the copper frame hook
         jsr disp_init           ; LUT, refresh hook
+        jsr snap_arm ; W12-T
         jsr mem_rec_dirty
         jsr mach_run
         sei

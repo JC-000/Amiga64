@@ -79,7 +79,7 @@ PROFILES = {
 # map may hand them out.  ``io`` = the trapped register bank itself; the
 # other owners keep host-private data in the REU under it.
 IO_BANKS = ((0xBF0000, 0xBFFFFF), (0xDF0000, 0xDFFFFF))
-IO_BANK_OWNERS = frozenset({"io", "disp"})
+IO_BANK_OWNERS = frozenset({"io", "disp", "snap"})   # W12-T (supervisor-approved): snap
 # Sources whose guest literals belong to a profile, not to guest.inc.
 PROFILE_SOURCES = [("tests/aros/*.s", "machine")]
 
@@ -105,6 +105,8 @@ FILE_OWNERS = {
     "tests/runner/runner.s": "run",
     "tests/runner/run_program.s": "run",
     "tests/aros/mboot.s": "aros",       # W11-A machine-mode boot driver (S3.7)
+    "runtime/ops/snap.s": "snap",       # W12-T (supervisor-approved) suspend/resume
+    "runtime/ops/ureu.s": "snap",       # W12-T (supervisor-approved) UCI REU I/O
 }
 
 # Owners by glob, for module families that grow by file (checked after the

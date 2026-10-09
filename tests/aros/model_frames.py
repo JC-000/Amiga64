@@ -13,7 +13,11 @@ matrix, colour RAM, the VIC registers) with the first frame it appears in.
 tests/aros_boot.py leg m3 compares the C64's conversion against this set
 (frames at or after INSERT_DISK_FRAME: the 7.0 s "insert disk" logo and
 icons, S3_PLAN §3.1).  Nothing of the ROM is written: only hashes and
-display-register values.
+display-register values.  W12-V: each entry also carries "u64", the hash
+the Ultimate side can compute (the matrix replaced by disp_mck, the
+checksum disp.s keeps in BSS), and "visible", the number of distinct
+non-background colours of cells with pixels; every insert-disk conversion
+must show at least MIN_VISIBLE of them (asserted here and in leg m3).
 
     ~/.cache/amiga64/s3probe-venv/bin/python tests/aros/model_frames.py OUT.json
         [--from 250] [--to 450]
@@ -37,13 +41,18 @@ sys.path.insert(0, os.path.join(ROOT, "tools", "s3probe"))
 INSERT_DISK_FRAME = 345
 # the VIC bits the conversion owns (tests/run_pf.py VIC_MASK)
 VIC_MASK = {0xD011: 0x7F, 0xD016: 0x1F, 0xD018: 0xFE, 0xD020: 0x0F, 0xD021: 0x0F}
+MIN_VISIBLE = 3                 # W12-V V3: distinct non-background colours in use
+MCK_VERSION = 2                 # W12-V: disp_mck = Fletcher mod 255 (1: mod 256)
 
 
-def conv_hash(bitmap: bytes, screen: bytes | None, colram: bytes, vic: dict) -> str:
+def conv_hash(bitmap: bytes, screen: bytes | None, colram: bytes, vic: dict,
+              mck: int | None = None) -> str:
     """The hash of one conversion; tests/aros_boot.py computes it from the
     C64 side with the same function (colour RAM low nibbles, masked VIC).
     screen None: the variant without the screen matrix (the U64E cannot read
-    the RAM under the I/O window of a running machine without banking it in)."""
+    the RAM under the I/O window of a running machine without banking it in);
+    W12-V: that variant carries mck, disp.s's matrix checksum (disp_mck, u16
+    LE), so a wrong palette still changes it."""
     h = hashlib.sha1()
     h.update(bitmap)
     if screen is not None:
@@ -51,7 +60,31 @@ def conv_hash(bitmap: bytes, screen: bytes | None, colram: bytes, vic: dict) -> 
     h.update(bytes(b & 0x0F for b in colram))
     for a in sorted(VIC_MASK):
         h.update(bytes([vic[a] & VIC_MASK[a]]))
+    if mck is not None:
+        h.update(bytes([mck & 0xFF, mck >> 8]))
     return h.hexdigest()
+
+
+def u64_hash(conv: dict) -> str:
+    """W12-V: the Ultimate-side hash of a c2v_ref.disp_convert result."""
+    return conv_hash(conv["bitmap"], None, conv["colram"], conv["vic"], conv["mck"])
+
+
+def visible_colours(conv: dict) -> int:
+    """W12-V: distinct foreground colours, other than the background, of the
+    cells that have a set pixel (hires: matrix high nibble; mc2: the three
+    pen colours if any pixel is non-zero)."""
+    bm, sc, bg = conv["bitmap"], conv["screen"], conv["bgc"]
+    if conv["decide"]["mode"] == 1:                  # mc2: global colours
+        pens = {(b >> s) & 3 for b in bm for s in (0, 2, 4, 6)} - {0}
+        col = {1: sc[0] >> 4, 2: sc[0] & 15, 3: conv["colram"][0] & 15}
+        return len({col[p] for p in pens} - {bg})
+    fg = set()
+    for c in range(1000):
+        r, cx = divmod(c, 40)
+        if any(bm[r * 320 + cx * 8 + y] for y in range(8)):
+            fg.add(sc[c] >> 4)
+    return len(fg - {bg})
 
 
 def snapshot(am) -> dict:
@@ -98,19 +131,27 @@ def main(argv=None) -> int:
                 d = conv["decide"]
                 seen[h] = {"frame": f, "icount": am.icount, "mode": d["mode"],
                            "why": d["why"], "count": 0,
-                           "nomatrix": conv_hash(conv["bitmap"], None, conv["colram"],
-                                                 conv["vic"]) if "bitmap" in conv else "blank"}
+                           "u64": u64_hash(conv) if "bitmap" in conv else "blank",
+                           "visible": visible_colours(conv) if "bitmap" in conv else 0,
+                           "vic_pens": conv.get("vic_pens")}
             seen[h]["count"] += 1
         return n
     am.copper = copper
     am.run((a.hi + 2) / 50.0, 1000)
+    dim = {h[:12]: v["visible"] for h, v in seen.items()
+           if v["frame"] >= INSERT_DISK_FRAME and v["visible"] < MIN_VISIBLE}
+    if dim:                     # W12-V V3: the insert-disk screen must be visible
+        print(f"FAIL: insert-disk conversions with < {MIN_VISIBLE} visible colours: {dim}")
+        return 1
     with open(a.out, "w") as fp:
         json.dump({"from": a.lo, "to": a.hi, "insert_disk_frame": INSERT_DISK_FRAME,
+                   "mck_version": MCK_VERSION,
                    "hashes": seen,
                    # the boot's serial debug text (milestones 1-2 compare it)
                    "serial": am.serial.decode("latin-1")}, fp, indent=1)
     print(f"{len(seen)} distinct conversions in frames {a.lo}-{a.hi}: "
-          + ", ".join(f"{v['frame']}" for v in sorted(seen.values(), key=lambda v: v['frame'])))
+          + ", ".join(f"{v['frame']} ({v['visible']} colours)"
+                      for v in sorted(seen.values(), key=lambda v: v['frame'])))
     return 0
 
 

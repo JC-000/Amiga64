@@ -48,6 +48,12 @@
 ;   c2v_pal_hires  colours 0-1 -> screen nibbles (fg = colour 1, bg = colour 0)
 ;   c2v_mc2        convert one frame from planes 0-1
 ;   c2v_hires      convert one frame from planes 0-3
+;   c2v_lookn      (W12-V disp; BASIC out, ends no REC use) X = highest
+;                  pen: c2v_v_col[0..X] = LUT[pal & $FFF]
+;   c2v_setmc2     (W12-V disp) c2v_pal_mc2 with c2v_v_col[0..3] already set
+;   c2v_hfill      (W12-V disp) matrix from the cell pens in colour RAM
+;   c2v_hires also (W12-V) leaves each cell's pen in colour RAM and the
+;                  cells per pen in c2v_v_cnt (c2v_pick, c2v_hrow)
 ;   c2v_mc2s, c2v_hiress  (W10-V disp) the same, but row n+1 of plane p
 ;                  starts width + c2v_a_skip[p] bytes after row n (BPLxMOD;
 ;                  docs/C2V.md "Row skip"); the two entries above zero
@@ -69,7 +75,9 @@
 ; Test-only variants (tests/run_c2v.py): C2V_STUB (every entry is rts, the
 ; red leg), C2V_MUT_BITORDER (planes swapped / pair tables swapped),
 ; C2V_MUT_LUT (LUT index + 1), C2V_MUT_ROW (source row advance one short),
-; C2V_MUT_NMI (the RAM NMI vector is not set before the $01=$34 fill).
+; C2V_MUT_NMI (the RAM NMI vector is not set before the $01=$34 fill);
+; W12-V: C2V_MUT_PICKR (the rightmost pixel's pen), C2V_MUT_HROW (pens not
+; cleared between char rows), C2V_MUT_HFILLBG (matrix low nibble = the pen's).
 ; (tests/run_c2v.py's nmiack variant is MACH_MUT_NMIACK in runtime/ops/mach.s.)
 ; ===========================================================================
 
@@ -77,6 +85,8 @@
 
 .export c2v_init, c2v_pal_mc2, c2v_pal_hires, c2v_mc2, c2v_hires
 .export c2v_mc2s, c2v_hiress                ; W10-V disp: per-plane row skip
+.export c2v_lookn, c2v_setmc2, c2v_hfill    ; W12-V disp: the colour choice
+.export c2v_v_col, c2v_v_cnt, c2v_v_tab     ; W12-V
 .export c2v_args, c2v_bitmap, c2v_screen   ; labels for the host (runner.lbl)
 .export C2V_ROWS
 .import mem_rec_dirty, mach_nmi
@@ -94,7 +104,7 @@ c2v_a_src  = c2v_args + 0       ; 4 x u24 plane REU addresses
 c2v_a_lut  = c2v_args + 12      ; u24 LUT REU address
 c2v_a_pal  = c2v_args + 16      ; 16 x u16 OCS colours
 c2v_a_bgc  = c2v_args + 48      ; u8 out: $D021 colour
-c2v_v_col  = c2v_args + 49      ; 4 x u8 looked-up VIC colours
+; (+49..+52 unused since W12-V: were the 4 looked-up colours, now c2v_v_col)
 c2v_v_scr  = c2v_args + 53      ; u8 screen byte, converted rows
 c2v_v_cr   = c2v_args + 54      ; u8 colour-RAM byte, converted rows
 c2v_v_band = c2v_args + 55      ; u8 screen byte, blank rows
@@ -109,11 +119,22 @@ c2v_a_skip = c2v_args + 72      ; W10-V disp: 4 x s16 bytes skipped after each
 c2v_v_adl  = c2v_args + 80      ; W10-V disp: 4 x u8 row advance, bits 7-0
 c2v_v_adh  = c2v_args + 84      ; 4 x u8 bits 15-8
 c2v_v_adb  = c2v_args + 88      ; 4 x u8 bits 23-16 (sign extension)
+c2v_v_col  = c2v_args + 92      ; W12-V: 16 x u8 VIC colour per pen (c2v_lookn:
+                                ; LUT; disp_rule rewrites the pens in use)
+c2v_v_cnt  = c2v_args + 108     ; W12-V: 16 x u8 hires cells per pen (sat. 255)
+c2v_v_tab  = c2v_args + 124     ; W12-V: 16 x u8 c2v_hfill's matrix byte per pen
+c2v_v_py   = c2v_args + 140     ; W12-V: c2v_pick's Y
+c2v_v_pm   = c2v_args + 141     ; W12-V: c2v_pick's pixel mask
+c2v_v_pen  = c2v_args + 142     ; W12-V: c2v_pick's pen
+c2v_v_px   = c2v_args + 143     ; W12-V: c2v_pick's X
 
 P0 = c2v_stage
 P1 = c2v_stage + $100
 P2 = c2v_stage + $200
 P3 = c2v_stage + $300
+C2V_CP = c2v_stage + $80        ; W12-V: pen of cell cx of the char row being
+                                ; converted at C2V_CP + 2cx (0 = none yet);
+                                ; P0's bytes past the 80-byte row
 
 .assert (c2v_pairhi & $FF) = 0 .and (c2v_pairlo & $FF) = 0, error, "c2v pair tables must be page-aligned"
 .assert (c2v_stage & $FF) = 0, error, "c2v plane rows must be page-aligned"
@@ -149,6 +170,9 @@ c2v_mc2:
 c2v_hires:
 c2v_mc2s:
 c2v_hiress:
+c2v_lookn:                      ; W12-V
+c2v_setmc2:                     ; W12-V
+c2v_hfill:                      ; W12-V
         rts
 .else
 
@@ -198,6 +222,11 @@ c2v_pal_mc2:
         C2V_ENTER
         ldx #3
         jsr c2v_lookn
+        jmp c2v_mc2col
+; c2v_setmc2 — W12-V (disp): c2v_pal_mc2 with c2v_v_col[0..3] already set.
+c2v_setmc2:
+        C2V_ENTER
+c2v_mc2col:
         lda c2v_v_col+1         ; %01 -> screen high nibble
         asl
         asl
@@ -287,6 +316,92 @@ c2v_leave:
         pla
         sta CPU_PORT
         rts
+
+; c2v_hfill — W12-V (disp, after c2v_hiress and the colour choice): matrix
+; cell i := c2v_v_tab[pen i] = c2v_v_col[pen] << 4 | c2v_v_col[0], the pen
+; read from colour RAM (c2v_hrow); the cells of any blank rows take pen 0
+; (their colour RAM := 0 first).  c2v_a_bgc := c2v_v_col[0].  Per page of
+; 256 cells: the bytes are mapped into C2V_HBUF with I/O in, then stored to
+; the matrix; under I/O that store loop runs at $01 = %xx100 with IRQs
+; masked (~3.6k cycles a page), the NMI guard set first as in c2v_fill.
+C2V_HBUF = c2v_stage + $100     ; W12-V: P1's page, free after the kernel
+c2v_hfill:
+        C2V_ENTER
+        ldx #15
+:       lda c2v_v_col,x
+        asl
+        asl
+        asl
+        asl
+.ifdef C2V_MUT_HFILLBG
+        ora c2v_v_col,x         ; mutant: the background nibble = the pen's
+.else
+        ora c2v_v_col
+.endif
+        sta c2v_v_tab,x
+        dex
+        bpl :-
+        lda c2v_v_col
+        sta c2v_a_bgc
+.if C2V_SPLIT < 1000
+        lda #0                  ; blank rows: pen 0
+        ldx #<(C2V_SPLIT - $300)
+:       sta VIC_COLRAM+$300,x
+        inx
+        cpx #<(1000 - $300)
+        bne :-
+.endif
+        lda #>VIC_COLRAM
+        sta @rd+2
+        lda #>c2v_screen
+        sta @wr+2
+.if C2V_SCR_UNDER_IO
+.ifndef C2V_MUT_NMI
+        lda #<mach_nmi          ; NMI guard first (c2v_fill)
+        sta mach_vnmi
+        lda #>mach_nmi
+        sta mach_vnmi+1
+.endif
+.endif
+@pg:    ldx #0                  ; map one page (256 cells; past cell 999 the
+@rd:    lda VIC_COLRAM,x        ; operand high byte patched; colour RAM's
+        and #$0F                ; spare bytes, never stored)
+        tay
+        lda c2v_v_tab,y
+        sta C2V_HBUF,x
+        inx
+        bne @rd
+        lda @wr+2               ; cells to store: 256, or 232 on the last page
+        cmp #>(c2v_screen + $300)
+        bne :+
+        lda #<1000
+        .byte $2C               ; bit abs: skip the lda #0
+:       lda #0
+        sta c2v_v_pm
+.if C2V_SCR_UNDER_IO
+        php
+        sei
+        lda CPU_PORT
+        sta c2v_v_port
+        and #$F8
+        ora #$04                ; %xx100 ($34): RAM everywhere, no I/O
+        sta CPU_PORT
+.endif
+@st:    lda C2V_HBUF,x          ; X = 0
+@wr:    sta c2v_screen,x        ; operand high byte patched
+        inx
+        cpx c2v_v_pm
+        bne @st
+.if C2V_SCR_UNDER_IO
+        lda c2v_v_port          ; restore at once
+        sta CPU_PORT
+        plp
+.endif
+        inc @rd+2
+        inc @wr+2
+        lda c2v_v_pm
+        beq @pg                 ; a full page; else the last cell is stored
+        jmp c2v_leave
 
 ; c2v_lookn — X = highest colour index: c2v_v_col[0..X] = LUT[pal[i] & $FFF]
 ; (one byte DMA each).
@@ -434,6 +549,20 @@ c2v_hiress:                     ; W10-V: rows skip c2v_a_skip[p] bytes
         C2V_ENTER
         ldx #80
         jsr c2v_setup
+        lda #<VIC_COLRAM        ; W12-V: c2v_hrow starts at row 0
+        sta c2v_hrow_d+1        ; W12-V
+        lda #>VIC_COLRAM        ; W12-V
+        sta c2v_hrow_d+2        ; W12-V
+        lda #0                  ; W12-V: no pens yet
+        ldx #15                 ; W12-V
+:       sta c2v_v_cnt,x         ; W12-V
+        dex                     ; W12-V
+        bpl :-                  ; W12-V
+        ldy #78                 ; W12-V
+:       sta C2V_CP,y            ; W12-V
+        dey                     ; W12-V
+        dey                     ; W12-V
+        bpl :-                  ; W12-V
 @ln:    C2V_FETCH 4
         jsr c2v_setln
         sta @o1+1
@@ -456,7 +585,11 @@ c2v_hiress:                     ; W10-V: rows skip c2v_a_skip[p] bytes
 @q1:    lda c2v_pairlo          ; operand low byte patched
 @h1:    ora c2v_pairhi
 @o1:    sta c2v_bitmap,x
-        iny
+        beq @e1                 ; W12-V: no pixel in this cell line
+        lda C2V_CP,y            ; W12-V: the cell's pen is chosen?
+        bne @e1                 ; W12-V
+        jsr c2v_pick            ; W12-V
+@e1:    iny
         iny
         txa
         clc
@@ -476,7 +609,11 @@ c2v_hiress:                     ; W10-V: rows skip c2v_a_skip[p] bytes
 @q2:    lda c2v_pairlo
 @h2:    ora c2v_pairhi
 @o2:    sta c2v_bitmap+256,x
-        txa
+        beq @e2                 ; W12-V
+        lda C2V_CP,y            ; W12-V
+        bne @e2                 ; W12-V
+        jsr c2v_pick            ; W12-V
+@e2:    txa
         clc
         adc #8
         tax
@@ -486,10 +623,86 @@ c2v_hiress:                     ; W10-V: rows skip c2v_a_skip[p] bytes
         bne @l2
         inc c2v_v_line
         lda c2v_v_line
+        and #7                  ; W12-V: a char row done: its pens to
+        bne :+                  ; W12-V: colour RAM
+        jsr c2v_hrow            ; W12-V
+:       lda c2v_v_line
         cmp #C2V_LINES
         beq @done
         jmp @ln
 @done:  jmp c2v_leave           ; C1
+
+; c2v_pick — W12-V: C2V_CP,y := the pen of the leftmost set pixel of this
+; cell line (planes' bytes y then y+1, bit 7 first; one is set), and count
+; it in c2v_v_cnt (saturating).  Keeps X and Y.
+c2v_pick:
+        sty c2v_v_py
+        stx c2v_v_px
+        lda P0,y
+        ora P1,y
+        ora P2,y
+        ora P3,y
+        bne :+
+        iny                     ; the left byte is empty: the right one
+        lda P0,y
+        ora P1,y
+        ora P2,y
+        ora P3,y
+:       sta c2v_v_pm
+.ifdef C2V_MUT_PICKR
+        lda #$01                ; mutant: the rightmost set pixel
+:       bit c2v_v_pm
+        bne :+
+        asl
+.else
+        lda #$80
+:       bit c2v_v_pm
+        bne :+
+        lsr
+.endif
+        bne :-                  ; (always: a bit is set)
+:       sta c2v_v_pm            ; the pixel
+        lda #0
+        sta c2v_v_pen
+.repeat 4, i
+        lda P3 - i * $100,y     ; plane 3 first: it ends in bit 3
+        and c2v_v_pm
+        cmp #1                  ; C = the pixel's bit in this plane
+        rol c2v_v_pen
+.endrepeat
+        ldy c2v_v_py
+        ldx c2v_v_pen
+        txa
+        sta C2V_CP,y
+        inc c2v_v_cnt,x
+        bne :+
+        dec c2v_v_cnt,x         ; hold at 255
+:       ldx c2v_v_px
+        rts
+
+; c2v_hrow — W12-V: the finished char row's pens (C2V_CP) to its colour
+; RAM row, C2V_CP cleared, the row pointer advanced by 40.
+c2v_hrow:
+        ldx #39
+        ldy #78
+:       lda C2V_CP,y
+c2v_hrow_d:
+        sta VIC_COLRAM,x        ; operand: the row's colour RAM (patched)
+.ifndef C2V_MUT_HROW
+        lda #0
+        sta C2V_CP,y            ; (mutant: pens carried into the next row)
+.endif
+        dey
+        dey
+        dex
+        bpl :-
+        clc
+        lda c2v_hrow_d+1
+        adc #40
+        sta c2v_hrow_d+1
+        bcc :+
+        inc c2v_hrow_d+2
+:       rts
 
 ; ---------------------------------------------------------------------------
 ; c2v_mc2 — 2-plane lores 320 -> 160 multicolour, one frame.

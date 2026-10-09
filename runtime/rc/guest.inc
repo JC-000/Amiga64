@@ -112,7 +112,14 @@ HEAP_FIRST = $100008    ; first block header; every block = 8-byte header + payl
 .ifndef disp_lut
 disp_lut  = $DF0000     ; W10-V disp: OCS-RGB -> VIC LUT, 4096 bytes (index = $0RGB), stashed by disp_init
 .endif
-; @region io $DF1000-$DFFFFF custom-chip bank: trapped to chip.s by the memory API, never guest RAM (W11-A: shrunk out of free; both profiles reserve it)
+; @region snap $DF1000-$DF3FFF W12-T (supervisor-approved) suspend snapshot in the REU under the trapped $DF bank (never guest-visible): header, zero page, disp_st, BSS image (host/snapfmt.py)
+.ifndef snap_base
+snap_base = $DF1000     ; W12-T (supervisor-approved): snapshot area (header at +0)
+.endif
+.ifndef snap_end
+snap_end  = $DF3FFF     ; W12-T (supervisor-approved): last byte of the snapshot area (inclusive)
+.endif
+; @region io $DF4000-$DFFFFF custom-chip bank: trapped to chip.s by the memory API, never guest RAM (W11-A: shrunk out of free; both profiles reserve it) ; W12-T (supervisor-approved): was $DF1000-
 
 ; @region hle $E00000-$FFFFFF HLE DOS RAMDISK - dos.library file store, 2 MB (WS-B2, docs/HLE_DOS.md: header + 32-entry directory, data from +$1000)
 .ifndef dosio_rd_base

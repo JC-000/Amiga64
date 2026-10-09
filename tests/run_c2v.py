@@ -34,10 +34,10 @@ Legs:
   (default)          correctness + NMI, the given PRG must pass
   --variant NAME     build a test-only variant of the given PRG's tree (in
                      the Makefile's link order) and run it: stub | bitorder
-                     | lut | row | nmi | nmiack (mutants),
+                     | lut | row | nmi | nmiack | pickr | hrow | hfillbg (mutants),
                      layout-b (176 lines, matrix at $FC00: must PASS),
                      nofetch (--perf only); --expect-fail inverts the exit
-  --teeth            the six mutants, each must fail
+  --teeth            the mutants (W12-V adds pickr, hrow, hfillbg), each must fail
   --perf             VICE cycles per frame of each kernel (CIA2 TA->TB
                      32-bit phi2 count, screen blanked: no badlines)
 
@@ -82,7 +82,10 @@ LUT_BANK = 0x14F800
 
 VARIANTS = {"stub": ["C2V_STUB=1"], "bitorder": ["C2V_MUT_BITORDER=1"],
             "lut": ["C2V_MUT_LUT=1"], "row": ["C2V_MUT_ROW=1"],
-            "nmi": ["C2V_MUT_NMI=1"], "nmiack": ["MACH_MUT_NMIACK=1"]}
+            "nmi": ["C2V_MUT_NMI=1"], "nmiack": ["MACH_MUT_NMIACK=1"],
+            # W12-V: the cell pen, the row flush, the matrix byte
+            "pickr": ["C2V_MUT_PICKR=1"], "hrow": ["C2V_MUT_HROW=1"],
+            "hfillbg": ["C2V_MUT_HFILLBG=1"]}
 OTHER_VARIANTS = {"layout-b": ["C2V_ROWS=22", "c2v_screen=0xFC00"],
                   "nofetch": ["C2V_PERF_NOFETCH=1"]}
 GUARD_REGS = (0xD011, 0xD016, 0xD018, 0xD020, 0xD021, 0xDD00)
@@ -175,7 +178,8 @@ class Session:
         self.timeout = timeout
         self.lab = {k: lookup_label(labels, k) for k in (
             "c2v_init", "c2v_pal_mc2", "c2v_pal_hires", "c2v_mc2",
-            "c2v_hires", "c2v_args", "test_load_chunk", "m_rok")}
+            "c2v_hires", "c2v_args", "test_load_chunk", "m_rok",
+            "c2v_hfill", "c2v_v_col")}                      # W12-V
         self.layout(labels)
 
     def layout(self, labels) -> None:
@@ -325,15 +329,29 @@ def check_outputs(s: Session, g: dict, ref: dict, regs0: bytes) -> list[str]:
     return fails
 
 
+def hfill_ref(s: Session, ref: dict, col: list[int]) -> dict:
+    """W12-V: c2v_hfill after c2v_hires, with c2v_v_col = col."""
+    n = s.rows * 40
+    return dict(ref, screen=bytes((col[k] << 4) | col[0] for k in ref["pens"])
+                + bytes([col[0] * 0x11] * (1000 - n)),
+                colram=ref["colram"][:n] + bytes(1000 - n), bgc=col[0])
+
+
 def run_kernel(s: Session, kind: str, case: dict, luts: dict) -> list[str]:
-    lut_addr, src = case_lut(case), case_src(case, kind)
-    ref = reference(s, kind, case, luts)
+    kk = "hires" if kind == "hfill" else kind       # W12-V: hfill = hires + c2v_hfill
+    lut_addr, src = case_lut(case), case_src(case, kk)
+    ref = reference(s, kk, case, luts)
     g = guard_fill(s, zlib.crc32(f"{case['name']}/{kind}".encode()))
     regs0 = read_regs(s.T)
     s.write_ram(s.lab["c2v_args"], R.pack_args(src, lut_addr, case["pal"]))
     fails: list[str] = []
-    for entry in ("c2v_init", f"c2v_pal_{kind}", f"c2v_{kind}"):
+    for entry in ("c2v_init", f"c2v_pal_{kk}", f"c2v_{kk}"):
         call_checked(s, entry, fails)
+    if kind == "hfill":                 # pen colours: a fixed permutation per case
+        col = random.Random(case["name"]).sample(range(16), 16)
+        s.write_ram(s.lab["c2v_v_col"], bytes(col))
+        call_checked(s, "c2v_hfill", fails)
+        ref = hfill_ref(s, ref, col)
     fails += check_outputs(s, g, ref, regs0)
     bm = s.read_ram(s.bitmap, 1000)
     unchanged = bm == expected_blocks(s, g, {"bitmap": b"", "screen": b""})[0][
@@ -345,8 +363,11 @@ def run_kernel(s: Session, kind: str, case: dict, luts: dict) -> list[str]:
     return fails
 
 
-def nmi_tramp(entry: int, count: int) -> bytes:
-    """Arm a CIA2 timer-A one-shot NMI *count* cycles out, jsr *entry*, rts."""
+def nmi_tramp(entry: int, count: int, spin: int = 0) -> bytes:
+    """Arm a CIA2 timer-A one-shot NMI *count* cycles out, jsr *entry*, then
+    (W12-V) *spin* x ~1280 cycles of delay loop, rts: an NMI armed past the
+    entry's end then fires before the call returns, never in a race with the
+    monitor's stop."""
     return bytes([
         0xA9, 0x7F, 0x8D, 0x0D, 0xDD,           # lda #$7F / sta $DD0D  (mask all)
         0xAD, 0x0D, 0xDD,                       # lda $DD0D             (ack)
@@ -356,11 +377,23 @@ def nmi_tramp(entry: int, count: int) -> bytes:
         0xA9, 0x81, 0x8D, 0x0D, 0xDD,           # enable TA -> NMI
         0xA9, 0x19, 0x8D, 0x0E, 0xDD,           # TA: force load, one-shot, start
         0x20, entry & 0xFF, entry >> 8,         # jsr entry
+        *([0xA0, spin, 0xA2, 0x00, 0xCA, 0xD0, 0xFD, 0x88, 0xD0, 0xF8]
+          if spin else []),                     # ldy #spin / ldx #0 / dex / bne / dey / bne
         0x60])
 
 
 NMI_ACK = bytes([0xA9, 0x7F, 0x8D, 0x0D, 0xDD, 0xAD, 0x0D, 0xDD, 0x60])
 NMI_COUNTS = (1500, 3000, 5000)     # phi2 cycles from arming to the NMI
+# W12-V: c2v_hfill maps a page (256 cells) with I/O in, then stores it at
+# $01 = $34 (~3.3-3.6k cycles a page, 4 pages in ~41k).  The leg sweeps the
+# NMI from arming in HFILL_STEP steps (smaller than a store window, so every
+# window gets one wherever the code before it moves: integration review,
+# V + C) and requires the NMIs that land at $34 (taken by mach_nmi) to form
+# HFILL_WINDOWS separate clusters; every other one is the KERNAL's.
+HFILL_STEP = 2000
+HFILL_COUNTS = tuple(range(HFILL_STEP, 46000, HFILL_STEP))
+HFILL_WINDOWS = 4
+HFILL_SPIN = 6                  # ~7.7k cycles after the fill: no NMI outlives the call
 NMI_CONTROL = 100                   # fires in the LUT lookups ($01=$36): the
                                     # KERNAL handler must take it
 # the reviewer's second NMI (scripts/nmi_latch.py): CIA2 timer B one-shot 200
@@ -379,17 +412,29 @@ def run_nmi(s: Session, case: dict, luts: dict) -> list[str]:
         print("  nmi leg: skipped (screen matrix not under I/O: no $01=$34 fill)")
         return fails
     nmis_at = s.nmis_at
-    for kind in ("mc2", "hires"):
-        for count in (NMI_CONTROL,) + NMI_COUNTS:
-            ref = reference(s, kind, case, luts)
+    lut = luts[case["lut"]]
+    hfill_in: list[int] = []
+    for kind in ("mc2", "hires", "hfill"):          # W12-V: c2v_hfill's fill too
+        for count in (HFILL_COUNTS if kind == "hfill" else (NMI_CONTROL,) + NMI_COUNTS):
+            kk = "hires" if kind == "hfill" else kind
+            ref = reference(s, kk, case, luts)
+            if kind == "hires":                     # W12-V: c2v_pal_hires runs last
+                ref = dict(ref, colram=bytes([ref["bgc"]] * 1000))
             g = guard_fill(s, count)
             regs0 = read_regs(s.T)
             s.write_ram(s.lab["c2v_args"],
-                        R.pack_args(case_src(case, kind), case_lut(case), case["pal"]))
+                        R.pack_args(case_src(case, kk), case_lut(case), case["pal"]))
             call_checked(s, "c2v_init", fails)
-            call_checked(s, f"c2v_{kind}", fails)
+            call_checked(s, f"c2v_{kk}", fails)
+            entry = f"c2v_pal_{kind}"
+            if kind == "hfill":                     # W12-V: the pens' colours, then the fill
+                col = [lut[c & 0xFFF] for c in case["pal"]] + [0] * 16
+                s.write_ram(s.lab["c2v_v_col"], bytes(col[:16]))
+                ref = hfill_ref(s, ref, col)
+                entry = "c2v_hfill"
             n0 = s.read_ram(nmis_at, 1)[0]
-            write_bytes(s.T, TRAMP, nmi_tramp(s.lab[f"c2v_pal_{kind}"], count))
+            write_bytes(s.T, TRAMP, nmi_tramp(s.lab[entry], count,
+                                              HFILL_SPIN if kind == "hfill" else 0))
             tag = f"nmi {kind} @{count}"
             try:
                 call_checked(s, TRAMP, fails)
@@ -412,6 +457,10 @@ def run_nmi(s: Session, case: dict, luts: dict) -> list[str]:
             write_bytes(s.T, TRAMP, NMI_ACK)
             s.call(TRAMP)
             want = 0 if count == NMI_CONTROL else 1
+            if kind == "hfill":                     # in a $34 window or not:
+                if taken == 1:                      # exactly one NMI either way
+                    hfill_in.append(count)
+                want = 0 if taken == 0 else 1
             if taken != want:
                 f.append(f"mach_nmi took {taken} NMI(s), want {want}"
                          + (" (control: must go to the KERNAL)" if not want else ""))
@@ -419,11 +468,19 @@ def run_nmi(s: Session, case: dict, luts: dict) -> list[str]:
                 f.append(f"ICR ${icr:02X} after the call: NMI not acknowledged")
             what = ("control: taken and acked by the KERNAL before the fill"
                     if count == NMI_CONTROL else
-                    "taken by mach_nmi, ICR acked; later TB NMI delivered")
+                    "taken by the KERNAL (I/O in), ICR acked" if kind == "hfill" and not taken
+                    else "taken by mach_nmi, ICR acked; later TB NMI delivered")
             print(f"  {tag:30s} {'OK' if not f else 'FAIL'}  ({what})")
             for x in f:
                 print(f"      {x}")
             fails += [f"{tag}: {x}" for x in f]
+    clusters = sum(1 for i, c in enumerate(hfill_in)
+                   if i == 0 or c - hfill_in[i - 1] > HFILL_STEP)
+    print(f"  nmi hfill: {len(hfill_in)} of {len(HFILL_COUNTS)} offsets landed at $34 "
+          f"({clusters} store windows: {hfill_in})")
+    if clusters < HFILL_WINDOWS:
+        fails.append(f"nmi hfill: NMIs at $34 in {clusters} store window(s), want "
+                     f"{HFILL_WINDOWS} (taken by mach_nmi at {hfill_in})")
     return fails
 
 
@@ -498,7 +555,7 @@ def session_run(prg: str, perf: bool, fetch: bool = True) -> tuple[list[str], di
                     s.stage(a, case["hires"][p])
                 for p, a in enumerate(case_src(case, "mc2")):
                     s.stage(a, case["mc2"][p])
-                for kind in ("mc2", "hires"):
+                for kind in ("mc2", "hires", "hfill"):
                     fails += [f"{case['name']} {kind}: {f}"
                               for f in run_kernel(s, kind, case, luts)]
             if perf:
