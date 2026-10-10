@@ -607,6 +607,10 @@ def run(a, rom, raw: bytes) -> tuple[list[str], dict]:
                 fails += leg_resume(m, rom, disk, s, r, a.vol, a.timeout, a.keep)
             elif leg == "demo":
                 fails += leg_demo(m, rom, r, a.vol, a.hold_s)
+            elif leg == "e2e":
+                fails += leg_e2e(m, rom, disk, s, r, a.vol, a.timeout, t_run, a.e2e_mutant)
+            elif leg == "demo-boot":
+                fails += leg_demo_boot(m, rom, disk, s, r, a.vol, a.timeout, t_run, a.hold_s)
             elif leg == "cost":
                 fails += (leg_cost(m, r) if a.legs[0] == "cost" else
                           ["cost: run it first in the session (--legs cost,...): see leg_cost"])
@@ -618,6 +622,52 @@ def run(a, rom, raw: bytes) -> tuple[list[str], dict]:
 
     fails = session(a.prg, a.backend, a.out, a.mhz, body)
     return fails, rep
+
+
+RESUME_MUTANT = [None]                 # --resume-mutant: aros_resume.MUTANTS name for resume (b)
+
+
+def resume_mutant_prg(prg: str, name: str) -> str:
+    """aros_resume's snap mutant, built like aros_resume.build_mutant with
+    its label check (the snapshot layout) but without its byte check, which
+    the merged layout (ureu's LOWCODE in the STARTUP slack) no longer meets
+    (MAIN bytes outside snap/ureu code differ at $087D/$0884 and DATA)."""
+    import subprocess
+    from host import snapfmt as F
+    from tests import aros_resume as RS
+    from tests.run_c2v import makefile_sources
+    bdir = os.path.dirname(os.path.abspath(prg))
+    out = os.path.join(bdir, "snapmut-wb", name)
+    os.makedirs(out, exist_ok=True)
+    mprg, mlbl = os.path.join(out, "runner.prg"), os.path.join(out, "runner.lbl")
+    cmd = ["cl65", "-t", "none", "-C", os.path.join(ROOT, "runtime", "c64.cfg"),
+           "--asm-define", f"{RS.MUTANTS[name][0]}=1", "-o", mprg, "-Ln", mlbl,
+           "-m", os.path.join(out, "runner.map")] + makefile_sources(ROOT) + \
+        [os.path.join(bdir, "gen", "dispatch.s")]
+    r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
+    if r.returncode:
+        raise RuntimeError(r.stdout + r.stderr)
+    base_lbl = os.path.splitext(prg)[0] + ".lbl"
+    F.stamp(mprg, mlbl, as_id=F.read_bid(prg, base_lbl))
+    la, lb = F.labels(base_lbl), F.labels(mlbl)
+    bad = [k for k, v in la.items() if 0x0801 <= v < 0xB100 and lb.get(k) != v]
+    if bad:
+        raise RuntimeError(f"mutant {name}: MAIN labels moved: {bad[:5]}")
+    return mprg
+
+
+def forced_hash(m: WbMachine, timeout: float = 120.0) -> str:
+    """The C64 picture right after a forced conversion: disp_st+105 (the
+    pixel epoch) += 1, then the next finished conversion."""
+    a = 0xB800 + 105                    # rc ram.inc disp_st + the epoch
+    nc = lambda: m.r(m.lab("disp_nconv"), 2)             # noqa: E731
+    n0 = nc()
+    m.w(a, bytes([(m.r(a, 1)[0] + 1) & 0xFF]))
+    t0 = time.monotonic()
+    while nc() == n0 and time.monotonic() - t0 < timeout:
+        time.sleep(0.1)
+    from tests import aros_resume as RS
+    return RS.fast_hash(m)
 
 
 SNAP_TEST = "wb-snap-test.bin"         # created and deleted by leg resume
@@ -713,13 +763,22 @@ def leg_resume(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol: str | None
             fails.append("resume: no read served after the resume")
         log(f"  mid: Workbench read Disk.info {a['after']['s']} s after the resume, "
             f"{a['after']['td']['nrd'] - nrd0} reads served since")
-        # (b) at the Workbench
+        # (b) at the Workbench.  The reference is the FROZEN C64 picture, taken
+        # right after a forced conversion (pixel epoch bumped: CPU-drawn pixels
+        # get no epoch of their own, so a static screen can lag the guest's
+        # planes) and the suspend.  The fit view's crop hides the title bar
+        # (the model's mask rows for it are empty), so the compare is exact.
+        # leg_resume calls _resume directly: the pointer module is not
+        # re-armed here (no sprite reaches the hash).
         b = rep.setdefault("wb", {})
         time.sleep(10.0 if m.vice else 5.0)
-        h0 = RS.fast_hash(m)
-        b["hash_before"] = h0[:12]
+        b["hash_forced"] = forced_hash(m)[:12]
         _suspend(m, sn, path, b)
-        sn, dt = _resume(m, m.prg, rid, path, b)
+        h0 = RS.fast_hash(m)                # frozen: nothing converts any more
+        b["hash_before"] = h0[:12]
+        prg_r = resume_mutant_prg(m.prg, RESUME_MUTANT[0]) if RESUME_MUTANT[0] else m.prg
+        b["resume_prg"] = RESUME_MUTANT[0] or "base"
+        sn, dt = _resume(m, prg_r, rid, path, b)
         t1 = b.pop("t_launch")
         fr0 = m.frames()
         while time.monotonic() - t1 < max(RESUME_BUDGET_S * 3, 60.0):
@@ -729,13 +788,16 @@ def leg_resume(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol: str | None
         el = time.monotonic() - t1
         b["back_s"] = round(el, 2)
         b["frames_after"] = m.frames() - fr0
+        b["hash_after"] = RS.fast_hash(m)[:12]
         b["td"] = m.td()
-        log(f"  wb: resumed (call {dt:.2f} s), running with the picture back {el:.2f} s "
-            f"after the launch")
+        log(f"  wb: resumed (call {dt:.2f} s), frozen picture {h0[:12]}, after {b['hash_after']} "
+            f"({el:.2f} s after the launch)")
         if m.frames() <= fr0 + 2 or RS.fast_hash(m) != h0:
             fails.append(f"resume: the Workbench did not come back ({b})")
         elif not m.vice and el > RESUME_BUDGET_S:
             fails.append(f"resume: {el:.1f} s > {RESUME_BUDGET_S:.0f} s")
+        if RESUME_MUTANT[0]:
+            return fails                    # teeth: the refusal step needs the base PRG
         fails += refuse_other_module(m, rid, path, rep.setdefault("refuse", {}))
     finally:
         if path and not keep:
@@ -769,6 +831,527 @@ def resume_workbench(m: WbMachine, rom, path: str | None, rep: dict) -> float:
     if m.frames() <= fr0 + 2:
         raise RuntimeError(f"resume: the guest does not run ({rep})")
     return time.monotonic() - t1
+
+
+# --------------------------------------------------------------------------
+# E2E (wave 13, on the merged tree): scripted input -> pointer -> Workbench
+# --------------------------------------------------------------------------
+
+PEEK_BUF, PEEK_PARK = 0xCD00, 0xCCF0   # buf_result, unused in machine mode (park outside the 256-byte buffer)
+J_UP, J_DOWN, J_LEFT, J_RIGHT, J_FIRE = 1, 2, 4, 8, 16     # inp_joy (CONTRACTS "Input")
+K_F1, K_CBM = 0x10, 0x20                                   # inp_key
+
+
+class GuestPeek:
+    """VICE: read guest memory (the REU) while the guest runs.  The 6510 is
+    halted by the monitor, parked on JMP * at PEEK_PARK with I set, one REC
+    fetch REU -> PEEK_BUF runs, and the REC address/length/control registers,
+    the park bytes, PC/FL and $01 are put back exactly, so an interrupted
+    REC sequence of the runtime continues with its own values (the method
+    of c64_test_harness snapshot.extract_reu_contents, for <= 256 bytes)."""
+
+    def __init__(self, m: WbMachine):
+        self.m, self.t, self.cache = m, m.t, {}
+
+    def fresh(self) -> None:
+        self.cache.clear()
+
+    def _dma(self, addr: int, n: int) -> bytes:
+        t, ov = self.t, "aros_wb e2e: REU peek"
+        for _ in range(200):            # x64sc runs a REC transfer from the CPU loop
+            regs = t.read_registers()   # after the command write (harness #514): a
+            if not t.read_memory(0xDF01, 1)[0] & 0x80:      # halt in between leaves
+                break                   # the runtime's own transfer pending -- let it
+            t.resume()                  # run first, or ours would replace it
+        else:
+            raise RuntimeError("peek: the runtime's REC transfer never completed")
+        port = t.read_memory(0x0001, 1)
+        io_in = port[0] & 4 and port[0] & 3
+        if not io_in:
+            t.write_memory(0x0001, b"\x35", override=ov)
+        rec = t.read_memory(0xDF02, 9)
+        park = t.read_memory(PEEK_PARK, 3)
+        t.write_memory(PEEK_PARK, bytes([0x4C, PEEK_PARK & 0xFF, PEEK_PARK >> 8]), override=ov)
+        t.set_registers({"PC": PEEK_PARK, "FL": regs["FL"] | 0x04})
+        try:
+            t.write_memory(0xDF02, bytes([PEEK_BUF & 0xFF, PEEK_BUF >> 8, addr & 0xFF,
+                                          (addr >> 8) & 0xFF, addr >> 16, n & 0xFF,
+                                          n >> 8]), override=ov)
+            t.write_memory(0xDF0A, b"\0", override=ov)
+            t.write_memory(0xDF01, b"\x91", override=ov)
+            t0 = time.monotonic()
+            while True:
+                t.resume()
+                if not t.read_memory(0xDF01, 1)[0] & 0x80:
+                    break
+                if time.monotonic() - t0 > 5:
+                    raise RuntimeError("peek: the REC fetch never ran")
+            data = t.read_memory(PEEK_BUF, n)
+        finally:
+            t.write_memory(0xDF02, rec[:7], override=ov)
+            t.write_memory(0xDF0A, rec[8:9], override=ov)
+            t.write_memory(PEEK_PARK, park, override=ov)
+            t.set_registers({"PC": regs["PC"], "FL": regs["FL"]})
+            if not io_in:
+                t.write_memory(0x0001, port, override=ov)
+            rc = getattr(t, "_resume_confirmed", None)      # a REC stall across a
+            if callable(rc):                                # vsync leaves spare monitor
+                rc(window=0.05)                             # traps (harness #516)
+            else:
+                t.resume()
+        return bytes(data)
+
+    def read(self, addr: int, n: int) -> bytes:
+        out = bytearray()
+        while len(out) < n:
+            a = addr + len(out)
+            pg = a & ~0xFF
+            if pg not in self.cache:
+                self.cache[pg] = self._dma(pg, 256)
+            k = min(n - len(out), pg + 256 - a)
+            out += self.cache[pg][a - pg:a - pg + k]
+        return bytes(out)
+
+
+def l32(read, a: int) -> int:
+    return struct.unpack(">I", read(a, 4))[0]
+
+
+def wb_screen(read) -> dict:
+    """Intuition's first screen and its windows (public NDK offsets:
+    IntuitionBase +60 FirstScreen; Screen +4 FirstWindow, +22 Title;
+    Window +0 NextWindow, +32 Title)."""
+    def cstr(a):
+        return read(a, 40).split(b"\0")[0].decode("latin-1") if 0 < a < 1 << 24 else ""
+    sb = l32(read, 4)
+    lh = sb + 378
+    n, ib = l32(read, lh), None
+    for _ in range(64):
+        if not n or not l32(read, n):
+            break
+        if cstr(l32(read, n + 10)) == "intuition.library":
+            ib = n
+            break
+        n = l32(read, n)
+    if not ib:
+        return {"title": "", "windows": []}
+    scr = l32(read, ib + 60)
+    wins, w = [], l32(read, scr + 4)
+    for _ in range(32):
+        if not w or w >= 1 << 24:
+            break
+        wins.append(cstr(l32(read, w + 32)))
+        w = l32(read, w)
+    return {"title": cstr(l32(read, scr + 22)), "windows": wins}
+
+
+def find_icon(read, st: dict, title_lines: int) -> dict:
+    """The Workbench disk icon from the guest's own screen planes: in the
+    rows below the title bar and above the icons' labels (title_lines ..
+    title_lines + 16), the columns with a non-background pixel form one
+    cluster per icon; RAM Disk's is the first, the disk's the one with the
+    largest centre (Workbook lays the volume icons out left to right).
+    -> the box in hires screen pixels and its centre."""
+    n = (st["bplcon0"] >> 12) & 7
+    mod = st["bpl1mod"] - 0x10000 if st["bpl1mod"] & 0x8000 else st["bpl1mod"]
+    rowb = 80 + (mod & ~1)              # hires fetch 80 bytes + the modulo
+    rows = range(title_lines, title_lines + 17)
+    cols = set()
+    pix: dict[int, set] = {}
+    for y in rows:
+        line = [read((st["bplpt"][p] & 0xFFFFFE) + y * rowb, 80) for p in range(n)]
+        for x in range(640):
+            if any(pl[x >> 3] >> (7 - (x & 7)) & 1 for pl in line):
+                cols.add(x)
+                pix.setdefault(x, set()).add(y)
+    clusters, cur = [], []
+    for x in sorted(cols):
+        if cur and x - cur[-1] > 8:
+            clusters.append(cur)
+            cur = []
+        cur.append(x)
+    if cur:
+        clusters.append(cur)
+    boxes = [{"x0": c[0], "x1": c[-1], "y0": min(min(pix[x]) for x in c),
+              "y1": max(max(pix[x]) for x in c)} for c in clusters if c[-1] - c[0] >= 12]
+    if len(boxes) < 2:
+        raise RuntimeError(f"icons: {len(boxes)} cluster(s) below the title bar: {boxes}")
+    b = dict(max(boxes, key=lambda b: b["x0"] + b["x1"]))
+    b.update(cx=(b["x0"] + b["x1"]) // 2, cy=(b["y0"] + b["y1"]) // 2, all=boxes)
+    return b
+
+
+class E2E:
+    """The scripted-input session helpers (inp_src = 1: inp_joy / inp_key)."""
+
+    def __init__(self, m: WbMachine):
+        self.m = m
+        self.a_joy, self.a_key = m.lab("inp_joy"), m.lab("inp_key")
+        self.st_args = m.lab("c2v_args") + 180
+
+    def frames_wait(self, k: int, timeout: float = 120.0) -> None:
+        f0, t0 = self.m.frames(), time.monotonic()
+        while self.m.frames() < f0 + k:
+            if time.monotonic() - t0 > timeout:
+                raise RuntimeError(f"the guest did not run {k} frames in {timeout:.0f} s")
+            time.sleep(0.02 if not self.m.vice else 0.05)
+
+    def joy(self, v: int) -> None:
+        self.m.w(self.a_joy, bytes([v]))
+
+    def key(self, v: int) -> None:
+        self.m.w(self.a_key, bytes([v]))
+
+    def cur(self) -> dict:
+        c = self.m.r(self.m.lab("disp_cur"), 71)
+        u16 = lambda o: c[o] | c[o + 1] << 8        # noqa: E731
+        return {"ddfstrt": u16(34), "diwstrt": u16(30), "bplcon0": u16(2)}
+
+    def pos(self) -> tuple[int, int, int, int]:
+        """(SX lores, SY line, POS, CTL) of the pointer as the module last
+        read it from the guest (c2v_args + 180: POS/CTL, CONTRACTS D2)."""
+        from host import c2v_ref as R
+        sn = self.m.r(self.st_args, 7)
+        pos, ctl = (sn[3] << 8) | sn[4], (sn[5] << 8) | sn[6]
+        c = self.cur()
+        hs, vs, _ = R.spr_decode(pos, ctl)
+        return (hs + 1 - R.spr_first_pixel(c, True), vs - ((c["diwstrt"] >> 8) & 0xFF),
+                pos, ctl)
+
+    def vic(self) -> tuple[int, int, int]:
+        r = self.m.r(0xD000, 0x20)
+        return r[0] | (r[0x10] & 1) << 8, r[1], r[0x15]
+
+    def goto(self, tx: int, ty: int, tol: int = 2, limit: int = 400) -> dict:
+        """Closed loop on the pointer (lores SX, line SY): hold a direction
+        while far, tap (one frame, then centre: the acceleration resets)
+        when near."""
+        steps = 0
+        for steps in range(limit):
+            sx, sy, _, _ = self.pos()
+            dx, dy = tx - sx, ty - sy
+            if abs(dx) <= tol and abs(dy) <= tol:
+                break
+            bits = 0
+            if abs(dx) > tol:
+                bits |= J_RIGHT if dx > 0 else J_LEFT
+            if abs(dy) > tol:
+                bits |= J_DOWN if dy > 0 else J_UP
+            self.joy(bits)
+            self.frames_wait(3 if max(abs(dx), abs(dy)) > 24 else 1)
+            self.joy(0)
+            self.frames_wait(2)
+        sx, sy, _, _ = self.pos()
+        return {"target": [tx, ty], "at": [sx, sy], "iterations": steps,
+                "ok": abs(tx - sx) <= tol and abs(ty - sy) <= tol}
+
+
+def guest_read_frozen(m: WbMachine, rom, fn, rep: dict):
+    """The Ultimate (no live REU read): suspend REU-resident (frozen), reset
+    + fresh load, run fn(reader) on the REU, resume, scripted input again."""
+    from tests import aros_resume as RS
+    sn = RS.Snap(m, m.prg, RS.rom_id(rom))
+    _suspend(m, sn, None, rep)
+    RS.fresh_load(m, m.prg)
+    rd = lambda a, n: b"".join(sn.reu_read(a + o, min(256, n - o)) for o in range(0, n, 256))  # noqa: E731
+    out = fn(rd)
+    resume_workbench(m, rom, None, rep)
+    m.w(m.lab("inp_src"), b"\x01\0\0")
+    return out
+
+
+E2E_FROZEN = [False]           # --e2e-frozen: guest reads by suspend/reset/resume on VICE too
+
+
+def e2e_serial(m: WbMachine, b: dict) -> str:
+    """The serial text the guest printed after the boot leg's capture
+    (AROS reports an alert there)."""
+    seen = b.get("serial_seen", 0)
+    try:
+        n, ring = m.serial(seen)
+        text = bytearray()
+        AB.take(text, ring, seen, n, m.sersz)
+        return bytes(text).decode("latin-1")
+    except Exception as ex:             # noqa: BLE001 - diagnostics only
+        return f"<serial unreadable: {ex}>"
+
+
+def leg_e2e(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol, timeout: float,
+            t_start: float, mutant: str | None = None) -> list[str]:
+    try:
+        return _leg_e2e(m, rom, disk, s, rep, vol, timeout, t_start, mutant)
+    except Exception as ex:             # noqa: BLE001 - report what the guest said
+        rep["exception"] = repr(ex)
+        rep["serial_after_boot"] = e2e_serial(m, rep.get("boot", {}))
+        rep["frames"] = m.frames()
+        log(f"  e2e: {ex!r}; serial after the boot: {rep['serial_after_boot'][-400:]!r}")
+        return [f"e2e: {ex!r}"]
+
+
+def _leg_e2e(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol, timeout: float,
+             t_start: float, mutant: str | None = None) -> list[str]:
+    """--legs e2e (the merged tree): boot (w3 hash), the pointer, a move, a
+    double-click on the disk icon, the right button, F1 (see the module
+    doc).  Scripted input throughout (inp_src = 1)."""
+    from host import c2v_ref as R
+    from tests import aros_resume as RS
+    from tests import run_spr as SP
+    sys.path.insert(0, os.path.join(ROOT, "tests", "aros"))
+    import model_frames as MF
+    sn = RS.Snap(m, m.prg, RS.rom_id(rom))
+
+    def stage_hook():
+        sn.declare_rid()
+        m.w(m.lab("inp_src"), b"\x01\0\0")          # scripted, idle
+
+    b = rep.setdefault("boot", {})
+    fails = boot_workbench(m, rom, disk, s, b, vol, timeout, t_start=t_start,
+                           after_stage=stage_hook)
+    if fails:
+        return fails
+    if "w3_hash" not in b or "pending" in b["w3_hash"]:
+        return ["e2e: w3 hash did not pass (no model frames with a picture?)"]
+    e = E2E(m)
+    g = GuestPeek(m) if m.vice and not E2E_FROZEN[0] else None
+    mf, _ = model_wb(disk.script)
+    title_lines = (mf or {}).get("title_lines", 15)
+
+    def hash_now() -> str:
+        return AB.c64_hash(m)[0] if m.vice else RS.fast_hash(m)
+
+    def settle(limit: int = 20) -> None:
+        """Until no conversion happens for 20 frames: a reference render of
+        the guest's planes must see the planes the C64 converted."""
+        nconv = lambda: m.r(m.lab("disp_nconv"), 2)        # noqa: E731
+        for _ in range(limit):
+            n0 = nconv()
+            e.frames_wait(20)
+            if nconv() == n0:
+                return
+
+    # -- 2. the pointer is visible, and where the guest puts it --------------
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 120 and not e.vic()[2] & 7:
+        time.sleep(0.5)
+    p = rep.setdefault("pointer", {})
+    vx, vy, en = e.vic()
+    p.update(vic=[vx, vy], d015=en)
+    if not en & 7:
+        return fails + [f"pointer: $D015 = ${en:02X}, no sprite 0-2 enabled"]
+    if m.vice:
+        sp = SP.spr_read_live(m)
+        p["blocks_nonempty"] = any(sp["blocks"])
+        if not p["blocks_nonempty"]:
+            fails.append("pointer: the sprite blocks at $D400 are empty")
+        shd = m.r(m.lab("chip_shd") + 0x120, 4)
+        pt = ((shd[0] << 24 | shd[1] << 16 | shd[2] << 8 | shd[3]) & 0xFFFFFE)
+        g.fresh()
+        pw = g.read(pt, 4)
+        pos, ctl = pw[0] << 8 | pw[1], pw[2] << 8 | pw[3]
+        p["guest"] = {"spr0pt": f"${pt:06X}", "pos": f"${pos:04X}", "ctl": f"${ctl:04X}"}
+    else:
+        _, _, pos, ctl = e.pos()
+        p["guest"] = {"pos": f"${pos:04X}", "ctl": f"${ctl:04X}", "from": "module cache"}
+    crop = m.r(m.lab("disp_crop"), 1)[0]
+    want = R.spr_place(e.cur(), pos, ctl, True, False, 0, crop, 0)
+    p["want"] = want
+    if "hidden" in want or (vx, vy) != (want["x"] | (want["msb"] & 1) << 8, want["y"]):
+        fails.append(f"pointer: VIC sprite 0 at ({vx}, {vy}), the guest's POS/CTL map to {want}")
+    log(f"  pointer: VIC ({vx}, {vy}) $D015 ${en:02X}, guest {p['guest']}, want {want}")
+
+    # -- 3. move: right, then down ---------------------------------------------
+    mv = rep.setdefault("move", {})
+    N = 40
+    for name, bit, axis in (("right", J_RIGHT, 0), ("down", J_DOWN, 1)):
+        jd0 = m.r(m.lab("chip_shd") + 0x0A, 2)
+        sx0, sy0, _, _ = e.pos()
+        v0 = e.vic()
+        f0, w0 = m.frames(), time.monotonic()
+        e.joy(bit)
+        e.frames_wait(N)
+        e.joy(0)
+        f1, w1 = m.frames(), time.monotonic()
+        e.frames_wait(3)
+        jd1 = m.r(m.lab("chip_shd") + 0x0A, 2)
+        sx1, sy1, _, _ = e.pos()
+        v1 = e.vic()
+        d = (sx1 - sx0, sy1 - sy0)[axis]
+        dv = (v1[0] - v0[0], v1[1] - v0[1])[axis]
+        mv[name] = {"joy0dat": [jd0.hex(), jd1.hex()], "amiga_px": d, "vic_px": dv,
+                    "frames": f1 - f0, "wall_s": round(w1 - w0, 2),
+                    "px_per_s": round(d / max(w1 - w0, 1e-3), 1),
+                    "px_per_frame": round(d / max(f1 - f0, 1), 2)}
+        log(f"  move {name}: JOY0DAT {jd0.hex()} -> {jd1.hex()}, pointer {d:+d} lores px "
+            f"(VIC {dv:+d}) in {f1 - f0} frames / {w1 - w0:.1f} s")
+        if jd1 == jd0 or d <= 0 or dv <= 0:
+            fails.append(f"move {name}: {mv[name]}")
+
+    # -- 4. double-click the disk icon -----------------------------------------
+    dc = rep.setdefault("doubleclick", {})
+    st = R.unpack_disp_st(m.r(0xB800, 256))
+    if g:
+        g.fresh()
+        icon = find_icon(g.read, st, title_lines)
+        before = wb_screen(g.read)
+    else:
+        icon, before = guest_read_frozen(
+            m, rom, lambda rd: (find_icon(rd, st, title_lines), wb_screen(rd)), dc)
+    dc["icon"] = {k: icon[k] for k in ("x0", "x1", "y0", "y1", "cx", "cy")}
+    dc["icons_found"] = icon["all"]
+    dc["windows_before"] = before["windows"]
+    nav = e.goto(icon["cx"] // 2, icon["cy"])
+    dc["goto"] = nav
+    log(f"  icon {dc['icon']} (from the guest's planes); pointer {nav}; windows {before['windows']}")
+    if not nav["ok"]:
+        fails.append(f"doubleclick: the pointer did not reach the icon ({nav})")
+    h0 = hash_now()
+    nrd0 = m.td()["nrd"]
+    if mutant != "nofire":
+        for _ in range(2):
+            e.joy(J_FIRE)
+            e.frames_wait(2)
+            e.joy(0)
+            e.frames_wait(2)
+    t1, h1, after = time.monotonic(), h0, before
+    while time.monotonic() - t1 < min(timeout, 300):
+        e.frames_wait(10)
+        h1 = hash_now()
+        if g:
+            g.fresh()
+            after = wb_screen(g.read)
+            if len(after["windows"]) > len(before["windows"]) and h1 != h0:
+                break
+        elif h1 != h0:
+            break
+    if not g:
+        after = guest_read_frozen(m, rom, wb_screen, dc)
+    dc.update(windows_after=after["windows"], hash_changed=h1 != h0,
+              reads_after=m.td()["nrd"] - nrd0, wall_s=round(time.monotonic() - t1, 1))
+    log(f"  double-click: windows {after['windows']}, screen changed {h1 != h0}, "
+        f"{dc['reads_after']} disk reads, {dc['wall_s']} s")
+    if len(after["windows"]) <= len(before["windows"]) or h1 == h0:
+        fails.append(f"doubleclick: no new Workbook window ({dc})")
+    if any("Failure" in w or "Alert" in w for w in after["windows"]):
+        dc["serial_after_boot"] = e2e_serial(m, b)
+        return fails + [f"doubleclick: AROS raised an alert ({after['windows']}); serial: "
+                        f"{dc['serial_after_boot'][-300:]!r}"]
+
+    # -- 5./6. F1 (the title bar becomes visible: 1:1 at line 0), the right
+    #    button there (Intuition's menu bar and a menu drop down), F1 back --
+    f1r = rep.setdefault("f1", {})
+    rb = rep.setdefault("menu", {})
+    hf = hash_now()
+    nc = lambda: struct.unpack("<H", m.r(m.lab("disp_nconv"), 2))[0]   # noqa: E731
+
+    def f1(view: int) -> dict:
+        n0 = nc()
+        e.key(K_F1)
+        e.frames_wait(2)
+        e.key(0)
+        t2 = time.monotonic()
+        while time.monotonic() - t2 < 120 and (nc() == n0 or m.r(m.lab("disp_one"), 1)[0] != view):
+            time.sleep(0.25)
+        stt = SP.state(m)
+        out = {"disp_one": stt["disp_one"], "state": stt, "s": round(time.monotonic() - t2, 1)}
+        log(f"  F1 -> view {view}: {stt} after {out['s']} s")
+        return out
+
+    f1r["to_1"] = r1 = f1(1)
+    if r1["disp_one"] != 1:
+        return fails + [f"F1: disp_one {r1['disp_one']}, want 1"]
+    nav = e.goto(20, 4)                 # the first menu header ("Workbench"/"Workbook")
+    rb["goto"] = nav
+    e.frames_wait(5)
+    settle()
+    stt = SP.state(m)
+    if m.vice:
+        h, raw = AB.c64_hash(m)
+        st = R.unpack_disp_st(m.r(0xB800, 256))
+        g.fresh()
+        conv = R.disp_convert_view(st, g.read, R.build_lut(), 1, stt["disp_px"], stt["disp_py"])
+        eq = {"bitmap": conv["bitmap"] == raw["bitmap"], "screen": conv["screen"] == raw["screen"]}
+        text = sum(1 for c in range(80) if (raw["screen"][c] >> 4) != (raw["screen"][c] & 15)
+                   and any(raw["bitmap"][(c // 40) * 320 + (c % 40) * 8 + y] for y in range(8)))
+        f1r.update(c2v_ref_equal=eq, two_pen_cells_rows01=text, window=[stt["disp_px"], stt["disp_crop"]])
+        log(f"  1:1 at ({stt['disp_px']}, {stt['disp_crop']}): c2v_ref of the guest's planes equal "
+            f"{eq}; {text} two-pen cells in the title rows")
+        png = os.path.join(EVID, "e2e_1to1.png")
+        SP.png_cells(png, raw)
+        f1r["png"] = png
+        if not (eq["bitmap"] and eq["screen"]):
+            fails.append(f"F1: the 1:1 picture differs from c2v_ref's render of the guest's planes ({eq})")
+        if stt["disp_crop"] == 0 and text < 10:
+            fails.append(f"F1: the title rows show only {text} two-pen cells")
+    hm0 = hash_now()
+    e.key(K_CBM)
+    e.frames_wait(6)
+    e.joy(J_RIGHT)                      # Intuition opens a menu on a move over its header
+    e.frames_wait(1)
+    e.joy(0)
+    f0 = m.frames()
+    hm1 = hm0
+    while hm1 == hm0 and m.frames() < f0 + 300:     # drawing the menu takes ~0.5 M
+        e.frames_wait(10)                           # instructions (boot model: 0.9 s)
+        hm1 = hash_now()
+    rb["frames_to_menu"] = m.frames() - f0
+    if m.vice:
+        _, rawm = AB.c64_hash(m)
+        SP.png_cells(os.path.join(EVID, "e2e_menu.png"), rawm)
+    e.key(0)
+    f0 = m.frames()
+    hm2 = hm1
+    while hm2 == hm1 and m.frames() < f0 + 300:
+        e.frames_wait(10)
+        hm2 = hash_now()
+    rb.update(hash_before=hm0[:12], hash_held=hm1[:12], hash_after=hm2[:12],
+              menu_shown=hm1 != hm0, closed=hm2 != hm1)
+    log(f"  right button (1:1 view): screen {hm0[:12]} -> {hm1[:12]} (C= held) -> {hm2[:12]}")
+    if hm1 == hm0:
+        fails.append(f"menu: holding C= on the title bar changed nothing ({rb})")
+    e.frames_wait(100)                  # the guest finishes closing the menu (its
+    settle()                            # CPU-drawn pixels convert only with F1's forced
+    f1r["to_0"] = r0 = f1(0)            # conversion: no pixel epoch for CPU writes)
+    if r0["disp_one"] != 0:
+        fails.append(f"F1 back: disp_one {r0['disp_one']}, want 0")
+    else:
+        # the menu changed the screen, so the fit picture is compared with
+        # c2v_ref's fit render of the guest's planes now (VICE), not with
+        # the picture before F1
+        hb = hash_now()
+        f1r["fit_hash"] = {"before_f1": hf[:12], "back": hb[:12]}
+        if m.vice:
+            h, raw = AB.c64_hash(m)
+            st = R.unpack_disp_st(m.r(0xB800, 256))
+            g.fresh()
+            conv = R.disp_convert_view(st, g.read, R.build_lut(), 0)
+            eq = {"bitmap": conv["bitmap"] == raw["bitmap"], "screen": conv["screen"] == raw["screen"],
+                  "colram": conv.get("colram") is None or
+                  bytes(c & 15 for c in conv["colram"]) == bytes(c & 15 for c in raw["colram"])}
+            f1r["fit_c2v_ref_equal"] = eq
+            log(f"  fit view again: {hb[:12]}; c2v_ref fit render of the guest's planes equal {eq}")
+            if not all(eq.values()):
+                fails.append(f"F1 back: the fit picture differs from c2v_ref's ({eq})")
+    if mutant:
+        rep["mutant"] = mutant
+    rep["serial_after_boot"] = e2e_serial(m, b)
+    if "lert" in rep["serial_after_boot"] or "Failure" in rep["serial_after_boot"]:
+        fails.append(f"e2e: alert text on the serial line: {rep['serial_after_boot'][-300:]!r}")
+    return fails
+
+
+def leg_demo_boot(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol, timeout: float,
+                  t_start: float, hold_s: float) -> list[str]:
+    """The user's boot demo: boot to the Workbench, then hand port 2 to the
+    user (inp_src = 0, the pointer armed) and hold."""
+    fails = boot_workbench(m, rom, disk, s, rep, vol, timeout, t_start=t_start,
+                           want_screen=False)
+    if fails:
+        return fails
+    m.w(m.lab("inp_src"), b"\0\0\0")
+    arm_spr(m)
+    log(f"  demo-boot: the Workbench is up; port 2 is the user's (inp_src 0); holding {hold_s:.0f} s")
+    time.sleep(hold_s)
+    return []
 
 
 def leg_demo(m: WbMachine, rom, rep: dict, vol: str, hold_s: float) -> list[str]:
@@ -949,6 +1532,12 @@ def main(argv=None) -> int:
                     help="assemble the td module with -D X (evidence builds, e.g. TD_ZPJUNK=$A5)")
     ap.add_argument("--hold-s", type=float, default=300.0,
                     help="leg demo: seconds the resumed Workbench keeps running")
+    ap.add_argument("--resume-mutant", default=None,
+                    help="teeth: resume (b) on an aros_resume mutant PRG (e.g. noepoch, nodst): must fail")
+    ap.add_argument("--e2e-frozen", action="store_true",
+                    help="leg e2e on VICE: guest reads by suspend/reset/resume (as on the Ultimate)")
+    ap.add_argument("--e2e-mutant", default=None, choices=("nofire",),
+                    help="red: leg e2e without the fire presses (the double-click must fail)")
     ap.add_argument("--td-mutant", default=None,
                     help="red: build the td module as host/tests/test_td.MUTANTS[NAME]")
     ap.add_argument("--watch", action="store_true",
@@ -959,6 +1548,8 @@ def main(argv=None) -> int:
     WATCH[0] = a.watch
     TD_DEFINES[:] = a.td_define
     TD_MUTANT[0] = a.td_mutant
+    E2E_FROZEN[0] = a.e2e_frozen
+    RESUME_MUTANT[0] = a.resume_mutant
     if a.vol.lower().strip("/") in ("flash", "temp") or not a.vol.startswith("/"):
         raise SystemExit(f"--vol {a.vol}: never Flash or Temp")
     rom, why = machine.find_rom()
