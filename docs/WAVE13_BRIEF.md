@@ -177,3 +177,38 @@ Then report to the supervisor. The supervisor:
 2. re-runs the combined gate, including the end-to-end legs: boot to the Workbench, move the pointer with scripted input, open the Workbench disk's window by a double-click, toggle the 1:1 view;
 3. has a fresh adversarial reviewer for each package;
 4. runs the attended demo with the user on the C64U.
+
+## Addendum: supervisor rulings during the wave (2026-10-09/10)
+
+- **Machine-mode modules.** In machine mode, buf_case is the machine-mode code area. It holds test-time modules, never PRG code:
+
+  | Range | Module |
+  |---|---|
+  | $C000-$C1FF | mboot |
+  | $C200-$C5FF | W13-W's td (HLE trackdisk) |
+  | $C600-$C8FF | W13-D's spr (the pointer) |
+
+  - MAIN reaches each module through a BSS vector: `td_vec`, `spr_vec`.
+  - A module ID check refuses a mismatched module, both at the call and on resume.
+  - A resume comes up with the pointer disarmed (snap.s). The launcher re-stages the modules and re-arms them (tests/aros_wb.py MODULES/arm_spr).
+- **Budgets as delivered.**
+  - MAIN: W13-I 207 B, W13-W 94 B, W13-D 512 B.
+  - The BHI tail went to W13-D.
+  - BSS ends at $9F31.
+- **Layout (supervisor).**
+  - RODATA is page-aligned. Its abs,X tables then keep their page offsets whatever CODE grows by.
+  - DATA and a new LOWCODE segment (ureu.s) sit in the STARTUP->DISPATCH slack. core.s asserts that DISPATCH stays at $0900.
+- **Scope added.**
+  - Hires BPU 1-3 converts in both views; the Workbench screen is hires 2-plane.
+  - The 1:1 view shows interlaced screens (LACE) in full; the insert-disk screen is interlaced.
+- **Shared buffers.**
+  - td's REU bounce buffer shares blt_abuf ($B600).
+  - The ADF is staged at REU $200000-$2DBFFF. The snapshot chip span covers it, and SNAP_VER is now 2.
+- **run_irq lag.** The W13 frame hooks moved the servable period at s = 0 (screen on) from below 3000 to 3000-3100 phi2. The leg now runs P = 3200 for 240 re-arms with a ring log, gated on the max (≤ 4096) and the slope (≤ 700). A +1024 bound was tried and withdrawn: the lateness was drifting, not quantized.
+- **E2E leg** (tests/aros_wb.py --legs e2e) on VICE and on the C64U:
+  - boot to the Workbench;
+  - the pointer visible, then moved;
+  - a double-click opens 'Workbench3.1:';
+  - F1 switches to 1:1;
+  - C= opens the menu (screen layers 4 -> 6 -> 4);
+  - F1 switches back.
