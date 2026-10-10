@@ -58,6 +58,7 @@ DRV_ORG = 0xC200
 P, R, LOG = 0xCA00, 0xCB00, 0xCC00
 F_INIT, F_SUPER, F_HOOK, F_RST, F_IEN = 0x01, 0x02, 0x04, 0x08, 0x10
 F_PRESET = 0x20
+F_RING = 0x40              # drv.s: first 16 log entries + a 16-entry ring of the last
 INTENAR, INTREQR = 0xDFF01C, 0xDFF01E
 INTENA, INTREQ = 0xDFF09A, 0xDFF09C
 RESET = 0x4E70
@@ -298,7 +299,13 @@ class Rig:
         r = self.dcall("drv_run")
         u32 = lambda o: struct.unpack_from("<I", r, o)[0]
         n = struct.unpack_from("<H", r, 62)[0]
-        raw = self.r(LOG, 8 * min(n, 32)) if n else b""
+        if flags & F_RING:                      # head 0-15, then the ring
+            page = self.r(LOG, 256) if n else b""
+            tail = min(max(n - 16, 0), 16)
+            idx = list(range(min(n, 16))) + [16 + j % 16 for j in range(n - tail, n)]
+            raw = b"".join(page[8 * i:8 * i + 8] for i in idx)
+        else:
+            raw = self.r(LOG, 8 * min(n, 32)) if n else b""
         log = []
         for i in range(0, len(raw), 8):
             k, e = raw[i], struct.unpack_from("<I", raw, i + 1)[0]
@@ -1323,50 +1330,90 @@ def leg_progress(rig: Rig) -> list[str]:
     return f
 
 
+# W13 (rev-inp round 4): lag is gated for drift, not only a max.  At s = 0
+# with the screen on (VIC badlines take ~8% of phi2), the W13 frame hooks
+# (inp_frame ~166-356 cycles) raised the shortest period a pass can serve
+# from < 3000 to ~3050-3100 phi2: at P = 3000 the lateness now grows
+# without bound (6.4-7.0k after 200 re-arms; 30 re-arms hid it).  The leg
+# runs at P = 3200, the realistic margin above that edge, for LAG_REARMS
+# re-arms with drv.s's F_RING log (the first 16 and the last 16 entries;
+# no per-callback max tracking: its cycles would move the edge it
+# measures), and gates their max (<= SLACK_PHI2) AND the slope (mean of the last
+# 10 - mean of the first 10 <= LAG_SLOPE_PHI2).
+LAG_P = 3200                # phi2; the servable edge is ~3050-3100 (screen on)
+LAG_REARMS = 240
+LAG_SLOPE_PHI2 = 700        # phi2, last 10 - first 10 over LAG_REARMS periods
+
+
+def lag_series(rig: Rig, p: int, rearms: int) -> dict:
+    """One periodic client at s = 0, screen ON (forced, restored after),
+    re-arming from its own deadline: {fires, max, first10, last10, slope}."""
+    from c64_test_harness import read_bytes
+    d011 = read_bytes(rig.t, 0xD011, 1)[0]
+    rig.w(0xD011, bytes([(d011 & 0x7F) | 0x10]))        # screen on: badlines
+    try:
+        (pc,) = rig.stage(prog_busy(20000))
+        res = rig.run(pc, s=0, flags=F_INIT | F_RING,
+                      slots={4: Slot(1000, period=p, rearms=rearms)})
+    finally:
+        rig.w(0xD011, bytes([d011 & 0x7F]))
+    lates = [l for k, e, l in res["log"] if k == 4]
+    out = {"res": res, "fires": res["fires"][4], "n": len(lates),
+           "max": max(lates) if lates else None, "lates": lates}
+    if len(lates) >= 20:
+        out["first10"] = sum(lates[:10]) / 10
+        out["last10"] = sum(lates[-10:]) / 10
+        out["slope"] = out["last10"] - out["first10"]
+    return out
+
+
 def leg_lag(rig: Rig) -> list[str]:
-    """Review N1 (fix round 2): a periodic client re-arming from its own
-    deadline (CIA timers' no-drift pattern) at s = 0.  P = 3000 phi2 keeps
-    a bounded lateness (<= SLACK_PHI2).  P = 1500 is below what a 1 MHz
-    6502 can serve (a pass with a callback plus the guaranteed guest
-    instruction, ~2.9k phi2), so no scheme keeps it bounded; its lateness
-    may grow by at most GROW phi2 per period (round 0 ~800 with no
-    progress guarantee, this ~1450, MACH_MINW ~3150)."""
+    """Review N1 (fix round 2), W13 rev-inp round 4: a periodic client
+    re-arming from its own deadline (CIA timers' no-drift pattern) at s = 0,
+    screen on.  P = LAG_P keeps a bounded lateness: max <= SLACK_PHI2 and no
+    drift over LAG_REARMS periods (slope <= LAG_SLOPE_PHI2).  P = 1500 is
+    below what a 1 MHz 6502 can serve (a pass with a callback plus the
+    guaranteed guest instruction, ~2.9k phi2), so no scheme keeps it
+    bounded; its lateness may grow by at most GROW phi2 per period (round 0
+    ~800 with no progress guarantee, this ~1450, MACH_MINW ~3150)."""
     f = need_seam(rig, "lag")
     if f:
         return f
     grow = 1600
-    for p in (3000, 1500):
-        (pc,) = rig.stage(prog_busy(3000))
-        res = rig.run(pc, s=0, slots={4: Slot(1000, period=p, rearms=30)})
-        lates = [l for k, e, l in res["log"] if k == 4]
-        if VERBOSE:
-            print(f"    lag P={p}: fires {res['fires'][4]} late first/last/max "
-                  f"{lates[:1]}/{lates[-1:]}/{max(lates) if lates else None}")
-        if not clean(res, f"lag P={p}", f):
-            continue
+    r = lag_series(rig, LAG_P, LAG_REARMS)
+    tag = f"lag P={LAG_P}"
+    if clean(r["res"], tag, f):
+        if r["fires"] != LAG_REARMS + 1 or r["n"] != 32:
+            f.append(f"{tag}: {r['fires']} firings, {r['n']} logged "
+                     f"(want {LAG_REARMS + 1}, 32)")
+        else:
+            print(f"    {tag} x{LAG_REARMS} (screen on, override, gated): max "
+                  f"{r['max']} phi2, first10 {r['first10']:.0f} last10 "
+                  f"{r['last10']:.0f} slope {r['slope']:+.0f}")
+            if r["max"] > SLACK_PHI2:
+                f.append(f"{tag}: max lateness {r['max']} phi2 > {SLACK_PHI2}")
+            if r["slope"] > LAG_SLOPE_PHI2:
+                f.append(f"{tag}: lateness drifts {r['slope']:+.0f} phi2 over "
+                         f"{LAG_REARMS} periods (> {LAG_SLOPE_PHI2}): the period "
+                         "is below what a pass can serve")
+    (pc,) = rig.stage(prog_busy(3000))
+    res = rig.run(pc, s=0, slots={4: Slot(1000, period=1500, rearms=30)})
+    lates = [l for k, e, l in res["log"] if k == 4]
+    if clean(res, "lag P=1500", f):
         if res["fires"][4] != 31 or len(lates) < 31:
-            f.append(f"lag P={p}: {res['fires'][4]} firings, {len(lates)} logged")
-            continue
-        if p == 3000:                                       # W13-I: every value reported
-            print(f"    lag P=3000 (override, gated): max lateness {max(lates)} phi2")  # W13-I
-        if p == 3000 and max(lates) > SLACK_PHI2:
-            f.append(f"lag P=3000: max lateness {max(lates)} phi2 > {SLACK_PHI2} "
-                     "(the lateness grows: the client drifts)")
-        if p == 1500 and (lates[-1] - lates[0]) / 30 > grow:
+            f.append(f"lag P=1500: {res['fires'][4]} firings, {len(lates)} logged")
+        elif (lates[-1] - lates[0]) / 30 > grow:
             f.append(f"lag P=1500: lateness grows {(lates[-1] - lates[0]) / 30:.0f} "
                      f"phi2 per period (> {grow})")
-    # W13-I: the bound is gated with the idle override (rig default); once
-    # more with the real CIA1 scan (inp_src = 0, +111 cycles per frame hook),
-    # recorded only (docs/CONTRACTS.md "Input")
+    # W13-I: the gate uses the idle override (rig default); once more with
+    # the real CIA1 scan (inp_src = 0, +111 cycles per frame hook), at the
+    # same P, recorded only (docs/CONTRACTS.md "Input")
     try:                                                    # W13-I
         rig.lab("inp_src")                                  # W13-I
         rig.inp(0)                                          # W13-I
-        (pc,) = rig.stage(prog_busy(3000))                  # W13-I
-        res = rig.run(pc, s=0, slots={4: Slot(1000, period=3000, rearms=30)})  # W13-I
-        lates = [l for k, e, l in res["log"] if k == 4]     # W13-I
-        print(f"    lag P=3000 real input (W13-I, not gated): max lateness "   # W13-I
-              f"{max(lates) if lates else None} phi2 (bound {SLACK_PHI2} gated "
-              "with the override)")                         # W13-I
+        r = lag_series(rig, LAG_P, LAG_REARMS)              # W13-I
+        print(f"    {tag} x{LAG_REARMS} real input (W13-I, not gated): max "   # W13-I
+              f"{r['max']} phi2, slope {r.get('slope', float('nan')):+.0f}")  # W13-I
     except KeyError:                                        # W13-I
         pass                                                # W13-I
     finally:                                                # W13-I
@@ -1518,6 +1565,13 @@ MUTANTS = {
     "nostep": (MACH, [("loop:   lda mach_fs             ; W9-I: a slot is due now (fix round 2)\n"
                        "        bne step\n", "loop:\n")]),
 }
+# W13 (rev-inp round 4): 800 cycles more in the frame hook (~180 phi2 per
+# period at P = LAG_P, s = 0): pushes LAG_P past the servable edge, so the
+# lag leg's drift gate fails (600 cycles is at the edge: not every run).
+MUTANTS["hook800"] = ("runtime/ops/inp.s",
+                      [(".proc inp_frame\n        lda inp_src\n",
+                        ".proc inp_frame\n        ldx #160\n:       dex\n"
+                        "        bne :-\n        lda inp_src\n")])
 MUTANT_LEGS = {"noslot": ["arm"], "nokick": ["trap"], "kickout": ["out"],
                "disarm": ["arm"], "wrap": ["etime"], "eshift": ["etime"],
                "hook": ["periodic"], "posthi": ["post"], "nodue": ["arm"],
@@ -1528,7 +1582,8 @@ MUTANT_LEGS = {"noslot": ["arm"], "nokick": ["trap"], "kickout": ["out"],
                "wkslot": ["stop"], "haltguard": ["haltrace"],
                "stopev": ["stoplost"], "nopoll": ["starve", "kick", "storm"],
                "dropb7": ["stoplost", "kick", "raiseev"], "wkvb": ["stop"],
-               "nostep": ["progress"], "fsclear": ["raiseslot"]}
+               "nostep": ["progress"], "fsclear": ["raiseslot"],
+               "hook800": ["lag"]}
 
 
 def build_mutant(name: str, out_dir: str) -> str:

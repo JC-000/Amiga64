@@ -39,6 +39,8 @@
 ;   R+68 mach_am  R+69 u16 mach_hold   R+71 u32 VERTB hook calls
 ;   R+75 u32 frames at the start (after mach_init)   R+79 u32 r_osp
 ;   R+83 u32 mach_nirq delta (interrupts delivered)   R+87 mach_stp
+;   F_RING (W13 lag): entries 0-15 at LOG, every later entry n at
+;   LOG + 8 (16 + n % 16): the first 16 and the last 16 survive any length
 ; Log at LOG: 8-byte entries {u8 slot, u32 E at the callback, u24 E -
 ;   deadline}; slot $80 = a trap arm {E at the arm, u24 delay}.
 ;
@@ -60,6 +62,7 @@ F_HOOK  = $04
 F_RST   = $08
 F_IEN   = $10
 F_PRESET = $20
+F_RING  = $40           ; W13 lag: entries 16+ go to a 16-entry ring in LOG+128
 
 SLOT = P + $40
 R_LEN = 92
@@ -423,11 +426,23 @@ logdl:  pha
 ; logent — log {A, mach_et, q_d u24}.  Clobbers A/X/Y.
 logent: tax
         lda logn+1
+        bne @ring
+        lda logn
+        cmp #16
+        bcc @put
+@ring:  lda P+9
+        and #F_RING
+        beq @lin
+        lda logn
+        and #15
+        ora #16
+        bne @put                ; always
+@lin:   lda logn+1
         bne @full
         lda logn
         cmp #LOGMAX
         bcs @full
-        asl a
+@put:   asl a
         asl a
         asl a
         tay
