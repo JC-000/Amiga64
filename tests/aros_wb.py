@@ -917,9 +917,12 @@ def l32(read, a: int) -> int:
 
 
 def wb_screen(read) -> dict:
-    """Intuition's first screen and its windows (public NDK offsets:
-    IntuitionBase +60 FirstScreen; Screen +4 FirstWindow, +22 Title;
-    Window +0 NextWindow, +32 Title)."""
+    """Intuition's first screen, its windows and its layers (public NDK
+    offsets: IntuitionBase +60 FirstScreen; Screen +4 FirstWindow, +22
+    Title, +224 LayerInfo (whose first long is top_layer); Window +0
+    NextWindow, +32 Title; Layer +4 back).  A menu Intuition shows lives in
+    layers of its own on the screen: the boot model counts 3 at rest, 5
+    with the Workbook menu down, 3 again after it closed."""
     def cstr(a):
         return read(a, 40).split(b"\0")[0].decode("latin-1") if 0 < a < 1 << 24 else ""
     sb = l32(read, 4)
@@ -933,7 +936,7 @@ def wb_screen(read) -> dict:
             break
         n = l32(read, n)
     if not ib:
-        return {"title": "", "windows": []}
+        return {"title": "", "windows": [], "layers": 0}
     scr = l32(read, ib + 60)
     wins, w = [], l32(read, scr + 4)
     for _ in range(32):
@@ -941,7 +944,11 @@ def wb_screen(read) -> dict:
             break
         wins.append(cstr(l32(read, w + 32)))
         w = l32(read, w)
-    return {"title": cstr(l32(read, scr + 22)), "windows": wins}
+    nl, ly = 0, l32(read, scr + 224)
+    while ly and ly < 1 << 24 and nl < 64:
+        nl += 1
+        ly = l32(read, ly + 4)
+    return {"title": cstr(l32(read, scr + 22)), "windows": wins, "layers": nl}
 
 
 def find_icon(read, st: dict, title_lines: int) -> dict:
@@ -1045,7 +1052,7 @@ class E2E:
                 "ok": abs(tx - sx) <= tol and abs(ty - sy) <= tol}
 
 
-def guest_read_frozen(m: WbMachine, rom, fn, rep: dict):
+def guest_read_frozen(m: WbMachine, rom, fn, rep: dict, key: int = 0):
     """The Ultimate (no live REU read): suspend REU-resident (frozen), reset
     + fresh load, run fn(reader) on the REU, resume, scripted input again."""
     from tests import aros_resume as RS
@@ -1055,10 +1062,11 @@ def guest_read_frozen(m: WbMachine, rom, fn, rep: dict):
     rd = lambda a, n: b"".join(sn.reu_read(a + o, min(256, n - o)) for o in range(0, n, 256))  # noqa: E731
     out = fn(rd)
     resume_workbench(m, rom, None, rep)
-    m.w(m.lab("inp_src"), b"\x01\0\0")
+    m.w(m.lab("inp_src"), bytes([1, 0, key]))      # scripted again, *key* still held
     return out
 
 
+MENU_DELAY = [0]                # --e2e-menu-delay frames before the menu step
 E2E_FROZEN = [False]           # --e2e-frozen: guest reads by suspend/reset/resume on VICE too
 
 
@@ -1316,9 +1324,19 @@ def _leg_e2e(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol, timeout: flo
             fails.append(f"F1: the 1:1 picture differs from c2v_ref's render of the guest's planes ({eq})")
         if stt["disp_crop"] == 0 and text < 10:
             fails.append(f"F1: the title rows show only {text} two-pen cells")
+    if MENU_DELAY[0]:                   # --e2e-menu-delay: start the menu step later
+        e.frames_wait(MENU_DELAY[0], timeout=max(120.0, 2.0 * MENU_DELAY[0]))   # (the resting title bar changes by itself)
     settle()
     force_conv(m)                       # rev-wb F2: the reference is a fresh picture
     hm0 = hash_now()
+
+    def layers(key: int = 0) -> int:
+        if g:
+            g.fresh()
+            return wb_screen(g.read)["layers"]
+        return guest_read_frozen(m, rom, wb_screen, rb, key)["layers"]
+
+    ly0 = layers()
     if mutant != "nocbm":
         e.key(K_CBM)
     e.frames_wait(6)
@@ -1326,25 +1344,34 @@ def _leg_e2e(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol, timeout: flo
     e.frames_wait(1)
     e.joy(0)
     f0 = m.frames()
-    hm1 = hm0
-    while hm1 == hm0 and m.frames() < f0 + 300:     # drawing the menu takes ~0.5 M
-        e.frames_wait(10)                           # instructions (boot model: 0.9 s)
+    hm1, ly1 = hm0, ly0
+    while m.frames() < f0 + 300:        # drawing the menu takes ~0.5 M instructions
+        e.frames_wait(10)               # (boot model: 0.9 s)
         hm1 = hash_now()
+        ly1 = layers(0 if mutant == "nocbm" else K_CBM)
+        if hm1 != hm0 and ly1 > ly0:
+            break
     rb["frames_to_menu"] = m.frames() - f0
     if m.vice:
         _, rawm = AB.c64_hash(m)
         SP.png_cells(os.path.join(EVID, "e2e_menu.png"), rawm)
     e.key(0)
-    f0 = m.frames()
-    hm2 = hm1
-    while hm2 == hm1 and m.frames() < f0 + 300:
-        e.frames_wait(10)
-        hm2 = hash_now()
+    e.frames_wait(30)
+    settle()
+    force_conv(m)                       # rev-wb E2E r2: the closed picture, converted
+    hm2 = hash_now()
+    ly2 = layers()
     rb.update(hash_before=hm0[:12], hash_held=hm1[:12], hash_after=hm2[:12],
-              menu_shown=hm1 != hm0, closed=hm2 != hm1)
-    log(f"  right button (1:1 view): screen {hm0[:12]} -> {hm1[:12]} (C= held) -> {hm2[:12]}")
-    if hm1 == hm0:
-        fails.append(f"menu: holding C= on the title bar changed nothing ({rb})")
+              layers=[ly0, ly1, ly2], menu_shown=hm1 != hm0 and ly1 > ly0,
+              closed=hm2 != hm1 and ly2 < ly1)
+    log(f"  right button (1:1 view): screen {hm0[:12]} -> {hm1[:12]} (C= held) -> {hm2[:12]}; "
+        f"screen layers {ly0} -> {ly1} -> {ly2}")
+    if ly1 <= ly0:
+        fails.append(f"menu: holding C= added no layer to the screen ({rb})")
+    if hm1 == hm0 or hm1 == hm2:
+        fails.append(f"menu: the held picture is not distinct from before and after ({rb})")
+    if ly2 >= ly1:
+        fails.append(f"menu: releasing C= did not close the menu's layers ({rb})")
     e.frames_wait(100)                  # the guest finishes closing the menu (its
     settle()                            # CPU-drawn pixels convert only with F1's forced
     f1r["to_0"] = r0 = f1(0)            # conversion: no pixel epoch for CPU writes)
@@ -1565,6 +1592,9 @@ def main(argv=None) -> int:
                     help="leg demo: seconds the resumed Workbench keeps running")
     ap.add_argument("--resume-mutant", default=None,
                     help="teeth: resume (b) on an aros_resume mutant PRG (e.g. noepoch, nodst): must fail")
+    ap.add_argument("--e2e-menu-delay", type=int, default=0,
+                    help="leg e2e: guest frames to wait before the menu step (teeth from both "
+                         "resting title-bar pictures)")
     ap.add_argument("--e2e-frozen", action="store_true",
                     help="leg e2e on VICE: guest reads by suspend/reset/resume (as on the Ultimate)")
     ap.add_argument("--e2e-mutant", default=None, choices=("nofire", "wrongicon", "nocbm"),
@@ -1583,6 +1613,7 @@ def main(argv=None) -> int:
     TD_DEFINES[:] = a.td_define
     TD_MUTANT[0] = a.td_mutant
     E2E_FROZEN[0] = a.e2e_frozen
+    MENU_DELAY[0] = a.e2e_menu_delay
     RESUME_MUTANT[0] = a.resume_mutant
     if a.vol.lower().strip("/") in ("flash", "temp") or not a.vol.startswith("/"):
         raise SystemExit(f"--vol {a.vol}: never Flash or Temp")

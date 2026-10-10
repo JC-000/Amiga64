@@ -86,15 +86,19 @@ def test_wb_screen_walks_libs_screen_and_windows():
     m.s(0xC32000, "Workbench3.1")
     m.l(w1 + 32, 0xC32000)
     m.l(w2 + 32, 0)
+    lys = [0xC50000, 0xC50200, 0xC50400]        # LayerInfo.top_layer -> back -> back
+    m.l(scr + 224, lys[0])
+    m.l(lys[0] + 4, lys[1])
+    m.l(lys[1] + 4, lys[2])
     s = W.wb_screen(m.read)
-    assert s == {"title": "Workbook 1.0", "windows": ["Workbench3.1", ""]}
+    assert s == {"title": "Workbook 1.0", "windows": ["Workbench3.1", ""], "layers": 3}
 
 
 def test_wb_screen_without_intuition():
     m = Mem()
     m.l(4, 0xC00568)
     m.l(0xC00568 + 378, 0xC00568 + 382)
-    assert W.wb_screen(m.read) == {"title": "", "windows": []}
+    assert W.wb_screen(m.read) == {"title": "", "windows": [], "layers": 0}
 
 
 def test_prefetch_fetches_every_page_in_one_park():
