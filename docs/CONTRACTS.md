@@ -550,8 +550,13 @@ no link dependency on any client.
     3200.
   - The old 30-re-arm window hid the drift: "2921-3485 over 7 runs" were
     fresh-session samples of a drifting series.
-  - At s = 4 (the AROS profiles use s = 3 on the Ultimates), one φ2 is
-    1/16 E tick, so a pass costs 16× fewer E ticks per period.
+  - At s = 3 (the AROS profile on the Ultimates) one φ2 is 1/8 E tick, so a
+    pass costs 8× fewer E ticks per period than at s = 0 (16× at VICE's
+    s = 4).
+  - **Frame-hook budget** (rev-inp, 2026-10-09): further work on the fhook
+    path stays safe up to about 300 extra cycles at idle. A 600-cycle hook
+    sits at the P = 3200 edge (slope +74 to +1300), so the lag leg would
+    flake; re-derive P before adding that much.
   - The leg now runs at **P = 3200**, 240 re-arms, with the screen forced
     on. It gates the max of the logged first 16 and last 16 entries
     (≤ 4096) and the drift: the mean of the last 10 minus the mean of the
