@@ -780,11 +780,23 @@ def build_mutant(prg: str, name: str) -> str:
         raise RuntimeError(f"mutant {name}: MAIN labels moved: {bad[:5]}")
     a, b = open(prg, "rb").read(), open(mprg, "rb").read()
     top = 0xB100 - 0x0801 + 2
-    lo, hi = la["snap_arm"], la["ureu_sv"] + 8      # snap.s + ureu.s MAIN code
+    # snap.s's MAIN code runs from snap_arm to CODE's end (snap.s links last
+    # in CODE); ureu.s's MAIN code is LOWCODE (Wave 13 supervisor: the
+    # STARTUP->DISPATCH slack).  Both ranges come from the base build's map.
+    import re
+    segs = {m.group(1): (int(m.group(2), 16), int(m.group(3), 16))
+            for m in re.finditer(r"^(\w+)\s+([0-9A-F]{6})\s+([0-9A-F]{6})\s",
+                                 open(os.path.splitext(prg)[0] + ".map").read(), re.M)}
+    ok = [(la["snap_arm"], segs["CODE"][1] + 1)]
+    if "LOWCODE" in segs:
+        ok.append((segs["LOWCODE"][0], segs["LOWCODE"][1] + 1))
+    else:
+        ok = [(la["snap_arm"], la["ureu_sv"] + 8)]
+    inside = lambda x: any(lo <= x < hi for lo, hi in ok)   # noqa: E731
     diff = [i - 2 + 0x0801 for i in range(top) if a[i] != b[i]]
-    if any(not lo <= x < hi for x in diff):
+    if any(not inside(x) for x in diff):
         raise RuntimeError(f"mutant {name}: MAIN bytes differ outside snap/ureu code: "
-                           f"{[hex(x) for x in diff if not lo <= x < hi][:5]}")
+                           f"{[hex(x) for x in diff if not inside(x)][:5]}")
     if a[top:] == b[top:]:
         raise RuntimeError(f"mutant {name}: identical to the base (define unused?)")
     return mprg

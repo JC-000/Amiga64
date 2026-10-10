@@ -535,12 +535,40 @@ no link dependency on any client.
   one instruction each), and there is no time floor, so a periodic client
   re-arming from its own deadline keeps a bounded lateness when its period
   exceeds a pass plus one instruction (`lag`: P = 3000 phi2 at s = 0,
-  max 2333 late; the round-1b floor drifted to 50k). W13-I: the bound is
-  gated with the input override (`inp_src` = 1, the rig's default since
-  Wave 13): max 2921-3485 over 7 runs. The real CIA1 scan adds 111 cycles
-  to every frame hook (screen off). With it, `lag` reads max 4713-4826
-  phi2 at s = 0 (same 7 runs), over the 4096 bound. That run is recorded, not gated
-  ("Input (joystick -> mouse)"). A halt in that step
+  max 2333 late; the round-1b floor drifted to 50k). 
+  **Wave 13 (rev-inp round 4):** the frame hooks (`inp_frame`, W13-D's)
+  raised the shortest period a pass can serve at s = 0, screen on (VIC
+  badlines take ~8% of φ2), from < 3000 to ≈ 3050-3100 φ2.
+  - Measured with the `lag` leg's ring log, 160 re-arms per run
+    (`build/evidence/sup-lag/probe_*.log`):
+    - merged P = 3000 drifts: slope +7116 to +7906, max 9.4-10.4k;
+    - merged P = 3100 is bounded: max 2830-3451;
+    - merged P = 3200 and 3400 are bounded: max ≤ 3218.
+  - The ring log stores every entry, about 50 cycles per callback more than
+    the old log's early exit once full. With it the base PRG (5eb3cd0)
+    also drifts slowly at P = 3000 (slope +1051 to +1660); it does not at
+    3200.
+  - The old 30-re-arm window hid the drift: "2921-3485 over 7 runs" were
+    fresh-session samples of a drifting series.
+  - At s = 3 (the AROS profile on the Ultimates) one φ2 is 1/8 E tick, so a
+    pass costs 8× fewer E ticks per period than at s = 0 (16× at VICE's
+    s = 4).
+  - **Frame-hook budget** (rev-inp, 2026-10-09): further work on the fhook
+    path stays safe up to about 300 extra cycles at idle. A 600-cycle hook
+    sits at the P = 3200 edge (slope +74 to +1300), so the lag leg would
+    flake; re-derive P before adding that much.
+  - The leg now runs at **P = 3200**, 240 re-arms, with the screen forced
+    on. It gates the max of the logged first 16 and last 16 entries
+    (≤ 4096) and the drift: the mean of the last 10 minus the mean of the
+    first 10 must be ≤ 700 φ2.
+    - Bounded series measured: max 2378-3391, slope −461 to +389, on base,
+      merged and with a 300-cycle hook delay.
+    - Drifting series: merged at P = 3000, slope ≥ +11254; mutant
+      `hook800` (+800 cycles per frame hook), ≥ +12586.
+    - A 600-cycle hook delay sits at the edge: +74 to +1300.
+  - The gate runs with the input override (`inp_src` = 1). The real CIA1
+    scan (+111 cycles per frame hook) is run once more at the same P and
+    recorded, not gated ("Input (joystick -> mouse)"). A halt in that step
   (HALT, STOP, an odd vector) leaves through the normal halt path, and every
   `mach_run` exit rule holds. A delivery does not force a step: a higher
   level pending after a delivery nests before the handler's first
@@ -1846,9 +1874,13 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
     - worst case: 356 (the real scan plus all four mouse-loop bits);
     - the real scan costs 111 more than the override.
     rev-inp's independent measurement agrees (277/166/245/356).
-  - **Lateness.** `run_irq` `lag`'s 4096-phi2 bound (s = 0) is gated with
-    the override (max 2921-3485 phi2 over 7 runs). With the real scan the
-    measured max is 4713-4826 phi2 (the same 7 runs, 2026-10-09). That is recorded, not gated; see "Event seam".
+  - **Lateness.** `run_irq` `lag` (s = 0, screen on) is gated with the
+    override at P = 3200 for drift and max; see "Event seam".
+    - The W13 frame hooks moved the servable edge from < 3000 to
+      ≈ 3050-3100 φ2. The old P = 3000 numbers ("2921-3485 over 7 runs")
+      were fresh-session samples of a drifting series.
+    - With the real scan at P = 3200 × 240: max 2779-3106 φ2, slope
+      +183 to +292 (3 runs, recorded only).
   - **Coverage gap.** A real key or stick press through CIA1 (the scan's
     positive path) is covered only by the attended script
     (`tests/run_inp.py --attended`):

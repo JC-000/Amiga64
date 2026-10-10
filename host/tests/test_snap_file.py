@@ -420,3 +420,22 @@ def test_unstamped_build_refuses_before_any_uci(build):
     r.poke("snap_bid", bytes(8))
     assert r.resume(F.RQ_FILE) == 1 and r.st() == 0xE8
     assert r.dev.log == [b"\x01\x03"]                  # no OPEN: only the failure close
+
+
+# --- Wave 13 (supervisor; rev-vis round 3): a resume disarms the pointer module
+def test_file_resume_disarms_the_pointer_module(build):
+    f, _r0 = suspended_file(build)
+    r = fresh(build, f)
+    r.poke("spr_vec", b"\x00\xC6")                 # armed (outside the image in this shim)
+    assert r.resume(F.RQ_FILE) == 0 and r.st() == F.ST_RES
+    assert r.peek("spr_vec", 2)[1] == 0
+
+
+def test_refused_resume_leaves_spr_vec(build):
+    f, _r0 = suspended_file(build)
+    f = bytearray(f)
+    f[300] ^= 1                                    # a state byte: refused before the restore
+    r = fresh(build, bytes(f))
+    r.poke("spr_vec", b"\x00\xC6")
+    assert r.resume(F.RQ_FILE) == 1
+    assert r.peek("spr_vec", 2)[1] == 0xC6
