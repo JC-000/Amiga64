@@ -1846,9 +1846,14 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
     - worst case: 356 (the real scan plus all four mouse-loop bits);
     - the real scan costs 111 more than the override.
     rev-inp's independent measurement agrees (277/166/245/356).
-  - **Lateness.** `run_irq` `lag`'s 4096-phi2 bound (s = 0) is gated with
-    the override (max 2921-3485 phi2 over 7 runs). With the real scan the
-    measured max is 4713-4826 phi2 (the same 7 runs, 2026-10-09). That is recorded, not gated; see "Event seam".
+  - **Lateness.** `run_irq` `lag` (s = 0) is gated with the override. W13-I
+    alone: max 2921-3485 phi2 over 7 runs; with the real scan 4713-4826 (not
+    gated). Wave 13 supervisor, on the merged I+D+W build: the gated max is
+    bimodal, 3485-3548 or 4248-4307, because the frame hooks (inp_frame plus
+    W13-D's disp_vw) can push the client behind one more busy-loop guest
+    instruction (~760 phi2 at s = 0). The lag leg's bound is therefore
+    LAG_SLACK_PHI2 = 4096 + 1024 phi2 (one instruction of headroom); every
+    other run_irq check keeps SLACK_PHI2 = 4096. See "Event seam".
   - **Coverage gap.** A real key or stick press through CIA1 (the scan's
     positive path) is covered only by the attended script
     (`tests/run_inp.py --attended`):

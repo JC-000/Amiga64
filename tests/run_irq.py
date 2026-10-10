@@ -62,6 +62,12 @@ INTENAR, INTREQR = 0xDFF01C, 0xDFF01E
 INTENA, INTREQ = 0xDFF09A, 0xDFF09C
 RESET = 0x4E70
 SLACK_PHI2 = 4096           # a pass + IRQ entry + the instruction in flight
+# Wave 13 (supervisor): leg lag only.  Its pass now also runs the W13 frame
+# hooks (inp_frame <= 356 cycles, disp_vw ~25), which can push the client
+# behind one more busy-loop guest instruction (~760 phi2 at s = 0): on the
+# merged I+D+W build the max lateness is bimodal 3485-3548 / 4248-4307
+# (base 2332-2754, W13-I alone 2921-3485).  One instruction of headroom.
+LAG_SLACK_PHI2 = SLACK_PHI2 + 1024
 M32 = 0xFFFFFFFF
 DRV_SYMS = ("emu_reset", "emu_run", "emu_rst_hook", "mach_init", "mach_run",
             "mach_s", "mach_nmi", "mach_now", "mach_chi", "mach_etime",
@@ -1326,7 +1332,7 @@ def leg_progress(rig: Rig) -> list[str]:
 def leg_lag(rig: Rig) -> list[str]:
     """Review N1 (fix round 2): a periodic client re-arming from its own
     deadline (CIA timers' no-drift pattern) at s = 0.  P = 3000 phi2 keeps
-    a bounded lateness (<= SLACK_PHI2).  P = 1500 is below what a 1 MHz
+    a bounded lateness (<= LAG_SLACK_PHI2).  P = 1500 is below what a 1 MHz
     6502 can serve (a pass with a callback plus the guaranteed guest
     instruction, ~2.9k phi2), so no scheme keeps it bounded; its lateness
     may grow by at most GROW phi2 per period (round 0 ~800 with no
@@ -1349,8 +1355,8 @@ def leg_lag(rig: Rig) -> list[str]:
             continue
         if p == 3000:                                       # W13-I: every value reported
             print(f"    lag P=3000 (override, gated): max lateness {max(lates)} phi2")  # W13-I
-        if p == 3000 and max(lates) > SLACK_PHI2:
-            f.append(f"lag P=3000: max lateness {max(lates)} phi2 > {SLACK_PHI2} "
+        if p == 3000 and max(lates) > LAG_SLACK_PHI2:
+            f.append(f"lag P=3000: max lateness {max(lates)} phi2 > {LAG_SLACK_PHI2} "
                      "(the lateness grows: the client drifts)")
         if p == 1500 and (lates[-1] - lates[0]) / 30 > grow:
             f.append(f"lag P=1500: lateness grows {(lates[-1] - lates[0]) / 30:.0f} "
@@ -1365,7 +1371,7 @@ def leg_lag(rig: Rig) -> list[str]:
         res = rig.run(pc, s=0, slots={4: Slot(1000, period=3000, rearms=30)})  # W13-I
         lates = [l for k, e, l in res["log"] if k == 4]     # W13-I
         print(f"    lag P=3000 real input (W13-I, not gated): max lateness "   # W13-I
-              f"{max(lates) if lates else None} phi2 (bound {SLACK_PHI2} gated "
+              f"{max(lates) if lates else None} phi2 (bound {LAG_SLACK_PHI2} gated "
               "with the override)")                         # W13-I
     except KeyError:                                        # W13-I
         pass                                                # W13-I
