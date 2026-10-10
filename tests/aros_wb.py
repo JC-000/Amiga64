@@ -795,7 +795,8 @@ def leg_resume(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol: str | None
     return fails
 
 
-def resume_workbench(m: WbMachine, rom, path: str | None, rep: dict) -> float:
+def resume_workbench(m: WbMachine, rom, path: str | None, rep: dict,
+                     inp: bytes | None = None) -> float:
     """I3: resume a Workbench snapshot (the Ultimate: from the file *path*,
     e.g. <vol>/amiga64/wb-snap.bin; VICE: REU-resident) on a fresh runner
     load, the modules re-staged; -> seconds from the snap_resume launch
@@ -807,9 +808,12 @@ def resume_workbench(m: WbMachine, rom, path: str | None, rep: dict) -> float:
         a = m.lab("inp_src")            # inp_src; after a resume the launcher picks
     except KeyError:                    # the real joystick (0) for the demo
         a = None
-    if a is not None:
+    if a is not None and inp is None:   # the demo: the user's stick
         m.w(a, b"\0")
         rep["inp_src"] = 0
+    elif a is not None:                 # scripted (e2e frozen reads): the image already
+        m.w(a, inp)                     # carries inp_src/joy/key as suspended; this write
+        rep["inp_src"] = inp[0]         # only confirms them (rev-wb E2E U2b)
     arm_spr(m)                          # supervisor: a resume comes up disarmed
     fr0 = m.frames()
     while time.monotonic() - t1 < 60 and m.frames() <= fr0 + 2:
@@ -1061,8 +1065,7 @@ def guest_read_frozen(m: WbMachine, rom, fn, rep: dict, key: int = 0):
     RS.fresh_load(m, m.prg)
     rd = lambda a, n: b"".join(sn.reu_read(a + o, min(256, n - o)) for o in range(0, n, 256))  # noqa: E731
     out = fn(rd)
-    resume_workbench(m, rom, None, rep)
-    m.w(m.lab("inp_src"), bytes([1, 0, key]))      # scripted again, *key* still held
+    resume_workbench(m, rom, None, rep, bytes([1, 0, key]))    # scripted, *key* held throughout
     return out
 
 
@@ -1145,11 +1148,12 @@ def _leg_e2e(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol, timeout: flo
     p.update(vic=[vx, vy], d015=en)
     if not en & 7:
         return fails + [f"pointer: $D015 = ${en:02X}, no sprite 0-2 enabled"]
-    if m.vice:
+    if m.vice:                          # the RAM under I/O: VICE's monitor only
         sp = SP.spr_read_live(m)
         p["blocks_nonempty"] = any(sp["blocks"])
         if not p["blocks_nonempty"]:
             fails.append("pointer: the sprite blocks at $D400 are empty")
+    if g:                               # the guest's POS/CTL, live (VICE)
         shd = m.r(m.lab("chip_shd") + 0x120, 4)
         pt = ((shd[0] << 24 | shd[1] << 16 | shd[2] << 8 | shd[3]) & 0xFFFFFE)
         g.fresh()
@@ -1234,8 +1238,14 @@ def _leg_e2e(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol, timeout: flo
                 break
         elif h1 != h0:
             break
-    if not g:
-        after = guest_read_frozen(m, rom, wb_screen, dc)
+    if not g:                           # rev-wb E2E U2a: the first change may be the
+        for _ in range(6):              # icon's selection highlight; read until the
+            after = guest_read_frozen(m, rom, wb_screen, dc)   # list changes (6 tries)
+            if len(after["windows"]) > len(before["windows"]):
+                break
+            e.frames_wait(60)
+        dc["frozen_reads"] = _ + 1
+        h1 = hash_now()
     dc.update(windows_after=after["windows"], hash_changed=h1 != h0,
               reads_after=m.td()["nrd"] - nrd0, wall_s=round(time.monotonic() - t1, 1))
     log(f"  double-click: windows {after['windows']}, screen changed {h1 != h0}, "
@@ -1309,7 +1319,9 @@ def _leg_e2e(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol, timeout: flo
     rb["goto"] = nav
     e.frames_wait(5)
     stt = SP.state(m)
-    if m.vice:
+    if not g:
+        f1r["c2v_ref_equal"] = "skipped: no live REU read (frozen path)"
+    if g:
         eq, raw = ref_compare(1, stt["disp_px"], stt["disp_py"])
         stt = SP.state(m)
         text = sum(1 for c in range(80) if (raw["screen"][c] >> 4) != (raw["screen"][c] & 15)
@@ -1344,15 +1356,17 @@ def _leg_e2e(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol, timeout: flo
     e.frames_wait(1)
     e.joy(0)
     f0 = m.frames()
-    hm1, ly1 = hm0, ly0
+    hm1 = hm0
     while m.frames() < f0 + 300:        # drawing the menu takes ~0.5 M instructions
         e.frames_wait(10)               # (boot model: 0.9 s)
         hm1 = hash_now()
-        ly1 = layers(0 if mutant == "nocbm" else K_CBM)
-        if hm1 != hm0 and ly1 > ly0:
+        if hm1 != hm0:
             break
-    rb["frames_to_menu"] = m.frames() - f0
-    if m.vice:
+    e.frames_wait(20)                   # the drop-down finishes drawing
+    hm1 = hash_now()
+    ly1 = layers(0 if mutant == "nocbm" else K_CBM)     # ONCE (rev-wb E2E U2b: a frozen
+    rb["frames_to_menu"] = m.frames() - f0                # read per poll costs a resume)
+    if m.vice:                          # (VICE: the matrix under I/O is readable)
         _, rawm = AB.c64_hash(m)
         SP.png_cells(os.path.join(EVID, "e2e_menu.png"), rawm)
     e.key(0)
@@ -1383,7 +1397,9 @@ def _leg_e2e(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol, timeout: flo
         # the picture before F1
         hb = hash_now()
         f1r["fit_hash"] = {"before_f1": hf[:12], "back": hb[:12]}
-        if m.vice:
+        if not g:
+            f1r["fit_c2v_ref_equal"] = "skipped: no live REU read (frozen path)"
+        if g:
             eq, _ = ref_compare(0)
             f1r["fit_c2v_ref_equal"] = eq
             log(f"  fit view again: {hb[:12]}; c2v_ref fit render of the guest's planes equal {eq}")
