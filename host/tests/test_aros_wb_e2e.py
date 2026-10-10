@@ -95,3 +95,24 @@ def test_wb_screen_without_intuition():
     m.l(4, 0xC00568)
     m.l(0xC00568 + 378, 0xC00568 + 382)
     assert W.wb_screen(m.read) == {"title": "", "windows": []}
+
+
+def test_prefetch_fetches_every_page_in_one_park():
+    """GuestPeek.prefetch: every 256-byte page of the ranges, not yet
+    cached, in ONE _fetch call (one park: rev-wb E2E F3)."""
+    calls = []
+
+    class G(W.GuestPeek):
+        def __init__(self):
+            self.cache = {0x3A00: bytes(256)}
+
+        def _fetch(self, pages):
+            calls.append(list(pages))
+            return {p: bytes([p >> 8 & 0xFF]) * 256 for p in pages}
+
+    g = G()
+    g.prefetch([(0x3AB8, 80 * 3), (0x8AB8, 10), (0xC1FFF0, 0x20)])
+    assert calls == [[0x3B00, 0x8A00, 0xC1FF00, 0xC20000]]
+    assert g.read(0x3B10, 2) == b"\x3b\x3b" and g.read(0x3AFF, 2) == b"\0\x3b"
+    g.prefetch([(0x3B00, 16)])
+    assert len(calls) == 1                      # all cached: no park at all
