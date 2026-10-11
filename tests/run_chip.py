@@ -888,7 +888,18 @@ def build_mutant(name: str, out_dir: str) -> str:
         f.write(text)
     srcs = [mpath if s == core else s for s in make_sources()]
     prg = os.path.join(out_dir, "runner.prg")
-    cmd = ["cl65", "-t", "none", "-C", "runtime/c64.cfg", "-o", prg,
+    # Wave 14 (supervisor): MAIN is nearly full, and a core mutant that grows
+    # CODE past the page-aligned RODATA overflows it.  Mutant builds test
+    # behaviour, not cycles, so their copy of the config drops RODATA's page
+    # alignment (product builds keep it: perf_cycles).
+    cfg = os.path.join(out_dir, "c64_mut.cfg")
+    ctext = open(os.path.join(ROOT, "runtime", "c64.cfg")).read()
+    ra = "RODATA:   load = MAIN,     type = ro,  align = $100;"
+    if ctext.count(ra) != 1:
+        raise RuntimeError("c64.cfg: RODATA line changed (update run_chip.build_mutant)")
+    with open(cfg, "w") as f:
+        f.write(ctext.replace(ra, "RODATA:   load = MAIN,     type = ro;"))
+    cmd = ["cl65", "-t", "none", "-C", cfg, "-o", prg,
            "-Ln", os.path.join(out_dir, "runner.lbl"),
            "--asm-define", "BRNC_WARN_ONLY", "--asm-include-dir", "runtime",
            "--asm-include-dir", "runtime/ops"]
