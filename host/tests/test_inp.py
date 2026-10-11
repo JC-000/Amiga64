@@ -168,3 +168,15 @@ def test_scan_port1_rows_never_reach_stick_or_keys():
         joy, key = scan(Matrix(joy1=v), 0)
         assert joy == 0 and key == 0
     assert scan(Matrix(joy1=FIRE), F1)[1] == F1           # row 4 unknown: kept
+
+
+def test_scan_stuck_mask():
+    """inp_stuck: a switch stuck closed (the user's Up, 2026-10-11) is read
+    as released; the other directions still read; F1 stays unknown while
+    the stuck Up pulls column 0 (it keeps its state)."""
+    assert scan(Matrix(joy2=UP), 0, stuck=UP) == (0, 0)
+    assert scan(Matrix(joy2=UP | DOWN | FIRE), 0, stuck=UP) == (DOWN | FIRE, 0)
+    assert scan(Matrix(joy2=UP | RIGHT), 0, stuck=0) == (UP | RIGHT, 0)
+    assert scan(Matrix(keys={(0, 4)}, joy2=UP), F1, stuck=UP) == (0, F1)   # kept
+    assert scan(Matrix(joy2=UP), F1, stuck=UP) == (0, 0)                    # row 4 readable
+    assert scan(Matrix(keys={(7, 5)}, joy2=UP), 0, stuck=UP) == (0, CBM)

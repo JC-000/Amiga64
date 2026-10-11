@@ -1896,6 +1896,22 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
     2026-10-09 saw no change at `$DC00`/`$DC01` with any controlport or
     joydev setting. The real-scan leg therefore holds rows low through
     DDRB/PRB instead.
+- **Stuck mask** (`inp_stuck`, MAIN BSS, 0 after the BSS clear,
+  host-set; demo 2026-10-11).
+  - The real scan reads the stick as `~(PRA | inp_stuck) & $1F`, so a
+    switch stuck closed reads as released. The user's stick has Up stuck:
+    `$01`. The override path ignores the mask.
+  - The snapshot image carries it, like the other inp bytes.
+  - It hides the direction from the mouse only. The line is still held at
+    the port, so it still selects its keyboard column. A held column-0 line
+    (Up) keeps F1 unreadable (it keeps its last state), as before. The
+    other keys are unaffected.
+  - Tests:
+    - `host/tests/test_inp.py::test_scan_stuck_mask` checks the model;
+    - `run_inp` `stuck` (VICE) checks the idle real scan with masks $01
+      and $1F, and that the override ignores the mask. VICE cannot hold a
+      port-A line, so the masking itself is shown only by the model and on
+      the device (`--attended --stuck 0x01`).
 - **Rule** (per frame, from `inp_joy`/`inp_key`; `host/inp_ref.Inp`):
   - **Mouse.** dir = joy & `$0F`. n = `inp_n`, set to 0 when dir = 0.
     step = 1 + n/2, then n += 1 while n < `INP_NMAX` (30). The steps run
@@ -1934,7 +1950,7 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
     resume must write `inp_src` = 0 after the resume for the user's stick
     to work.
 - **State.** `inp_src`, `inp_joy`, `inp_key`, `inp_view`, `inp_n`,
-  `inp_kp` (MAIN BSS, in this order, zero = idle; inp.s links after
+  `inp_kp`, `inp_stuck` (MAIN BSS, in this order, zero = idle; inp.s links after
   mach.s and before snap.s, so the W12-T snapshot image carries them, I2).
   Scratch: rc zp `inp $9A-$9B` (`inp_t`, `inp_u`). It is live only inside
   one call and not saved or restored: the "free zp" row of the

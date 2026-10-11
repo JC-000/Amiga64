@@ -15,6 +15,8 @@
 ;   inp_joy  bits 0-4 = up/down/left/right/fire, 1 = pressed (the harness's
 ;            inject_joystick polarity)
 ;   inp_key  INP_F1 ($10) = F1, INP_CBM ($20) = C= (their matrix row bits)
+;   inp_stuck  stick bits the real scan ignores (host-set; a switch stuck
+;            closed, e.g. $01 = Up); the override path ignores it
 ;
 ; Scan (real source).  Port 2 drives the same port-A lines as the
 ; keyboard's column select, so:
@@ -50,7 +52,7 @@
 .include "../macros.inc"
 
 .export inp_frame, inp_pot
-.export inp_src, inp_joy, inp_key, inp_view, inp_n
+.export inp_src, inp_joy, inp_key, inp_view, inp_n, inp_stuck
 .import chip_shd, cia_st, chip_vh
 
 INP_CAP   = 16          ; @value step cap (counter units per frame)
@@ -67,6 +69,7 @@ inp_key:  .res 1        ; keys, 1 = down: INP_F1, INP_CBM
 inp_view: .res 1        ; I1: view edges (bit 0 = F1 pressed), W13-D clears
 inp_n:    .res 1        ; frames a direction was held (<= INP_NMAX)
 inp_kp:   .res 1        ; the last frame's inp_key
+inp_stuck: .res 1       ; host: stick bits the real scan ignores (1 = stuck closed)
 
 ; CODE layout: no pad needed.  RODATA is page-aligned (c64.cfg, Wave 13
 ; supervisor), so CODE growth no longer moves which abs,X table entries
@@ -84,6 +87,7 @@ inp_beg:
         lda #0                  ; 1. the stick, nothing driven (DDRB is
         sta CIA1_DDRA           ; $00 throughout: nothing here sets it)
         lda CIA1_PRA
+        ora inp_stuck           ; stuck lines read as released
         eor #$FF
         and #$1F
         sta inp_joy

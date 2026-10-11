@@ -202,6 +202,7 @@ def arm_spr(m) -> None:
     (snap.s comes up disarmed)."""
     from tests import run_spr as SP
     SP.arm(m.w, m.lab)
+STUCK: list = [0]               # --stuck (demo legs)
 TD_DEFINES: list = []           # --td-define (evidence builds: TD_ZPJUNK=$A5)
 
 
@@ -1421,6 +1422,8 @@ def leg_demo_boot(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol, timeout
                            want_screen=False)
     if fails:
         return fails
+    if STUCK[0]:                        # supervisor: mask the stuck switch first
+        m.w(m.lab("inp_stuck"), bytes([STUCK[0]]))
     m.w(m.lab("inp_src"), b"\0\0\0")
     arm_spr(m)
     log(f"  demo-boot: the Workbench is up; port 2 is the user's (inp_src 0); holding {hold_s:.0f} s")
@@ -1434,6 +1437,9 @@ def leg_demo(m: WbMachine, rom, rep: dict, vol: str, hold_s: float) -> list[str]
     *hold_s* seconds before the hold restores the device."""
     path = f"{vol}/amiga64/{SNAP_DEMO}"
     el = resume_workbench(m, rom, path, rep)
+    if STUCK[0]:                        # supervisor: the user's stick has a stuck switch
+        m.w(m.lab("inp_stuck"), bytes([STUCK[0]]))
+        rep["inp_stuck"] = STUCK[0]
     rep["running_s"] = round(el, 2)
     rep["td"] = m.td()
     log(f"  demo: {path} resumed, guest running {el:.2f} s after the launch; holding {hold_s:.0f} s")
@@ -1600,6 +1606,8 @@ def main(argv=None) -> int:
     ap.add_argument("--s", type=int, default=None)
     ap.add_argument("--timeout", type=float, default=1800.0)
     ap.add_argument("--out", default=EVID)
+    ap.add_argument("--stuck", type=lambda v: int(v, 0), default=0,
+                    help="demo legs: inp_stuck mask for a stuck port-2 switch (e.g. 0x01 = UP)")
     ap.add_argument("--keep", action="store_true",
                     help="leg resume: leave <vol>/amiga64/wb-snap.bin (the demo snapshot)")
     ap.add_argument("--td-define", action="append", default=[],
@@ -1624,6 +1632,7 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     a.legs = [x for x in a.legs.split(",") if x]
     WATCH[0] = a.watch
+    STUCK[0] = a.stuck
     if a.watch and "e2e" in a.legs:     # WATCH_AT/WATCH_N lie in GuestPeek's PEEK_BUF page
         raise SystemExit("--watch cannot run with leg e2e (both use $CD00-$CDFF)")
     TD_DEFINES[:] = a.td_define

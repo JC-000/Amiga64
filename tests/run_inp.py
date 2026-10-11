@@ -79,9 +79,10 @@ JOY0 = 0x0A               # JOY0DAT in chip_shd (inp.s INP_JOY0)
 LOG = 0x20000             # fixtures/inp/inp_log.s LOG
 FRAMES = 16               # fixtures/inp/inp_log.s FRAMES
 GUEST_S = 2               # mach_s for the guest runs (18 frames/s on NTSC phi2)
-ALL_LEGS = ["api", "guest", "real", "cost"]
+ALL_LEGS = ["api", "guest", "real", "cost", "stuck"]
 U64_LEGS = ["api", "guest", "real", "noinj"]
 VERBOSE = False
+STUCK = 0                 # --stuck: inp_stuck written by every reset (attended/demo)
 ALLOW_HELD = 0            # --allow-held: stick bits a hardware port may read held
 WARNS: list[str] = []     # the WARN lines of this run (summary / --json "warn")
 
@@ -134,11 +135,15 @@ class Rig:
 
     def reset(self, src: int = 1) -> None:
         """chip_reset (JOY0DAT 0, CIAs to power-up: pins $EB), then inp's
-        BSS block (inp_src .. inp_kp, 6 bytes) to idle."""
+        BSS block (inp_src .. inp_kp, 6 bytes) to idle; inp_stuck := *stuck*."""
         self.cia.call(self.lab("chip_reset"))
         if self.ok:
             assert self.lab("inp_n") == self.src + 4, "inp BSS layout"
             self.w(self.src, bytes([src, 0, 0, 0, 0, 0]))
+            try:
+                self.w(self.lab("inp_stuck"), bytes([STUCK]))
+            except KeyError:
+                pass                        # a PRG before inp_stuck
 
     def set_input(self, joy: int, key: int) -> None:
         self.w(self.src + 1, bytes([joy, key]))
@@ -463,7 +468,50 @@ def leg_cost(rig: Rig) -> list[str]:
     return [] if 0 < worst < 1000 else [f"cost: implausible {worst} cycles"]
 
 
-LEGS = {"api": leg_api, "guest": leg_guest, "real": leg_real, "noinj": leg_noinj, "cost": leg_cost}
+def leg_stuck(rig: Rig) -> list[str]:
+    """inp_stuck (W13-I demo, 2026-10-11).  VICE cannot hold a port-A line
+    (it ignores JOYPORT_SET; DDRB/PRB only drives rows, and the stick read
+    has DDRA = $00), so the masking itself is shown by host/inp_ref
+    (test_scan_stuck_mask) and on the device (--attended --stuck $01).
+    Here: the real scan with every mask still reads idle and moves nothing;
+    the override ignores the mask (UP and DOWN with inp_stuck = $1F move);
+    a reset leaves inp_stuck as the host set it."""
+    global STUCK
+    rig.need()
+    f: list[str] = []
+    a = rig.lab("inp_stuck")
+    saved = STUCK
+    try:
+        for m in (0x01, 0x1F):
+            STUCK = m
+            rig.reset(src=0)
+            for _ in range(3):
+                rig.frame()
+            st = rig.state()
+            if st["joy"] or st["joy0dat"] or rig.r(a, 1)[0] != m:
+                f.append(f"stuck ${m:02X}: real scan idle gave {st}, inp_stuck "
+                         f"${rig.r(a, 1)[0]:02X}")
+        STUCK = 0x1F
+        rig.reset(src=1)
+        m = Inp()
+        for joy in (UP, UP, DOWN, DOWN | FIRE):
+            rig.set_input(joy, 0)
+            rig.frame()
+            want = m.frame(joy, 0)
+            got = rig.state()
+            if (got["joy0dat"], got["pra"]) != (want["joy0dat"], want["pra"]):
+                f.append(f"stuck $1F, override joy ${joy:02X}: got JOY0DAT "
+                         f"${got['joy0dat']:04X} PRA ${got['pra']:02X}, want "
+                         f"${want['joy0dat']:04X} ${want['pra']:02X} (the override "
+                         "must ignore inp_stuck)")
+    finally:
+        STUCK = saved
+        rig.reset(src=1)
+    log(f"  stuck: {'ok' if not f else 'FAIL'}")
+    return f
+
+
+LEGS = {"api": leg_api, "guest": leg_guest, "real": leg_real, "noinj": leg_noinj, "cost": leg_cost, "stuck": leg_stuck}
 
 
 def run_legs(rig: Rig, legs: list[str]) -> list[str]:
@@ -633,7 +681,12 @@ def attended(rig: Rig, seconds: float) -> int:
         print("  (F3/C= check ended early)")
     want = ["up", "down", "left", "right", "left button (fire)", "right button (C=)",
             "right button + move", "F1", "JOY0DAT moved"]
-    missing = [w for w in want if w not in seen]
+    excused = [n for b, n in ((UP, "up"), (DOWN, "down"), (LEFT, "left"),
+                              (RIGHT, "right"), (FIRE, "left button (fire)"))
+               if STUCK & b]
+    if excused:
+        print(f"  (--stuck ${STUCK:02X}: not required: {excused})")
+    missing = [w for w in want if w not in seen and w not in excused]
     print(f"ATTENDED VERDICT: {'PASS' if not missing else 'INCOMPLETE'}: seen "
           f"{sorted(seen)}{'; missing ' + str(missing) if missing else ''}; "
           f"F3/C= {phantom or 'not run'}")
@@ -658,8 +711,8 @@ MUTANTS = {
     # the pin write leaks into bit 4 (W13-W's /TK0) (rev-inp)
     "pinleak4": (INP, [("        and #$C0\n", "        and #$D0\n")]),
     # the stick read without its polarity flip (rev-inp R1)
-    "stickpol": (INP, [("        lda CIA1_PRA\n        eor #$FF\n        and #$1F\n",
-                        "        lda CIA1_PRA\n        and #$1F\n")]),
+    "stickpol": (INP, [("        ora inp_stuck           ; stuck lines read as released\n        eor #$FF\n        and #$1F\n",
+                        "        ora inp_stuck           ; stuck lines read as released\n        and #$1F\n")]),
     # the right button on POTINP bit 11 instead of 10
     "potbit": (INP, [("        lsr\n        lsr\n        lsr\n        eor #$FF\n",
                       "        lsr\n        lsr\n        eor #$FF\n")]),
@@ -734,11 +787,15 @@ def main(argv=None) -> int:
     ap.add_argument("--allow-held", default="0",
                     help="stick bits port 2 may read held with nothing driven "
                          "(hardware only, e.g. $01 for the C64U's stuck Up): a WARN")
+    ap.add_argument("--stuck", default="0",
+                    help="inp_stuck for --attended / hardware legs: stick bits the "
+                         "real scan ignores (e.g. $01: Up stuck closed)")
     ap.add_argument("--json", help="write {legs, fails, warn} here")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args(argv)
     VERBOSE = a.verbose
-    global ALLOW_HELD
+    global ALLOW_HELD, STUCK
+    STUCK = int(a.stuck.lstrip("$"), 16) if a.stuck.startswith("$") else int(a.stuck, 0)
     ALLOW_HELD = int(a.allow_held.lstrip("$"), 16) if a.allow_held.startswith("$") \
         else int(a.allow_held, 0)
     if ALLOW_HELD and a.backend != "u64" and not a.attended:
