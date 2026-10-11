@@ -108,10 +108,11 @@ class Matrix:
             pa, pb = npa, npb
 
 
-def scan(m: Matrix, prev_key: int) -> tuple[int, int]:
-    """inp.s's real-source scan: (inp_joy, inp_key)."""
+def scan(m: Matrix, prev_key: int, stuck: int = 0) -> tuple[int, int]:
+    """inp.s's real-source scan: (inp_joy, inp_key); *stuck* = inp_stuck
+    (stick bits read as released: a switch stuck closed)."""
     pa, _ = m.read(None)                      # 1. nothing driven
-    joy = ~pa & 0x1F
+    joy = ~(pa | stuck) & 0x1F
     _, idle = m.read(0xFF)                    # 2. no column selected
     _, b0 = m.read(0xFE)                      # 3. column 0 (F1 = row 4)
     _, b7 = m.read(0x7F)                      #    column 7 (C= = row 5)
