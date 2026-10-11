@@ -118,7 +118,17 @@ def build(prg: str, name: str, defines: list[str], shim: bool) -> str:
     vprg = os.path.join(out, "runner.prg")
     defs = list(defines)
     srcs = C.makefile_sources() + ([SHIM] if shim else [])
-    cmd = ["cl65", "-t", "none", "-C", os.path.join(ROOT, "runtime", "c64.cfg"),
+    # Wave 14 (supervisor): MAIN is nearly full; variant builds (shim, trace,
+    # mutants) test behaviour, not cycles, so their copy of the config drops
+    # RODATA's page alignment (product builds keep it: perf_cycles).
+    cfg = os.path.join(out, "c64_var.cfg")
+    ctext = open(os.path.join(ROOT, "runtime", "c64.cfg")).read()
+    ra = "RODATA:   load = MAIN,     type = ro,  align = $100;"
+    if ctext.count(ra) != 1:
+        raise RuntimeError("c64.cfg: RODATA line changed (update run_pf.build)")
+    with open(cfg, "w") as f:
+        f.write(ctext.replace(ra, "RODATA:   load = MAIN,     type = ro;"))
+    cmd = ["cl65", "-t", "none", "-C", cfg,
            *[x for d in defs for x in ("--asm-define", d)],
            "-o", vprg, "-Ln", os.path.join(out, "runner.lbl"),
            "-m", os.path.join(out, "runner.map")] + srcs + [disp]
