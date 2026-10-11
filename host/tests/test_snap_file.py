@@ -34,13 +34,14 @@ pytestmark = pytest.mark.skipif(shutil.which("cl65") is None,
 
 SHIM = U.SHIM + """
 .export mach_fhook, mach_now, mach_rdc, mach_run, emu_reset, disp_init
-.export mem_rec_dirty, calls, code_invall, spr_vec
+.export mem_rec_dirty, calls, code_invall, spr_vec, inp_mon
 .segment "BSS"
 mach_fhook: .res 2
 mach_now:   .res 4
 .segment "SBSS"               ; (after all BSS: outside the image)
 calls:      .res 6            ; mach_rdc, mach_run, emu_reset, disp_init, rec_dirty, code_invall
 spr_vec:    .res 2            ; W13-D: snap.s disarms it on resume (outside the image here)
+inp_mon:    .res 1            ; W14-M: snap.s disarms the input module on resume (supervisor, at the merge)
 .segment "CODE"
 mach_rdc:   inc calls+0
             rts
@@ -439,3 +440,26 @@ def test_refused_resume_leaves_spr_vec(build):
     r.poke("spr_vec", b"\x00\xC6")
     assert r.resume(F.RQ_FILE) == 1
     assert r.peek("spr_vec", 2)[1] == 0xC6
+
+
+# --- Wave 14 (supervisor): a resume disarms the input module (W14-M M2) as it
+# does the pointer module; the launcher re-arms (tests/aros_wb.arm_inpm).
+# The snap.s store (inp_mon := 0 next to spr_vec+1) is the supervisor's at
+# the merge: until then the disarm test is an expected failure (strict: it
+# must be flipped when the store lands).
+def test_file_resume_disarms_the_input_module(build):
+    f, _r0 = suspended_file(build)
+    r = fresh(build, f)
+    r.poke("inp_mon", b"\x5A")                    # armed (outside the image in this shim)
+    assert r.resume(F.RQ_FILE) == 0 and r.st() == F.ST_RES
+    assert r.peek("inp_mon", 1)[0] == 0
+
+
+def test_refused_resume_leaves_inp_mon(build):
+    f, _r0 = suspended_file(build)
+    f = bytearray(f)
+    f[300] ^= 1                                    # a state byte: refused before the restore
+    r = fresh(build, bytes(f))
+    r.poke("inp_mon", b"\x5A")
+    assert r.resume(F.RQ_FILE) == 1
+    assert r.peek("inp_mon", 1)[0] == 0x5A

@@ -6,12 +6,14 @@
 ; three input registers the Amiga reads for a port-0 mouse:
 ;   +0 JOY0DAT ($DFF00A, word)   +2 CIA-A PRA ($BFE001, byte)   +3 0
 ;   +4 POTINP ($DFF016, word)
-; FRAMES frames to LOG, then HALT ($AFFF, the runner's halt opcode).
+; FRAMES frames (default 16; vasm -DFRAMES=n) to LOG, then HALT ($AFFF, the runner's halt opcode).
 ; d3 = 1 if a VERTB never came (POLL polls).  Public register map: Amiga
 ; Hardware Reference Manual (custom chips, 8520 CIA-A).
 ; Build: vasmm68k_mot -Fbin -o inp_log.bin inp_log.s (org = the image base).
 
+        ifnd    FRAMES
 FRAMES  equ     16
+        endif
 POLL    equ     20000
 LOG     equ     $20000
 INTREQR equ     $dff01e

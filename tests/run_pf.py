@@ -86,6 +86,7 @@ VARIANTS = {
     "w13px": ["DISP_MUT_W13PX=1"],
     "w13edge": ["DISP_MUT_W13EDGE=1"], "w13lsr": ["DISP_MUT_W13LSR=1"],
     "w13bpu5": ["DISP_MUT_W13BPU5=1"],
+    "w14crop": ["DISP_MUT_W14CROP=1"],   # W14-D: the centre crop back
 }
 NOT_TEETH = ("stub", "lutram", "trace")
 TEETH = [k for k in VARIANTS if k not in NOT_TEETH]
@@ -101,7 +102,8 @@ MUTANT_LEGS = {"bitorder": ["shim", "fixture"], "pal": ["shim", "fixture"],
                "w12up": ["shim"], "w12mck": ["shim"], "w12rle": ["shim"],
                "w12run": ["shim"],            # W11-A (supervisor grant, efrom)
                "w13px": ["view"], "w13edge": ["view"],
-               "w13lsr": ["view"], "w13bpu5": ["view"]}
+               "w13lsr": ["view"], "w13bpu5": ["view"],
+               "w14crop": ["shim", "view"]}
 
 
 def build(prg: str, name: str, defines: list[str], shim: bool) -> str:
@@ -116,7 +118,17 @@ def build(prg: str, name: str, defines: list[str], shim: bool) -> str:
     vprg = os.path.join(out, "runner.prg")
     defs = list(defines)
     srcs = C.makefile_sources() + ([SHIM] if shim else [])
-    cmd = ["cl65", "-t", "none", "-C", os.path.join(ROOT, "runtime", "c64.cfg"),
+    # Wave 14 (supervisor): MAIN is nearly full; variant builds (shim, trace,
+    # mutants) test behaviour, not cycles, so their copy of the config drops
+    # RODATA's page alignment (product builds keep it: perf_cycles).
+    cfg = os.path.join(out, "c64_var.cfg")
+    ctext = open(os.path.join(ROOT, "runtime", "c64.cfg")).read()
+    ra = "RODATA:   load = MAIN,     type = ro,  align = $100;"
+    if ctext.count(ra) != 1:
+        raise RuntimeError("c64.cfg: RODATA line changed (update run_pf.build)")
+    with open(cfg, "w") as f:
+        f.write(ctext.replace(ra, "RODATA:   load = MAIN,     type = ro;"))
+    cmd = ["cl65", "-t", "none", "-C", cfg,
            *[x for d in defs for x in ("--asm-define", d)],
            "-o", vprg, "-Ln", os.path.join(out, "runner.lbl"),
            "-m", os.path.join(out, "runner.map")] + srcs + [disp]
@@ -1287,7 +1299,7 @@ def view_steps() -> list[dict]:
     return [
         {"name": "fit", "st": st, "act": "refresh", "view": (0, 20, 0)},
         {"name": "f1-to-1:1", "st": st, "act": "kick", "pre": {"inp_view": 0x81},
-         "view": (1, 20, 28)},                  # centred: px 20, the fit crop
+         "view": (1, 20, 0)},                   # px 20 centred, W14-D: the top line
         {"name": "same-no-conv", "st": st, "act": "kick", "pre": {"inp_view": 0x80},
          "view": None},
         {"name": "test-offset", "st": st, "act": "refresh",
@@ -1318,7 +1330,7 @@ def view_steps() -> list[dict]:
         {"name": "lace-fit", "st": dict(LACE_ST, gen=0x2A), "act": "kick",
          "pre": {"disp_view": 0}, "view": (0, 20, 0)},
         {"name": "lace-f1-centre", "st": dict(LACE_ST, gen=0x2A), "act": "kick",
-         "pre": {"inp_view": 1}, "view": (1, 20, 77), "exact": True},   # ymax 155
+         "pre": {"inp_view": 1}, "view": (1, 20, 0), "exact": True},    # W14-D: the top
         {"name": "lace-odd-top", "st": dict(LACE_ST, gen=0x2B,
                                             bplpt=[LACE_BASE + 80, LACE_BASE + 0xA050]),
          "act": "refresh", "pre": {"disp_px": 0, "disp_py": 0}, "view": (1, 0, 0),

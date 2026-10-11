@@ -604,7 +604,15 @@ VENV_PY = os.path.expanduser("~/.cache/amiga64/s3probe-venv/bin/python")
 
 def model_frames() -> tuple[dict | None, str]:
     """The model's conversion hashes (tests/aros/model_frames.py), built
-    once into build/aros/ (git-ignored) with the s3probe venv."""
+    once into build/aros/ (git-ignored) with the s3probe venv.  W14-D: a
+    JSON from another crop rule (no "crop_rule", or a different one) is
+    rebuilt."""
+    sys.path.insert(0, os.path.join(ROOT, "tests", "aros"))
+    import model_frames as MF
+    if os.path.exists(MODEL_JSON):
+        with open(MODEL_JSON) as f:
+            if json.load(f).get("crop_rule") != MF.CROP_RULE:
+                os.remove(MODEL_JSON)
     if not os.path.exists(MODEL_JSON):
         if not os.path.exists(VENV_PY):
             return None, f"no s3probe venv at {VENV_PY} (tools/s3probe/setup_venv.sh)"

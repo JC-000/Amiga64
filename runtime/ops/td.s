@@ -83,6 +83,12 @@ chk:    ldy #3                  ; Z=1: the staged module is the armed one
         iny                     ; Y = 0: Z=1
 :       rts
 
+; Supervisor (Wave 14): the FETCH_DIRECT link-check variant (rec_gate step
+; fetchdirect; never run with td) shifts core BSS, so these vector checks are
+; for the product layout only.  A layout-independent vector placement is a
+; follow-up (docs/WAVE14_BRIEF.md addendum).
+.ifndef FETCH_DIRECT
 .assert (td_vec & $FF) <> $FF, lderror, "jmp (td_vec) must not straddle a page"
 .assert (td_fvec & $FF) <> $FF, lderror, "jmp (td_fvec) must not straddle a page"
 .assert (td_chain & $FF) <> $FF, lderror, "the module's jmp (td_chain) must not straddle a page"
+.endif

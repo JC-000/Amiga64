@@ -18,16 +18,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-CAP = 16                  # step cap (inp.s INP_CAP)
-NMAX = 2 * CAP - 2        # n saturates here (inp.s INP_NMAX)
+CAP = 32                  # step cap (inp.s INP_CAP; W14-M: 16 -> 32)
+NMAX = CAP - 1            # n saturates here (inp.s INP_NMAX)
 F1, CBM = 0x10, 0x20      # inp_key bits (the keys' matrix rows)
 UP, DOWN, LEFT, RIGHT, FIRE = 1, 2, 4, 8, 16
 PIN_RESET = 0xEB          # CIA-A PRA input pins after cia_reset
 
 
+def m1351_delta(old: int, new: int) -> int:
+    """The 1351 proportional protocol: a pot carries the position mod 64
+    in bits 1-6 (bit 0 is noise); the move since the last read is the
+    difference mod 128 as a signed 7-bit value, halved: -32..31 counts
+    (a move of more than 31 counts between two reads aliases)."""
+    d = ((new & 0x7E) - (old & 0x7E)) & 0x7F
+    if d & 0x40:
+        d -= 0x80
+    return d >> 1 if d >= 0 else -((-d + 1) >> 1)
+
+
 def step(n: int) -> int:
     """Counter units moved in a frame after n frames of the same hold."""
-    return min(1 + n // 2, CAP)
+    return min(1 + n, CAP)
 
 
 @dataclass
@@ -39,13 +50,18 @@ class Inp:
     view: int = 0         # inp_view
     pin: int = PIN_RESET  # CIA-A pins (cia_st+CIA_PIN)
     key: int = 0          # inp_key after the frame
+    mb: int = 0           # inp_mb: the mouse port's lines (bit 4 left, 0 right)
+    mold: list = None     # inp_mold (POTY, POTX), bits 1-6
+    mok: bool = False     # inp_mok
+    macc: list = field(default_factory=lambda: [0, 0])   # inp_macc (Y, X), s8
 
-    def frame(self, joy: int, key: int) -> dict:
-        self.key = key
+    def frame(self, joy: int, key: int, mb: int = 0) -> dict:
+        self.macc = [0, 0]                    # inp.s module: a new frame (clamp)
+        self.key, self.mb = key, mb
         if key & ~self.kp & F1:
             self.view |= 1
         self.kp = key
-        fire = bool(joy & FIRE)
+        fire = bool((joy | mb) & FIRE)
         self.pin = (self.pin & 0x3F) | 0x80 | (0 if fire else 0x40)
         d = joy & 0x0F
         if not d:
@@ -69,7 +85,22 @@ class Inp:
 
     @property
     def potinp(self) -> int:
-        return 0xFB00 if self.key & CBM else 0xFF00
+        return 0xFB00 if self.key & CBM or self.mb & UP else 0xFF00
+
+    def msamp(self, poty: int, potx: int) -> dict:
+        """One 1351 sample (inp.s inp_msamp): pots -> JOY0DAT."""
+        new = [poty & 0x7E, potx & 0x7E]
+        if self.mok:
+            dy, dx = (m1351_delta(o, n) for o, n in zip(self.mold, new))
+            for i, d in ((0, -dy), (1, dx)):  # AROS reads s8 per frame: clamp
+                acc = max(-127, min(127, self.macc[i] + d))
+                step, self.macc[i] = acc - self.macc[i], acc
+                if i == 0:
+                    self.y = (self.y + step) & 0xFF
+                else:
+                    self.x = (self.x + step) & 0xFF
+        self.mold, self.mok = new, True
+        return self.obs()
 
     def obs(self) -> dict:
         return {"joy0dat": self.joy0dat, "pra": self.pin, "potinp": self.potinp,
@@ -108,10 +139,11 @@ class Matrix:
             pa, pb = npa, npb
 
 
-def scan(m: Matrix, prev_key: int) -> tuple[int, int]:
-    """inp.s's real-source scan: (inp_joy, inp_key)."""
+def scan(m: Matrix, prev_key: int, stuck: int = 0) -> tuple[int, int]:
+    """inp.s's real-source scan: (inp_joy, inp_key); *stuck* = inp_stuck
+    (stick bits read as released: a switch stuck closed)."""
     pa, _ = m.read(None)                      # 1. nothing driven
-    joy = ~pa & 0x1F
+    joy = ~(pa | stuck) & 0x1F
     _, idle = m.read(0xFF)                    # 2. no column selected
     _, b0 = m.read(0xFE)                      # 3. column 0 (F1 = row 4)
     _, b7 = m.read(0x7F)                      #    column 7 (C= = row 5)
@@ -119,3 +151,41 @@ def scan(m: Matrix, prev_key: int) -> tuple[int, int]:
     new = ~u & 0xFF
     key = ((new ^ prev_key) & idle) ^ prev_key
     return joy, key
+
+
+def scan_mouse_lines(m: Matrix, mport: int = 0, resting: bool = False) -> int:
+    """W14-M: the mouse port's lines (1 = closed: bit 4 left, bit 0 right)
+    as inp.s step 1 reads them: DDRA = DDRB = $00, nothing driven.  With
+    *resting* the read is taken (wrongly) with the pot select still driving
+    PA7-6 (port 1 select: PA7 low = keyboard column 7 selected)."""
+    pa_out = (0x7F if mport == 0 else 0xBF) if resting else None
+    pa, pb = m.read(pa_out)
+    lines = pb if mport == 0 else pa
+    return ~lines & 0x1F
+
+
+@dataclass
+class Queue:
+    """W14-M M2 (tests/aros/inpm.s): the LEFT button's edge queue.
+    look(lines) is the module's step 1 (every sample and every frame);
+    frame(lines) then delivers one left transition and returns the
+    delivered lines (left from the queue, right = the lines now)."""
+    last: int = 0
+    q: int = 0
+    md: int = 0
+
+    def look(self, lines: int) -> None:
+        lines &= 0x11
+        if lines & ~self.last & FIRE:
+            self.q += 1
+        self.last = lines
+
+    def frame(self, lines: int) -> int:
+        self.look(lines)
+        if self.md:
+            if self.q or not lines & FIRE:
+                self.md = 0
+        elif self.q:
+            self.q -= 1
+            self.md = FIRE
+        return self.md | (lines & UP)

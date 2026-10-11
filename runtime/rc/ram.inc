@@ -76,7 +76,7 @@ c2v_args   = $BF00      ; W7-V c2v: argument block + converter state (layout: do
 .endif
 
 ; @region run $C000-$C7FF buf_case - harness writes test cases / load records here
-; W13-W (supervisor-approved): in machine mode buf_case is the machine-mode code area (test-time modules, never in the PRG): mboot $C000-$C1FF, td $C200-$C5FF (tests/aros/td.s), W13-D's spr $C600-$C8FF (its last page overlaps buf_result's case-result span $C800-$C8FF, which machine mode never uses; mboot's P/R block is at $C900); staged by tests/aros_wb.py, re-staged before a resume
+; W13-W (supervisor-approved): in machine mode buf_case is the machine-mode code area (test-time modules, never in the PRG): mboot $C000-$C1FF, td $C200-$C5FF (tests/aros/td.s), W13-D's spr $C600-$C8FF (its last page overlaps buf_result's case-result span $C800-$C8FF, which machine mode never uses; mboot's P/R block is at $C900), W14-M's inpm in two segments $C980-$C9FE and $CF00-$CFEF (supervisor; below READY_FLAG $CFFF); staged by tests/aros_wb.py, re-staged before a resume
 .ifndef buf_case
 buf_case   = $C000
 .endif
@@ -87,7 +87,7 @@ buf_result = $C800      ; contract range $C800-$CFFF; $CE00 page carved out belo
 .endif
 
 ; @region mb $CE00-$CEFF harness hardware mailbox page - RESERVED for the U64 hardware harness (in-flight H1 work); runner must not write $CE00-$CEFF
-; @region run $CF00-$CFFF buf_result tail - READY_FLAG at $CFFF (runner.s, buf_result+$7FF)
+; @region run $CF00-$CFFF buf_result tail - READY_FLAG at $CFFF (runner.s, buf_result+$7FF); in machine mode $CF00-$CFEF is W14-M's inpm segment B (supervisor; run_super_vectors' $CF00-$CF9F and run_irq's $CFF0 are other sessions, which never stage inpm and keep inp_mon = 0)
 
 ; @region sys $D000-$DEFF VIC/SID/color/CIA I/O block - hardware, not claimable
 .ifndef VIC_RASTER
@@ -104,6 +104,9 @@ CIA1_DDRA   = $DC02     ; CIA 1 data direction A
 .endif
 .ifndef CIA1_DDRB
 CIA1_DDRB   = $DC03     ; CIA 1 data direction B
+.endif
+.ifndef SID_POTX
+SID_POTX    = $D419     ; W14-M inp: SID POTX (POTY at +1), the selected port's pots (1351 position)
 .endif
 .ifndef VIC_COLRAM
 VIC_COLRAM  = $D800     ; W7-V c2v: VIC colour RAM (low nibbles), written by runtime/ops/c2v.s
