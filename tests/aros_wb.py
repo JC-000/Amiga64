@@ -192,8 +192,72 @@ def build_spr_mod(labels_path: str, out_dir: str) -> bytes:
     return SP.build_spr(os.path.join(out_dir, "spr"), labels_path)[0]
 
 
+INPM_A, INPM_B = (0xC980, 0xC9FF), (0xCF00, 0xCFF0)        # W14-M: [org, end)
+
+
+def build_inpm2(labels_path: str, out_dir: str, src_path: str | None = None,
+                defines: tuple = ()):                       # W14-M
+    """W14-M: the input module tests/aros/inpm.s in two segments: A at
+    $C980-$C9FE, B at $CF00-$CFEF.  One ID, SHA-1[:4] of A + B with both
+    ID fields (+3) zero, stamped in both.  Returns (a, b)."""   # W14-M
+    from c64_test_harness import Labels                     # W14-M
+    from tests.harness_util import lookup_label             # W14-M
+    src_path = src_path or os.path.join(ROOT, "tests", "aros", "inpm.s")   # W14-M
+    labels = Labels.from_file(labels_path)                  # W14-M
+    defs = []                                               # W14-M
+    for n in module_syms(open(src_path).read()):            # W14-M
+        defs += ["-D", f"{n}=${lookup_label(labels, n):04X}"]   # W14-M
+    for d in defines:                                       # W14-M (test builds)
+        defs += ["-D", d]                                   # W14-M
+    os.makedirs(out_dir, exist_ok=True)                     # W14-M
+    base = os.path.join(out_dir, os.path.splitext(os.path.basename(src_path))[0])   # W14-M
+    with open(base + ".cfg", "w") as f:                     # W14-M
+        f.write("MEMORY { A: file = \"%s\", start = $%04X, size = $%04X;\n"
+                "         B: file = \"%s\", start = $%04X, size = $%04X; }\n"
+                "SEGMENTS { CODE: load = A, type = rw; CODEB: load = B, type = rw; }\n"
+                % (base + ".a.bin", INPM_A[0], INPM_A[1] - INPM_A[0],
+                   base + ".b.bin", INPM_B[0], INPM_B[1] - INPM_B[0]))   # W14-M
+    for cmd in (["ca65", "-g", *defs, "-I", os.path.join(ROOT, "tests", "aros"),
+                 "-o", base + ".o", src_path],
+                ["ld65", "-C", base + ".cfg", "-Ln", base + ".lbl", base + ".o"]):   # W14-M
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)   # W14-M
+        if r.returncode:                                    # W14-M
+            raise RuntimeError(f"{' '.join(cmd)}\n{r.stdout}{r.stderr}")
+    a = bytearray(open(base + ".a.bin", "rb").read())       # W14-M
+    b = bytearray(open(base + ".b.bin", "rb").read())       # W14-M
+    if a[3:7] != bytes(4) or b[3:7] != bytes(4):            # W14-M
+        raise RuntimeError(f"{src_path}: no zero ID fields at A+3 / B+3")
+    mid = hashlib.sha1(bytes(a) + bytes(b)).digest()[:4]    # W14-M
+    a[3:7] = b[3:7] = mid                                   # W14-M
+    return bytes(a), bytes(b)                               # W14-M
+
+
+def build_inpm(labels_path: str, out_dir: str) -> bytes:   # W14-M: segment A
+    return build_inpm2(labels_path, out_dir)[0]             # W14-M
+
+
+def build_inpm_b(labels_path: str, out_dir: str) -> bytes:   # W14-M: segment B
+    return build_inpm2(labels_path, out_dir)[1]             # W14-M
+
+
 MODULES: list = [("td", build_td, 0xC200, 0xC600),
-                 ("spr", build_spr_mod, 0xC600, 0xC900)]
+                 ("spr", build_spr_mod, 0xC600, 0xC900),
+                 ("inpm", build_inpm, 0xC980, 0xC9FF),                # W14-M: A
+                 ("inpm2", build_inpm_b, 0xCF00, 0xCFF0)]             # W14-M: B
+
+
+def arm_inpm(m, mod: bytes | None = None) -> None:      # W14-M
+    """Arm the staged input module: its queue state idle, then inp_mon :=
+    its ID byte 0 (inp.s inp_mod compares it with $C983 on every call).
+    After staging AND after every resume: a resume comes up disarmed
+    (snap.s zeroes inp_mon, as spr_vec), the launcher re-arms."""   # W14-M
+    if mod is None:                                     # W14-M: the staged one
+        mod = dict((n, b) for n, _o, b in m.mods)["inpm"]   # W14-M
+    if mod[3] == 0:                                     # W14-M
+        raise RuntimeError("inpm: ID byte 0 is 0 (cannot arm): change the source")
+    m.w(m.lab("inp_mon"), b"\0")                       # W14-M: disarmed while set up
+    m.w(m.lab("inp_mlast"), bytes(4))                   # W14-M: mlast, mq (2), md
+    m.w(m.lab("inp_mon"), mod[3:4])                     # W14-M
 
 
 def arm_spr(m) -> None:
@@ -351,6 +415,7 @@ def boot_workbench(m: WbMachine, rom, disk: Disk, s: int, rep: dict,
     if after_stage:
         after_stage()
     arm_spr(m)                          # supervisor (W13-D merge): the pointer module
+    arm_inpm(m)                         # W14-M: the input module
     order = [k for k in ("w1", "w2", "wbi") if disk.blocks.get(k) is not None]
     if stop_after:
         order = order[:order.index(stop_after) + 1]
@@ -607,7 +672,7 @@ def run(a, rom, raw: bytes) -> tuple[list[str], dict]:
             elif leg == "resume":
                 fails += leg_resume(m, rom, disk, s, r, a.vol, a.timeout, a.keep)
             elif leg == "demo":
-                fails += leg_demo(m, rom, r, a.vol, a.hold_s)
+                fails += leg_demo(m, rom, r, a.vol, a.hold_s, s)   # W14-M: s
             elif leg == "e2e":
                 fails += leg_e2e(m, rom, disk, s, r, a.vol, a.timeout, t_run, a.e2e_mutant)
             elif leg == "demo-boot":
@@ -816,6 +881,7 @@ def resume_workbench(m: WbMachine, rom, path: str | None, rep: dict,
         m.w(a, inp)                     # carries inp_src/joy/key as suspended; this write
         rep["inp_src"] = inp[0]         # only confirms them (rev-wb E2E U2b)
     arm_spr(m)                          # supervisor: a resume comes up disarmed
+    arm_inpm(m)                         # W14-M: the input module too (snap.s zeroes inp_mon)
     fr0 = m.frames()
     while time.monotonic() - t1 < 60 and m.frames() <= fr0 + 2:
         time.sleep(0.25)
@@ -1056,6 +1122,116 @@ class E2E:
         return {"target": [tx, ty], "at": [sx, sy], "iterations": steps,
                 "ok": abs(tx - sx) <= tol and abs(ty - sy) <= tol}
 
+    # -- W14-M: the scripted 1351 (inp_mpot / inp_mb with the override) ------
+    def mouse_on(self, s: int) -> None:                     # W14-M
+        """Arm the 1351 sampler (mach slot 7, every 8192 phi2 = $2000 >> s E
+        ticks) on the override pots, reference at (64, 64)."""  # W14-M
+        import struct                                       # W14-M
+        m = self.m                                          # W14-M
+        a = m.lab("inp_msamp")                              # W14-M
+        m.w(m.lab("mach_cbv") + 14, bytes([a & 0xFF, a >> 8]))   # W14-M: slot 7
+        self.mpot = [0x40, 0x40]                            # W14-M: POTY, POTX
+        m.w(m.lab("inp_mpot"), bytes(self.mpot))            # W14-M
+        m.w(m.lab("inp_mok"), b"\0")                        # W14-M: next = reference
+        # W14-M: 8192 phi2 (~120 Hz) is for a real 1351 on the Ultimate; on
+        # VICE (s = 9: 16 E ticks, ~890 samples a frame) the passes would eat
+        # the guest, so the scripted pots are sampled ~7 times a frame there
+        per = 2048 if m.vice else max(1, 0x2000 >> s)       # W14-M
+        m.w(m.lab("inp_mper"), struct.pack("<I", per))      # W14-M
+        self.frames_wait(2)                                 # W14-M
+
+    def mouse_move(self, dx: int, dy: int) -> None:         # W14-M
+        """Move by (dx, dy) Amiga counts (|d| <= 31 per sample: the host
+        waits a frame per step, many samples per frame)."""   # W14-M
+        self.mpot[1] = (self.mpot[1] + 2 * dx) & 0x7E       # W14-M: X
+        self.mpot[0] = (self.mpot[0] - 2 * dy) & 0x7E       # W14-M: Y counts up
+        self.m.w(self.m.lab("inp_mpot"), bytes(self.mpot))  # W14-M
+        self.frames_wait(1)                                 # W14-M
+
+    def quiet(self, hash_now, step: int = 20, need: int = 3,
+              limit: int = 900) -> dict:                    # W14-M
+        """Wait until the screen hash holds over *need* checks *step* guest
+        frames apart (at most *limit* frames): the Workbench has finished
+        filling a drawer before a timed step starts (the e2e menu step;
+        fix round 1: with the 1351 sampler on, VICE's s = 9 margin was gone
+        and the menu request landed while the drawer was still drawing)."""   # W14-M
+        f0, last, same = self.m.frames(), None, 0           # W14-M
+        while self.m.frames() - f0 < limit:                 # W14-M
+            self.frames_wait(step)                          # W14-M
+            h = hash_now()                                  # W14-M
+            same = same + 1 if h == last else 0             # W14-M
+            last = h                                        # W14-M
+            if same >= need - 1:                            # W14-M
+                break                                       # W14-M
+        out = {"frames": self.m.frames() - f0, "stable": same >= need - 1}   # W14-M
+        log(f"  quiet: the screen held for {need} checks after {out['frames']} frames"
+            if out["stable"] else f"  quiet: not stable after {limit} frames (going on)")
+        return out                                          # W14-M
+
+    def ramp_probe(self, frames: int = 34) -> dict:         # W14-M
+        """The stick's ramp as AROS shows it: park at the left edge, then
+        hold RIGHT for *frames* guest frames, the pointer read every frame;
+        lores px per guest frame at the start and at the cap, and px/s at
+        the C64U's s = 3 rate (72.08 / 8 frames/s, CONTRACTS "Machine
+        loop": guest frames/s = phi2 / 14188 / 2^s)."""     # W14-M
+        self.joy(J_LEFT)                                    # W14-M: park left
+        self.frames_wait(40)                                # W14-M
+        self.joy(0)                                         # W14-M
+        self.frames_wait(4)                                 # W14-M
+        f0 = self.m.frames()                                # W14-M
+        xs = [(f0, self.pos()[0])]                          # W14-M
+        self.joy(J_RIGHT)                                   # W14-M
+        while self.m.frames() < f0 + frames:                # W14-M
+            self.frames_wait(1)                             # W14-M
+            xs.append((self.m.frames(), self.pos()[0]))     # W14-M
+        self.joy(0)                                         # W14-M
+        rate = lambda a, b: (b[1] - a[1]) / max(1, b[0] - a[0])   # noqa: E731  W14-M
+        # the AROS lag (the sprite moves ~3 frames after the counters) is
+        # excluded: the ramp starts at the first frame the pointer moved
+        k0 = next((k for k, p in enumerate(xs) if p[1] != xs[0][1]), len(xs) - 1)   # W14-M
+        k0 = max(0, k0 - 1)                                 # W14-M
+        lag = xs[k0][0] - f0                                # W14-M
+        start = rate(xs[k0], xs[min(len(xs) - 1, k0 + 4)])  # W14-M: its first 4 frames
+        cap = rate(xs[-3], xs[-1]) if xs[-1][0] - xs[k0][0] >= 31 else None   # W14-M
+        fps = {"pal": 69.44 / 8, "ntsc": 72.08 / 8}         # W14-M: s = 3, CONTRACTS "Machine loop"
+        out = {"series": xs, "aros_lag_frames": lag,        # W14-M
+               "start_px_per_frame": round(start, 2),       # W14-M
+               "cap_px_per_frame": cap and round(cap, 2),   # W14-M
+               "px_s_s3": {k: [round(start * v, 1), cap and round(cap * v, 1)]
+                           for k, v in fps.items()}}        # W14-M
+        log(f"  ramp: AROS lag {lag} frames; {out['start_px_per_frame']} px/frame over the "
+            f"first 4 moving frames, {out['cap_px_per_frame']} at the cap; at s=3 "
+            f"(PAL / NTSC phi2): {out['px_s_s3']} px/s; series {xs}")   # W14-M
+        return out                                          # W14-M
+
+    def mouse_btn(self, b: int) -> None:                    # W14-M: $10 left, $01 right
+        self.m.w(self.m.lab("inp_ml"), bytes([b]))          # W14-M: M2 (module armed)
+        self.m.w(self.m.lab("inp_mb"), bytes([b]))          # W14-M: M1 (no module)
+
+    def mgoto(self, tx: int, ty: int, tol: int = 2, limit: int = 200) -> dict:   # W14-M
+        """Closed loop on the pointer with the scripted 1351."""   # W14-M
+        # W14-M: AROS moves the sprite from JOY0DAT a few frames after the
+        # sampler integrated the move, so pos() lags: move at most half the
+        # distance per step, wait 3 frames, and only stop on a position that
+        # holds over another 4 frames (an overshoot of up to 23 lines when
+        # the loop stopped on a stale position: DBG trace 2026-10-11)
+        steps = 0                                           # W14-M
+        for steps in range(limit):                          # W14-M
+            sx, sy, _, _ = self.pos()                       # W14-M
+            dx, dy = tx - sx, ty - sy                       # W14-M
+            if abs(dx) <= tol and abs(dy) <= tol:           # W14-M
+                self.frames_wait(4)                         # W14-M: still there?
+                sx, sy, _, _ = self.pos()                   # W14-M
+                if abs(tx - sx) <= tol and abs(ty - sy) <= tol:   # W14-M
+                    break                                   # W14-M
+                continue                                    # W14-M
+            cl = lambda d: max(-24, min(24, d // 2 if abs(d) > 1 else d))   # noqa: E731  W14-M
+            self.mouse_move(cl(dx), cl(dy))                 # W14-M
+            self.frames_wait(2)                             # W14-M
+        sx, sy, _, _ = self.pos()                           # W14-M
+        return {"target": [tx, ty], "at": [sx, sy], "iterations": steps,   # W14-M
+                "ok": abs(tx - sx) <= tol and abs(ty - sy) <= tol, "mouse": True}
+
 
 def guest_read_frozen(m: WbMachine, rom, fn, rep: dict, key: int = 0):
     """The Ultimate (no live REU read): suspend REU-resident (frozen), reset
@@ -1072,6 +1248,9 @@ def guest_read_frozen(m: WbMachine, rom, fn, rep: dict, key: int = 0):
 
 MENU_DELAY = [0]                # --e2e-menu-delay frames before the menu step
 E2E_FROZEN = [False]           # --e2e-frozen: guest reads by suspend/reset/resume on VICE too
+E2E_MOUSE = [False]            # W14-M --e2e-mouse: the double-click by the scripted 1351
+E2E_RAMP = [False]             # W14-M --e2e-ramp: measure the stick's ramp at the end
+DEMO_MOUSE = [0]               # W14-M --mouse-port 1/2: the demo legs drive the user's 1351
 
 
 def e2e_serial(m: WbMachine, b: dict) -> str:
@@ -1215,7 +1394,11 @@ def _leg_e2e(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol, timeout: flo
     if mutant == "wrongicon":           # red: double-click RAM Disk instead
         b0 = min(icon["all"], key=lambda b: b["x0"])
         target = {"cx": (b0["x0"] + b0["x1"]) // 2, "cy": (b0["y0"] + b0["y1"]) // 2}
-    nav = e.goto(target["cx"] // 2, target["cy"])
+    if E2E_MOUSE[0]:                    # W14-M: the scripted 1351 instead of the stick
+        e.mouse_on(s)                   # W14-M
+        nav = e.mgoto(target["cx"] // 2, target["cy"])   # W14-M
+    else:                               # W14-M
+        nav = e.goto(target["cx"] // 2, target["cy"])
     dc["goto"] = nav
     log(f"  icon {dc['icon']} (from the guest's planes); pointer {nav}; windows {before['windows']}")
     if not nav["ok"]:
@@ -1224,6 +1407,12 @@ def _leg_e2e(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol, timeout: flo
     nrd0 = m.td()["nrd"]
     if mutant != "nofire":
         for _ in range(2):
+            if E2E_MOUSE[0]:            # W14-M: the 1351's left button
+                e.mouse_btn(J_FIRE)     # W14-M
+                e.frames_wait(2)        # W14-M
+                e.mouse_btn(0)          # W14-M
+                e.frames_wait(2)        # W14-M
+                continue                # W14-M
             e.joy(J_FIRE)
             e.frames_wait(2)
             e.joy(0)
@@ -1339,6 +1528,7 @@ def _leg_e2e(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol, timeout: flo
             fails.append(f"F1: the title rows show only {text} two-pen cells")
     if MENU_DELAY[0]:                   # --e2e-menu-delay: start the menu step later
         e.frames_wait(MENU_DELAY[0], timeout=max(120.0, 2.0 * MENU_DELAY[0]))   # (the resting title bar changes by itself)
+    rb["quiet"] = e.quiet(hash_now)     # W14-M (supervisor): the Workbench done drawing
     settle()
     force_conv(m)                       # rev-wb F2: the reference is a fresh picture
     hm0 = hash_now()
@@ -1408,6 +1598,8 @@ def _leg_e2e(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol, timeout: flo
                 fails.append(f"F1 back: the fit picture differs from c2v_ref's ({eq})")
     if mutant:
         rep["mutant"] = mutant
+    if E2E_RAMP[0]:                     # W14-M: the stick's ramp in guest frames
+        rep["ramp"] = e.ramp_probe()    # W14-M
     rep["serial_after_boot"] = e2e_serial(m, b)
     if "lert" in rep["serial_after_boot"] or "Failure" in rep["serial_after_boot"]:
         fails.append(f"e2e: alert text on the serial line: {rep['serial_after_boot'][-300:]!r}")
@@ -1426,12 +1618,29 @@ def leg_demo_boot(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol, timeout
         m.w(m.lab("inp_stuck"), bytes([STUCK[0]]))
     m.w(m.lab("inp_src"), b"\0\0\0")
     arm_spr(m)
+    demo_mouse(m, s)                    # W14-M
     log(f"  demo-boot: the Workbench is up; port 2 is the user's (inp_src 0); holding {hold_s:.0f} s")
     time.sleep(hold_s)
     return []
 
 
-def leg_demo(m: WbMachine, rom, rep: dict, vol: str, hold_s: float) -> list[str]:
+def demo_mouse(m, s: int) -> None:                      # W14-M
+    """The user's 1351 (--mouse-port 1/2): mouse port, the slot-7 sampler
+    (mach_cbv[7] := inp_msamp, inp_mper := 8192 phi2 = $2000 >> s E
+    ticks), a fresh reference; the input module re-armed."""   # W14-M
+    if not DEMO_MOUSE[0]:                               # W14-M
+        return                                          # W14-M
+    a = m.lab("inp_msamp")                              # W14-M
+    m.w(m.lab("inp_mport"), bytes([DEMO_MOUSE[0] - 1]))   # W14-M
+    m.w(m.lab("mach_cbv") + 14, bytes([a & 0xFF, a >> 8]))   # W14-M
+    m.w(m.lab("inp_mok"), b"\0")                        # W14-M
+    m.w(m.lab("inp_mper"), struct.pack("<I", max(1, 0x2000 >> s)))   # W14-M
+    log(f"  demo: the 1351 on port {DEMO_MOUSE[0]} (sampled every {max(1, 0x2000 >> s)} "
+        f"E ticks), the stick on port {3 - DEMO_MOUSE[0]}")   # W14-M
+
+
+def leg_demo(m: WbMachine, rom, rep: dict, vol: str, hold_s: float,
+             s: int = 3) -> list[str]:
     """The user's demo: resume <vol>/amiga64/wb-snap.bin (left by
     `--legs resume --keep` on the final tree) and keep the machine running
     *hold_s* seconds before the hold restores the device."""
@@ -1440,6 +1649,7 @@ def leg_demo(m: WbMachine, rom, rep: dict, vol: str, hold_s: float) -> list[str]
     if STUCK[0]:                        # supervisor: the user's stick has a stuck switch
         m.w(m.lab("inp_stuck"), bytes([STUCK[0]]))
         rep["inp_stuck"] = STUCK[0]
+    demo_mouse(m, s)                    # W14-M
     rep["running_s"] = round(el, 2)
     rep["td"] = m.td()
     log(f"  demo: {path} resumed, guest running {el:.2f} s after the launch; holding {hold_s:.0f} s")
@@ -1619,6 +1829,13 @@ def main(argv=None) -> int:
     ap.add_argument("--e2e-menu-delay", type=int, default=0,
                     help="leg e2e: guest frames to wait before the menu step (teeth from both "
                          "resting title-bar pictures)")
+    ap.add_argument("--e2e-mouse", action="store_true",          # W14-M
+                    help="W14-M leg e2e: reach and double-click the disk icon with the "
+                         "scripted 1351 (inp_mpot / inp_mb) instead of the stick")
+    ap.add_argument("--mouse-port", type=int, choices=(1, 2), default=0,   # W14-M
+                    help="W14-M demo legs: the user's 1351 in this port (the stick in the other)")
+    ap.add_argument("--e2e-ramp", action="store_true",           # W14-M
+                    help="W14-M leg e2e: at the end, the stick's ramp in px/frame")
     ap.add_argument("--e2e-frozen", action="store_true",
                     help="leg e2e on VICE: guest reads by suspend/reset/resume (as on the Ultimate)")
     ap.add_argument("--e2e-mutant", default=None, choices=("nofire", "wrongicon", "nocbm"),
@@ -1638,6 +1855,9 @@ def main(argv=None) -> int:
     TD_DEFINES[:] = a.td_define
     TD_MUTANT[0] = a.td_mutant
     E2E_FROZEN[0] = a.e2e_frozen
+    E2E_MOUSE[0] = a.e2e_mouse          # W14-M
+    E2E_RAMP[0] = a.e2e_ramp            # W14-M
+    DEMO_MOUSE[0] = a.mouse_port        # W14-M
     MENU_DELAY[0] = a.e2e_menu_delay
     RESUME_MUTANT[0] = a.resume_mutant
     if a.vol.lower().strip("/") in ("flash", "temp") or not a.vol.startswith("/"):

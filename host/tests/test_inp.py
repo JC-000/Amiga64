@@ -33,7 +33,7 @@ def num(v: str) -> int:
 def test_equates_match_runtime():
     e = equates("runtime/ops/inp.s")
     assert num(e["INP_CAP"]) == CAP
-    assert e["INP_NMAX"].replace(" ", "") == "2*INP_CAP-2" and NMAX == 2 * CAP - 2
+    assert e["INP_NMAX"].replace(" ", "") == "INP_CAP-1" and NMAX == CAP - 1
     assert num(e["INP_F1"]) == F1 and num(e["INP_CBM"]) == CBM
     assert num(e["INP_JOY0"]) == 0x0A                     # JOY0DAT ($DFF00A)
     assert num(e["INP_PIN"]) == num(equates("runtime/ops/cia.s")["CIA_PIN"])
@@ -56,7 +56,7 @@ def test_single_call_site():
 # --- the frame rule ------------------------------------------------------------
 
 def test_step_sequence_and_cap():
-    assert [inp_ref.step(n) for n in range(6)] == [1, 1, 2, 2, 3, 3]
+    assert [inp_ref.step(n) for n in range(6)] == [1, 2, 3, 4, 5, 6]
     assert inp_ref.step(NMAX) == CAP and inp_ref.step(NMAX + 100) == CAP
     m = Inp()
     xs = []
@@ -64,7 +64,7 @@ def test_step_sequence_and_cap():
         m.frame(RIGHT, 0)
         xs.append(m.x)
     deltas = [(b - a) & 0xFF for a, b in zip([0] + xs, xs)]
-    assert deltas[:6] == [1, 1, 2, 2, 3, 3]
+    assert deltas[:6] == [1, 2, 3, 4, 5, 6]
     assert max(deltas) == CAP and deltas[-1] == CAP and m.n == NMAX
 
 
@@ -72,7 +72,7 @@ def test_counter_wrap_both_ways():
     m = Inp()
     for _ in range(3):
         m.frame(UP | LEFT, 0)
-    assert (m.y, m.x) == (0xFC, 0xFC)                     # 1 + 1 + 2 below 0
+    assert (m.y, m.x) == (0xFA, 0xFA)                     # 1 + 2 + 3 below 0
     m = Inp(y=0xFE, x=0xFF)
     m.frame(DOWN | RIGHT, 0)
     assert (m.y, m.x) == (0xFF, 0x00)
@@ -89,7 +89,7 @@ def test_centre_resets_direction_change_does_not():
     assert m.n == 1                                       # 0 -> 1 like inp.s
     y0 = m.y
     m.frame(UP, 0)
-    assert (y0 - m.y) & 0xFF == 1
+    assert (y0 - m.y) & 0xFF == 2       # the centred frame counted (n = 1): a tap = 2
 
 
 def test_opposite_bits_cancel():
@@ -180,3 +180,90 @@ def test_scan_stuck_mask():
     assert scan(Matrix(keys={(0, 4)}, joy2=UP), F1, stuck=UP) == (0, F1)   # kept
     assert scan(Matrix(joy2=UP), F1, stuck=UP) == (0, 0)                    # row 4 readable
     assert scan(Matrix(keys={(7, 5)}, joy2=UP), 0, stuck=UP) == (0, CBM)
+
+
+# --- W14-M: the 1351 ---------------------------------------------------------
+
+def test_m1351_delta_wrap_noise_limit():
+    from host.inp_ref import m1351_delta as d
+    assert d(0x00, 0x02) == 1 and d(0x02, 0x00) == -1
+    assert d(0x7E, 0x00) == 1 and d(0x00, 0x7E) == -1        # the wrap
+    assert d(0x00, 0x3E) == 31 and d(0x00, 0x40) == -32      # the +-31 limit
+    assert d(0x0A, 0x0B) == 0 and d(0x0B, 0x0A) == 0        # bit 0 is noise
+    assert d(0x41, 0x80 | 0x41) == 0                         # bit 7 ignored
+
+
+def test_msamp_reference_axes_and_sign():
+    m = Inp()
+    m.msamp(0x10, 0x20)                                       # reference only
+    assert (m.y, m.x) == (0, 0)
+    m.msamp(0x14, 0x26)                                       # POTY +2, POTX +3
+    assert (m.y, m.x) == ((-2) & 0xFF, 3)                     # Amiga Y counts down
+    for _ in range(40):                                       # wrap both counters
+        m.frame(0, 0)                                         # (one sample a frame)
+        m.msamp(m.mold[0] + 0x3C & 0x7F, m.mold[1] - 0x3C & 0x7F)
+    assert (m.y, m.x) == ((-2 - 40 * 30) & 0xFF, (3 - 40 * 30) & 0xFF)
+
+
+def test_msamp_clamps_each_frame_at_127():
+    """rev14-mouse HIGH-1: AROS reads JOY0DAT as a signed 8-bit delta per
+    frame; 14 samples of +31 inside one frame must deliver +127, not wrap."""
+    m = Inp()
+    m.msamp(0x40, 0x00)
+    x0 = m.x
+    for _ in range(14):
+        m.msamp(0x40, m.mold[1] + 62 & 0x7F)                  # +31 counts each
+    assert (m.x - x0) & 0xFF == 127 and m.y == 0
+    m.frame(0, 0)                                             # the next frame
+    m.msamp(0x40, m.mold[1] + 62 & 0x7F)
+    assert (m.x - x0) & 0xFF == 127 + 31
+    m = Inp()
+    m.msamp(0x00, 0x40)
+    for _ in range(14):                                       # Y: 1351 up = Amiga -
+        m.msamp(m.mold[0] + 62 & 0x7F, 0x40)
+    assert m.y == (-127) & 0xFF
+
+
+def test_mouse_buttons_or_with_stick_and_cbm():
+    m = Inp()
+    assert m.frame(0, 0, mb=FIRE)["pra"] == 0xAB              # left = /FIR0
+    assert m.frame(0, 0, mb=UP)["potinp"] == 0xFB00           # right = DATLY
+    o = m.frame(FIRE, CBM, mb=FIRE | UP)                      # all at once
+    assert o["pra"] == 0xAB and o["potinp"] == 0xFB00
+    assert m.frame(0, 0, mb=0)["potinp"] == 0xFF00
+
+
+def test_port1_mouse_not_clicked_by_column7_keys():
+    """Supervisor condition (b1): the pot select rests driving column 7 (port
+    1) or 6 (port 2) low; SPACE (column 7, row 4) and "1" (column 7, row 0)
+    would read as the port-1 mouse's left/right button if port 1 were read
+    with the select still driven.  inp.s reads it with DDRA = $00."""
+    from host.inp_ref import scan_mouse_lines
+    for key in ((7, 4), (7, 0), (7, 5)):            # SPACE, 1, C=
+        assert scan_mouse_lines(Matrix(keys={key})) == 0
+        assert scan_mouse_lines(Matrix(keys={key}), resting=True) != 0 or key == (7, 5)
+    assert scan_mouse_lines(Matrix(joy1=FIRE | UP)) == FIRE | UP     # the mouse itself
+    assert scan_mouse_lines(Matrix(keys={(6, 4)}, joy2=0), mport=1) == 0
+
+
+def test_queue_double_click_inside_one_frame():
+    from host.inp_ref import Queue
+    q = Queue()
+    for lines in (FIRE, 0, FIRE, 0):          # two clicks between two frames
+        q.look(lines)
+    seq = [q.frame(0) & FIRE for _ in range(5)]
+    assert seq == [FIRE, 0, FIRE, 0, 0]
+
+
+def test_queue_held_and_short():
+    from host.inp_ref import Queue
+    q = Queue()
+    q.look(FIRE)
+    assert [q.frame(FIRE) for _ in range(3)] == [FIRE] * 3          # held
+    assert q.frame(0) == 0                                          # released
+    q.look(UP)                                 # the right button: not queued
+    q.look(0)
+    assert q.frame(0) == 0 and q.frame(UP) == UP
+    q.look(FIRE)
+    q.look(0)                                  # shorter than a frame
+    assert [q.frame(0) for _ in range(3)] == [FIRE, 0, 0]

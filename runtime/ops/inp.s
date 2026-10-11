@@ -31,14 +31,17 @@
 ;      48 and 64 MHz, and a column 1 -> column 7 read shows no phantom
 ;      (rev-inp, build/evidence/w13-inp/settle/; the U64E is unmeasured).  F3 alone
 ;      reading as C= is checked by the attended script.
-;   CIA1 DDRA and PRA are restored to their values on entry (PRA as read:
-;   the 6526 returns the pins, so a bit an outside switch held low at entry
-;   comes back as a 0 in the latch).  DDRB is never written.
+;   W14-M: on exit CIA1 port A rests selecting the mouse port's pots for
+;   the SID (PA7-6 = 01 port 1 / 10 port 2, DDRA = $C0; PA7/PA6 are also
+;   keyboard columns 7/6, so every port-1 read is made with DDRA = $00).
+;   DDRB is never written.  The 1351 decode and the button queue are the
+;   input module's (tests/aros/inpm.s, $C980 + $CF00), called through
+;   inp_mod's ID guard; no module: the stick and the mouse's buttons only.
 ;
 ; Per frame, from inp_joy/inp_key:
 ;   - mouse: dir = joy & $0F; n = frames the same nonzero dir was held
 ;     before this one (0 on a change or when centred; saturates at
-;     INP_NMAX); step = 1 + n/2 (1, 1, 2, 2, ... INP_CAP); up/down -/+ step on JOY0DAT's Y counter (chip_shd+$0A),
+;     INP_NMAX); step = 1 + n (1, 2, 3, ... INP_CAP; W14-M: was 1 + n/2, cap 16); up/down -/+ step on JOY0DAT's Y counter (chip_shd+$0A),
 ;     left/right on X (chip_shd+$0B), u8 wrap.
 ;   - left button: CIA-A PRA pin bit 6 (/FIR0) low while fire is held; bit
 ;     7 (/FIR1) high; pin bits 0-5 untouched (read-modify-write).
@@ -53,14 +56,19 @@
 
 .export inp_frame, inp_pot
 .export inp_src, inp_joy, inp_key, inp_view, inp_n, inp_stuck
+.export inp_msamp, inp_mport, inp_mper, inp_mpot, inp_mb, inp_mok
+.export inp_mon, inp_ml, inp_mlast, inp_mq, inp_md, inp_macc, inp_mps, inp_mns, inp_mold, inp_mrearm, INPM_ORG
 .import chip_shd, cia_st, chip_vh
+.import mach_etime, mach_arm, mach_et, mach_at   ; W14-M: slot 7
 
-INP_CAP   = 16          ; @value step cap (counter units per frame)
-INP_NMAX  = 2 * INP_CAP - 2 ; @value n saturates here: 1 + n/2 = INP_CAP
+INP_CAP   = 32          ; @value step cap (counter units per frame; W14-M: 16 -> 32)
+INP_NMAX  = INP_CAP - 1 ; @value n saturates here: 1 + n = INP_CAP
 INP_F1    = $10         ; @value inp_key: F1 (column 0, row 4)
 INP_CBM   = $20         ; @value inp_key: C= (column 7, row 5)
 INP_PIN   = 32          ; @value cia.s CIA_PIN: CIA-A port A input pins
 INP_JOY0  = $0A         ; @value JOY0DAT offset in chip_shd (Y, then X)
+INP_MSLOT = 7           ; @value W14-M: mach event slot of the 1351 sampler
+INPM_ORG  = buf_case + $980 ; @value W14-M: the M2 module (tests/aros/inpm.s), $C980-$C9FE
 
 .segment "BSS"
 inp_src:  .res 1        ; 0 = CIA1, else the host-written inp_joy/inp_key
@@ -70,6 +78,20 @@ inp_view: .res 1        ; I1: view edges (bit 0 = F1 pressed), W13-D clears
 inp_n:    .res 1        ; frames a direction was held (<= INP_NMAX)
 inp_kp:   .res 1        ; the last frame's inp_key
 inp_stuck: .res 1       ; host: stick bits the real scan ignores (1 = stuck closed)
+inp_mport: .res 1       ; W14-M host: mouse port, 0 = port 1 (stick on 2), 1 = port 2
+inp_mper: .res 4        ; W14-M host: 1351 sample period, E ticks, u32 (0 = no sampling)
+inp_mpot: .res 2        ; W14-M POTY, POTX: override input (inp_src != 0), else the last SID read
+inp_mb:   .res 1        ; W14-M mouse port lines, 1 = closed (bit 4 left, bit 0 right)
+inp_mold: .res 2        ; W14-M last POTY, POTX (bits 1-6)
+inp_mok:  .res 1        ; W14-M nonzero once inp_mold holds a sample
+inp_mon:  .res 1        ; W14-M host: the M2 module's ID byte 0 (0 = none)
+inp_ml:   .res 1        ; W14-M M2 override: mouse lines (inp_src != 0, module armed)
+inp_mlast: .res 1       ; W14-M M2: lines at the last look (press edges)
+inp_mq:   .res 1        ; W14-M M2: pending left presses (<= 2)
+inp_md:   .res 1        ; W14-M M2: the buttons as delivered (bit 4 left, 0 right)
+inp_macc: .res 2        ; W14-M M2: 1351 counts added since the frame hook: Y, X (s8, +-127)
+inp_mps:  .res 1        ; W14-M M2: inp_mport | inp_src << 1 at the last frame (a change: new reference)
+inp_mns:  .res 2        ; W14-M M2: 1351 samples taken (u16 LE, wraps; tests)
 
 ; CODE layout: no pad needed.  RODATA is page-aligned (c64.cfg, Wave 13
 ; supervisor), so CODE growth no longer moves which abs,X table entries
@@ -80,16 +102,23 @@ inp_beg:
 .proc inp_frame
         lda inp_src
         bne have
-        lda CIA1_DDRA           ; the caller's port A, restored below
-        pha
-        lda CIA1_PRA            ; (pins: the latch is not readable)
-        pha
-        lda #0                  ; 1. the stick, nothing driven (DDRB is
+        lda #0                  ; 1. both ports, nothing driven (DDRB is
         sta CIA1_DDRA           ; $00 throughout: nothing here sets it)
-        lda CIA1_PRA
-        ora inp_stuck           ; stuck lines read as released
+        lda CIA1_PRB            ; port 1 (rows: no column driven, so no key)
         eor #$FF
         and #$1F
+        tay
+        lda CIA1_PRA            ; port 2
+        eor #$FF
+        and #$1F
+        ldx inp_mport           ; W14-M: the mouse on port 2: swap
+        beq :+
+        sty inp_t
+        tay
+        lda inp_t
+:       sty inp_mb              ; the mouse port's lines (buttons)
+        ora inp_stuck           ; the stick's port; stuck lines read as
+        eor inp_stuck           ; released
         sta inp_joy
         ldx #$FF                ; 2. idle rows, no column selected: the
         stx CIA1_PRA            ; latch high first, then the outputs on
@@ -111,9 +140,12 @@ inp_beg:
         and inp_t               ; last state: ((new ^ old) & idle) ^ old
         eor inp_key
         sta inp_key
-        pla                     ; the caller's port A back: latch first,
-        sta CIA1_PRA            ; then the direction
-        pla
+        lda #$40                ; W14-M: rest with PA7-6 selecting the
+        ldx inp_mport           ; mouse port's pots for the SID (01 =
+        beq :+                  ; port 1, 10 = port 2), latch first
+        asl
+:       sta CIA1_PRA
+        lda #$C0
         sta CIA1_DDRA
 have:   lda inp_kp              ; F1 press edge -> inp_view bit 0
         eor #$FF
@@ -127,9 +159,9 @@ have:   lda inp_kp              ; F1 press edge -> inp_view bit 0
         sta inp_view
         lda inp_key
         sta inp_kp
-        ldy inp_joy             ; left button: /FIR0 (pin 6) low while fire
-        tya                     ; is held, /FIR1 (pin 7) high, pins 0-5 kept
-        and #$10
+        lda inp_joy             ; left button: /FIR0 (pin 6) low while fire
+        ora inp_mb              ; (stick or mouse) is held, /FIR1 (pin 7)
+        and #$10                ; high, pins 0-5 kept
         asl
         asl
         eor #$C0
@@ -137,14 +169,13 @@ have:   lda inp_kp              ; F1 press edge -> inp_view bit 0
         and #$C0
         eor cia_st+INP_PIN
         sta cia_st+INP_PIN
-        tya                     ; the mouse: centred -> n = 0
+        lda inp_joy             ; the stick: centred -> n = 0
         and #$0F
         sta inp_u
         bne :+
         sta inp_n
-:       lda inp_n               ; step - 1 = n / 2 (n <= INP_NMAX: step <= INP_CAP)
+:       lda inp_n               ; step - 1 = n (n <= INP_NMAX: step <= INP_CAP)
         tay
-        lsr
         sta inp_t
         cpy #INP_NMAX
         bcs :+
@@ -163,8 +194,61 @@ add:    adc chip_shd+INP_JOY0,y
 nx:     inx
         cpx #4
         bne lp
+        ldx #0                  ; W14-M: the M2 module (frame), then the
+        jmp inp_mod             ; re-arm when sampling is on
+.endproc
+
+; inp_msamp — W14-M: mach slot INP_MSLOT's callback (callback rules; the
+; host stores it in mach_cbv[INP_MSLOT]).  The 1351's decode lives in the
+; input module (tests/aros/inpm.s, fix round 1: it is AROS-only): this is
+; X = 3 into inp_mod's ID guard.  No module: no 1351 position (the slot
+; keeps re-arming, nothing is read).
+.proc inp_msamp
+        ldx #3
+.endproc
+; fall through
+; inp_mod — W14-M: the M2 module (tests/aros/inpm.s at INPM_ORG) when
+; armed: inp_mon = the first byte of its ID (INPM_ORG+3); a mismatch (not
+; staged, a different build) disarms it.  X = 0 frame, 3 sample.  Ends in
+; inp_mrearm (the module jumps there too).
+.proc inp_mod
+        lda inp_mon
+        beq none
+        cmp INPM_ORG+3
+        bne off
+        jmp INPM_ORG
+off:    lda #0
+        sta inp_mon
+none:   jmp inp_mrearm
+.endproc
+
+.segment "LOWCODE"
+; marm — W14-M: arm slot INP_MSLOT at now + inp_mper (u32) E ticks.  LOWCODE:
+; the STARTUP->DISPATCH slack (no MAIN page moves).
+; inp_mrearm — W14-M: X = 0 (the frame hook): re-arm when sampling is on
+; (inp_mper != 0); X != 0 (a sample): re-arm.
+.proc inp_mrearm
+        txa
+        bne marm
+        lda inp_mper
+        ora inp_mper+1
+        bne marm
         rts
 .endproc
+.proc marm
+        jsr mach_etime
+        clc
+        ldx #0
+:       lda mach_et,x
+        adc inp_mper,x
+        sta mach_at,x
+        inx
+        cpx #4
+        bne :-
+        lda #INP_MSLOT
+        jmp mach_arm
+.endproc
+.segment "CODE"
 
 ; inp_pot — chip.s's POTINP read (c_rdw, jmp): chip_vh := $FB while C= is
 ; held (bit 10, DATLY, low), else $FF; chip_vl stays 0.  Clobbers A.
@@ -174,6 +258,12 @@ nx:     inx
         lsr
         lsr
         lsr
+        sta inp_t
+        lda inp_mb              ; W14-M: or the mouse's right button (its
+        and #$01                ; port's UP line) -> $04
+        asl
+        asl
+        ora inp_t
         eor #$FF
         sta chip_vh
         rts
