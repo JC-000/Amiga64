@@ -39,6 +39,8 @@ Legs:
     U64_HOST=10.53.21.158 python3 -m tests.run_inp --prg ... --backend u64 \
         [--mhz 64]                      # api, guest, noinj on the device
     U64_HOST=10.53.21.158 python3 -m tests.run_inp --prg ... --attended \
+        --mouse 1 [--stuck 0x01]        # W14-M: the 1351 windows (CUE lines)
+    U64_HOST=10.53.21.158 python3 -m tests.run_inp --prg ... --attended \
         [--seconds 60] [--mhz 64]       # the user moves the real stick, then
                                         # holds F3 alone, then C= alone (5 s each)
     ... --backend u64 --allow-held 0x01 # a hardware port with a stuck direction:
@@ -69,17 +71,18 @@ from host import inp_ref
 from host.inp_ref import CBM, F1, FIRE, DOWN, LEFT, RIGHT, UP, Inp
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EVID = os.path.join(ROOT, "build", "evidence", "w13-inp")
+EVID = os.path.join(ROOT, "build", "evidence", "w14-mouse")
 VBCC = os.environ.get("VBCC", os.path.expanduser("~/.local/opt/vbcc"))
 FIXTURE = os.path.join(ROOT, "fixtures", "inp", "inp_log.s")
 
 FSTUB = 0xC780            # buf_case tail: php / sei / jsr inp_frame / plp / rts
+MSTUB = 0xC788            # the same for inp_msamp (W14-M)
 JOY0DAT, POTINP, CIAA_PRA = 0xDFF00A, 0xDFF016, 0xBFE001
 JOY0 = 0x0A               # JOY0DAT in chip_shd (inp.s INP_JOY0)
 LOG = 0x20000             # fixtures/inp/inp_log.s LOG
 FRAMES = 16               # fixtures/inp/inp_log.s FRAMES
 GUEST_S = 2               # mach_s for the guest runs (18 frames/s on NTSC phi2)
-ALL_LEGS = ["api", "guest", "real", "cost", "stuck"]
+ALL_LEGS = ["api", "guest", "real", "cost", "stuck", "mouse", "msamp", "queue"]
 U64_LEGS = ["api", "guest", "real", "noinj"]
 VERBOSE = False
 STUCK = 0                 # --stuck: inp_stuck written by every reset (attended/demo)
@@ -144,6 +147,27 @@ class Rig:
                 self.w(self.lab("inp_stuck"), bytes([STUCK]))
             except KeyError:
                 pass                        # a PRG before inp_stuck
+            if self.mouse:                  # W14-M: mport .. mok (11 bytes)
+                assert self.lab("inp_mok") == self.lab("inp_mport") + 10, "inp BSS"
+                self.w(self.lab("inp_mport"), bytes(11))
+                try:                        # W14-M M2: mon .. md (7 bytes): no module
+                    self.w(self.lab("inp_mon"), bytes(7))
+                except KeyError:
+                    pass
+
+    @property
+    def mouse(self) -> bool:
+        try:
+            self.lab("inp_msamp")
+            return True
+        except KeyError:
+            return False
+
+    def msamp(self) -> None:
+        """Call inp_msamp (the 1351 sampler) once, like a slot firing."""
+        a = self.lab("inp_msamp")
+        self.w(MSTUB, bytes([0x08, 0x78, 0x20, a & 0xFF, a >> 8, 0x28, 0x60]))
+        self.cia.call(MSTUB)
 
     def set_input(self, joy: int, key: int) -> None:
         self.w(self.src + 1, bytes([joy, key]))
@@ -306,6 +330,10 @@ def leg_guest(rig: Rig) -> list[str]:
                 f.append(f"{tag}: inp_view {st['view']} want {m.view}")
         log(f"  {tag}: {FRAMES} frames, JOY0DAT ${m.joy0dat:04X}, "
             f"{'ok' if not bad else f'{bad} frame(s) differ'}")
+    if rig.mouse:                       # W14-M: the override with inp_mper = 0
+        am = rig.r(rig.lab("mach_am"), 1)[0]          # (run_irq's rig) arms nothing
+        if am & 0x80:
+            f.append(f"guest: mach_am ${am:02X}: slot 7 armed with inp_mper = 0")
     return f
 
 
@@ -373,18 +401,21 @@ def leg_real(rig: Rig) -> list[str]:
             if got != want:
                 f.append(f"real: rows ${drive:02X} low, inp_key ${prev:02X} before: "
                          f"${got:02X} after, want ${want:02X}")
-        # CIA1 port A as the caller had it: DDRA $F0, latch $5A -> reads
-        # $5F (inputs high), less any bit held low at the port
-        rig.w(0xDC00, b"\x5A")
-        rig.w(0xDC02, b"\xF0")
-        rig.frame()
-        pra, _, ddra, ddrb = rig.r(0xDC00, 4)
-        want = 0x5F & ~(base & 0x1F)
-        if (pra, ddra, ddrb) != (want, 0xF0, 0x00):
-            f.append(f"real: CIA1 left PRA ${pra:02X} DDRA ${ddra:02X} DDRB "
-                     f"${ddrb:02X}, want ${want:02X} $F0 $00 (the caller's)")
-        rig.w(0xDC02, b"\xFF")
-        rig.w(0xDC00, b"\xFF")
+        # W14-M: CIA1 port A rests selecting the mouse port's pots for the
+        # SID: DDRA $C0, PA7-6 = 01 (port 1, inp_mport 0) or 10 (port 2)
+        for mport, sel in ((0, 0x40), (1, 0x80)):
+            if not rig.mouse and mport:
+                break
+            if rig.mouse:
+                rig.w(rig.lab("inp_mport"), bytes([mport]))
+            rig.frame()
+            pra, _, ddra, ddrb = rig.r(0xDC00, 4)
+            if (pra & 0xC0, ddra, ddrb) != (sel, 0xC0, 0x00):
+                f.append(f"real: inp_mport {mport}: CIA1 left PRA ${pra:02X} DDRA "
+                         f"${ddra:02X} DDRB ${ddrb:02X}, want PA7-6 ${sel:02X}, "
+                         "DDRA $C0, DDRB $00 (the pot select at rest)")
+        if rig.mouse:
+            rig.w(rig.lab("inp_mport"), b"\0")
         st = rig.state()
         if not base and (st["joy"] or st["key"] or st["joy0dat"] or st["pra"] != 0xEB):
             f.append(f"real: nothing held, yet {st}")
@@ -458,14 +489,245 @@ def leg_cost(rig: Rig) -> list[str]:
         ovr0 = best() - over
         rig.set_input(0x1F, F1 | CBM)
         ovr_all = min(cycles(rig, rig.frame_addr) for _ in range(5)) - over
+        msamp = rearm = None
+        extra = ""
+        if rig.mouse:                           # W14-M: the 1351 sampler
+            rig.reset(src=1)
+            rig.w(rig.lab("inp_mper"), struct.pack("<I", 2048))
+            rig.w(rig.lab("inp_mpot"), bytes([0x40, 0x40]))
+            cycles(rig, rig.lab("inp_msamp"))   # the reference
+            rig.w(rig.lab("inp_mpot"), bytes([0x7E, 0x02]))   # both axes move
+            msamp = min(cycles(rig, rig.lab("inp_msamp")) for _ in range(5)) - over
+            rig.reset(src=0)
+            rig.w(rig.lab("inp_mper"), struct.pack("<I", 2048))
+            rearm = best() - over - real0
+            rig.w(rig.lab("inp_mper"), bytes(4))
+            try:                                # W14-M M2: the module armed
+                rig.lab("inp_mon")
+                rig.reset(src=1)
+                stage_inpm(rig)
+                mframe = best() - over - ovr0
+                rig.w(rig.lab("inp_mpot"), bytes([0x40, 0x40]))
+                cycles(rig, rig.lab("inp_msamp"))
+                msamp2 = min(cycles(rig, rig.lab("inp_msamp")) for _ in range(5)) - over
+                rig.reset(src=0)
+                stage_inpm(rig)
+                mframer = best() - over - real0
+                extra = (f"; M2 module armed: frame +{mframe} (override) / +{mframer} "
+                         f"(real), sample {msamp2}")
+            except KeyError:
+                extra = ""
     finally:
         rig.w(0xD011, bytes([d011 & 0x7F]))
     worst = real0 + ovr_all - ovr0
     log(f"  cost (screen off, min of 5): inp_frame real scan {real0}, override "
         f"idle {ovr0}, override all bits {ovr_all} cycles; worst case {worst} "
-        f"cycles; the real scan adds {real0 - ovr0} (stub overhead {over})")
+        f"cycles; the real scan adds {real0 - ovr0} (stub overhead {over})"
+        + (f"; W14-M: inp_msamp {msamp} cycles per sample (with its re-arm), the "
+           f"frame hook's re-arm +{rearm}" if msamp is not None else "") + extra)
     rig.reset(src=1)
     return [] if 0 < worst < 1000 else [f"cost: implausible {worst} cycles"]
+
+
+def leg_mouse(rig: Rig) -> list[str]:
+    """W14-M: the 1351 with the override (inp_src = 1; VICE's 1351 takes
+    the host mouse only, see CONTRACTS "Input").  inp_msamp called by the
+    host like a slot firing, with scripted pots (POTY, POTX), bit-0 noise,
+    the mod-64 wrap and the +-31 limit; JOY0DAT against host/inp_ref after
+    every sample.  Then the buttons through inp_mb with frames: left ->
+    /FIR0, right -> POTINP DATLY, OR-ed with the stick's fire and C=, both
+    buttons while the pointer moves."""
+    rig.need()
+    if not rig.mouse:
+        return ["mouse: this PRG has no inp_msamp (no W14-M)"]
+    f: list[str] = []
+    rig.reset(src=1)
+    pot, mb = rig.lab("inp_mpot"), rig.lab("inp_mb")
+    m = Inp()
+    rng = random.Random(1351)
+    y = x = 0x40
+    seq = [(y, x)]
+    for i in range(120):                       # a square, then random moves
+        k = i // 30
+        dy, dx = ((0, 6), (6, 0), (0, -6), (-6, 0))[k] if i < 120 else (0, 0)
+        y, x = (y + 2 * dy) & 0x7E, (x + 2 * dx) & 0x7E
+        seq.append((y, x))
+    for _ in range(80):
+        y = (y + 2 * rng.randint(-31, 31)) & 0x7E
+        x = (x + 2 * rng.randint(-31, 31)) & 0x7E
+        seq.append((y, x))
+    for i, (py, px) in enumerate(seq):
+        ny, nx = py | rng.randint(0, 1), px | rng.randint(0, 1)   # bit-0 noise
+        if rng.random() < 0.2:
+            ny |= 0x80                          # bit 7 (not a 1351 bit)
+        rig.w(pot, bytes([ny, nx]))
+        rig.msamp()
+        want = m.msamp(ny, nx)["joy0dat"]
+        got = rig.state()["joy0dat"]
+        if got != want:
+            f.append(f"mouse sample {i}: pots ${ny:02X} ${nx:02X}: JOY0DAT "
+                     f"${got:04X}, want ${want:04X}")
+            if len(f) > 5:
+                return f
+    for joy, key, b in ((0, 0, FIRE), (0, 0, UP), (0, 0, FIRE | UP),
+                        (FIRE, 0, UP), (0, CBM, FIRE), (0, 0, 0)):
+        rig.set_input(joy, key)
+        rig.w(mb, bytes([b]))
+        rig.frame()
+        want = m.frame(joy, key, mb=b)
+        g = rig.api_read()
+        if (g["pra"], g["potinp"]) != (want["pra"], want["potinp"]):
+            f.append(f"mouse buttons joy ${joy:02X} key ${key:02X} mb ${b:02X}: "
+                     f"PRA ${g['pra']:02X} POTINP ${g['potinp']:04X}, want "
+                     f"${want['pra']:02X} ${want['potinp']:04X}")
+    rig.reset(src=1)
+    log(f"  mouse: {len(seq)} samples, end JOY0DAT ${m.joy0dat:04X}, "
+        f"{'ok' if not f else 'FAIL'}")
+    return f
+
+
+def leg_msamp(rig: Rig) -> list[str]:
+    """W14-M: the sampler live under mach_run.  Real source (inp_src = 0):
+    the frame hook arms slot 7 (inp_mper > 0, mach_cbv[7] = inp_msamp, as
+    the launcher sets them), the slot fires, inp_msamp reads the SID: in
+    VICE (sound off) $D419/$D41A read $FF, so inp_mpot = $FF $FF, inp_mok
+    = 1 and JOY0DAT does not move.  Override (inp_src = 1): the slot runs
+    too and integrates host-set pots (the scripted e2e path): a +20-count
+    POTX step written before the run moves X by 20, POTY -10 moves Y +10.
+    Red: no slot, inp_mok stays 0."""
+    rig.need()
+    if not rig.mouse:
+        return ["msamp: this PRG has no inp_msamp (no W14-M)"]
+    from tests.run_mach import clean
+    f: list[str] = []
+    mr = rig.cia.mach_rig()
+    (pc,) = mr.stage(fixture_words())
+    rig._stub = False
+    rig.cia._tramp = None
+    rig.reset(src=0)
+    a = rig.lab("inp_msamp")
+    rig.w(rig.lab("mach_cbv") + 14, bytes([a & 0xFF, a >> 8]))
+    per = max(1, 8192 >> GUEST_S)
+    rig.w(rig.lab("inp_mper"), struct.pack("<I", per))
+    res = mr.run(pc, s=GUEST_S, budget=4_000_000)
+    clean(res, "msamp", f)
+    mok = rig.r(rig.lab("inp_mok"), 1)[0]
+    mpot = rig.r(rig.lab("inp_mpot"), 2)
+    jd = rig.state()["joy0dat"]
+    log(f"  msamp: inp_mok {mok}, inp_mpot {mpot.hex()}, JOY0DAT ${jd:04X}")
+    if mok != 1 or mpot != b"\xff\xff" or jd != 0:
+        f.append(f"msamp: inp_mok {mok}, inp_mpot {mpot.hex()}, JOY0DAT ${jd:04X} "
+                 "(want 1, ffff, $0000: the slot fired and read the SID)")
+    # the override: reference first (inp_mok 1, inp_mold = these pots),
+    # then the pots step and a second run integrates the step
+    rig.reset(src=1)
+    rig.w(rig.lab("inp_mper"), struct.pack("<I", per))
+    rig.w(rig.lab("inp_mpot"), bytes([0x40, 0x40]))
+    rig.msamp()                                  # the reference
+    rig.w(rig.lab("inp_mpot"), bytes([0x40 - 20, 0x40 + 40]))   # POTY -10, POTX +20
+    res = mr.run(pc, s=GUEST_S, budget=4_000_000)
+    clean(res, "msamp override", f)
+    jd = rig.state()["joy0dat"]
+    log(f"  msamp override: JOY0DAT ${jd:04X} (want $0A14)")
+    if jd != 0x0A14:
+        f.append(f"msamp override: JOY0DAT ${jd:04X}, want $0A14 (the slot did not "
+                 "integrate the host's pot step)")
+    rig.w(rig.lab("inp_mper"), bytes(4))
+    rig.reset(src=1)
+    return f
+
+
+def stage_inpm(rig: Rig) -> bytes:
+    """W14-M M2: build tests/aros/inpm.s for this PRG, stage it at $C980,
+    arm it (tests/aros_wb.arm_inpm).  Returns the module."""
+    from tests import aros_wb as WB
+    d = os.path.join(os.path.dirname(os.path.abspath(rig.prg)), "inpm-mod")
+    lbl = os.path.splitext(rig.prg)[0] + ".lbl"
+    if QMUT[0]:                                  # a module mutant (--qmutants)
+        src = open(os.path.join(ROOT, "tests", "aros", "inpm.s")).read()
+        a, b = QMUTANTS[QMUT[0]]
+        assert src.count(a) == 1, f"qmutant {QMUT[0]}: anchor"
+        os.makedirs(d, exist_ok=True)
+        msrc = os.path.join(d, f"inpm_{QMUT[0]}.s")
+        open(msrc, "w").write(src.replace(a, b))
+        mod = WB.build_module(msrc, 0xC980, 0xC9FF, 3, lbl, d)
+    else:
+        mod = WB.build_inpm(lbl, d)
+    rig.w(0xC980, mod)
+    WB.arm_inpm(type("M", (), {"w": staticmethod(rig.w), "lab": staticmethod(rig.lab)}), mod)
+    return mod
+
+
+QMUT = [None]
+QMUTANTS = {    # tests/aros/inpm.s mutants (one-off: python3 -m tests.run_inp --qmutants)
+    # no queue: the delivered left button is the lines now (stretch lost)
+    "qnone": ("        lda inp_md              ; 2. delivery (left), one transition a frame\n        beq rel\n",
+              "        tya\n        and #$10\n        bpl set\n"),
+    # a pending press does not force the release frame (P,P instead of P,R,P)
+    "qnorel": ("        lda inp_mq              ; delivered: release when up now or another\n        bne up                  ; press is pending\n",
+               "        lda inp_mq              ; delivered: release when up now or another\n        nop\n        nop\n"),
+    # the sampler does not count edges (only the frame looks)
+    "qnosamp": ("        inc inp_mq\n:       cpx #0", "        nop\n        nop\n        nop\n:       cpx #0"),
+}
+
+
+def leg_queue(rig: Rig) -> list[str]:
+    """W14-M M2: the button edge queue (tests/aros/inpm.s) with the
+    override (inp_ml): press edges seen by the sampler are delivered one
+    left transition per frame.  Two clicks inside one frame -> P,R,P,R; a
+    click shorter than a frame -> one pressed frame; a held button stays;
+    the right button is the lines now (not queued); both at once; each
+    against host/inp_ref.Queue.
+    Then no module: an unstaged module (inp_mon set, $C980 cleared) is
+    disarmed by the guard and the buttons behave as M1 (immediate)."""
+    rig.need()
+    if not rig.mouse:
+        return ["queue: no inp_msamp (no W14-M)"]
+    try:
+        rig.lab("inp_mon")
+    except KeyError:
+        return ["queue: no inp_mon (no M2 stub)"]
+    from host.inp_ref import Queue
+    f: list[str] = []
+    rig.reset(src=1)
+    rig.w(rig.lab("inp_mpot"), bytes([0x40, 0x40]))
+    mod = stage_inpm(rig)
+    ml = rig.lab("inp_ml")
+    cases = [("double", [FIRE, 0, FIRE, 0], [0] * 5),
+             ("short", [FIRE, 0], [0] * 3),
+             ("held", [FIRE], [FIRE] * 3 + [0, 0]),
+             ("dblheld", [FIRE, 0, FIRE], [FIRE] * 4 + [0]),     # 2nd click still down
+             ("right", [UP, 0, UP, 0], [0, UP, UP, 0]),        # not queued: now
+             ("both", [FIRE | UP, 0, FIRE | UP, 0], [UP, UP, 0, 0, 0])]
+    for name, looks, frames in cases:
+        q = Queue()
+        rig.w(rig.lab("inp_mlast"), bytes(4))
+        rig.w(rig.lab("inp_mb"), b"\0")
+        for lines in looks:                     # samples between two frames
+            rig.w(ml, bytes([lines]))
+            rig.msamp()
+            q.look(lines)
+        got, want = [], []
+        for lines in frames:
+            rig.w(ml, bytes([lines]))
+            rig.frame()
+            want.append(q.frame(lines))
+            g = rig.api_read()
+            got.append((0 if g["pra"] & 0x40 else FIRE) | (UP if g["potinp"] == 0xFB00 else 0))
+        log(f"  queue/{name}: delivered {['%02X' % x for x in got]}")
+        if got != want:
+            f.append(f"queue/{name}: delivered {got}, want {want} (host/inp_ref.Queue)")
+    # no module staged: the guard disarms, the buttons are M1's
+    rig.w(0xC980, bytes(len(mod)))
+    rig.w(rig.lab("inp_mb"), bytes([FIRE]))
+    rig.frame()
+    g = rig.api_read()
+    mon = rig.r(rig.lab("inp_mon"), 1)[0]
+    if mon or g["pra"] & 0x40:
+        f.append(f"queue/nomodule: inp_mon ${mon:02X} after a frame, PRA ${g['pra']:02X} "
+                 "(want 0: disarmed, and the M1 button through inp_mb)")
+    rig.reset(src=1)
+    return f
 
 
 def leg_stuck(rig: Rig) -> list[str]:
@@ -511,7 +773,8 @@ def leg_stuck(rig: Rig) -> list[str]:
     return f
 
 
-LEGS = {"api": leg_api, "guest": leg_guest, "real": leg_real, "noinj": leg_noinj, "cost": leg_cost, "stuck": leg_stuck}
+LEGS = {"api": leg_api, "guest": leg_guest, "real": leg_real, "noinj": leg_noinj, "cost": leg_cost, "stuck": leg_stuck,
+        "mouse": leg_mouse, "msamp": leg_msamp, "queue": leg_queue}
 
 
 def run_legs(rig: Rig, legs: list[str]) -> list[str]:
@@ -609,6 +872,97 @@ def attended_stub(rig: Rig, n: int) -> bytes:
           0x68, 0xAA, 0xCA, 0xD0]                  # pla/tax/dex/bne loop
     c += [(4 - (len(c) + 1)) & 0xFF, 0x28, 0x60]   # loop = offset 4 (txa)
     return bytes(c)
+
+
+def mouse_stub(rig: Rig, n: int) -> bytes:
+    """php/sei; n times (raster-paced, ~10 ms): jsr inp_frame; jsr inp_msamp;
+    OR inp_joy, inp_key, inp_view (consumed), inp_mb into AFLAGS+0..3; count
+    the mouse buttons' press edges (left = bit 4 at AFLAGS+4, right = bit 0
+    at AFLAGS+5; the last inp_mb at AFLAGS+6); plp/rts."""
+    lo, hi = lambda a: a & 0xFF, lambda a: a >> 8
+    f, ms = rig.frame_addr, rig.lab("inp_msamp")
+    j, k, v, mb = rig.src + 1, rig.src + 2, rig.src + 3, rig.lab("inp_mb")
+    c = [0x08, 0x78, 0xA2, n]
+    top = len(c)
+    c += [0x8A, 0x48, 0x20, lo(f), hi(f), 0x20, lo(ms), hi(ms)]
+    for src, dst in ((j, AFLAGS), (k, AFLAGS + 1), (v, AFLAGS + 2), (mb, AFLAGS + 3)):
+        c += [0xAD, lo(src), hi(src), 0x0D, lo(dst), hi(dst), 0x8D, lo(dst), hi(dst)]
+    c += [0xA9, 0x00, 0x8D, lo(v), hi(v)]
+    p6 = AFLAGS + 6
+    c += [0xAD, lo(p6), hi(p6), 0x49, 0xFF, 0x2D, lo(mb), hi(mb)]   # new presses
+    c += [0xAE, lo(mb), hi(mb), 0x8E, lo(p6), hi(p6)]                # prev := mb
+    c += [0x4A, 0x90, 0x03, 0xEE, lo(AFLAGS + 5), hi(AFLAGS + 5)]    # bit 0: right
+    c += [0x29, 0x08, 0xF0, 0x03, 0xEE, lo(AFLAGS + 4), hi(AFLAGS + 4)]  # bit 4: left
+    c += [0xAD, 0x12, 0xD0, 0xD0, 0xFB, 0xAD, 0x12, 0xD0, 0xF0, 0xFB,
+          0x68, 0xAA, 0xCA, 0xD0]
+    c += [(top - (len(c) + 1)) & 0xFF, 0x28, 0x60]
+    assert len(c) < 0xF0
+    return bytes(c)
+
+
+MOUSE_WINDOWS = [   # (seconds, cue, check)
+    (20, "MOUSE: move it in a SQUARE, slowly: right, down, left, up", "square"),
+    (15, "MOUSE: LEFT button: click it 3 times", "left3"),
+    (15, "MOUSE: RIGHT button: click it 3 times", "right3"),
+    (15, "MOUSE: hold BOTH buttons together for a second, then release", "both"),
+    (15, "KEYBOARD: hold C= alone (right button through the keyboard)", "cbm"),
+    (20, "JOYSTICK (the other port): up, down, left, right, then fire", "stick"),
+]
+
+
+def attended_mouse(rig: Rig, mport: int) -> int:
+    """W14-M: the 1351 through the real CIA1 and SID (inp_src = 0), host-
+    paced: 10 iterations of inp_frame + inp_msamp per call.  Six windows of
+    15-20 s, each announced with a timestamped CUE line (the supervisor
+    relays them); a per-window result and a verdict."""
+    rig.need()
+    if not rig.mouse:
+        print("ATTENDED MOUSE: this PRG has no inp_msamp")
+        return 1
+    rig.reset(src=0)
+    rig.w(rig.lab("inp_mport"), bytes([mport]))
+    rig.w(ASTUB, mouse_stub(rig, 10))
+    idle = undriven(rig, "attended-mouse", [])
+    print("=" * 72)
+    print(f"ATTENDED MOUSE: the 1351 in PORT {1 + mport}, the joystick in port "
+          f"{2 - mport}.  {len(MOUSE_WINDOWS)} windows; each starts with a CUE line.")
+    print("=" * 72, flush=True)
+    results = {}
+    for secs, cue, chk in MOUSE_WINDOWS:
+        print(f"CUE {time.strftime('%H:%M:%S')} ({secs} s, starts in 5 s): {cue}", flush=True)
+        time.sleep(5.0)
+        print(f"GO  {time.strftime('%H:%M:%S')}: {cue}", flush=True)
+        rig.w(AFLAGS, bytes(7))
+        y0x0 = rig.state()["joy0dat"]
+        ys, xs, joy, key, mbs = set(), set(), 0, 0, 0
+        nl = nr = 0
+        t1 = time.monotonic() + secs
+        while time.monotonic() < t1:
+            rig.w(AFLAGS, bytes(6))
+            rig.cia.call(ASTUB)
+            fj, fk, _, fm, cl, cr, _ = rig.r(AFLAGS, 7)
+            jd = rig.state()["joy0dat"]
+            ys.add(jd >> 8)
+            xs.add(jd & 0xFF)
+            joy, key, mbs, nl, nr = joy | fj, key | fk, mbs | fm, nl + cl, nr + cr
+        jd = rig.state()["joy0dat"]
+        dy = ((jd >> 8) - (y0x0 >> 8) + 128) % 256 - 128
+        dx = ((jd & 0xFF) - (y0x0 & 0xFF) + 128) % 256 - 128
+        span = (len(ys), len(xs))
+        ok = {"square": span[0] > 8 and span[1] > 8,
+              "left3": nl >= 3, "right3": nr >= 3,
+              "both": mbs & 0x11 == 0x11,
+              "cbm": bool(key & CBM),
+              "stick": (joy & ~idle & 0x0F) == (0x0F & ~STUCK & ~idle)}[chk]
+        results[chk] = ok
+        print(f"END {time.strftime('%H:%M:%S')}: {chk}: {'OK' if ok else 'NOT SEEN'} "
+              f"(distinct Y {span[0]}, X {span[1]}; net dy {dy:+d} dx {dx:+d}; "
+              f"left presses {nl}, right presses {nr}; mouse lines seen ${mbs:02X}; "
+              f"stick seen ${joy:02X}; keys ${key:02X})", flush=True)
+    missing = [k for k, v in results.items() if not v]
+    print(f"ATTENDED MOUSE VERDICT: {'PASS' if not missing else 'INCOMPLETE'}"
+          f"{': missing ' + str(missing) if missing else ''}")
+    return 0 if not missing else 1
 
 
 def attended(rig: Rig, seconds: float) -> int:
@@ -711,18 +1065,16 @@ MUTANTS = {
     # the pin write leaks into bit 4 (W13-W's /TK0) (rev-inp)
     "pinleak4": (INP, [("        and #$C0\n", "        and #$D0\n")]),
     # the stick read without its polarity flip (rev-inp R1)
-    "stickpol": (INP, [("        ora inp_stuck           ; stuck lines read as released\n        eor #$FF\n        and #$1F\n",
-                        "        ora inp_stuck           ; stuck lines read as released\n        and #$1F\n")]),
-    # the right button on POTINP bit 11 instead of 10
-    "potbit": (INP, [("        lsr\n        lsr\n        lsr\n        eor #$FF\n",
-                      "        lsr\n        lsr\n        eor #$FF\n")]),
-    # F1 as a level, not an edge
-    "noedge": (INP, [("have:   lda inp_kp              ; F1 press edge -> inp_view bit 0\n        eor #$FF\n        and inp_key\n",
-                      "have:   lda inp_key             ; F1 press edge -> inp_view bit 0\n")]),
+    "stickpol": (INP, [("        lda CIA1_PRA            ; port 2\n        eor #$FF\n",
+                        "        lda CIA1_PRA            ; port 2\n")]),
     # unreadable rows not masked: a port-1 row reads as a key (phantom)
     "noghost": (INP, [("        eor inp_key             ; unreadable rows (idle bit 0) keep the\n        and inp_t               ; last state: ((new ^ old) & idle) ^ old\n        eor inp_key\n", "")]),
     # the override is ignored: the real CIA1 is always scanned
     "nosrc": (INP, [("        lda inp_src\n        bne have\n", "")]),
+    # W14-M: the 1351's Y not negated (the pointer moves the wrong way)
+    "msign": (INP, [("        eor #$FF                ; Y: negate (C = 0)\n        adc #1\n", "")]),
+    # W14-M: bit 0 (noise) kept in the position
+    "mnoise": (INP, [("lp:     lda inp_mpot,x\n        and #$7E\n", "lp:     lda inp_mpot,x\n        and #$7F\n")]),
 }
 # One-off checks (--only), outside the <= 10 set: covered by the same legs
 EXTRA_MUTANTS = {
@@ -732,12 +1084,27 @@ EXTRA_MUTANTS = {
     "nofir1": (INP, [("        and #$C0\n", "        and #$40\n")]),
     # the pin write leaks into bit 2 (W13-W's /CHNG) (rev-inp)
     "pinleak2": (INP, [("        and #$C0\n", "        and #$C4\n")]),
+    # the right button on POTINP bit 11 instead of 10
+    "potbit": (INP, [("        lsr\n        lsr\n        lsr\n        sta inp_t\n",
+                      "        lsr\n        lsr\n        sta inp_t\n")]),
+    # F1 as a level, not an edge
+    "noedge": (INP, [("have:   lda inp_kp              ; F1 press edge -> inp_view bit 0\n        eor #$FF\n        and inp_key\n",
+                      "have:   lda inp_key             ; F1 press edge -> inp_view bit 0\n")]),
+    # W14-M: the pots rest on port 2 when the mouse is on port 1
+    "mselect": (INP, [("        lda #$40                ; W14-M: rest with PA7-6 selecting the\n",
+                       "        lda #$80                ; W14-M: rest with PA7-6 selecting the\n")]),
+    # W14-M: the first sample is a move, not the reference
+    "mref": (INP, [("        lda inp_mok\n        beq nx                  ; reference only\n", "")]),
+    # W14-M: the delta taken mod 64 instead of mod 128 (sign lost)
+    "mwrap": (INP, [("        tya\n        and #$7F\n", "        tya\n        and #$3F\n")]),
 }
-EXTRA_LEGS = {"noreset": ["api"], "nofir1": ["api"], "pinleak2": ["api"]}
+EXTRA_LEGS = {"noreset": ["api"], "nofir1": ["api"], "pinleak2": ["api"],
+              "potbit": ["api", "mouse"], "noedge": ["api"], "mselect": ["real"],
+              "mref": ["mouse"], "mwrap": ["mouse"]}
 MUTANT_LEGS = {"nocall": ["guest"], "nocap": ["api"], "pinleak4": ["api"],
                "sign": ["api"], "fireinv": ["api"], "stickpol": ["real"],
-               "potbit": ["api"], "noedge": ["api"], "noghost": ["real"],
-               "nosrc": ["api"]}
+               "noghost": ["real"], "nosrc": ["api"],
+               "msign": ["mouse"], "mnoise": ["mouse"]}
 
 
 def build_mutant(name: str, out_dir: str) -> str:
@@ -782,6 +1149,7 @@ def main(argv=None) -> int:
     ap.add_argument("--mhz", type=int, default=64)
     ap.add_argument("--mutants", action="store_true")
     ap.add_argument("--only")
+    ap.add_argument("--qmutants", action="store_true", help="W14-M: the inpm.s module mutants")
     ap.add_argument("--attended", action="store_true")
     ap.add_argument("--seconds", type=float, default=60.0)
     ap.add_argument("--allow-held", default="0",
@@ -790,6 +1158,8 @@ def main(argv=None) -> int:
     ap.add_argument("--stuck", default="0",
                     help="inp_stuck for --attended / hardware legs: stick bits the "
                          "real scan ignores (e.g. $01: Up stuck closed)")
+    ap.add_argument("--mouse", type=int, choices=(1, 2), default=None,
+                    help="with --attended: the 1351 windows, mouse in this port")
     ap.add_argument("--json", help="write {legs, fails, warn} here")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args(argv)
@@ -805,11 +1175,26 @@ def main(argv=None) -> int:
     signal.signal(signal.SIGINT, signal.default_int_handler)
     signal.signal(signal.SIGTERM, _sigterm)
     t0 = time.monotonic()
-    if a.mutants:
+    if a.qmutants:                      # W14-M M2: tests/aros/inpm.s mutants
+        bad = []
+        for name in QMUTANTS:
+            QMUT[0] = name
+            fails = vice(a.prg, ["queue"])
+            log(f"=== qmutant {name}: {'KILLED' if fails else 'SURVIVED'}")
+            if not fails:
+                bad.append(name)
+        QMUT[0] = None
+        print(f"qmutants: {len(QMUTANTS) - len(bad)} killed, {len(bad)} survived {bad}")
+        rc = 1 if bad else 0
+    elif a.mutants:
         rc = teeth(a.prg, a.only.split(",") if a.only else None)
     elif a.attended:
         legs, fails = ["attended"], []
-        rc = u64(a.prg, a.mhz, lambda rig: attended(rig, a.seconds), "attended")
+        if a.mouse is not None:
+            rc = u64(a.prg, a.mhz, lambda rig: attended_mouse(rig, a.mouse - 1),
+                     "attended-mouse")
+        else:
+            rc = u64(a.prg, a.mhz, lambda rig: attended(rig, a.seconds), "attended")
     elif a.backend == "u64":
         legs = a.legs.split(",") if a.legs else U64_LEGS
         fails = u64(a.prg, a.mhz, lambda rig: run_legs(rig, legs), f"{a.mhz}mhz")

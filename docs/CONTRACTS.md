@@ -1855,17 +1855,20 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
      - The U64E is unmeasured.
      - A held F3 (column 0, row 5) reading as C= is checked by the attended
        script's F3/C= step.
-  4. **Restore.** On exit the scan puts back CIA1 DDRA and PRA as they were
-     on entry: PRA first, then DDRA. The PRA value is the one *read* on
-     entry, because the 6526 returns the pins, not the latch. DDRB and PRB
-     are never written.
-     - The caller's CIA1 port A is unchanged by a frame, unless a port-2
-       switch is closed at entry. That latch bit then stays 0 until the
-       caller rewrites PRA. (Leg `real` checks DDRA `$F0`/PRA `$5A` →
-       `$F0`/`$5F`.)
-     - Callers that read CIA1 set it up themselves (`hle_con.s:401-405`),
-       and no runtime code calls the KERNAL. The restore is a precaution
-       kept under the page pad (supervisor, fix round 1).
+  4. **Rest (W14-M).** On exit the scan leaves CIA1 port A selecting the
+     mouse port's pots for the SID: PRA bits 7-6 = `01` (port 1) or `10`
+     (port 2), written before DDRA = `$C0`. PA7/PA6 are also keyboard
+     columns 7/6, so between scans the rest drives column 7 (port 1) or
+     column 6 (port 2) low.
+     - Every port-1 read (PB) and every row read other than a deliberate
+       column scan is made with DDRA = `$00` (step 1). Otherwise SPACE
+       (column 7, row 4) would read as the port-1 mouse's left button and
+       "1" (column 7, row 0) as its right button.
+     - VICE cannot hold a key, so `host/tests/test_inp.py::
+       test_port1_mouse_not_clicked_by_column7_keys` models it. It no longer restores the
+     caller's DDRA/PRA (W13-I's precaution). Callers that read CIA1 set it
+     up themselves (`hle_con.s:401-405`), and no runtime code calls the
+     KERNAL. DDRB and PRB are never written. (Leg `real` checks it.)
   - **Cost** (leg `cost`: 6502 cycles per call, VICE, screen off, the
     minimum of 5; CPU speed does not change it):
     - the real scan with nothing held: 277;
@@ -1896,6 +1899,126 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
     2026-10-09 saw no change at `$DC00`/`$DC01` with any controlport or
     joydev setting. The real-scan leg therefore holds rows low through
     DDRB/PRB instead.
+- **1351 mouse (W14-M).** A Commodore 1351 in proportional mode is the
+  Amiga's port-0 mouse.
+  - **Facts used:** SID POTX/POTY (`$D419/$D41A`) give the selected port's
+    position mod 64 in bits 1-6; bit 0 is noise; the SID samples every 512
+    φ2 on its own clock. CIA1 PA7-6 select the pot port. The left button is
+    the port's fire line, the right button its UP line.
+  - **Ports.** `inp_mport` (host): 0 puts the mouse on port 1 and the stick
+    on port 2 (the default); 1 swaps them. Step 1 reads both ports with
+    DDRA = DDRB = `$00`: port 1 is `~PRB & $1F` (no column is driven, so no
+    key reaches it), port 2 is `~PRA & $1F`.
+    - The mouse port's lines go to `inp_mb` (bit 4 left, bit 0 right). The
+      other port is the stick (`inp_joy`, with `inp_stuck`).
+    - The one electrical path left is the same as on any C64: a port-2 line
+      held low (for example the stuck UP, column 0) plus a key in that
+      column shorts the key's row. With the mouse on port 1, the column-0
+      keys (DEL, RETURN, the cursor keys, F1/F3/F5/F7) then read as port-1
+      lines: F1 → row 4 → the left button, DEL → row 0 → the right button.
+    - The keys behave as in W13-I: a mouse button held makes its row
+      unknown, so F1 keeps its state while the left button is down.
+  - **Sampling.** The frame hook runs only once per guest frame, about
+    8.7 Hz at s = 3. The 1351 aliases beyond ±31 counts per read, so the
+    pots are sampled by **mach event slot 7**:
+    - callback `inp_msamp`; the host stores `mach_cbv[7]` and the period
+      `inp_mper` (u32 E ticks; 0 = off). The launchers use
+      8192 φ2 = `$2000 >> s`, about 120 Hz in real time (≈ 3.7k counts/s).
+    - each sample re-arms itself (`marm`, LOWCODE). The frame hook also
+      re-arms at now + `inp_mper` after every scan, so a sample is always
+      at least 8192 φ2 after the last port-select change. The SID needs
+      one full 512-φ2 window. The wait is measured in the time base's E
+      ticks (CIA #2 φ2), not CPU loops, so it holds at any CPU speed.
+    - with the override (`inp_src` = 1) the slot runs too and decodes the
+      host-written `inp_mpot` (the scripted mouse); otherwise `inp_mpot`
+      := the SID's pots.
+  - **Decode** (`inp_msamp`, `host/inp_ref.m1351_delta`). Per axis, v =
+    pot & `$7E`, d = (v − old) mod 128 as a signed 7-bit value / 2
+    (−32..31). JOY0DAT X += dx, Y −= dy (the 1351's Y counts up, the
+    Amiga's down). The scale is 1:1, one 1351 count per Amiga count. The
+    first sample after `inp_mok` = 0 only sets the reference.
+  - **Buttons.** Left = (stick fire | mouse left) → /FIR0. Right = C= |
+    mouse right → POTINP DATLY (`inp_pot`).
+  - **Cost** (leg `cost`, VICE cycles, the same at any CPU speed):
+    - `inp_msamp`: 531 cycles per sample, with its re-arm (`mach_etime` +
+      `mach_arm`). At 8192 φ2 per sample (≈ 120 Hz real time on the
+      Ultimate, any s) that is ≈ 64k cycles/s, ≈ 0.1 % of the CPU at 64 MHz.
+    - the frame hook's re-arm: +384 cycles per frame, ≈ 3.3k cycles/s at
+      s = 3 (8.7 frames/s).
+    - with the override and `inp_mper` = 0 (`run_irq`'s rig) nothing is
+      armed. Leg `guest` checks `mach_am` bit 7.
+  - **M2: the left button's edge queue** (machine-mode module
+    `tests/aros/inpm.s` at `$C980-$C9FE`, 126 of 127 B; supervisor range,
+    asserted).
+    - **MAIN** (in `inp.s`):
+      - `inp_mod`, the ID-guarded call. `inp_mon` = the module's ID byte 0,
+        compared with `$C983` on every call; a mismatch disarms (`inp_mon`
+        := 0).
+      - `inp_mrearm` (LOWCODE).
+      - BSS `inp_mon`, `inp_ml`, `inp_mlast`, `inp_mq` (2), `inp_md`, `inp_lf`.
+      - Both call sites end in it: `inp_frame` with X = 0, `inp_msamp` with
+        X = 3.
+    - **No module** (`inp_mon` = 0, or a module that does not match): M1's
+      behaviour exactly (leg `queue`'s no-module case, and every M1 leg
+      runs without it).
+    - **Each call** looks at the mouse lines: `inp_ml` with the override,
+      else CIA1 with DDRA = `$00`, then the select back. Every left press
+      edge is counted in `inp_mq`.
+    - **The frame call** delivers one left transition per guest frame:
+      - delivered, and (up now or a press pending) → released;
+      - not delivered, and a press pending → pressed.
+      So a click shorter than a frame is one pressed frame, and two clicks
+      inside one frame are P, R, P, R (leg `queue`, `host/inp_ref.Queue`).
+      Then `inp_mb` := delivered left | right now, and /FIR0 := stick fire
+      | delivered left. The right button is not queued (127 B; menus hold
+      it). With the module armed, the scripted mouse's lines go in
+      `inp_ml`, not `inp_mb`.
+    - **Resume.** The rule is the same as spr: a resume comes up with the
+      module **disarmed**, and the launcher re-arms it.
+      - `snap.s`'s restore zeroes `inp_mon` next to its `spr_vec` store
+        (supervisor, at the merge). `host/tests/test_snap_file.py` has the
+        test; it is an expected failure until the store lands.
+      - `tests/aros_wb.arm_inpm(m)` runs after staging and after every
+        resume (`resume_workbench`, alongside `arm_spr`). `run_inp` arms it
+        the same way (`stage_inpm`).
+      - The queue state itself (`inp_mlast`, `inp_mq`, `inp_md`) is MAIN BSS
+        and in the image. `arm_inpm` resets it to idle.
+      - The 1-byte ID guard (a different build matches with p = 1/256) is
+        not relied on after a resume.
+    - **Limits** (supervisor, accepted):
+      - the right button is not queued (the module's 127 B): it is the
+        line's state now;
+      - the stick's ramp is not time-scaled by elapsed guest frames (no
+        bytes left): a catch-up pass moves one frame's step; the faster ramp
+        below is used instead.
+    - **Cost** (leg `cost`, VICE cycles): with the module armed, the frame
+      is +101 cycles (override) / +125 (real), and a sample 595 (+50).
+    - **Ramp:** not time-scaled: the CODE (9 B), LOWCODE (4 B) and module
+      (1 B) left are not enough for a mach_frames delta. The stick's ramp is
+      faster instead (W14-M, 0 B): step = 1 + n, cap `INP_CAP` = 32 counts
+      per frame (was 1 + n/2, cap 16).
+      - Measured on VICE (`aros_wb --e2e-ramp`, the pointer read every guest
+        frame; AROS shows 2 counts per lores pixel): 1.17 lores px/frame at
+        the start and 16.0 at the cap. On the C64U at s = 3 (8.7 frames/s)
+        that is ≈ 10 px/s and ≈ 144 px/s. 320 lores px take 2.2 s at the
+        cap, about 4 s from rest.
+      - AROS moves the sprite 3 frames after the counters change (the
+        series' first 3 frames read 0).
+  - **Closed loops on the pointer** (scripted input, the demo helpers).
+    AROS moves the pointer sprite from JOY0DAT a few guest frames after
+    the counters change, so a sprite position read right after a move is
+    stale. `tests/aros_wb.py E2E.mgoto` therefore moves at most half the
+    remaining distance per step, waits 2 frames, and stops only on a
+    position that still holds 4 frames later. Its first version stopped on
+    a stale position 23 lines past the icon, and the double-click missed.
+  - **VICE** emulates a 1351 (`-controlport1device 3`) but takes it only
+    from the host mouse. The harness's binary monitor has no mouse or pot
+    command (c64-test-harness `backends/vice_binary.py:61-84`), and with
+    `sound=False` `$D419/$D41A` read `$FF` (`backends/vice_lifecycle.py:60`,
+    `:638-640`). So the scripted legs use the override:
+    - `run_inp` `mouse` and `msamp`;
+    - `tests/aros_wb.py --legs e2e --e2e-mouse`.
+    The real SID path is covered by `--attended --mouse 1`.
 - **Stuck mask** (`inp_stuck`, MAIN BSS, 0 after the BSS clear,
   host-set; demo 2026-10-11).
   - The real scan reads the stick as `~(PRA | inp_stuck) & $1F`, so a
@@ -1914,8 +2037,10 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
       the device (`--attended --stuck 0x01`).
 - **Rule** (per frame, from `inp_joy`/`inp_key`; `host/inp_ref.Inp`):
   - **Mouse.** dir = joy & `$0F`. n = `inp_n`, set to 0 when dir = 0.
-    step = 1 + n/2, then n += 1 while n < `INP_NMAX` (30). The steps run
-    1, 1, 2, 2, ..., `INP_CAP` = 16 counter units per frame.
+    step = 1 + n, then n += 1 while n < `INP_NMAX` (31). The steps run
+    1, 2, 3, ..., `INP_CAP` = 32 counter units per frame (W14-M; W13-I
+    had 1 + n/2 up to 16). The centred frame counts, so a tap after centring
+    moves 2 counts (1 lores px in AROS).
     - Up subtracts the step from JOY0DAT's Y counter (`chip_shd+$0A`, the
       high byte), down adds it. Left and right do the same on the X
       counter (`chip_shd+$0B`). Each counter is a u8 and wraps, as on the
@@ -1950,12 +2075,14 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
     resume must write `inp_src` = 0 after the resume for the user's stick
     to work.
 - **State.** `inp_src`, `inp_joy`, `inp_key`, `inp_view`, `inp_n`,
-  `inp_kp`, `inp_stuck` (MAIN BSS, in this order, zero = idle; inp.s links after
+  `inp_kp`, `inp_stuck`, then W14-M's `inp_mport`, `inp_mper` (4), `inp_mpot` (2),
+  `inp_mb`, `inp_mold` (2), `inp_mok` (MAIN BSS, in this order, zero = idle; inp.s links after
   mach.s and before snap.s, so the W12-T snapshot image carries them, I2).
   Scratch: rc zp `inp $9A-$9B` (`inp_t`, `inp_u`). It is live only inside
   one call and not saved or restored: the "free zp" row of the
   suspend/resume inventory now starts at `$9C`.
-- **Host-visible** (`runner.lbl`): `inp_frame`, `inp_pot`, `inp_src`,
+- **Host-visible** (`runner.lbl`): `inp_frame`, `inp_pot`, `inp_msamp`,
+  `inp_mport`, `inp_mper`, `inp_mpot`, `inp_mb`, `inp_mok`, `inp_src`,
   `inp_joy`, `inp_key`, `inp_view`, `inp_n`.
 - **Link order.** inp.s links after mach.s and before snap.s (Makefile).
   - chip.s keeps its size. Only mach.s grows (+3 B, the call), so only

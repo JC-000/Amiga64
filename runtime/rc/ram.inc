@@ -105,6 +105,9 @@ CIA1_DDRA   = $DC02     ; CIA 1 data direction A
 .ifndef CIA1_DDRB
 CIA1_DDRB   = $DC03     ; CIA 1 data direction B
 .endif
+.ifndef SID_POTX
+SID_POTX    = $D419     ; W14-M inp: SID POTX (POTY at +1), the selected port's pots (1351 position)
+.endif
 .ifndef VIC_COLRAM
 VIC_COLRAM  = $D800     ; W7-V c2v: VIC colour RAM (low nibbles), written by runtime/ops/c2v.s
 .endif
