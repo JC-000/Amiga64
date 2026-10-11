@@ -138,7 +138,7 @@ def test_blank_reasons(kw, why):
 
 def test_diw_v8_and_crop():
     d = R.disp_decide(st(diwstop=0x2CC1))        # V7 = 0 -> V8 = 1: $12C
-    assert (d["lines"], d["src"][0]) == (200, 0x100000 + 28 * 40)
+    assert (d["lines"], d["src"][0]) == (200, 0x100000)   # W14-D: top crop (was + 28 rows)
     d = R.disp_decide(st(diwstop=0xC2C1))        # $C2 - $2C = 150
     assert d["lines"] == 150 and d["src"][0] == 0x100000
 

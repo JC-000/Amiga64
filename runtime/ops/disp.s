@@ -62,7 +62,8 @@
 ; (LUT colour bit 3 lost), DISP_MUT_W12RUN (LUT run length bit 3 lost).
 ; W13-D: DISP_MUT_W13PX (the 1:1 window's byte offset lost),
 ; DISP_MUT_W13EDGE (inp_view bit 0 never consumed), DISP_MUT_W13LSR (LACE's
-; advance halved by a logical shift), DISP_MUT_W13BPU5 (hires BPU 5 converts).
+; advance halved by a logical shift), DISP_MUT_W13BPU5 (hires BPU 5 converts); W14-D: DISP_MUT_W14CROP (the old
+; centre crop).
 ;
 ; Link layout: CODE and BSS are each padded to whole pages, no RODATA or
 ; DATA, so modules linked after this one move by whole pages only.
@@ -208,7 +209,7 @@ disp_laste: .res 4              ; E (mach_et) when the last conversion ended
 disp_bud:   .res 1              ; nonzero: disp_laste is a budget reference
 disp_pix:   .res 1              ; W11-A: pixel epoch (disp_st+105) when last taken
 disp_lines: .res 1              ; lines shown (<= DISP_LINES)
-disp_crop:  .res 1              ; rows skipped at the top (centre crop)
+disp_crop:  .res 1              ; rows skipped at the top (W14-D: 0 in the fit view)
 disp_dm:    .res 1              ; candidate mode
 disp_np:    .res 1              ; planes converted (2 / 4)
 disp_wid:   .res 1              ; row bytes converted (40 / 80)
@@ -682,7 +683,9 @@ disp_decide:
         beq @no
         cmp #DISP_LINES + 1
         bcc @small
-@big:   sec                     ; crop = (L - lines) / 2
+@big:
+.ifdef DISP_MUT_W14CROP                ; mutant: the W10-W13 centre crop
+        sec
         lda disp_t
         sbc #DISP_LINES
         sta disp_t
@@ -692,6 +695,10 @@ disp_decide:
         lda disp_t
         ror
         sta disp_crop
+.else
+        lda #0                  ; W14-D: crop 0, the top 200 lines (was the
+        sta disp_crop           ; centre, (L - lines) / 2)
+.endif
         lda #DISP_LINES
         bne @lset
 @no:    sec
@@ -1293,8 +1300,7 @@ disp_vw:
         sta disp_view
         lda #DISP_PXC
         sta disp_px
-        lda disp_ymax           ; the window centred: half the 1:1 range
-        lsr
+        lda #0                  ; W14-D: the window's top line (was disp_ymax / 2)
         sta disp_py
         sec
 @x:     rts

@@ -366,7 +366,8 @@ def disp_decide(st: dict) -> dict:
     is even, BPL2MOD if odd; pointers and modulos ignore bit 0 (word DMA).
     Row n+1 of plane p starts fetch + mod after row n; the converter takes
     the first 40/80 bytes of each row (skip = fetch - row + mod).  More than
-    200 lines: centre crop ((L - 200) // 2 rows skipped); fewer: the
+    200 lines: W14-D, the first 200 from DIWSTRT (a bottom crop; was the
+    centre, (L - 200) // 2 rows skipped); fewer: the
     converted lines L..199 are cleared to colour 0 afterwards."""
     r = {"mode": MODE_BLANK, "why": WHY_OK, "src": [0] * 4, "skip": [0] * 4,
          "lines": 0, "width": 0, "fetch": 0}
@@ -406,7 +407,7 @@ def disp_decide(st: dict) -> dict:
     if fetch < width or any(not -0x8000 <= k <= 0x7FFF for k in skip):
         r["why"] = WHY_DDF
         return r
-    crop = max(0, (lines - C2V_LINES) // 2)
+    crop = 0                            # W14-D: the top 200 lines (was (L - 200) // 2)
     src = [((st["bplpt"][p] & 0xFFFFFE) + crop * (width + skip[p])) & 0xFFFFFF
            for p in range(n)]
     for p in range(n):
@@ -481,6 +482,7 @@ def pack_skip(skip: list[int]) -> bytes:
 ONE_ROW = 40                    # bytes of each plane row in the window
 LACE = 0x0004                   # BPLCON0 bit 2: interlace (1:1 view: both fields)
 PX_CENTRE, PX_MAX = 20, 40      # disp_px: the window's first byte (centred / last)
+ONE_PY_DEFAULT = 0              # W14-D: F1's 1:1 window starts at the top (was ymax // 2)
 NO_FG = 0xFF                    # c2v_ones: a cell without a second pen
 
 
@@ -548,7 +550,7 @@ def disp_decide_view(st: dict, view: int = 0, px: int = PX_CENTRE,
     lines = vstop - vstart
     lace = bool(st["bplcon0"] & LACE)
     d["ymax"] = min(255, max(0, lines - (C2V_LINES // 2 + 1 if lace else C2V_LINES)))
-    d["crop"] = max(0, (lines - C2V_LINES) // 2)
+    d["crop"] = 0                       # W14-D: the fit view keeps the top
     d["lace"] = lace
     if view and d["mode"] == MODE_HIRES:
         crop = min(py, d["ymax"])

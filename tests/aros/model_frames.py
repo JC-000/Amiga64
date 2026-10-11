@@ -53,6 +53,8 @@ INSERT_DISK_FRAME = 345
 VIC_MASK = {0xD011: 0x7F, 0xD016: 0x1F, 0xD018: 0xFE, 0xD020: 0x0F, 0xD021: 0x0F}
 MIN_VISIBLE = 3                 # W12-V V3: distinct non-background colours in use
 MCK_VERSION = 2                 # W12-V: disp_mck = Fletcher mod 255 (1: mod 256)
+CROP_RULE = "top"               # W14-D: the fit view's crop (c2v_ref.disp_decide); a JSON
+                                # without it ("centre", the W13 rule) is rebuilt by its loader
 
 
 def conv_hash(bitmap: bytes, screen: bytes | None, colram: bytes, vic: dict,
@@ -115,12 +117,10 @@ WB_TAIL_S = 20.0                # W13-W: frames kept after the model's boot idle
 def title_mask_rows(st: dict, title_lines: int) -> list[int]:
     """W13-W: the C64 character rows that show the Amiga lines
     0 .. title_lines-1 (Workbench's title bar, whose free-memory text
-    changes) in the fit view: the conversion takes DIW's lines from the
-    centre-crop (disp_decide: (L - 200) // 2 lines skipped).  Empty when the
-    crop hides the whole bar."""
-    vstart = (st["diwstrt"] >> 8) & 0xFF
-    vstop = ((st["diwstop"] >> 8) & 0xFF) | ((~st["diwstop"] >> 7) & 0x100)
-    crop = max(0, (vstop - vstart - 200) // 2)
+    changes) in the fit view: the conversion takes DIW's first 200 lines
+    (W14-D: no crop at the top; it was the centre-crop, (L - 200) // 2
+    lines skipped).  Empty when the crop hides the whole bar."""
+    crop = 0                    # W14-D: c2v_ref.disp_decide's crop
     lines = range(max(0, -crop), max(0, title_lines - crop))
     return sorted({y // 8 for y in lines if y < 200})
 
@@ -218,6 +218,7 @@ def wb_main(a) -> int:
     with open(a.out, "w") as fp:
         json.dump({"adf": os.path.basename(a.adf), "startup": a.startup,
                    "overlay": ov.info(), "mck_version": MCK_VERSION,
+                   "crop_rule": CROP_RULE,
                    "markers": marks, "frames": am.frames, "tail_s": WB_TAIL_S,
                    "hle_served": am.hle.served, "hle_passed": am.hle.passed,
                    "title_lines": title_lines,
@@ -281,7 +282,7 @@ def main(argv=None) -> int:
         return 1
     with open(a.out, "w") as fp:
         json.dump({"from": a.lo, "to": a.hi, "insert_disk_frame": INSERT_DISK_FRAME,
-                   "mck_version": MCK_VERSION,
+                   "mck_version": MCK_VERSION, "crop_rule": CROP_RULE,
                    "hashes": seen,
                    # the boot's serial debug text (milestones 1-2 compare it)
                    "serial": am.serial.decode("latin-1")}, fp, indent=1)

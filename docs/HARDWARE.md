@@ -1253,3 +1253,22 @@ hold (`build/evidence/w13-wb/SESSION.log`).
 --prg build/<final>/runner.prg --legs demo --backend u64 --mhz 64 --vol
 /SD` resumes it (guest running 7.6 s after the launch). It needs a PRG
 with the same build ID and the same td module.
+
+## Wave 14 hardware findings (2026-10-11, C64U 10.53.21.158, fw 1.1.0)
+
+- **The 1351 mouse at turbo (open).** A genuine Commodore 1351 in port 1, measured with `tests/run_inp.py --attended --mouse-diag` (evidence: the w14-mouse worktree's `build/evidence/w14-mouse/diag/run1.log`):
+
+  | Config | POTX while moving | POTY while moving |
+  |---|---|---|
+  | 1 MHz, no frame scan | $51-$D3 (120 values), full | $4D-$CE |
+  | 64 MHz, no frame scan | $60-$80 (33 values) | $5C-$7C |
+  | 64 MHz, production scan + module | $60-$80 | $5C-$7B |
+
+  - At the 64 MHz turbo the SID pot readings compress to about a quarter of their range. This holds with the real 8580s, with UltiSID, and with Paddle Override on or off.
+  - The 1351 decode (mod 128) then sees each wrap as a reverse move, so the Workbench pointer stays in a small box.
+  - The buttons are fine: right = PB0, left = PB4, also at 64 MHz.
+  - Planned fix (CONTRACTS "Input", known limit): drop the CPU to 1 MHz through $D031 (Turbo Control = "C64U Turbo Registers") around each pot read.
+- **Firmware defaults instead of flash.** For part of the day the C64U ran on firmware defaults, not its saved settings: SID sockets Disabled ("None", 470 pF) although 8580s are fitted, network services Disabled, TimeZone Western Europe, Paddle Override Enabled. A power cycle loaded the flash settings again. The harness does not write those categories (c64-test-harness-c2; harness issue #530 proposes a check).
+  - u64_hold restores only the categories it snapshots, so a hold passes such a state through unchanged. Before SID or input work, check that the SID Sockets read Enabled/8580.
+- **Don't open the Ultimate menu while a hold runs.** Opening the C64U's firmware menu during a hold wedged it: REST timed out, the hold's config restore failed, and only a hard power cycle recovered it.
+- **The joystick used in Wave 13** has its UP switch stuck closed: port 2 reads $01 when idle. `inp_stuck` = $01 masks it (`--stuck 0x01`). With it, Workbench could be driven by joystick (left, right and down).

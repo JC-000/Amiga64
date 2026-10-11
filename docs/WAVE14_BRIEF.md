@@ -89,3 +89,15 @@ Supervisor-authored, **binding**.
 - One C64U run of your package leg, **after asking**.
 
 The supervisor merges W14-M then W14-D, re-runs the gate, has a fresh adversarial reviewer per package, and runs the attended mouse demo with the user.
+
+## Addendum: state at landing (2026-10-11, supervisor)
+
+- **W14-D** (top-anchored fit view): rev14-vis said MERGE. Follow-ups from that review:
+  - the 1:1 view can't reach the insert-disk text: F1 opens at the top, and an empty pointer never pans;
+  - the Ultimate w3 hash drops disp_mck now that the title rows are masked;
+  - the 1:1 straddle check in c2v_ref uses the fit window;
+  - stale "centred" comments.
+- **W14-M** (1351 + polish): rev14-mouse's round-1 verdict was FIX. Fix round 1 is done: the per-frame clamp; the decode moved into the module, now two segments $C980-$C9FE and $CF00-$CFEF under one ID; new teeth; the production-path attended leg; the diag mode. **Round 2 of rev14-mouse's review is still open.**
+  - Known limit: the 1351 at turbo (docs/HARDWARE.md).
+  - Supervisor at the merge: snap.s zeroes inp_mon on resume, as it does spr_vec.
+- **MAIN layout limit:** CODE must end below $8D00 and LOWCODE below $0900; BSS ends at $9F47. A future wave needs a MAIN restructure.

@@ -86,6 +86,7 @@ VARIANTS = {
     "w13px": ["DISP_MUT_W13PX=1"],
     "w13edge": ["DISP_MUT_W13EDGE=1"], "w13lsr": ["DISP_MUT_W13LSR=1"],
     "w13bpu5": ["DISP_MUT_W13BPU5=1"],
+    "w14crop": ["DISP_MUT_W14CROP=1"],   # W14-D: the centre crop back
 }
 NOT_TEETH = ("stub", "lutram", "trace")
 TEETH = [k for k in VARIANTS if k not in NOT_TEETH]
@@ -101,7 +102,8 @@ MUTANT_LEGS = {"bitorder": ["shim", "fixture"], "pal": ["shim", "fixture"],
                "w12up": ["shim"], "w12mck": ["shim"], "w12rle": ["shim"],
                "w12run": ["shim"],            # W11-A (supervisor grant, efrom)
                "w13px": ["view"], "w13edge": ["view"],
-               "w13lsr": ["view"], "w13bpu5": ["view"]}
+               "w13lsr": ["view"], "w13bpu5": ["view"],
+               "w14crop": ["shim", "view"]}
 
 
 def build(prg: str, name: str, defines: list[str], shim: bool) -> str:
@@ -1287,7 +1289,7 @@ def view_steps() -> list[dict]:
     return [
         {"name": "fit", "st": st, "act": "refresh", "view": (0, 20, 0)},
         {"name": "f1-to-1:1", "st": st, "act": "kick", "pre": {"inp_view": 0x81},
-         "view": (1, 20, 28)},                  # centred: px 20, the fit crop
+         "view": (1, 20, 0)},                   # px 20 centred, W14-D: the top line
         {"name": "same-no-conv", "st": st, "act": "kick", "pre": {"inp_view": 0x80},
          "view": None},
         {"name": "test-offset", "st": st, "act": "refresh",
@@ -1318,7 +1320,7 @@ def view_steps() -> list[dict]:
         {"name": "lace-fit", "st": dict(LACE_ST, gen=0x2A), "act": "kick",
          "pre": {"disp_view": 0}, "view": (0, 20, 0)},
         {"name": "lace-f1-centre", "st": dict(LACE_ST, gen=0x2A), "act": "kick",
-         "pre": {"inp_view": 1}, "view": (1, 20, 77), "exact": True},   # ymax 155
+         "pre": {"inp_view": 1}, "view": (1, 20, 0), "exact": True},    # W14-D: the top
         {"name": "lace-odd-top", "st": dict(LACE_ST, gen=0x2B,
                                             bplpt=[LACE_BASE + 80, LACE_BASE + 0xA050]),
          "act": "refresh", "pre": {"disp_px": 0, "disp_py": 0}, "view": (1, 0, 0),

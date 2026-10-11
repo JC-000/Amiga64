@@ -447,7 +447,6 @@ def test_refused_resume_leaves_spr_vec(build):
 # The snap.s store (inp_mon := 0 next to spr_vec+1) is the supervisor's at
 # the merge: until then the disarm test is an expected failure (strict: it
 # must be flipped when the store lands).
-@pytest.mark.xfail(strict=True, reason="snap.s inp_mon store: supervisor, at the W14-M merge")
 def test_file_resume_disarms_the_input_module(build):
     f, _r0 = suspended_file(build)
     r = fresh(build, f)
