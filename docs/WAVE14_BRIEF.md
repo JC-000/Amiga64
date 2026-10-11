@@ -102,3 +102,11 @@ The supervisor merges W14-M then W14-D, re-runs the gate, has a fresh adversaria
   - Supervisor at the merge: snap.s zeroes inp_mon on resume, as it does spr_vec.
 - **MAIN layout limit:** CODE must end below $8D00 and LOWCODE below $0900; BSS ends at $9F47. A future wave needs a MAIN restructure.
 - **Variant layout:** the FETCH_DIRECT link-check variant shifts core BSS, which put td_fvec on a page end ("jmp (abs)" straddle). The td vector asserts are now product-layout only (`.ifndef FETCH_DIRECT`); a layout-independent vector placement is a follow-up.
+- **rev14-mouse round 2 (c09f941): FIX, landed as a known limit.**
+  - The ±127 per-frame clamp resets at the frame hook, but AROS reads JOY0DAT later, in its VBL handler. A late sample can push one AROS delta to 158 counts, which wraps: an occasional ~50 px backward jerk on a sustained very fast flick. VICE showed 1 in ~15 saturated frames.
+  - Planned fix for the next session: clamp at ±63, or reset the budget on the guest's JOY0DAT read.
+  - Irrelevant on the C64U until the 1351-at-turbo fix lands.
+  - Also noted:
+    - the stale comment in arm_inpm;
+    - a select toggle ~10 cycles before each SID read;
+    - the production frame hook (~+690 cycles with the module armed) is not covered by the lag gate.
