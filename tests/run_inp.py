@@ -75,14 +75,14 @@ EVID = os.path.join(ROOT, "build", "evidence", "w14-mouse")
 VBCC = os.environ.get("VBCC", os.path.expanduser("~/.local/opt/vbcc"))
 FIXTURE = os.path.join(ROOT, "fixtures", "inp", "inp_log.s")
 
-FSTUB = 0xC780            # buf_case tail: php / sei / jsr inp_frame / plp / rts
-MSTUB = 0xC788            # the same for inp_msamp (W14-M)
+FSTUB = 0xC900            # php / sei / jsr inp_frame / plp / rts ($C900-$C96F: past the
+MSTUB = 0xC908            # mach driver at $C200-$C7C1, before inp's module at $C980)
 JOY0DAT, POTINP, CIAA_PRA = 0xDFF00A, 0xDFF016, 0xBFE001
 JOY0 = 0x0A               # JOY0DAT in chip_shd (inp.s INP_JOY0)
 LOG = 0x20000             # fixtures/inp/inp_log.s LOG
 FRAMES = 16               # fixtures/inp/inp_log.s FRAMES
 GUEST_S = 2               # mach_s for the guest runs (18 frames/s on NTSC phi2)
-ALL_LEGS = ["api", "guest", "real", "cost", "stuck", "mouse", "msamp", "queue"]
+ALL_LEGS = ["api", "guest", "real", "cost", "stuck", "mouse", "msamp", "queue", "mreal"]
 U64_LEGS = ["api", "guest", "real", "noinj"]
 VERBOSE = False
 STUCK = 0                 # --stuck: inp_stuck written by every reset (attended/demo)
@@ -279,11 +279,12 @@ GUEST_RUNS = [(RIGHT, 0), (RIGHT | DOWN | FIRE, 0), (LEFT, CBM),
               (0, F1), (UP | LEFT | FIRE, CBM), (UP, 0)]
 
 
-def fixture_words() -> list[int]:
+def fixture_words(frames: int | None = None) -> list[int]:
     import tempfile
     with tempfile.TemporaryDirectory() as d:
         out = os.path.join(d, "inp_log.bin")
-        r = subprocess.run([os.path.join(VBCC, "bin", "vasmm68k_mot"), "-quiet",
+        dfr = [f"-DFRAMES={frames}"] if frames else []
+        r = subprocess.run([os.path.join(VBCC, "bin", "vasmm68k_mot"), "-quiet", *dfr,
                             "-Fbin", "-o", out, FIXTURE], capture_output=True, text=True)
         if r.returncode:
             raise RuntimeError(f"vasm failed: {r.stdout}{r.stderr}")
@@ -451,7 +452,7 @@ def leg_noinj(rig: Rig) -> list[str]:
 # cost: 6502 cycles per inp_frame (CIA1 timer B, phi2 = one cycle in VICE)
 # --------------------------------------------------------------------------
 
-CSTUB, COUT = 0xC740, 0xC7E0
+CSTUB, COUT = 0xC910, 0xC960        # (as FSTUB: outside the mach driver)
 
 
 def cycles(rig: Rig, target: int) -> int:
@@ -530,36 +531,36 @@ def leg_cost(rig: Rig) -> list[str]:
 
 
 def leg_mouse(rig: Rig) -> list[str]:
-    """W14-M: the 1351 with the override (inp_src = 1; VICE's 1351 takes
-    the host mouse only, see CONTRACTS "Input").  inp_msamp called by the
-    host like a slot firing, with scripted pots (POTY, POTX), bit-0 noise,
-    the mod-64 wrap and the +-31 limit; JOY0DAT against host/inp_ref after
-    every sample.  Then the buttons through inp_mb with frames: left ->
-    /FIR0, right -> POTINP DATLY, OR-ed with the stick's fire and C=, both
-    buttons while the pointer moves."""
+    """W14-M: the 1351 decode (tests/aros/inpm.s, staged and armed) with the
+    override (inp_src = 1; VICE's 1351 takes the host mouse only, CONTRACTS
+    "Input"): inp_msamp called by the host like a slot firing, a frame every
+    4 samples; scripted pots (POTY, POTX) with bit-0/bit-7 noise, the mod-64
+    wrap, the +-31 limit; JOY0DAT against host/inp_ref after every sample.
+    The clamp (rev14-mouse HIGH-1): 14 samples of +31 counts inside one
+    frame deliver +127 (X) / -127 (Y), not a wrap.  Then the buttons (lines
+    in inp_ml, each held 2 frames): left -> /FIR0, right -> POTINP DATLY,
+    OR-ed with the stick's fire and C=."""
     rig.need()
     if not rig.mouse:
         return ["mouse: this PRG has no inp_msamp (no W14-M)"]
     f: list[str] = []
     rig.reset(src=1)
-    pot, mb = rig.lab("inp_mpot"), rig.lab("inp_mb")
+    stage_inpm(rig)
+    pot, ml = rig.lab("inp_mpot"), rig.lab("inp_ml")
     m = Inp()
     rng = random.Random(1351)
     y = x = 0x40
     seq = [(y, x)]
     for i in range(120):                       # a square, then random moves
-        k = i // 30
-        dy, dx = ((0, 6), (6, 0), (0, -6), (-6, 0))[k] if i < 120 else (0, 0)
+        dy, dx = ((0, 6), (6, 0), (0, -6), (-6, 0))[i // 30]
         y, x = (y + 2 * dy) & 0x7E, (x + 2 * dx) & 0x7E
         seq.append((y, x))
     for _ in range(80):
         y = (y + 2 * rng.randint(-31, 31)) & 0x7E
         x = (x + 2 * rng.randint(-31, 31)) & 0x7E
         seq.append((y, x))
-    for i, (py, px) in enumerate(seq):
-        ny, nx = py | rng.randint(0, 1), px | rng.randint(0, 1)   # bit-0 noise
-        if rng.random() < 0.2:
-            ny |= 0x80                          # bit 7 (not a 1351 bit)
+
+    def sample(i, ny, nx):
         rig.w(pot, bytes([ny, nx]))
         rig.msamp()
         want = m.msamp(ny, nx)["joy0dat"]
@@ -567,65 +568,145 @@ def leg_mouse(rig: Rig) -> list[str]:
         if got != want:
             f.append(f"mouse sample {i}: pots ${ny:02X} ${nx:02X}: JOY0DAT "
                      f"${got:04X}, want ${want:04X}")
-            if len(f) > 5:
-                return f
+        return got
+
+    for i, (py, px) in enumerate(seq):
+        if i % 4 == 0:
+            rig.frame()
+            m.frame(0, 0)
+        ny, nx = py | rng.randint(0, 1), px | rng.randint(0, 1)   # bit-0 noise
+        if rng.random() < 0.2:
+            ny |= 0x80                          # bit 7 (not a 1351 bit)
+        sample(i, ny, nx)
+        if len(f) > 5:
+            return f
+    # the clamp: 14 x +31 counts in one frame (X right, Y up = Amiga -)
+    rig.frame()
+    m.frame(0, 0)
+    j0 = rig.state()["joy0dat"]
+    for k in range(14):
+        y, x = (y + 62) & 0x7E, (x + 62) & 0x7E
+        j1 = sample(f"clamp{k}", y, x)
+    dy = ((j1 >> 8) - (j0 >> 8)) & 0xFF
+    dx = ((j1 & 0xFF) - (j0 & 0xFF)) & 0xFF
+    log(f"  mouse clamp: 14 x +31 counts in one frame -> dx {dx} (want 127), "
+        f"dy {dy - 256 if dy > 127 else dy} (want -127)")
+    if (dx, dy) != (127, 0x81):
+        f.append(f"mouse clamp: one frame's 14 x +31 counts gave dx {dx} dy {dy}, "
+                 "want +127 / -127 (AROS reads s8 per frame: no wrap)")
+    # a port change takes a new reference (rev14-mouse LOW h): a jump of
+    # +20 counts across the change must not move the pointer
+    rig.frame()
+    m.frame(0, 0)
+    j0 = rig.state()["joy0dat"]
+    rig.w(rig.lab("inp_mport"), b"\x01")
+    rig.frame()                                 # the module sees the change
+    rig.w(pot, bytes([y, (x + 40) & 0x7E]))
+    rig.msamp()
+    rig.w(rig.lab("inp_mport"), b"\x00")
+    rig.frame()
+    rig.w(pot, bytes([y, (x + 80) & 0x7E]))
+    rig.msamp()
+    j1 = rig.state()["joy0dat"]
+    log(f"  mouse port change: JOY0DAT ${j0:04X} -> ${j1:04X} (want unchanged)")
+    if j1 != j0:
+        f.append(f"mouse: across a port change JOY0DAT ${j0:04X} -> ${j1:04X}: the "
+                 "first sample after a change must be a new reference")
+    m.mold = [y & 0x7E, (x + 80) & 0x7E]
     for joy, key, b in ((0, 0, FIRE), (0, 0, UP), (0, 0, FIRE | UP),
                         (FIRE, 0, UP), (0, CBM, FIRE), (0, 0, 0)):
         rig.set_input(joy, key)
-        rig.w(mb, bytes([b]))
+        rig.w(ml, bytes([b]))
         rig.frame()
+        rig.frame()                             # the queue delivers within 2 frames
+        m.frame(joy, key, mb=b)
         want = m.frame(joy, key, mb=b)
         g = rig.api_read()
         if (g["pra"], g["potinp"]) != (want["pra"], want["potinp"]):
-            f.append(f"mouse buttons joy ${joy:02X} key ${key:02X} mb ${b:02X}: "
+            f.append(f"mouse buttons joy ${joy:02X} key ${key:02X} lines ${b:02X}: "
                      f"PRA ${g['pra']:02X} POTINP ${g['potinp']:04X}, want "
                      f"${want['pra']:02X} ${want['potinp']:04X}")
     rig.reset(src=1)
-    log(f"  mouse: {len(seq)} samples, end JOY0DAT ${m.joy0dat:04X}, "
+    log(f"  mouse: {len(seq)} samples + the clamp, end JOY0DAT ${m.joy0dat:04X}, "
         f"{'ok' if not f else 'FAIL'}")
     return f
 
 
 def leg_msamp(rig: Rig) -> list[str]:
-    """W14-M: the sampler live under mach_run.  Real source (inp_src = 0):
-    the frame hook arms slot 7 (inp_mper > 0, mach_cbv[7] = inp_msamp, as
-    the launcher sets them), the slot fires, inp_msamp reads the SID: in
-    VICE (sound off) $D419/$D41A read $FF, so inp_mpot = $FF $FF, inp_mok
-    = 1 and JOY0DAT does not move.  Override (inp_src = 1): the slot runs
-    too and integrates host-set pots (the scripted e2e path): a +20-count
-    POTX step written before the run moves X by 20, POTY -10 moves Y +10.
-    Red: no slot, inp_mok stays 0."""
+    """W14-M: the sampler live under mach_run (the production path: slot 7,
+    its re-arms, the module armed), s = 3 as on the C64U.
+    Real source (inp_src = 0): the frame hook arms slot 7 (inp_mper =
+    8192 phi2 = $2000 >> s, mach_cbv[7] = inp_msamp, as the launchers set
+    them); the slot fires; the module reads the SID (VICE, sound off: $FF
+    $FF): inp_mok = 1, JOY0DAT still; the samples per guest frame
+    (inp_mns): at most 14188 E / 1024 E = 13.9 (+10%), at least half of it
+    (VICE at 1 MHz: ~9, each sample's pass delays the next; a sampler that
+    re-arms only from the frame hook takes 1).  Override: a POTX +20 / POTY -10 count
+    step written before the run is integrated exactly ($0A14).  Red: no
+    slot, inp_mok stays 0."""
     rig.need()
     if not rig.mouse:
         return ["msamp: this PRG has no inp_msamp (no W14-M)"]
     from tests.run_mach import clean
     f: list[str] = []
+    s = 3
+    per = 0x2000 >> s
     mr = rig.cia.mach_rig()
     (pc,) = mr.stage(fixture_words())
     rig._stub = False
     rig.cia._tramp = None
     rig.reset(src=0)
+    stage_inpm(rig)
     a = rig.lab("inp_msamp")
     rig.w(rig.lab("mach_cbv") + 14, bytes([a & 0xFF, a >> 8]))
-    per = max(1, 8192 >> GUEST_S)
     rig.w(rig.lab("inp_mper"), struct.pack("<I", per))
-    res = mr.run(pc, s=GUEST_S, budget=4_000_000)
+    n0 = struct.unpack("<H", rig.r(rig.lab("inp_mns"), 2))[0]
+    res = mr.run(pc, s=s, budget=8_000_000)
     clean(res, "msamp", f)
+    ns = (struct.unpack("<H", rig.r(rig.lab("inp_mns"), 2))[0] - n0) & 0xFFFF
+    want = FRAMES * 14188 / per
     mok = rig.r(rig.lab("inp_mok"), 1)[0]
     mpot = rig.r(rig.lab("inp_mpot"), 2)
     jd = rig.state()["joy0dat"]
-    log(f"  msamp: inp_mok {mok}, inp_mpot {mpot.hex()}, JOY0DAT ${jd:04X}")
+    log(f"  msamp (s={s}): {ns} samples in {FRAMES} frames ({ns / FRAMES:.1f} a frame, "
+        f"want ~{want / FRAMES:.1f}), inp_mok {mok}, inp_mpot {mpot.hex()}, JOY0DAT ${jd:04X}")
+    # the re-arm counts from NOW (the scan's end), not a stale E: ~80 ms of
+    # 6502 time after the run (mach_et untouched), then a frame must arm
+    # slot 7 at E now + inp_mper
+    rig.w(CSTUB, bytes([0x08, 0x78, 0xA0, 0x40, 0xA2, 0x00, 0xCA, 0xD0, 0xFD, 0x88,
+                        0xD0, 0xF8, 0x28, 0x60]))   # 64 x 256 x 5 cycles
+    rig.cia.call(CSTUB)
+    rig.frame()
+    et = rig.lab("mach_et")
+    e_stub = rig.lab("mach_etime")
+    rig.w(CSTUB, bytes([0x08, 0x78, 0x20, e_stub & 0xFF, e_stub >> 8, 0x28, 0x60]))
+    rig.cia.call(CSTUB)
+    now = struct.unpack("<I", rig.r(et, 4))[0]
+    dl = struct.unpack("<I", rig.r(rig.lab("mach_dl") + 4 * 7, 4))[0]
+    ahead = (dl - now + (1 << 31)) % (1 << 32) - (1 << 31)
+    log(f"  msamp: after a frame scan slot 7 is due {ahead} E ticks ahead (want 0..{per}: "
+        "one period from the scan, the SID's 512 phi2 settle)")
+    if not 0 <= ahead <= per:
+        f.append(f"msamp: slot 7 due {ahead} E ticks from now after a scan, want 0..{per} "
+                 "(marm must take E now, not a stale mach_et)")
     if mok != 1 or mpot != b"\xff\xff" or jd != 0:
         f.append(f"msamp: inp_mok {mok}, inp_mpot {mpot.hex()}, JOY0DAT ${jd:04X} "
                  "(want 1, ffff, $0000: the slot fired and read the SID)")
-    # the override: reference first (inp_mok 1, inp_mold = these pots),
-    # then the pots step and a second run integrates the step
-    rig.reset(src=1)
+    # at 1 MHz (VICE) each sample's pass delays the next (~9 a frame); the
+    # Ultimate at 64 MHz comes close to 13.9.  A sampler that re-arms only
+    # from the frame hook takes 1 a frame, a stale deadline far more.
+    if not 0.5 * want <= ns <= 1.1 * want:
+        f.append(f"msamp: {ns} samples in {FRAMES} frames, want {0.5 * want:.0f}-"
+                 f"{1.1 * want:.0f} (8192 phi2 a sample: the sampler re-arms itself)")
+    rig.reset(src=1)                            # the override: reference, then a step
+    stage_inpm(rig)
+    rig.w(rig.lab("mach_cbv") + 14, bytes([a & 0xFF, a >> 8]))
     rig.w(rig.lab("inp_mper"), struct.pack("<I", per))
     rig.w(rig.lab("inp_mpot"), bytes([0x40, 0x40]))
-    rig.msamp()                                  # the reference
+    rig.frame()                                  # (the source changed: the module
+    rig.msamp()                                  # takes a new reference) the reference
     rig.w(rig.lab("inp_mpot"), bytes([0x40 - 20, 0x40 + 40]))   # POTY -10, POTX +20
-    res = mr.run(pc, s=GUEST_S, budget=4_000_000)
+    res = mr.run(pc, s=s, budget=8_000_000)
     clean(res, "msamp override", f)
     jd = rig.state()["joy0dat"]
     log(f"  msamp override: JOY0DAT ${jd:04X} (want $0A14)")
@@ -637,38 +718,59 @@ def leg_msamp(rig: Rig) -> list[str]:
     return f
 
 
-def stage_inpm(rig: Rig) -> bytes:
-    """W14-M M2: build tests/aros/inpm.s for this PRG, stage it at $C980,
-    arm it (tests/aros_wb.arm_inpm).  Returns the module."""
+def stage_inpm(rig: Rig, defines: tuple = ()) -> bytes:
+    """W14-M: build tests/aros/inpm.s (A at $C980, B at $CF00) for this PRG,
+    stage both, arm it (tests/aros_wb.arm_inpm).  Returns A."""
     from tests import aros_wb as WB
     d = os.path.join(os.path.dirname(os.path.abspath(rig.prg)), "inpm-mod")
     lbl = os.path.splitext(rig.prg)[0] + ".lbl"
+    src = None
     if QMUT[0]:                                  # a module mutant (--qmutants)
-        src = open(os.path.join(ROOT, "tests", "aros", "inpm.s")).read()
+        text = open(os.path.join(ROOT, "tests", "aros", "inpm.s")).read()
         a, b = QMUTANTS[QMUT[0]]
-        assert src.count(a) == 1, f"qmutant {QMUT[0]}: anchor"
+        assert text.count(a) == 1, f"qmutant {QMUT[0]}: anchor"
         os.makedirs(d, exist_ok=True)
-        msrc = os.path.join(d, f"inpm_{QMUT[0]}.s")
-        open(msrc, "w").write(src.replace(a, b))
-        mod = WB.build_module(msrc, 0xC980, 0xC9FF, 3, lbl, d)
-    else:
-        mod = WB.build_inpm(lbl, d)
-    rig.w(0xC980, mod)
-    WB.arm_inpm(type("M", (), {"w": staticmethod(rig.w), "lab": staticmethod(rig.lab)}), mod)
-    return mod
+        src = os.path.join(d, f"inpm_{QMUT[0]}.s")
+        open(src, "w").write(text.replace(a, b))
+    ma, mb = WB.build_inpm2(lbl, d, src, defines)
+    rig.w(WB.INPM_A[0], ma)
+    rig.w(WB.INPM_B[0], mb)
+    WB.arm_inpm(type("M", (), {"w": staticmethod(rig.w), "lab": staticmethod(rig.lab)}), ma)
+    return ma
 
 
 QMUT = [None]
-QMUTANTS = {    # tests/aros/inpm.s mutants (one-off: python3 -m tests.run_inp --qmutants)
+QMUTANTS = {    # tests/aros/inpm.s mutants (python3 -m tests.run_inp --qmutants)
     # no queue: the delivered left button is the lines now (stretch lost)
-    "qnone": ("        lda inp_md              ; 2. delivery (left), one transition a frame\n        beq rel\n",
-              "        tya\n        and #$10\n        bpl set\n"),
+    "qnone": (":       lda inp_md              ; the left button: one transition a frame\n        beq rel\n",
+              ":       tya\n        and #$10\n        bpl set\n"),
     # a pending press does not force the release frame (P,P instead of P,R,P)
-    "qnorel": ("        lda inp_mq              ; delivered: release when up now or another\n        bne up                  ; press is pending\n",
-               "        lda inp_mq              ; delivered: release when up now or another\n        nop\n        nop\n"),
+    "qnorel": ("        lda inp_mq              ; delivered: release when up now or a press\n        bne up                  ; is pending\n",
+               "        lda inp_mq              ; delivered: release when up now or a press\n        nop\n        nop\n"),
     # the sampler does not count edges (only the frame looks)
-    "qnosamp": ("        inc inp_mq\n:       cpx #0", "        nop\n        nop\n        nop\n:       cpx #0"),
+    "qnosamp": ("bbody:  jsr look\n", "bbody:  nop\n        nop\n        nop\n"),
+    # the 1351's Y not negated (the pointer moves the wrong way)
+    "msign": ("        eor #$FF                ; Y: negate (C = 0)\n        adc #1\n", ""),
+    # bit 0 (noise) kept in the position
+    "mnoise": ("lp:     lda inp_mpot,x\n        and #$7E\n", "lp:     lda inp_mpot,x\n        and #$7F\n"),
+    # the first sample is a move, not the reference
+    "mref": ("        lda inp_mok\n        beq nx                  ; reference only\n", ""),
+    # no clamp: every sample's delta added (rev14-mouse HIGH-1: AROS wraps)
+    "noclamp": ("        bvc :+\n        lda inp_t\n        bmi neg\n        lda #$7F\n        bne :+\nneg:    lda #$81\n:       cmp #$80\n        bne :+\n        lda #$81\n:       tay",
+                "        lda inp_t\n        clc\n        adc inp_macc,x\n        tay"),
+    # the module leaves PA7-6 released (DDRA $00): the pot select floats
+    "qnorest": (":       ldy #$C0\n        sty CIA1_DDRA           ; the pot select at rest again\n",
+                ":       ldy #$00\n        sty CIA1_DDRA           ; the pot select at rest again\n"),
+    # the module reads the wrong port for the mouse lines
+    "qport": ("        lda CIA1_PRB            ; port 1\n        ldy inp_mport\n        beq :+\n        lda CIA1_PRA            ; port 2\n",
+              "        lda CIA1_PRA            ; port 1\n        ldy inp_mport\n        beq :+\n        lda CIA1_PRB            ; port 2\n"),
+    # a port/source change keeps the old reference (a jump)
+    "qnomps": ("        sta inp_mps\n        lda #0\n        sta inp_mok\n", "        sta inp_mps\n"),
 }
+QMUTANT_LEGS = {"qnone": ["queue"], "qnorel": ["queue"], "qnosamp": ["queue"],
+                "msign": ["mouse"], "mnoise": ["mouse"], "mref": ["mouse"],
+                "noclamp": ["mouse"], "qnorest": ["mreal"], "qport": ["mreal"],
+                "qnomps": ["mouse"]}
 
 
 def leg_queue(rig: Rig) -> list[str]:
@@ -730,6 +832,64 @@ def leg_queue(rig: Rig) -> list[str]:
     return f
 
 
+def leg_mreal(rig: Rig) -> list[str]:
+    """W14-M: the real CIA1 path with the module armed (inp_src = 0).  Port 1's
+    lines are driven low by the CIA itself (DDRB/PRB, as leg real: VICE
+    cannot hold a stick or a key), port 2's cannot be (DDRA = $00 releases
+    them).  Routing: inp_mport 0 -> port 1 is the mouse (PB4 = left: /FIR0
+    after the queue; PB0 = right: POTINP), not the stick; inp_mport 1 ->
+    port 1 is the stick (PB4 = fire in inp_joy), not the mouse.  inp_stuck
+    masks the stick only, never the mouse's lines.  After every frame CIA1
+    DDRA = $C0 (the module put the pot select back)."""
+    rig.need()
+    if not rig.mouse:
+        return ["mreal: no W14-M"]
+    f: list[str] = []
+    DDRB, PRB = 0xDC03, 0xDC01
+    mbl = rig.lab("inp_mb")
+
+    def run(mport, stuck, drive, frames=3):
+        rig.reset(src=0)
+        rig.w(rig.lab("inp_mport"), bytes([mport]))
+        rig.w(rig.lab("inp_stuck"), bytes([stuck]))
+        stage_inpm(rig)
+        out = []
+        try:
+            for _ in range(frames):
+                rig.w(PRB, bytes([0xFF ^ drive]))
+                rig.w(DDRB, bytes([drive]))
+                rig.frame()
+                rig.w(DDRB, b"\0")
+                g = rig.api_read()
+                ddra = rig.r(0xDC02, 1)[0]
+                out.append({"joy": rig.state()["joy"], "mb": rig.r(mbl, 1)[0],
+                            "fir0": not g["pra"] & 0x40, "rmb": g["potinp"] == 0xFB00,
+                            "ddra": ddra})
+        finally:
+            rig.w(DDRB, b"\0")
+            rig.w(rig.lab("inp_stuck"), b"\0")
+        return out
+
+    for mport, stuck, drive, want in (
+            (0, 0, 0x10, {"joy": 0, "fir0": True, "rmb": False}),      # mouse left
+            (0, 0, 0x01, {"joy": 0, "fir0": False, "rmb": True}),      # mouse right
+            (0, 0x11, 0x11, {"joy": 0, "fir0": True, "rmb": True}),   # stuck: stick only
+            (1, 0, 0x10, {"joy": FIRE, "fir0": True, "rmb": False}),   # port 1 = the stick
+            (1, 0, 0x01, {"joy": UP, "fir0": False, "rmb": False}),
+            (1, 0x10, 0x10, {"joy": 0, "fir0": False, "rmb": False})): # stuck stick fire
+        st = run(mport, stuck, drive)[-1]
+        bad = [k for k, v in want.items() if st[k] != v]
+        if st["ddra"] != 0xC0:
+            bad.append("ddra")
+        log(f"  mreal mport {mport} stuck ${stuck:02X} PB low ${drive:02X}: {st}"
+            f"{'' if not bad else ' FAIL ' + str(bad)}")
+        if bad:
+            f.append(f"mreal mport {mport} stuck ${stuck:02X} drive ${drive:02X}: {st}, "
+                     f"want {want} and DDRA $C0")
+    rig.reset(src=1)
+    return f
+
+
 def leg_stuck(rig: Rig) -> list[str]:
     """inp_stuck (W13-I demo, 2026-10-11).  VICE cannot hold a port-A line
     (it ignores JOYPORT_SET; DDRB/PRB only drives rows, and the stick read
@@ -774,7 +934,7 @@ def leg_stuck(rig: Rig) -> list[str]:
 
 
 LEGS = {"api": leg_api, "guest": leg_guest, "real": leg_real, "noinj": leg_noinj, "cost": leg_cost, "stuck": leg_stuck,
-        "mouse": leg_mouse, "msamp": leg_msamp, "queue": leg_queue}
+        "mouse": leg_mouse, "msamp": leg_msamp, "queue": leg_queue, "mreal": leg_mreal}
 
 
 def run_legs(rig: Rig, legs: list[str]) -> list[str]:
@@ -901,68 +1061,315 @@ def mouse_stub(rig: Rig, n: int) -> bytes:
 
 
 MOUSE_WINDOWS = [   # (seconds, cue, check)
-    (20, "MOUSE: move it in a SQUARE, slowly: right, down, left, up", "square"),
+    (20, "MOUSE: move it in a SQUARE, slowly: right, then down, then left, then up", "square"),
     (15, "MOUSE: LEFT button: click it 3 times", "left3"),
     (15, "MOUSE: RIGHT button: click it 3 times", "right3"),
     (15, "MOUSE: hold BOTH buttons together for a second, then release", "both"),
-    (15, "KEYBOARD: hold C= alone (right button through the keyboard)", "cbm"),
+    (15, "KEYBOARD: hold SPACE for 5 s, then the 1 key for 5 s (expect NO mouse click)", "kbiso"),
+    (15, "KEYBOARD: hold C= alone (the right button through the keyboard)", "cbm"),
     (20, "JOYSTICK (the other port): up, down, left, right, then fire", "stick"),
 ]
+ATT_S = 3                       # mach_s, as the AROS boot on the Ultimate
+
+
+def square_order(deltas: list) -> list:
+    """The per-frame (dx, dy) as direction runs (>= 3 frames): R, D, L, U."""
+    runs, cur, n = [], None, 0
+    for dx, dy in deltas:
+        d = None
+        if abs(dx) >= abs(dy) and abs(dx) >= 2:
+            d = "R" if dx > 0 else "L"
+        elif abs(dy) >= 2:
+            d = "D" if dy > 0 else "U"
+        if d == cur:
+            n += 1
+        else:
+            if cur and n >= 3 and (not runs or runs[-1] != cur):
+                runs.append(cur)
+            cur, n = d, 1
+    if cur and n >= 3 and (not runs or runs[-1] != cur):
+        runs.append(cur)
+    return runs
 
 
 def attended_mouse(rig: Rig, mport: int) -> int:
-    """W14-M: the 1351 through the real CIA1 and SID (inp_src = 0), host-
-    paced: 10 iterations of inp_frame + inp_msamp per call.  Six windows of
-    15-20 s, each announced with a timestamped CUE line (the supervisor
-    relays them); a per-window result and a verdict."""
+    """W14-M: the 1351 through the PRODUCTION path (rev14-mouse 5): the
+    68k fixture runs under mach_run (s = 3) for each window, so slot 7's
+    sampler, its re-arms, the frame hook and the input module (armed) do
+    the work; the fixture logs JOY0DAT, CIA-A PRA and POTINP every guest
+    frame, the host evaluates the log after the window.  Seven windows,
+    each with a timestamped CUE and GO line (the supervisor relays them),
+    an END line and a verdict.  "square" checks the direction ORDER (right,
+    down, left, up as frame-delta runs); "kbiso" (rev14-mouse MEDIUM-3):
+    SPACE and 1 held with the mouse on port 1 must give no click."""
     rig.need()
     if not rig.mouse:
         print("ATTENDED MOUSE: this PRG has no inp_msamp")
         return 1
+    from tests.run_mach import clean
+    mr = rig.cia.mach_rig()
+    secs_max = max(w[0] for w in MOUSE_WINDOWS)
+    fps = 72.08 / 2 ** ATT_S
+    nfr = int(secs_max * fps) + 2
+    (pc,) = mr.stage(fixture_words(nfr))
+    rig._stub = False
+    rig.cia._tramp = None
     rig.reset(src=0)
     rig.w(rig.lab("inp_mport"), bytes([mport]))
-    rig.w(ASTUB, mouse_stub(rig, 10))
+    stage_inpm(rig)
+    a = rig.lab("inp_msamp")
+    rig.w(rig.lab("mach_cbv") + 14, bytes([a & 0xFF, a >> 8]))
+    rig.w(rig.lab("inp_mper"), struct.pack("<I", 0x2000 >> ATT_S))
     idle = undriven(rig, "attended-mouse", [])
     print("=" * 72)
     print(f"ATTENDED MOUSE: the 1351 in PORT {1 + mport}, the joystick in port "
-          f"{2 - mport}.  {len(MOUSE_WINDOWS)} windows; each starts with a CUE line.")
+          f"{2 - mport}.  {len(MOUSE_WINDOWS)} windows of ~{nfr / fps:.0f} s each; "
+          "each starts with a CUE line, then GO.")
     print("=" * 72, flush=True)
     results = {}
     for secs, cue, chk in MOUSE_WINDOWS:
-        print(f"CUE {time.strftime('%H:%M:%S')} ({secs} s, starts in 5 s): {cue}", flush=True)
+        print(f"CUE {time.strftime('%H:%M:%S')} (~{nfr / fps:.0f} s, starts in 5 s): {cue}",
+              flush=True)
         time.sleep(5.0)
         print(f"GO  {time.strftime('%H:%M:%S')}: {cue}", flush=True)
-        rig.w(AFLAGS, bytes(7))
-        y0x0 = rig.state()["joy0dat"]
-        ys, xs, joy, key, mbs = set(), set(), 0, 0, 0
-        nl = nr = 0
-        t1 = time.monotonic() + secs
-        while time.monotonic() < t1:
-            rig.w(AFLAGS, bytes(6))
-            rig.cia.call(ASTUB)
-            fj, fk, _, fm, cl, cr, _ = rig.r(AFLAGS, 7)
-            jd = rig.state()["joy0dat"]
-            ys.add(jd >> 8)
-            xs.add(jd & 0xFF)
-            joy, key, mbs, nl, nr = joy | fj, key | fk, mbs | fm, nl + cl, nr + cr
-        jd = rig.state()["joy0dat"]
-        dy = ((jd >> 8) - (y0x0 >> 8) + 128) % 256 - 128
-        dx = ((jd & 0xFF) - (y0x0 & 0xFF) + 128) % 256 - 128
-        span = (len(ys), len(xs))
-        ok = {"square": span[0] > 8 and span[1] > 8,
-              "left3": nl >= 3, "right3": nr >= 3,
-              "both": mbs & 0x11 == 0x11,
-              "cbm": bool(key & CBM),
-              "stick": (joy & ~idle & 0x0F) == (0x0F & ~STUCK & ~idle)}[chk]
-        results[chk] = ok
+        n0 = struct.unpack("<H", rig.r(rig.lab("inp_mns"), 2))[0]
+        res = mr.run(pc, s=ATT_S, budget=50_000_000)
+        ok_run = clean(res, chk, [])
+        raw = mr.guest_read(LOG, 6 * nfr)
+        ns = (struct.unpack("<H", rig.r(rig.lab("inp_mns"), 2))[0] - n0) & 0xFFFF
+        rows = [struct.unpack_from(">HBBH", raw, 6 * k) for k in range(nfr)]
+        deltas, prev = [], rows[0][0]
+        for jd, _p, _z, _pot in rows[1:]:
+            dy = ((jd >> 8) - (prev >> 8) + 128) % 256 - 128
+            dx = ((jd & 0xFF) - (prev & 0xFF) + 128) % 256 - 128
+            deltas.append((dx, dy))
+            prev = jd
+        left = [not r[1] & 0x40 for r in rows]
+        right = [r[3] == 0xFB00 for r in rows]
+        lp = sum(1 for k in range(1, nfr) if left[k] and not left[k - 1])
+        rp = sum(1 for k in range(1, nfr) if right[k] and not right[k - 1])
+        both = any(l and r for l, r in zip(left, right))
+        order = square_order(deltas)
+        sq = "".join(order)
+        joy = rig.state()["joy"]
+        ok = {"square": "RDLU" in sq * 2,
+              "left3": lp >= 3, "right3": rp >= 3, "both": both,
+              "kbiso": lp == 0 and rp == 0,
+              "cbm": rp >= 1,
+              "stick": any(abs(dx) + abs(dy) for dx, dy in deltas)}[chk]
+        results[chk] = ok and ok_run
         print(f"END {time.strftime('%H:%M:%S')}: {chk}: {'OK' if ok else 'NOT SEEN'} "
-              f"(distinct Y {span[0]}, X {span[1]}; net dy {dy:+d} dx {dx:+d}; "
-              f"left presses {nl}, right presses {nr}; mouse lines seen ${mbs:02X}; "
-              f"stick seen ${joy:02X}; keys ${key:02X})", flush=True)
+              f"(direction runs {sq or '-'}; left presses {lp}, right presses {rp}, "
+              f"both {both}; 1351 samples {ns} in {nfr} frames; stick ${joy:02X}"
+              f"{'' if ok_run else '; the guest run did not end cleanly'})", flush=True)
+    rig.w(rig.lab("inp_mper"), bytes(4))
     missing = [k for k, v in results.items() if not v]
     print(f"ATTENDED MOUSE VERDICT: {'PASS' if not missing else 'INCOMPLETE'}"
           f"{': missing ' + str(missing) if missing else ''}")
     return 0 if not missing else 1
+
+
+# --------------------------------------------------------------------------
+# --mouse-diag: the raw 1351 lines and pots on the device (supervisor,
+# 2026-10-11: the real 1351's pots stay in a ~32-unit window at 64 MHz)
+# --------------------------------------------------------------------------
+
+DIAG_ORG, DIAG_PRM, DIAG_DATA, DIAG_N = 0xC500, 0xC600, 0xC000, 300   # data $C000-$C4AF
+DIAG_SRC = """
+.ifndef inp_frame
+.error "-D inp_frame"
+.endif
+.ifndef inp_msamp
+.error "-D inp_msamp"
+.endif
+PRM  = $C600        ; +0 mode (0 = no scan: the select rests; 1 = inp_frame each
+                    ; sample; 2 = inp_frame + inp_msamp, the module armed)
+                    ; +1 u16 samples, +3 VIC frames between samples
+CNT  = $C604
+PTR  = $FB
+DATA = $C000
+.segment "CODE"
+        php
+        sei
+        lda #<DATA
+        sta PTR
+        lda #>DATA
+        sta PTR+1
+        lda PRM+1
+        sta CNT
+        lda PRM+2
+        sta CNT+1
+        lda PRM
+        bne loop
+        lda #$40            ; no scan: PA7-6 = 01 (port 1's pots), latch first
+        sta $DC00
+        lda #$C0
+        sta $DC02
+        lda #0
+        sta $DC03
+loop:   lda PRM
+        beq :+
+        jsr inp_frame       ; the production scan (and its rest select)
+        lda PRM
+        cmp #2
+        bne :+
+        jsr inp_msamp       ; + the module's sample (its port-line look)
+:       ldy #0
+        lda $DC01           ; port 1 lines (column 7 driven low by the rest)
+        sta (PTR),y
+        iny
+        lda $DC00
+        sta (PTR),y
+        iny
+        lda $D419           ; POTX
+        sta (PTR),y
+        iny
+        lda $D41A           ; POTY
+        sta (PTR),y
+        clc
+        lda PTR
+        adc #4
+        sta PTR
+        bcc :+
+        inc PTR+1
+:       ldx PRM+3
+w:      lda $D012           ; one VIC frame: raster line $30 of the top half
+        cmp #$30
+        bne w
+        lda $D011
+        bmi w
+w2:     lda $D012
+        cmp #$30
+        beq w2
+        dex
+        bne w
+        lda CNT
+        bne :+
+        dec CNT+1
+:       dec CNT
+        lda CNT
+        ora CNT+1
+        bne loop
+        plp
+        rts
+"""
+
+DIAG_PLAN = [   # (config, MHz, mode, [(seconds, cue, tag)])
+    ("A: 1 MHz, no frame scan", 1, 0, [
+        (10, "MOUSE: do NOT touch the mouse (idle)", "idle"),
+        (30, "MOUSE: press and HOLD the RIGHT button (keep holding)", "right"),
+        (30, "MOUSE: press and HOLD the LEFT button (keep holding)", "left"),
+        (30, "MOUSE: move SLOWLY to the RIGHT, then back left, several times", "x"),
+        (30, "MOUSE: move SLOWLY DOWN, then back up, several times", "y")]),
+    ("B: 64 MHz, no frame scan", 64, 0, [
+        (30, "MOUSE: move SLOWLY to the RIGHT, then back left, several times", "x"),
+        (30, "MOUSE: move SLOWLY DOWN, then back up, several times", "y")]),
+    ("C: 64 MHz, the production frame scan + the module", 64, 2, [
+        (30, "MOUSE: move SLOWLY to the RIGHT, then back left, several times", "x"),
+        (30, "MOUSE: press and HOLD the RIGHT button (keep holding)", "right")]),
+]
+
+
+def diag_stub(rig: Rig) -> bytes:
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "diag.s")
+        open(src, "w").write(DIAG_SRC)
+        cfg = os.path.join(d, "diag.cfg")
+        open(cfg, "w").write("MEMORY { M: file = %%O, start = $%04X, size = $100; }\n"
+                             "SEGMENTS { CODE: load = M, type = rw; }\n" % DIAG_ORG)
+        out = os.path.join(d, "diag.bin")
+        for cmd in (["ca65", "-D", f"inp_frame=${rig.frame_addr:04X}",
+                     "-D", f"inp_msamp=${rig.lab('inp_msamp'):04X}", "-o", src + ".o", src],
+                    ["ld65", "-C", cfg, "-o", out, src + ".o"]):
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode:
+                raise RuntimeError(r.stdout + r.stderr)
+        return open(out, "rb").read()
+
+
+def mouse_diag(rig: Rig) -> int:
+    """Raw 1351 diagnostics: every ~2 VIC frames (25/30 Hz) the C64 itself
+    records $DC01 (port 1 lines), $DC00, POTX, POTY into RAM; the host reads
+    them after each 10-s chunk and prints the table with times.  Windows of
+    10-30 s, each announced 10 s ahead (CUE) with a GO line; per window a
+    summary (lines that changed vs idle; each pot's min/max/distinct values
+    and its wraps); a verdict at the end.  Configurations: A 1 MHz without
+    the frame scan (the pot select rests on port 1 the whole time), B 64 MHz
+    without it, C 64 MHz with inp_frame (the production key scan) and
+    inp_msamp (the input module armed: its port-line look) per sample."""
+    rig.need()
+    rig.reset(src=0)
+    rig.w(rig.lab("inp_mport"), b"\0")
+    rig.w(rig.lab("inp_mper"), bytes(4))
+    stub = diag_stub(rig)
+    rig.w(DIAG_ORG, stub)
+    nf = 2
+    print("=" * 72)
+    print("MOUSE DIAG: the 1351 in PORT 1.  Each window is announced 10 s ahead (CUE),")
+    print("starts at GO and ends at END.  Columns: t(s) DC01 DC00 POTX POTY")
+    print("=" * 72, flush=True)
+    summary, idle01 = [], None
+    for cname, mhz, mode, windows in DIAG_PLAN:
+        rig.tg.transport.set_speed(mhz)
+        time.sleep(1.0)
+        if mode == 2:                   # the input module, armed (inp_mper = 0:
+            stage_inpm(rig)             # the host-paced samples only)
+            rig.w(DIAG_ORG, stub)
+        print(f"CONFIG {cname}", flush=True)
+        for secs, cue, tag in windows:
+            print(f"CUE {time.strftime('%H:%M:%S')} [{cname}] in 10 s, for {secs} s: {cue}",
+                  flush=True)
+            time.sleep(10.0)
+            print(f"GO  {time.strftime('%H:%M:%S')} [{cname}] {cue}", flush=True)
+            rows, t0 = [], time.monotonic()
+            while time.monotonic() - t0 < secs:
+                n = DIAG_N
+                rig.w(DIAG_PRM, bytes([mode, n & 0xFF, n >> 8, nf]))
+                ts = time.monotonic()
+                rig.cia.call(DIAG_ORG, timeout=120)
+                te = time.monotonic()
+                raw = rig.r(DIAG_DATA, 4 * n)
+                for k in range(n):
+                    rows.append((round(ts - t0 + (te - ts) * k / n, 2), *raw[4 * k:4 * k + 4]))
+            for t, b1, b0, px, py in rows:
+                print(f"  {tag:5} {t:6.2f}  ${b1:02X} ${b0:02X}  ${px:02X} ${py:02X}")
+            def stats(col):
+                vals = [r[col] for r in rows]
+                wraps = sum(1 for a, b in zip(vals, vals[1:]) if abs(a - b) > 0x40)
+                return {"min": min(vals), "max": max(vals), "distinct": len(set(vals)),
+                        "wraps": wraps}
+            b1s = {r[1] for r in rows}
+            low = 0
+            for v in b1s:
+                low |= ~v & 0xFF
+            if tag == "idle":
+                idle01 = low
+            sx, sy = stats(3), stats(4)
+            line = (f"END {time.strftime('%H:%M:%S')} [{cname}] {tag}: {len(rows)} samples; "
+                    f"DC01 values {sorted('$%02X' % v for v in b1s)} (bits seen low ${low:02X}"
+                    f"{'' if idle01 is None else f', new vs idle ${low & ~idle01 & 0xFF:02X}'}); "
+                    f"POTX ${sx['min']:02X}-${sx['max']:02X} ({sx['distinct']} values, "
+                    f"{sx['wraps']} jumps > $40); POTY ${sy['min']:02X}-${sy['max']:02X} "
+                    f"({sy['distinct']} values, {sy['wraps']} jumps)")
+            print(line, flush=True)
+            summary.append((cname, tag, low, sx, sy))
+    rig.tg.transport.set_speed(1)
+    rig.w(rig.lab("inp_mon"), b"\0")
+    print("MOUSE DIAG VERDICT:")
+    for cname, tag, low, sx, sy in summary:
+        what = {"right": "RIGHT button", "left": "LEFT button"}.get(tag)
+        if what:
+            nb = low & ~(idle01 or 0) & 0xFF
+            print(f"  {cname}: {what} held -> DC01 bits low ${nb:02X}"
+                  f" ({'PB' + ','.join(str(b) for b in range(8) if nb >> b & 1) if nb else 'no line'})"
+                  f"; pots X ${sx['min']:02X}-${sx['max']:02X}, Y ${sy['min']:02X}-${sy['max']:02X}")
+        elif tag in ("x", "y"):
+            st = sx if tag == "x" else sy
+            print(f"  {cname}: move {tag.upper()} -> POT{tag.upper()} ${st['min']:02X}-"
+                  f"${st['max']:02X}, {st['distinct']} values, {st['wraps']} jumps "
+                  f"(a 1351 covers ~$00-$7F mod 64 counts)")
+    return 0
 
 
 def attended(rig: Rig, seconds: float) -> int:
@@ -1071,12 +1478,14 @@ MUTANTS = {
     "noghost": (INP, [("        eor inp_key             ; unreadable rows (idle bit 0) keep the\n        and inp_t               ; last state: ((new ^ old) & idle) ^ old\n        eor inp_key\n", "")]),
     # the override is ignored: the real CIA1 is always scanned
     "nosrc": (INP, [("        lda inp_src\n        bne have\n", "")]),
-    # W14-M: the 1351's Y not negated (the pointer moves the wrong way)
-    "msign": (INP, [("        eor #$FF                ; Y: negate (C = 0)\n        adc #1\n", "")]),
-    # W14-M: bit 0 (noise) kept in the position
-    "mnoise": (INP, [("lp:     lda inp_mpot,x\n        and #$7E\n", "lp:     lda inp_mpot,x\n        and #$7F\n")]),
+    # W14-M (rev14-mouse): the port swap never happens (the mouse always port 1)
+    "noswap": (INP, [("        ldx inp_mport           ; W14-M: the mouse on port 2: swap\n        beq :+\n",
+                      "        ldx inp_mport           ; W14-M: the mouse on port 2: swap\n        bne :+\n        beq :+\n")]),
+    # W14-M (rev14-mouse): the sampler re-arms only from the frame hook
+    "nosamparm": (INP, [("        txa\n        bne marm\n        lda inp_mper\n        ora inp_mper+1\n        bne marm\n        rts\n",
+                         "        txa\n        bne :+\n        lda inp_mper\n        ora inp_mper+1\n        bne marm\n:       rts\n")]),
 }
-# One-off checks (--only), outside the <= 10 set: covered by the same legs
+# One-off checks (--only), outside the <= 10 set
 EXTRA_MUTANTS = {
     # centring does not reset the acceleration
     "noreset": (INP, [("        bne :+\n        sta inp_n\n", "        bne :+\n        nop\n        nop\n        nop\n")]),
@@ -1093,18 +1502,28 @@ EXTRA_MUTANTS = {
     # W14-M: the pots rest on port 2 when the mouse is on port 1
     "mselect": (INP, [("        lda #$40                ; W14-M: rest with PA7-6 selecting the\n",
                        "        lda #$80                ; W14-M: rest with PA7-6 selecting the\n")]),
-    # W14-M: the first sample is a move, not the reference
-    "mref": (INP, [("        lda inp_mok\n        beq nx                  ; reference only\n", "")]),
-    # W14-M: the delta taken mod 64 instead of mod 128 (sign lost)
-    "mwrap": (INP, [("        tya\n        and #$7F\n", "        tya\n        and #$3F\n")]),
+    # W14-M (rev14-mouse): marm without mach_etime (a stale deadline)
+    "stale": (INP, [("        jsr mach_etime\n        clc\n", "        clc\n")]),
+    # W14-M (rev14-mouse): the stuck mask on the mouse's lines, not the stick's
+    "stuckmouse": (INP, [(":       sty inp_mb              ; the mouse port's lines (buttons)\n        ora inp_stuck           ; the stick's port; stuck lines read as\n        eor inp_stuck           ; released\n        sta inp_joy\n",
+                          ":       sta inp_joy\n        tya\n        ora inp_stuck\n        eor inp_stuck\n        sta inp_mb\n        lda inp_joy\n        sta inp_joy\n")]),
+    # W14-M (rev14-mouse): the ID guard compares the wrong byte
+    "idbyte": (INP, [("        cmp INPM_ORG+3\n", "        cmp INPM_ORG+4\n")]),
+    # W14-M (rev14-mouse): the rest select written without DDRA
+    "restfloat": (INP, [("        lda #$C0\n        sta CIA1_DDRA\nhave:", "        lda #$00\n        sta CIA1_DDRA\nhave:")]),
+    # W14-M (rev14-mouse): port 1 read before PA7-6 are released (VICE cannot
+    # hold a key: SURVIVES by design, the attended keyboard window covers it)
+    "kbiso": (INP, [("        lda #0                  ; 1. both ports, nothing driven (DDRB is\n        sta CIA1_DDRA           ; $00 throughout: nothing here sets it)\n        lda CIA1_PRB            ; port 1 (rows: no column driven, so no key)\n",
+                     "        lda CIA1_PRB            ; port 1 (rows: no column driven, so no key)\n        pha\n        lda #0\n        sta CIA1_DDRA\n        pla\n")]),
 }
 EXTRA_LEGS = {"noreset": ["api"], "nofir1": ["api"], "pinleak2": ["api"],
               "potbit": ["api", "mouse"], "noedge": ["api"], "mselect": ["real"],
-              "mref": ["mouse"], "mwrap": ["mouse"]}
+              "stale": ["msamp"], "stuckmouse": ["mreal"], "idbyte": ["queue"],
+              "restfloat": ["real"], "kbiso": ["mreal", "real"]}
 MUTANT_LEGS = {"nocall": ["guest"], "nocap": ["api"], "pinleak4": ["api"],
                "sign": ["api"], "fireinv": ["api"], "stickpol": ["real"],
                "noghost": ["real"], "nosrc": ["api"],
-               "msign": ["mouse"], "mnoise": ["mouse"]}
+               "noswap": ["mreal"], "nosamparm": ["msamp"]}
 
 
 def build_mutant(name: str, out_dir: str) -> str:
@@ -1160,6 +1579,8 @@ def main(argv=None) -> int:
                          "real scan ignores (e.g. $01: Up stuck closed)")
     ap.add_argument("--mouse", type=int, choices=(1, 2), default=None,
                     help="with --attended: the 1351 windows, mouse in this port")
+    ap.add_argument("--mouse-diag", action="store_true",
+                    help="with --attended: the raw 1351 lines/pots (3 configurations)")
     ap.add_argument("--json", help="write {legs, fails, warn} here")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args(argv)
@@ -1179,7 +1600,7 @@ def main(argv=None) -> int:
         bad = []
         for name in QMUTANTS:
             QMUT[0] = name
-            fails = vice(a.prg, ["queue"])
+            fails = vice(a.prg, QMUTANT_LEGS[name])
             log(f"=== qmutant {name}: {'KILLED' if fails else 'SURVIVED'}")
             if not fails:
                 bad.append(name)
@@ -1190,7 +1611,9 @@ def main(argv=None) -> int:
         rc = teeth(a.prg, a.only.split(",") if a.only else None)
     elif a.attended:
         legs, fails = ["attended"], []
-        if a.mouse is not None:
+        if a.mouse_diag:
+            rc = u64(a.prg, a.mhz, mouse_diag, "mouse-diag")
+        elif a.mouse is not None:
             rc = u64(a.prg, a.mhz, lambda rig: attended_mouse(rig, a.mouse - 1),
                      "attended-mouse")
         else:

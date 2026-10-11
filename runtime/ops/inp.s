@@ -31,9 +31,12 @@
 ;      48 and 64 MHz, and a column 1 -> column 7 read shows no phantom
 ;      (rev-inp, build/evidence/w13-inp/settle/; the U64E is unmeasured).  F3 alone
 ;      reading as C= is checked by the attended script.
-;   CIA1 DDRA and PRA are restored to their values on entry (PRA as read:
-;   the 6526 returns the pins, so a bit an outside switch held low at entry
-;   comes back as a 0 in the latch).  DDRB is never written.
+;   W14-M: on exit CIA1 port A rests selecting the mouse port's pots for
+;   the SID (PA7-6 = 01 port 1 / 10 port 2, DDRA = $C0; PA7/PA6 are also
+;   keyboard columns 7/6, so every port-1 read is made with DDRA = $00).
+;   DDRB is never written.  The 1351 decode and the button queue are the
+;   input module's (tests/aros/inpm.s, $C980 + $CF00), called through
+;   inp_mod's ID guard; no module: the stick and the mouse's buttons only.
 ;
 ; Per frame, from inp_joy/inp_key:
 ;   - mouse: dir = joy & $0F; n = frames the same nonzero dir was held
@@ -54,7 +57,7 @@
 .export inp_frame, inp_pot
 .export inp_src, inp_joy, inp_key, inp_view, inp_n, inp_stuck
 .export inp_msamp, inp_mport, inp_mper, inp_mpot, inp_mb, inp_mok
-.export inp_mon, inp_ml, inp_mlast, inp_mq, inp_md, inp_lf, inp_mrearm, INPM_ORG
+.export inp_mon, inp_ml, inp_mlast, inp_mq, inp_md, inp_macc, inp_mps, inp_mns, inp_mold, inp_mrearm, INPM_ORG
 .import chip_shd, cia_st, chip_vh
 .import mach_etime, mach_arm, mach_et, mach_at   ; W14-M: slot 7
 
@@ -84,9 +87,11 @@ inp_mok:  .res 1        ; W14-M nonzero once inp_mold holds a sample
 inp_mon:  .res 1        ; W14-M host: the M2 module's ID byte 0 (0 = none)
 inp_ml:   .res 1        ; W14-M M2 override: mouse lines (inp_src != 0, module armed)
 inp_mlast: .res 1       ; W14-M M2: lines at the last look (press edges)
-inp_mq:   .res 2        ; W14-M M2: pending presses: left, right
+inp_mq:   .res 1        ; W14-M M2: pending left presses (<= 2)
 inp_md:   .res 1        ; W14-M M2: the buttons as delivered (bit 4 left, 0 right)
-inp_lf:   .res 1        ; W14-M M2: mach_frames (low byte) at the last frame hook
+inp_macc: .res 2        ; W14-M M2: 1351 counts added since the frame hook: Y, X (s8, +-127)
+inp_mps:  .res 1        ; W14-M M2: inp_mport | inp_src << 1 at the last frame (a change: new reference)
+inp_mns:  .res 2        ; W14-M M2: 1351 samples taken (u16 LE, wraps; tests)
 
 ; CODE layout: no pad needed.  RODATA is page-aligned (c64.cfg, Wave 13
 ; supervisor), so CODE growth no longer moves which abs,X table entries
@@ -194,48 +199,12 @@ nx:     inx
 .endproc
 
 ; inp_msamp — W14-M: mach slot INP_MSLOT's callback (callback rules; the
-; host stores it in mach_cbv[INP_MSLOT]): the 1351 on the mouse port.
-; inp_mpot (POTY, POTX: JOY0DAT's byte order) := the SID's pots unless the
-; override is on.  Per axis: v = pot & $7E (bits 1-6; bit 0 is noise),
-; d = (v - old) mod 128 as a signed 7-bit value / 2 (-32..31 counts);
-; JOY0DAT Y -= dy (the 1351's Y counts up, the Amiga's down), X += dx.
-; The first sample after inp_mok = 0 is the reference only.  Re-arms.
+; host stores it in mach_cbv[INP_MSLOT]).  The 1351's decode lives in the
+; input module (tests/aros/inpm.s, fix round 1: it is AROS-only): this is
+; X = 3 into inp_mod's ID guard.  No module: no 1351 position (the slot
+; keeps re-arming, nothing is read).
 .proc inp_msamp
-        lda inp_src
-        bne :+
-        lda SID_POTX+1          ; POTY
-        sta inp_mpot
-        lda SID_POTX
-        sta inp_mpot+1
-:       ldx #1                  ; 1 = X (POTX), 0 = Y (POTY)
-lp:     lda inp_mpot,x
-        and #$7E
-        pha
-        sec
-        sbc inp_mold,x
-        tay                     ; v - old
-        pla
-        sta inp_mold,x
-        lda inp_mok
-        beq nx                  ; reference only
-        tya
-        and #$7F
-        cmp #$40                ; C = 1: negative
-        bcc :+
-        ora #$80
-:       ror                     ; signed / 2: -32..31
-        cpx #1
-        bcs :+
-        eor #$FF                ; Y: negate (C = 0)
-        adc #1
-:       clc
-        adc chip_shd+INP_JOY0,x
-        sta chip_shd+INP_JOY0,x
-nx:     dex
-        bpl lp
-        lda #1
-        sta inp_mok
-        ldx #3                  ; W14-M: the M2 module (sample), re-arm
+        ldx #3
 .endproc
 ; fall through
 ; inp_mod — W14-M: the M2 module (tests/aros/inpm.s at INPM_ORG) when

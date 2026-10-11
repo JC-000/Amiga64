@@ -200,8 +200,28 @@ def test_msamp_reference_axes_and_sign():
     m.msamp(0x14, 0x26)                                       # POTY +2, POTX +3
     assert (m.y, m.x) == ((-2) & 0xFF, 3)                     # Amiga Y counts down
     for _ in range(40):                                       # wrap both counters
+        m.frame(0, 0)                                         # (one sample a frame)
         m.msamp(m.mold[0] + 0x3C & 0x7F, m.mold[1] - 0x3C & 0x7F)
     assert (m.y, m.x) == ((-2 - 40 * 30) & 0xFF, (3 - 40 * 30) & 0xFF)
+
+
+def test_msamp_clamps_each_frame_at_127():
+    """rev14-mouse HIGH-1: AROS reads JOY0DAT as a signed 8-bit delta per
+    frame; 14 samples of +31 inside one frame must deliver +127, not wrap."""
+    m = Inp()
+    m.msamp(0x40, 0x00)
+    x0 = m.x
+    for _ in range(14):
+        m.msamp(0x40, m.mold[1] + 62 & 0x7F)                  # +31 counts each
+    assert (m.x - x0) & 0xFF == 127 and m.y == 0
+    m.frame(0, 0)                                             # the next frame
+    m.msamp(0x40, m.mold[1] + 62 & 0x7F)
+    assert (m.x - x0) & 0xFF == 127 + 31
+    m = Inp()
+    m.msamp(0x00, 0x40)
+    for _ in range(14):                                       # Y: 1351 up = Amiga -
+        m.msamp(m.mold[0] + 62 & 0x7F, 0x40)
+    assert m.y == (-127) & 0xFF
 
 
 def test_mouse_buttons_or_with_stick_and_cbm():

@@ -192,15 +192,58 @@ def build_spr_mod(labels_path: str, out_dir: str) -> bytes:
     return SP.build_spr(os.path.join(out_dir, "spr"), labels_path)[0]
 
 
-def build_inpm(labels_path: str, out_dir: str) -> bytes:   # W14-M
-    """W14-M M2: the input module (tests/aros/inpm.s, $C980-$C9FE)."""   # W14-M
-    return build_module(os.path.join(ROOT, "tests", "aros", "inpm.s"), 0xC980,   # W14-M
-                        0xC9FF, 3, labels_path, out_dir)                    # W14-M
+INPM_A, INPM_B = (0xC980, 0xC9FF), (0xCF00, 0xCFF0)        # W14-M: [org, end)
+
+
+def build_inpm2(labels_path: str, out_dir: str, src_path: str | None = None,
+                defines: tuple = ()):                       # W14-M
+    """W14-M: the input module tests/aros/inpm.s in two segments: A at
+    $C980-$C9FE, B at $CF00-$CFEF.  One ID, SHA-1[:4] of A + B with both
+    ID fields (+3) zero, stamped in both.  Returns (a, b)."""   # W14-M
+    from c64_test_harness import Labels                     # W14-M
+    from tests.harness_util import lookup_label             # W14-M
+    src_path = src_path or os.path.join(ROOT, "tests", "aros", "inpm.s")   # W14-M
+    labels = Labels.from_file(labels_path)                  # W14-M
+    defs = []                                               # W14-M
+    for n in module_syms(open(src_path).read()):            # W14-M
+        defs += ["-D", f"{n}=${lookup_label(labels, n):04X}"]   # W14-M
+    for d in defines:                                       # W14-M (test builds)
+        defs += ["-D", d]                                   # W14-M
+    os.makedirs(out_dir, exist_ok=True)                     # W14-M
+    base = os.path.join(out_dir, os.path.splitext(os.path.basename(src_path))[0])   # W14-M
+    with open(base + ".cfg", "w") as f:                     # W14-M
+        f.write("MEMORY { A: file = \"%s\", start = $%04X, size = $%04X;\n"
+                "         B: file = \"%s\", start = $%04X, size = $%04X; }\n"
+                "SEGMENTS { CODE: load = A, type = rw; CODEB: load = B, type = rw; }\n"
+                % (base + ".a.bin", INPM_A[0], INPM_A[1] - INPM_A[0],
+                   base + ".b.bin", INPM_B[0], INPM_B[1] - INPM_B[0]))   # W14-M
+    for cmd in (["ca65", "-g", *defs, "-I", os.path.join(ROOT, "tests", "aros"),
+                 "-o", base + ".o", src_path],
+                ["ld65", "-C", base + ".cfg", "-Ln", base + ".lbl", base + ".o"]):   # W14-M
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)   # W14-M
+        if r.returncode:                                    # W14-M
+            raise RuntimeError(f"{' '.join(cmd)}\n{r.stdout}{r.stderr}")
+    a = bytearray(open(base + ".a.bin", "rb").read())       # W14-M
+    b = bytearray(open(base + ".b.bin", "rb").read())       # W14-M
+    if a[3:7] != bytes(4) or b[3:7] != bytes(4):            # W14-M
+        raise RuntimeError(f"{src_path}: no zero ID fields at A+3 / B+3")
+    mid = hashlib.sha1(bytes(a) + bytes(b)).digest()[:4]    # W14-M
+    a[3:7] = b[3:7] = mid                                   # W14-M
+    return bytes(a), bytes(b)                               # W14-M
+
+
+def build_inpm(labels_path: str, out_dir: str) -> bytes:   # W14-M: segment A
+    return build_inpm2(labels_path, out_dir)[0]             # W14-M
+
+
+def build_inpm_b(labels_path: str, out_dir: str) -> bytes:   # W14-M: segment B
+    return build_inpm2(labels_path, out_dir)[1]             # W14-M
 
 
 MODULES: list = [("td", build_td, 0xC200, 0xC600),
                  ("spr", build_spr_mod, 0xC600, 0xC900),
-                 ("inpm", build_inpm, 0xC980, 0xC9FF)]               # W14-M
+                 ("inpm", build_inpm, 0xC980, 0xC9FF),                # W14-M: A
+                 ("inpm2", build_inpm_b, 0xCF00, 0xCFF0)]             # W14-M: B
 
 
 def arm_inpm(m, mod: bytes | None = None) -> None:      # W14-M
@@ -1105,6 +1148,26 @@ class E2E:
         self.m.w(self.m.lab("inp_mpot"), bytes(self.mpot))  # W14-M
         self.frames_wait(1)                                 # W14-M
 
+    def quiet(self, hash_now, step: int = 20, need: int = 3,
+              limit: int = 900) -> dict:                    # W14-M
+        """Wait until the screen hash holds over *need* checks *step* guest
+        frames apart (at most *limit* frames): the Workbench has finished
+        filling a drawer before a timed step starts (the e2e menu step;
+        fix round 1: with the 1351 sampler on, VICE's s = 9 margin was gone
+        and the menu request landed while the drawer was still drawing)."""   # W14-M
+        f0, last, same = self.m.frames(), None, 0           # W14-M
+        while self.m.frames() - f0 < limit:                 # W14-M
+            self.frames_wait(step)                          # W14-M
+            h = hash_now()                                  # W14-M
+            same = same + 1 if h == last else 0             # W14-M
+            last = h                                        # W14-M
+            if same >= need - 1:                            # W14-M
+                break                                       # W14-M
+        out = {"frames": self.m.frames() - f0, "stable": same >= need - 1}   # W14-M
+        log(f"  quiet: the screen held for {need} checks after {out['frames']} frames"
+            if out["stable"] else f"  quiet: not stable after {limit} frames (going on)")
+        return out                                          # W14-M
+
     def ramp_probe(self, frames: int = 34) -> dict:         # W14-M
         """The stick's ramp as AROS shows it: park at the left edge, then
         hold RIGHT for *frames* guest frames, the pointer read every frame;
@@ -1123,17 +1186,22 @@ class E2E:
             xs.append((self.m.frames(), self.pos()[0]))     # W14-M
         self.joy(0)                                         # W14-M
         rate = lambda a, b: (b[1] - a[1]) / max(1, b[0] - a[0])   # noqa: E731  W14-M
-        start = rate(xs[0], next((p for p in xs if p[0] >= f0 + 6), xs[-1]))   # W14-M
-        cap = rate(next((p for p in xs if p[0] >= f0 + 32), xs[-2]), xs[-1]) \
-            if xs[-1][0] >= f0 + 33 else None               # W14-M
-        fps = 72.08 / 8                                     # W14-M: C64U, s = 3
-        out = {"series": xs, "start_px_per_frame": round(start, 2),   # W14-M
+        # the AROS lag (the sprite moves ~3 frames after the counters) is
+        # excluded: the ramp starts at the first frame the pointer moved
+        k0 = next((k for k, p in enumerate(xs) if p[1] != xs[0][1]), len(xs) - 1)   # W14-M
+        k0 = max(0, k0 - 1)                                 # W14-M
+        lag = xs[k0][0] - f0                                # W14-M
+        start = rate(xs[k0], xs[min(len(xs) - 1, k0 + 4)])  # W14-M: its first 4 frames
+        cap = rate(xs[-3], xs[-1]) if xs[-1][0] - xs[k0][0] >= 31 else None   # W14-M
+        fps = {"pal": 69.44 / 8, "ntsc": 72.08 / 8}         # W14-M: s = 3, CONTRACTS "Machine loop"
+        out = {"series": xs, "aros_lag_frames": lag,        # W14-M
+               "start_px_per_frame": round(start, 2),       # W14-M
                "cap_px_per_frame": cap and round(cap, 2),   # W14-M
-               "start_px_s_c64u": round(start * fps, 1),    # W14-M
-               "cap_px_s_c64u": cap and round(cap * fps, 1)}   # W14-M
-        log(f"  ramp: {out['start_px_per_frame']} px/frame at the start, "
-            f"{out['cap_px_per_frame']} at the cap (C64U s=3: {out['start_px_s_c64u']} / "
-            f"{out['cap_px_s_c64u']} px/s); series {xs}")  # W14-M
+               "px_s_s3": {k: [round(start * v, 1), cap and round(cap * v, 1)]
+                           for k, v in fps.items()}}        # W14-M
+        log(f"  ramp: AROS lag {lag} frames; {out['start_px_per_frame']} px/frame over the "
+            f"first 4 moving frames, {out['cap_px_per_frame']} at the cap; at s=3 "
+            f"(PAL / NTSC phi2): {out['px_s_s3']} px/s; series {xs}")   # W14-M
         return out                                          # W14-M
 
     def mouse_btn(self, b: int) -> None:                    # W14-M: $10 left, $01 right
@@ -1460,6 +1528,7 @@ def _leg_e2e(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol, timeout: flo
             fails.append(f"F1: the title rows show only {text} two-pen cells")
     if MENU_DELAY[0]:                   # --e2e-menu-delay: start the menu step later
         e.frames_wait(MENU_DELAY[0], timeout=max(120.0, 2.0 * MENU_DELAY[0]))   # (the resting title bar changes by itself)
+    rb["quiet"] = e.quiet(hash_now)     # W14-M (supervisor): the Workbench done drawing
     settle()
     force_conv(m)                       # rev-wb F2: the reference is a fresh picture
     hm0 = hash_now()

@@ -1,35 +1,42 @@
 ; ---------------------------------------------------------------------------
-; tests/aros/inpm.s — W14-M M2: the input module (button edge queue), a
-; machine-mode module (docs/WAVE14_BRIEF.md W14-M M2; docs/CONTRACTS.md
-; "Input (joystick -> mouse)", "M2").
+; tests/aros/inpm.s — W14-M: the input module (the 1351 decode with a per-
+; frame clamp, the left button's edge queue), a machine-mode module in TWO
+; segments (docs/WAVE14_BRIEF.md W14-M; docs/CONTRACTS.md "Input (joystick
+; -> mouse)", "M2").
 ;
-; NOT linked into the runner PRG: tests/aros_wb.py build_inpm() assembles
-; it at test time to a raw binary at INPM_ORG ($C980, end <= $C9FE; the
-; supervisor's range between aros_boot's VICE TRAMP at $C970 and mboot's
-; AROS_ZERO at $C9FF) with the runner's labels as -D defines.  Its ID (4
-; bytes at +3: SHA-1 of the binary with them zero) is stamped by the host;
-; MAIN arms it by inp_mon := ID byte 0 (runtime/ops/inp.s inp_mod: a
-; mismatch disarms, so an unstaged or different module is never called).
-; All its state is MAIN BSS (inp_mlast, inp_mq, inp_md): a snapshot
-; carries it, and a resume with the module re-staged continues.
+; NOT linked into the runner PRG: tests/aros_wb.py build_inpm() assembles it
+; at test time with the runner's labels as -D defines into two raw binaries:
+;   A at INPM_ORG ($C980, end <= $C9FE: the supervisor's range between
+;     aros_boot's VICE TRAMP at $C970 and mboot's AROS_ZERO at $C9FF);
+;   B at INPM_ORGB ($CF00, end <= $CFEF: the buf_result tail below the
+;     runner's READY_FLAG $CFFF; supervisor, fix round 1; nothing in machine
+;     mode uses $CF00-$CFEF: mboot uses $CE00 and $CFFF, the U64 dispatcher
+;     $CE00-$CEFF, run_irq's drv $CFF0, run_super_vectors' $CF00-$CF9F only
+;     in its own HLE sessions).
+; One ID (SHA-1[:4] of A and B with both ID fields zero) is stamped at A+3
+; and B+3.  MAIN calls A only through inp_mod's guard (inp_mon = ID byte 0
+; vs A+3); A calls B only while B's 4 ID bytes equal A's, else it disarms.
+; All state is MAIN BSS.  A resume comes up disarmed (snap.s zeroes
+; inp_mon); the launcher re-stages and re-arms (tests/aros_wb.arm_inpm).
 ;
-; Entry INPM_ORG (jmp), X = 0 from the frame hook (end of inp_frame), X = 3
-; from the 1351 sampler (inp_msamp); $01 = $35; clobbers A/X/Y; ends in
-; inp_mrearm (X as on entry).
-;   1. the mouse lines: inp_ml with the override, else CIA1 with DDRA =
-;      $00 (PA7-6 released: no keyboard column driven), port 1 = PRB, port
-;      2 = PRA; DDRA := $C0 again (the pot select at rest, PRA unchanged);
-;      every left press edge (closed now, open at the last look) counts in
-;      inp_mq.
-;   2. (frame only) the LEFT button's delivery, one transition per guest
-;      frame: delivered and (up now or another press pending) -> released;
-;      not delivered and a press pending -> pressed (pending - 1).  So a
-;      click shorter than a frame is one pressed frame, and two clicks
-;      inside one frame are P, R, P, R over four frames (the 120 Hz sampler
-;      sees them; W13-I/M1 sampled the buttons once per frame).  The right
-;      button is not queued (the module's 127 B; menus hold it): it is the
-;      lines now.  inp_mb := delivered left | right now (the POTINP read),
-;      CIA-A /FIR0 := stick fire | delivered left.
+; Entry A (jmp), X = 0 from the frame hook (end of inp_frame), X = 3 from
+; the 1351 sampler (inp_msamp, mach slot 7); $01 = $35; clobbers A/X/Y;
+; ends in inp_mrearm with X as on entry.
+;   look (both): the mouse lines (inp_ml with the override, else CIA1 with
+;     DDRA = $00: PA7-6 released, no keyboard column driven; port 1 = PRB,
+;     port 2 = PRA; DDRA := $C0 again); a left press edge adds 1 to inp_mq
+;     (at most 2 pending).
+;   sample (X = 3): POTY/POTX (the SID, or inp_mpot with the override) ->
+;     d = ((v & $7E) - old) mod 128, signed, / 2 (-32..31); Y negated; the
+;     counts added since the last frame hook (inp_macc, s8) saturate at
+;     +-127, so AROS, which reads JOY0DAT once a frame as a signed 8-bit
+;     delta, never sees a wrap (rev14-mouse HIGH-1: +217 counts moved the
+;     pointer -19 px); JOY0DAT += the clamped part.
+;   frame (X = 0): a port or source change since the last frame -> inp_mok
+;     := 0 (the next sample is a new reference); the left button's delivery,
+;     one transition per frame (delivered and (up now or a press pending)
+;     -> released; else a press pending -> pressed); inp_mb := delivered
+;     left | right now; /FIR0 := stick fire | delivered left; inp_macc := 0.
 ; ---------------------------------------------------------------------------
 
 .include "../../runtime/rc/zp.inc"
@@ -59,8 +66,32 @@
 .ifndef inp_md
 .error "-D inp_md=... (runner.lbl)"
 .endif
+.ifndef inp_macc
+.error "-D inp_macc=... (runner.lbl)"
+.endif
+.ifndef inp_mps
+.error "-D inp_mps=... (runner.lbl)"
+.endif
+.ifndef inp_mpot
+.error "-D inp_mpot=... (runner.lbl)"
+.endif
+.ifndef inp_mold
+.error "-D inp_mold=... (runner.lbl)"
+.endif
+.ifndef inp_mok
+.error "-D inp_mok=... (runner.lbl)"
+.endif
+.ifndef inp_mon
+.error "-D inp_mon=... (runner.lbl)"
+.endif
+.ifndef inp_mns
+.error "-D inp_mns=... (runner.lbl)"
+.endif
 .ifndef inp_mrearm
 .error "-D inp_mrearm=... (runner.lbl)"
+.endif
+.ifndef chip_shd
+.error "-D chip_shd=... (runner.lbl)"
 .endif
 .ifndef cia_st
 .error "-D cia_st=... (runner.lbl)"
@@ -70,13 +101,27 @@
 .endif
 
 CIA_PIN   = 32                  ; @value cia.s CIA_PIN (inp.s INP_PIN)
+JOY0      = $0A                 ; @value JOY0DAT in chip_shd (Y, then X)
+QMAX      = 2                   ; @value pending left presses at most
 
+; --- A: $C980-$C9FE ----------------------------------------------------------
 .segment "CODE"
 entry:  jmp body
 inpm_id: .byte 0, 0, 0, 0       ; the module ID, stamped by the host
 .assert inpm_id = INPM_ORG + 3, lderror, "runtime/ops/inp.s reads the ID at INPM_ORG+3"
-
-body:   lda inp_ml              ; 1. the mouse lines (1 = closed)
+body:   ldy #3                  ; B present and the same build?
+:       lda inpm_id,y
+        cmp idb,y
+        bne off
+        dey
+        bpl :-
+        jmp bbody
+off:    lda #0                  ; no: disarmed, never called again
+        sta inp_mon
+        jmp inp_mrearm
+; look — Y := the mouse lines (1 = closed: bit 4 left, bit 0 right); a left
+; press edge adds 1 to inp_mq (at most QMAX).  Keeps X.
+look:   lda inp_ml
         ldy inp_src
         bne have
         lda #0                  ; PA7-6 released: columns 6/7 not driven
@@ -89,20 +134,99 @@ body:   lda inp_ml              ; 1. the mouse lines (1 = closed)
         sty CIA1_DDRA           ; the pot select at rest again
         eor #$FF
 have:   and #$11
-        tay                     ; Y = the lines now
-        tya                     ; a left press edge: pending + 1
+        tay
         eor inp_mlast           ; (now ^ last) & now = closed now, open then
         sty inp_mlast
         and inp_mlast
         and #$10
         beq :+
+        lda inp_mq
+        cmp #QMAX
+        bcs :+
         inc inp_mq
-:       cpx #0                  ; X (kept): 0 = frame, else a sample:
-        bne done                ; counts only
-        lda inp_md              ; 2. delivery (left), one transition a frame
+:       rts
+.assert entry = buf_case + $980, error, "inpm A: org buf_case + 980 (the supervisor's range)"
+.assert * <= buf_case + $9FF, lderror, "inpm A: ends past buf_case + 9FE"
+
+; --- B: $CF00-$CFEF ----------------------------------------------------------
+.segment "CODEB"
+entryb: jmp bbody
+idb:    .byte 0, 0, 0, 0        ; the same ID, stamped by the host
+bbody:  jsr look
+        cpx #0
+        bne :+
+        jmp frame
+:
+        inc inp_mns             ; sample: counted (tests, u16)
+        bne :+
+        inc inp_mns+1
+:
+        ldx #1                  ; 1 = X (POTX), 0 = Y (POTY)
+        lda inp_src
+        bne lp
+        lda SID_POTX+1          ; POTY
+        sta inp_mpot
+        lda SID_POTX
+        sta inp_mpot+1
+lp:     lda inp_mpot,x
+        and #$7E
+        pha
+        sec
+        sbc inp_mold,x
+        tay                     ; v - old
+        pla
+        sta inp_mold,x
+        lda inp_mok
+        beq nx                  ; reference only
+        tya
+        and #$7F
+        cmp #$40                ; C = 1: negative
+        bcc :+
+        ora #$80
+:       ror                     ; signed / 2: -32..31
+        cpx #1
+        bcs :+
+        eor #$FF                ; Y: negate (C = 0)
+        adc #1
+:       sta inp_t               ; d
+        clc
+        adc inp_macc,x          ; acc + d, saturated at +-127
+        bvc :+
+        lda inp_t
+        bmi neg
+        lda #$7F
+        bne :+
+neg:    lda #$81
+:       cmp #$80
+        bne :+
+        lda #$81
+:       tay                     ; the new acc
+        sec
+        sbc inp_macc,x          ; the part that may still be added
+        clc
+        adc chip_shd+JOY0,x
+        sta chip_shd+JOY0,x
+        tya
+        sta inp_macc,x
+nx:     dex
+        bpl lp
+        lda #1
+        sta inp_mok
+        ldx #3
+        jmp inp_mrearm
+
+frame:  lda inp_src             ; a port or source change: new reference
+        asl
+        ora inp_mport
+        cmp inp_mps
+        beq :+
+        sta inp_mps
+        lda #0
+        sta inp_mok
+:       lda inp_md              ; the left button: one transition a frame
         beq rel
-        lda inp_mq              ; delivered: release when up now or another
-        bne up                  ; press is pending
+        lda inp_mq              ; delivered: release when up now or a press
+        bne up                  ; is pending
         tya
         and #$10
         bne keep
@@ -113,8 +237,8 @@ rel:    lda inp_mq
         dec inp_mq
         lda #$10
 set:    sta inp_md
-keep:   tya                     ; inp_mb := delivered left | right now (the
-        and #$01                ; right button is not queued: menus hold it)
+keep:   tya                     ; inp_mb := delivered left | right now
+        and #$01
         ora inp_md
         sta inp_mb
         ora inp_joy             ; /FIR0 low while stick fire or delivered left
@@ -125,8 +249,11 @@ keep:   tya                     ; inp_mb := delivered left | right now (the
         eor cia_st+CIA_PIN
         and #$C0
         eor cia_st+CIA_PIN
-        sta cia_st+CIA_PIN      ; (X = 0 still: inp_mrearm's frame case)
-done:   jmp inp_mrearm
+        sta cia_st+CIA_PIN
+        lda #0                  ; a new frame: nothing added yet
+        sta inp_macc
+        sta inp_macc+1
+        jmp inp_mrearm          ; (X = 0)
 
-.assert entry = buf_case + $980, error, "inpm: org buf_case + 980 (the supervisor's range)"
-.assert * <= buf_case + $9FF, lderror, "inpm: the module ends past buf_case + 9FE"
+.assert entryb = buf_result + $700, error, "inpm B: org buf_result + 700"
+.assert * <= buf_result + $7F0, lderror, "inpm B: ends past buf_result + 7EF"

@@ -1921,58 +1921,86 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
   - **Sampling.** The frame hook runs only once per guest frame, about
     8.7 Hz at s = 3. The 1351 aliases beyond ±31 counts per read, so the
     pots are sampled by **mach event slot 7**:
-    - callback `inp_msamp`; the host stores `mach_cbv[7]` and the period
-      `inp_mper` (u32 E ticks; 0 = off). The launchers use
-      8192 φ2 = `$2000 >> s`, about 120 Hz in real time (≈ 3.7k counts/s).
-    - each sample re-arms itself (`marm`, LOWCODE). The frame hook also
-      re-arms at now + `inp_mper` after every scan, so a sample is always
-      at least 8192 φ2 after the last port-select change. The SID needs
-      one full 512-φ2 window. The wait is measured in the time base's E
-      ticks (CIA #2 φ2), not CPU loops, so it holds at any CPU speed.
-    - with the override (`inp_src` = 1) the slot runs too and decodes the
-      host-written `inp_mpot` (the scripted mouse); otherwise `inp_mpot`
-      := the SID's pots.
-  - **Decode** (`inp_msamp`, `host/inp_ref.m1351_delta`). Per axis, v =
-    pot & `$7E`, d = (v − old) mod 128 as a signed 7-bit value / 2
-    (−32..31). JOY0DAT X += dx, Y −= dy (the 1351's Y counts up, the
-    Amiga's down). The scale is 1:1, one 1351 count per Amiga count. The
-    first sample after `inp_mok` = 0 only sets the reference.
+    - callback `inp_msamp` (MAIN: `ldx #3` into `inp_mod`'s ID guard).
+      The host stores `mach_cbv[7]` and the period `inp_mper` (E ticks).
+      The launchers use 8192 φ2 = `$2000 >> s`, about 120 Hz in real time
+      at any s (≈ 3.7k counts/s).
+      - `inp_mper` is u32 in `marm`'s add, but the enable check
+        (`inp_mrearm`) reads only its low 16 bits: keep it ≤ `$FFFF`
+        (bytes 2-3 zero).
+    - each sample re-arms itself (`marm`, LOWCODE, with a fresh
+      `mach_etime`). The frame hook also re-arms at now + `inp_mper` after
+      every scan, so a sample is always at least one period after the last
+      port-select change. The SID needs one full 512-φ2 window. The wait is
+      measured in the time base's E ticks (CIA #2 φ2), not CPU loops, so it
+      holds at any CPU speed.
+      - Leg `msamp` checks it: after a scan, slot 7 is due 0..`inp_mper`
+        E ticks ahead, even ~80 ms after the last pass. Mutant `stale`
+        (`marm` without `mach_etime`) is due −10287.
+      - It also counts the samples: at s = 3 under VICE (1 MHz), 9.1 a
+        frame, with each sample's pass delaying the next; the Ultimate at
+        64 MHz approaches 13.9.
+    - **The override and slot 7 (supervisor's ruling, rev14-mouse
+      MEDIUM-4):** with `inp_src` = 1 and `inp_mper` ≠ 0 the slot runs too,
+      and decodes the host-written `inp_mpot` (the scripted e2e mouse);
+      otherwise `inp_mpot` := the SID's pots. `run_irq`'s rig stays safe
+      through `inp_mper` = 0 (leg `guest` asserts `mach_am` bit 7 clear).
+  - **Decode** (the input module's segment B; `host/inp_ref.m1351_delta`).
+    Per axis, v = pot & `$7E`, d = (v − old) mod 128 as a signed 7-bit
+    value / 2 (−32..31); the Y delta is negated (the 1351's Y counts up,
+    the Amiga's down).
+    - **The per-frame clamp** (rev14-mouse HIGH-1). AROS reads JOY0DAT once
+      a guest frame as a signed 8-bit delta, and about 14 samples land in
+      one frame at s = 3. So the counts added since the last frame hook
+      (`inp_macc`, s8 per axis) saturate at ±127, and only the clamped part
+      is added. 14 samples of +31 deliver +127 (`host/tests/test_inp.py`,
+      leg `mouse`), not a wrap (+217 had moved the pointer −19 px).
+      - The stick's ≤ 32 per frame comes on top, so a full-speed stick and
+        mouse together can still exceed 127.
+    - The scale is 1:1, one 1351 count per Amiga count.
+    - The first sample after `inp_mok` = 0 only sets the reference. The
+      module also clears `inp_mok` when `inp_mport` or `inp_src` changed
+      since the last frame (`inp_mps`).
   - **Buttons.** Left = (stick fire | mouse left) → /FIR0. Right = C= |
     mouse right → POTINP DATLY (`inp_pot`).
-  - **Cost** (leg `cost`, VICE cycles, the same at any CPU speed):
-    - `inp_msamp`: 531 cycles per sample, with its re-arm (`mach_etime` +
-      `mach_arm`). At 8192 φ2 per sample (≈ 120 Hz real time on the
-      Ultimate, any s) that is ≈ 64k cycles/s, ≈ 0.1 % of the CPU at 64 MHz.
-    - the frame hook's re-arm: +384 cycles per frame, ≈ 3.3k cycles/s at
-      s = 3 (8.7 frames/s).
-    - with the override and `inp_mper` = 0 (`run_irq`'s rig) nothing is
-      armed. Leg `guest` checks `mach_am` bit 7.
-  - **M2: the left button's edge queue** (machine-mode module
-    `tests/aros/inpm.s` at `$C980-$C9FE`, 126 of 127 B; supervisor range,
+  - **The input module** (`tests/aros/inpm.s`; the supervisor's ranges,
     asserted).
-    - **MAIN** (in `inp.s`):
-      - `inp_mod`, the ID-guarded call. `inp_mon` = the module's ID byte 0,
-        compared with `$C983` on every call; a mismatch disarms (`inp_mon`
-        := 0).
-      - `inp_mrearm` (LOWCODE).
-      - BSS `inp_mon`, `inp_ml`, `inp_mlast`, `inp_mq` (2), `inp_md`, `inp_lf`.
-      - Both call sites end in it: `inp_frame` with X = 0, `inp_msamp` with
-        X = 3.
-    - **No module** (`inp_mon` = 0, or a module that does not match): M1's
-      behaviour exactly (leg `queue`'s no-module case, and every M1 leg
-      runs without it).
+    - **Segments:** A at `$C980-$C9FE` (89 of 127 B: entry, ID, the B check,
+      `look`) and B at `$CF00-$CFEF` (219 of 240 B: the decode, the clamp,
+      the queue).
+    - **$CF00-$CFEF in machine mode** is otherwise unused: mboot uses `$CE00`
+      and `$CFFF`, the Ultimate dispatcher `$CE00-$CEFF`, `run_irq`'s drv
+      `$CFF0`, and `run_super_vectors`' `$CF00-$CF9F` only in its own HLE
+      sessions.
+    - **One ID** (SHA-1[:4] of A + B with both ID fields zero) is stamped
+      in both. MAIN's `inp_mod` compares `inp_mon` (ID byte 0) with A+3;
+      A compares all 4 bytes of B's ID with its own before calling B,
+      else it disarms (`inp_mon` := 0).
+    - **MAIN** (in `inp.s`): `inp_mod`, `inp_mrearm` (LOWCODE), and BSS
+      `inp_mon`, `inp_ml`, `inp_mlast`, `inp_mq`, `inp_md`, `inp_macc` (2),
+      `inp_mps`, `inp_mns` (u16 sample count, tests). Both call sites end in
+      it: `inp_frame` with X = 0, `inp_msamp` with X = 3.
+    - **No module** (`inp_mon` = 0, or no match): the stick and the
+      mouse's buttons (`inp_mb`, M1) only. The 1351's position needs the
+      module (it is AROS-only; supervisor, fix round 1). Slot 7 keeps
+      re-arming without reading anything.
     - **Each call** looks at the mouse lines: `inp_ml` with the override,
       else CIA1 with DDRA = `$00`, then the select back. Every left press
-      edge is counted in `inp_mq`.
+      edge is counted in `inp_mq`, which holds at most 2.
     - **The frame call** delivers one left transition per guest frame:
       - delivered, and (up now or a press pending) → released;
       - not delivered, and a press pending → pressed.
       So a click shorter than a frame is one pressed frame, and two clicks
       inside one frame are P, R, P, R (leg `queue`, `host/inp_ref.Queue`).
-      Then `inp_mb` := delivered left | right now, and /FIR0 := stick fire
-      | delivered left. The right button is not queued (127 B; menus hold
-      it). With the module armed, the scripted mouse's lines go in
-      `inp_ml`, not `inp_mb`.
+      Then `inp_mb` := delivered left | right now, /FIR0 := stick fire |
+      delivered left, and `inp_macc` := 0. With the module armed, the
+      scripted mouse's lines go in `inp_ml`, not `inp_mb`.
+    - **The real CIA1 path** with the module armed (leg `mreal`): port-1
+      lines are driven low through DDRB/PRB. The legs check
+      `inp_mport` 0/1 routing (the mouse vs the stick), that `inp_stuck`
+      masks the stick only, and DDRA = `$C0` after every frame.
+      - Keyboard isolation at turbo (PA7 released 4 cycles before the PRB
+        read) is VICE-impossible. The attended `kbiso` window covers it.
     - **Resume.** The rule is the same as spr: a resume comes up with the
       module **disarmed**, and the launcher re-arms it.
       - `snap.s`'s restore zeroes `inp_mon` next to its `spr_vec` store
@@ -1981,29 +2009,73 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
       - `tests/aros_wb.arm_inpm(m)` runs after staging and after every
         resume (`resume_workbench`, alongside `arm_spr`). `run_inp` arms it
         the same way (`stage_inpm`).
-      - The queue state itself (`inp_mlast`, `inp_mq`, `inp_md`) is MAIN BSS
-        and in the image. `arm_inpm` resets it to idle.
-      - The 1-byte ID guard (a different build matches with p = 1/256) is
-        not relied on after a resume.
+      - The module's state is MAIN BSS and in the image. `arm_inpm` resets
+        the queue to idle.
     - **Limits** (supervisor, accepted):
-      - the right button is not queued (the module's 127 B): it is the
-        line's state now;
-      - the stick's ramp is not time-scaled by elapsed guest frames (no
-        bytes left): a catch-up pass moves one frame's step; the faster ramp
-        below is used instead.
-    - **Cost** (leg `cost`, VICE cycles): with the module armed, the frame
-      is +101 cycles (override) / +125 (real), and a sample 595 (+50).
-    - **Ramp:** not time-scaled: the CODE (9 B), LOWCODE (4 B) and module
-      (1 B) left are not enough for a mach_frames delta. The stick's ramp is
-      faster instead (W14-M, 0 B): step = 1 + n, cap `INP_CAP` = 32 counts
-      per frame (was 1 + n/2, cap 16).
-      - Measured on VICE (`aros_wb --e2e-ramp`, the pointer read every guest
-        frame; AROS shows 2 counts per lores pixel): 1.17 lores px/frame at
-        the start and 16.0 at the cap. On the C64U at s = 3 (8.7 frames/s)
-        that is ≈ 10 px/s and ≈ 144 px/s. 320 lores px take 2.2 s at the
-        cap, about 4 s from rest.
-      - AROS moves the sprite 3 frames after the counters change (the
-        series' first 3 frames read 0).
+      - the right button is not queued: it is the line's state now;
+      - the stick's ramp is not time-scaled by elapsed guest frames: a
+        catch-up pass moves one frame's step. The faster ramp below is used
+        instead.
+  - **Cost** (leg `cost`, VICE, cycles):
+    - the frame hook: 327 (the real scan) / 198 (override, idle) without
+      the module; +228 / +204 with it armed. The re-arm, when sampling is
+      on, adds +383.
+    - a sample: 743 with the module (decode, clamp, queue look, re-arm),
+      400 without (the guard and the re-arm only).
+    - Per second these scale with the rates: samples at ≈ 120 Hz real time
+      on the Ultimate (any s), frames at 69.44 or 72.08 / 2^s Hz (PAL or
+      NTSC φ2; 8.7 / 9.0 at s = 3). That is ≈ 89k + 5.3k cycles/s, ≈ 0.15 %
+      of 64 MHz. On a 1 MHz VICE at s = 9 a 16-E-tick period would mean
+      ~890 samples a frame, so the scripted pots are sampled every 2048 E
+      ticks there.
+  - **Ramp:** not time-scaled (the limit above). The stick's ramp is
+    faster instead (W14-M): step = 1 + n, cap `INP_CAP` = 32 counts per
+    frame (was 1 + n/2, cap 16).
+    - Measured on VICE (`aros_wb --e2e-ramp`, the pointer read every guest
+      frame, the AROS lag excluded: the sprite moves 2 frames after the
+      counters; AROS shows 2 counts per lores pixel): 1.75 lores px/frame
+      over the first 4 moving frames and 16.0 at the cap.
+    - At s = 3 that is 15.2 and 138.9 px/s (PAL φ2) or 15.8 and 144.2 px/s
+      (NTSC φ2). 320 lores px take 2.2-2.3 s at the cap.
+  - **Known limit: the 1351 at turbo; planned fix** (supervisor: approved
+    in principle for the next session).
+    - **Measured** (C64U, a genuine 1351 in port 1,
+      `build/evidence/w14-mouse/diag/run1.log`, `run_inp --attended
+      --mouse-diag`):
+      - 1 MHz, no frame scan: POTX `$51-$D3` (120 values), POTY `$4D-$CE`,
+        the full range;
+      - 64 MHz, with or without the scan and the module: POTX `$60-$80`
+        (33 values), POTY `$5C-$7C`.
+      The 64 MHz turbo compresses the SID pot readings to ~1/4. The pointer
+      stays in a small box (the decode sees each wrap as a reverse move).
+      It is the same with the 8580s, UltiSID, and Paddle Override on or off.
+      The buttons are right = PB0 and left = PB4 at both speeds.
+    - **Planned fix:** drop the CPU to 1 MHz only around each pot read.
+      - With Turbo Control in register mode ("C64U Turbo Registers" / "U64
+        Turbo Registers"), the 6510 writes the speed index to `$D031` (0 = 1
+        MHz … 15 = 64 MHz on the C64U):
+        - 1541u-315preview `software/u64/u64_config.cc:313`
+          (`speeds_u64ii[]`), `:316-317` (`speed_regs[]`,
+          `speedregs_regvalues[]`), `:1599-1610` (`C64_TURBOREGS_EN`);
+        - the bench notes `~/Documents/1541u-turbo-drafts/close-61.md:11-17`
+          (`$D031` changes the clock 47×, reads back; `$D030` reads `$FF`);
+        - `clock-issue-draft.md:72-83` (the C64U name of the mode; writes
+          are ignored for ~2 s after a reset, so prove the register live
+          first; the CIA #2 time base does not move with `$D031`).
+      - With "Manual" (today's holds) `$D031` does nothing.
+      - **The sampler:** save `$D031`, write 0, wait W φ2 on the time base
+        (CIA #2 or raster lines, never a CPU loop; about 2 SID cycles ≈ 1.1
+        ms), read POTX/POTY, restore `$D031`.
+      - **Gating:** by a host byte (the speed index to restore; 0 = never
+        touch `$D031`), set only by an Ultimate launcher that has set the
+        register mode and proven it live. VICE and 1 MHz are unchanged.
+      - **Cost:** at 120 Hz ≈ 13 % of the throughput, so sample at ≈ 50 Hz
+        (≈ 5.5 %, still 31 × 50 ≈ 1.5k counts/s). W and the rate are
+        host-set.
+      - **First, a confirming diag D:** the register mode, liveness, then W
+        = 0 / 0.6 / 1.1 / 2.2 ms while moving right. If no W restores the
+        range, fall back to a turbo-gated mod-32 decode of the window
+        (≈ 4× coarser, possibly device-specific).
   - **Closed loops on the pointer** (scripted input, the demo helpers).
     AROS moves the pointer sprite from JOY0DAT a few guest frames after
     the counters change, so a sprite position read right after a move is

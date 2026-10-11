@@ -53,8 +53,10 @@ class Inp:
     mb: int = 0           # inp_mb: the mouse port's lines (bit 4 left, 0 right)
     mold: list = None     # inp_mold (POTY, POTX), bits 1-6
     mok: bool = False     # inp_mok
+    macc: list = field(default_factory=lambda: [0, 0])   # inp_macc (Y, X), s8
 
     def frame(self, joy: int, key: int, mb: int = 0) -> dict:
+        self.macc = [0, 0]                    # inp.s module: a new frame (clamp)
         self.key, self.mb = key, mb
         if key & ~self.kp & F1:
             self.view |= 1
@@ -90,8 +92,13 @@ class Inp:
         new = [poty & 0x7E, potx & 0x7E]
         if self.mok:
             dy, dx = (m1351_delta(o, n) for o, n in zip(self.mold, new))
-            self.y = (self.y - dy) & 0xFF
-            self.x = (self.x + dx) & 0xFF
+            for i, d in ((0, -dy), (1, dx)):  # AROS reads s8 per frame: clamp
+                acc = max(-127, min(127, self.macc[i] + d))
+                step, self.macc[i] = acc - self.macc[i], acc
+                if i == 0:
+                    self.y = (self.y + step) & 0xFF
+                else:
+                    self.x = (self.x + step) & 0xFF
         self.mold, self.mok = new, True
         return self.obs()
 
