@@ -33,7 +33,14 @@ AROS_CHIP     = $000000 ; first chip-RAM byte; the ROM's first 8 bytes are copie
 AROS_CHIP_END = $1FFFFF ; last chip-RAM byte (inclusive)
 .endif
 
-; @region free $200000-$BEFFFF unmapped on the machine; zero-filled; AROS probes it and finds nothing (Akiko at $B80002 reads 0)
+; @region td $200000-$2DBFFF W13-W: the staged DF0 disk image (880 KB ADF + Startup-Sequence overlay), read only by td.s's HLE trackdisk (REU DMA); never guest-visible: no guest access to $200000-$B7FFFF to the Workbench (boot-model watch, build/evidence/w13-wb); zero without a disk
+.ifndef TD_ADF
+TD_ADF        = $200000 ; W13-W: ADF byte 0 (block n at TD_ADF + 512 n)
+.endif
+.ifndef TD_ADF_END
+TD_ADF_END    = $2DBFFF ; W13-W: last ADF byte (inclusive; 901120 bytes)
+.endif
+; @region free $2DC000-$BEFFFF unmapped on the machine; zero-filled; AROS probes it and finds nothing (Akiko at $B80002 reads 0) ; W13-W: was $200000-
 ; @region io $BF0000-$BFFFFF CIA bank: trapped to chip.s/cia.s by the memory API, the REU under it unused
 
 ; @region aros $C00000-$DBFFFF slow RAM, 1.75 MB (AROS sizes it to $DC0000; SysBase lands here)
@@ -56,7 +63,11 @@ snap_base = $DF1000     ; W12-T (supervisor-approved): snapshot area (header at 
 .ifndef snap_end
 snap_end  = $DF3FFF     ; W12-T (supervisor-approved): last byte of the snapshot area (inclusive)
 .endif
-; @region io $DF4000-$DFFFFF custom-chip bank: trapped to chip.s by the memory API ; W12-T (supervisor-approved): was $DF1000-
+; @region disp $DF4000-$DF40FF W13-D: a zero row (256 B, stashed by disp_init) the hires kernels fetch for the planes a 1-3-plane hires picture lacks; under the trapped $DF bank (never guest-visible)
+.ifndef disp_zero
+disp_zero = $DF4000     ; W13-D disp: zero row for absent hires planes (row advance 0)
+.endif
+; @region io $DF4100-$DFFFFF custom-chip bank: trapped to chip.s by the memory API ; W12-T (supervisor-approved): was $DF1000- ; W13-D: was $DF4000- (disp zero row split off)
 
 ; @region aros $E00000-$E7FFFF extension ROM bank, 512 KB (aros-ext.bin, staged by host/machine.py)
 .ifndef AROS_EXT
@@ -80,4 +91,7 @@ AROS_ROM_END  = $FFFFFF ; last ROM byte (inclusive)
 .assert AROS_ROM_END - AROS_ROM + 1 = $80000, error, "the Kickstart bank is 512 KB"
 .assert AROS_EXT_END - AROS_EXT + 1 = $80000, error, "the extension bank is 512 KB"
 .assert AROS_CHIP = 0,                        error, "chip RAM starts at 0 (the vector page and the reset longs)"
+.assert TD_ADF = AROS_CHIP_END + 1,            error, "W13-W: the disk follows chip RAM (one snapshot span)"
+.assert TD_ADF_END - TD_ADF + 1 = 901120,      error, "W13-W: a DD ADF"
 .assert disp_lut = $DF0000,                   error, "disp_lut sits where guest.inc puts it (disp.s is profile-agnostic)"
+.assert disp_zero = $DF4000,                  error, "W13-D: disp_zero sits where guest.inc puts it"

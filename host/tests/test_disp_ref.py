@@ -119,7 +119,7 @@ def test_standard_mc2_and_hires():
     ({"bplcon0": 0x2600}, R.WHY_HAMDPF),       # DBLPF
     ({"bplcon0": 0x1200}, R.WHY_DEPTH),        # 1 plane
     ({"bplcon0": 0x3200}, R.WHY_DEPTH),        # 3 planes
-    ({"bplcon0": 0xA200}, R.WHY_DEPTH),        # hires 2 planes
+    ({"bplcon0": 0x8200}, R.WHY_DEPTH),        # hires 0 planes (W13-D: hires 2 planes, $A200, now converts)
     ({"bplcon0": 0x4200}, R.WHY_DEPTH),        # lores 4 planes
     ({"diwstrt": 0x2C81, "diwstop": 0x2CC1}, None),   # $12C: 256 lines
     ({"diwstrt": 0xF481, "diwstop": 0x90C1}, R.WHY_DIW),          # $90 < $F4

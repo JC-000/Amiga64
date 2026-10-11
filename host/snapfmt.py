@@ -57,7 +57,7 @@ import hashlib
 import struct
 import sys
 
-VERSION = 1
+VERSION = 2                     # W13-W: 2 = the chip span holds the staged disk too
 MAGIC = b"A64S"
 SNAP_BASE = 0xDF1000            # rc snap region ($DF1000-$DF3FFF)
 SNAP_END = 0xDF3FFF
@@ -66,13 +66,14 @@ OFF_RID = 0x2FE0                # the ROM id the host/stager declares (32 bytes)
 OFF_SAV = 0x2E00                # F1: snap_res's save of the scratch page (256 bytes; no file span)
 KEEP_MAX = SNAP_END + 1 - SNAP_BASE - OFF_BSS
 H_NSP, H_FLAGS, H_BID, H_RID, H_SSUM, HDR_SUM = 5, 52, 56, 64, 96, 252
-# The guest REU ranges a file carries (runtime/rc/machine.inc): chip RAM,
+# The guest REU ranges a file carries (runtime/rc/machine.inc): chip RAM
+# with the staged DF0 disk after it (W13-W, TD_ADF $200000-$2DBFFF),
 # slow RAM together with the unmapped $DC0000-$DEFFFF above it (AROS writes
 # there: not zero after a boot to m3, measured on both Ultimates,
 # tests/aros_resume.zero_check), the extension and Kickstart ROM banks.  The
 # rest of the machine profile's unmapped space stays zero (checked by the
 # same leg); the LUT at disp_lut is rebuilt by disp_init on resume.
-RANGES = ((0x000000, 0x200000), (0xC00000, 0x1F0000),
+RANGES = ((0x000000, 0x2DC000), (0xC00000, 0x1F0000),   # W13-W: chip RAM + TD_ADF
           (0xE00000, 0x080000), (0xF80000, 0x080000))
 BID_LEN = 8
 

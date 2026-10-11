@@ -47,6 +47,7 @@ cwin_base  = $A900      ; W12-C cwin: up to 7 page-aligned 256-byte code windows
 cwin_map   = $B000      ; W12-C cwin: 256-byte page-low map ($B000-$B0FF; also the last window's guard byte)
 .endif
 ; W11-B blt: the blitter's row buffers (RAM under BASIC ROM; blt.s banks BASIC out for a blit, REU DMA in/out)
+; W13-W (supervisor-approved): the td module (tests/aros/td.s) also uses $B600-$B6FF (blt_abuf) as its 256-byte REU bounce buffer (TD_BUF), only inside the BeginIO trap and its frame hook; blits run synchronously inside a custom-register write, so no blit is ever in flight there
 ; @region blt $B600-$B7FF blitter channel rows: A, B, C, D, 128 bytes each (one row of up to 64 words, guest byte order)
 .ifndef blt_abuf
 blt_abuf   = $B600      ; W11-B blt: A row ($B600) and B row ($B680): one page, X-indexed by blt_prep
@@ -75,6 +76,7 @@ c2v_args   = $BF00      ; W7-V c2v: argument block + converter state (layout: do
 .endif
 
 ; @region run $C000-$C7FF buf_case - harness writes test cases / load records here
+; W13-W (supervisor-approved): in machine mode buf_case is the machine-mode code area (test-time modules, never in the PRG): mboot $C000-$C1FF, td $C200-$C5FF (tests/aros/td.s), W13-D's spr $C600-$C8FF (its last page overlaps buf_result's case-result span $C800-$C8FF, which machine mode never uses; mboot's P/R block is at $C900); staged by tests/aros_wb.py, re-staged before a resume
 .ifndef buf_case
 buf_case   = $C000
 .endif
@@ -124,6 +126,30 @@ VIC_BORDER  = $D020     ; W10-V disp: VIC border colour (Amiga colour 0)
 .ifndef VIC_BG0
 VIC_BG0     = $D021     ; W10-V disp: VIC background colour 0 (Amiga colour 0)
 .endif
+.ifndef VIC_SPR0X
+VIC_SPR0X   = $D000     ; W13-D disp: VIC sprite 0 X ($D000), Y ($D001); sprites 1-2 at +2/+4 (the Amiga pointer)
+.endif
+.ifndef VIC_SPRMSB
+VIC_SPRMSB  = $D010     ; W13-D disp: VIC sprite X bit 8 (bits 0-2 written: sprites 0-2)
+.endif
+.ifndef VIC_SPREN
+VIC_SPREN   = $D015     ; W13-D disp: VIC sprite enable (0 or 7: sprites 0-2)
+.endif
+.ifndef VIC_SPRYX
+VIC_SPRYX   = $D017     ; W13-D disp: VIC sprite Y expansion (0)
+.endif
+.ifndef VIC_SPRPRI
+VIC_SPRPRI  = $D01B     ; W13-D disp: VIC sprite priority (0: in front of the bitmap)
+.endif
+.ifndef VIC_SPRMC
+VIC_SPRMC   = $D01C     ; W13-D disp: VIC sprite multicolour (0: hires)
+.endif
+.ifndef VIC_SPRXX
+VIC_SPRXX   = $D01D     ; W13-D disp: VIC sprite X expansion (7 in the 1:1 view, else 0)
+.endif
+.ifndef VIC_SPRCOL
+VIC_SPRCOL  = $D027     ; W13-D disp: VIC sprite 0 colour; 1-2 at $D028-$D029 (Amiga colours 17-19 via the LUT)
+.endif
 .ifndef CIA2_PRA
 CIA2_PRA    = $DD00     ; W10-V disp: CIA 2 port A; bits 1-0 = NOT VIC bank (disp.s sets bank 3, other bits kept)
 .endif
@@ -161,6 +187,11 @@ CIA2_CRB    = $DD0F     ; W8-L mach: CIA 2 control B (bit 7 kept)
 ; @under c2v $D000-$D3FF c2v VIC screen matrix + sprite pointers in the RAM under VIC/SID I/O (bank 3 + $1000); CPU writes with $01=$34 under sei only, never REU DMA
 .ifndef c2v_screen
 c2v_screen = $D000      ; W7-V c2v: 40x25 screen matrix
+.endif
+; W13-D disp: the Amiga pointer's VIC sprite blocks (docs/CONTRACTS.md "Display refresh": "Pointer sprite (W13-D)")
+; @under disp $D400-$D7FF disp pointer sprite blocks in the RAM under SID I/O: sprites 0-2 at $D400/$D440/$D480 (VIC bank 3 blocks $50-$52), $D4C0-$D7FF spare; CPU writes with $01=$34 under sei only (inside mach_run), never REU DMA
+.ifndef disp_sprb
+disp_sprb  = $D400      ; W13-D disp: 3 x 64-byte sprite blocks
 .endif
 ; @region sys $DF00-$DF0A REU RAM-Expansion-Controller registers
 .ifndef REC_STATUS

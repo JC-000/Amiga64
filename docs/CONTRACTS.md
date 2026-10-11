@@ -535,7 +535,40 @@ no link dependency on any client.
   one instruction each), and there is no time floor, so a periodic client
   re-arming from its own deadline keeps a bounded lateness when its period
   exceeds a pass plus one instruction (`lag`: P = 3000 phi2 at s = 0,
-  max 2333 late; the round-1b floor drifted to 50k). A halt in that step
+  max 2333 late; the round-1b floor drifted to 50k). 
+  **Wave 13 (rev-inp round 4):** the frame hooks (`inp_frame`, W13-D's)
+  raised the shortest period a pass can serve at s = 0, screen on (VIC
+  badlines take ~8% of φ2), from < 3000 to ≈ 3050-3100 φ2.
+  - Measured with the `lag` leg's ring log, 160 re-arms per run
+    (`build/evidence/sup-lag/probe_*.log`):
+    - merged P = 3000 drifts: slope +7116 to +7906, max 9.4-10.4k;
+    - merged P = 3100 is bounded: max 2830-3451;
+    - merged P = 3200 and 3400 are bounded: max ≤ 3218.
+  - The ring log stores every entry, about 50 cycles per callback more than
+    the old log's early exit once full. With it the base PRG (5eb3cd0)
+    also drifts slowly at P = 3000 (slope +1051 to +1660); it does not at
+    3200.
+  - The old 30-re-arm window hid the drift: "2921-3485 over 7 runs" were
+    fresh-session samples of a drifting series.
+  - At s = 3 (the AROS profile on the Ultimates) one φ2 is 1/8 E tick, so a
+    pass costs 8× fewer E ticks per period than at s = 0 (16× at VICE's
+    s = 4).
+  - **Frame-hook budget** (rev-inp, 2026-10-09): further work on the fhook
+    path stays safe up to about 300 extra cycles at idle. A 600-cycle hook
+    sits at the P = 3200 edge (slope +74 to +1300), so the lag leg would
+    flake; re-derive P before adding that much.
+  - The leg now runs at **P = 3200**, 240 re-arms, with the screen forced
+    on. It gates the max of the logged first 16 and last 16 entries
+    (≤ 4096) and the drift: the mean of the last 10 minus the mean of the
+    first 10 must be ≤ 700 φ2.
+    - Bounded series measured: max 2378-3391, slope −461 to +389, on base,
+      merged and with a 300-cycle hook delay.
+    - Drifting series: merged at P = 3000, slope ≥ +11254; mutant
+      `hook800` (+800 cycles per frame hook), ≥ +12586.
+    - A 600-cycle hook delay sits at the edge: +74 to +1300.
+  - The gate runs with the input override (`inp_src` = 1). The real CIA1
+    scan (+111 cycles per frame hook) is run once more at the same P and
+    recorded, not gated ("Input (joystick -> mouse)"). A halt in that step
   (HALT, STOP, an odd vector) leaves through the normal halt path, and every
   `mach_run` exit rule holds. A delivery does not force a step: a higher
   level pending after a delivery nests before the handler's first
@@ -1034,11 +1067,146 @@ spec: `docs/C2V.md` "Row skip", "Display refresh (S3.5)". Reference:
     2048 nibble-packed; supervisor-approved); `disp_init` unpacks it, once,
     into the same 4096 REU bytes at `disp_lut` and stops at exactly 4096
     entries (`disp_init` 126,616 φ2 cycles, base 120,006–120,225).
+- **1:1 view (W13-D).** Spec: `docs/C2V.md` "1:1 view (W13-D)", "Hires
+  with 1-3 planes (W13-D)".
+  - Reference: `c2v_ref.one_cells`, `convert_one`, `disp_decide_view`,
+    `disp_convert_view`.
+  - Tests: `tests/run_c2v.py` (kind `one`), `tests/run_pf.py` leg `view`,
+    `tests/run_spr.py` leg `aros1`, `host/tests/test_c2v_one.py`.
+  - **State.** All of it is in disp.s's BSS, so the snapshot carries it
+    (I2): `disp_view` (0 fit, 1 1:1), `disp_px` (the window's first byte,
+    0-40), `disp_py` (its first line, before clamping), `disp_ymax`, and
+    `disp_one` (the last decision is the 1:1 view). `disp_ymax` is
+    L − 200, or L − 101 with LACE, clamped to 0-255; every shown decision
+    sets it. (Fix round 1: LACE L − 101.)
+  - **The toggle.** `inp_view` (I1; until W13-I lands, disp.s's stand-in
+    under `DISP_INPV_LOCAL`) bit 0 is an edge.
+    - `disp_frame` consumes it first, clearing bit 0 only.
+    - It flips `disp_view` and sets `disp_px` = 20 and `disp_py` =
+      `disp_ymax` / 2: the window is centred.
+    - It converts at once, ignoring gen, the snapshot compare and the duty
+      budget.
+  - **The decision.** For hires (BPU 1-4) with `disp_view` = 1:
+    - `disp_one` = 1 and `disp_crop` = min(`disp_py`, `disp_ymax`).
+    - With BPLCON0 LACE, each plane's row advance is halved (the two
+      fields interleave; an arithmetic shift, so negative modulos work) and
+      `disp_lines` = min(2 · `disp_lines`, 200). `disp_ymax` = L − 101, so
+      the odd field's last frame line read is ≤ 2L − 1.
+    - Rows past the picture (frame line ≥ `disp_lines`) read 0
+      (`disp_ozero`, BHI, from `c2v_ones` through `c2v_v_olim`): they add
+      nothing to the colour counts and show pen 0, as in the fit view. A
+      char row that straddles the picture's end shows the cell's bg below
+      it.
+    - Known gap: the 512 KB check covers only the current field's rows.
+      The other field's rows in between are not checked; a straddling row
+      shows wrong pixels in that row only, since the DMA target is fixed.
+    - Any other decision leaves the fit view's.
+  - **The output.** A hires bitmap with a per-cell bg (the pen of the
+    cell's top-left pixel) and fg (the first other pen in raster order).
+    The matrix byte is colour(fg) << 4 | colour(bg), with colours by the
+    W12-V rule over every cell's bg and fg. Colour RAM is left as it was
+    (unused in hires). `disp_mck`, `disp_clrlines` and the VIC setup are
+    the fit hires view's.
+  - **Cells with 3+ pens are lossy:** the top-left pixel's pen becomes bg,
+    and every other pen shows as fg's colour. Pinned by run_c2v case
+    `three-pen`.
+  - **Frozen part.** The fit view's bitmap, matrix and colour RAM are
+    byte-identical to the base for every input it converted before: the
+    existing run_c2v/run_pf legs, and the AROS m3 hashes, unchanged.
+- **Hires with 1-3 planes (W13-D).** These decisions now convert (they
+  were DEPTH), in both views.
+  - An absent plane reads `disp_zero` (`$DF4000-$DF40FF` in the REU
+    under the trapped `$DF` bank, rc `guest.inc`/`machine.inc`, zeroed by
+    `disp_init`) with a row advance of 0.
+  - The guest cannot reach it: every guest access to bank `$DF` traps to
+    `chip.s`.
+- **Pointer sprite (W13-D, D2).** The pointer is a machine-mode module,
+  `tests/aros/spr.s`, at `$C600-$C8FF`.
+  - **Build and arm.** It is assembled at test time by
+    `tests/run_spr.py build_spr(out_dir, labels)` against the runner's
+    labels; it is not in the PRG. `run_spr.arm` arms it: `spr_vec` :=
+    `$C600` (high byte last) and `spr_id` := `"SPR1"` (`$31525053`; a
+    resume compares it, W13-W's loader).
+  - **Hook.** `disp_vw` (BHI) calls through `spr_vec` once per frame
+    hook when F1 is not pressed and `spr_vec` ≠ 0. The module returns
+    C = 1 when it moved the 1:1 window; `disp_frame` then converts at
+    once.
+  - **When it runs.** Inside `mach_run` only. It shows the pointer while
+    `disp_mode` is mc2 or hires, DMACON has DMAEN and SPREN, and VSTOP >
+    VSTART. A hidden → hidden frame writes nothing.
+  - **Per frame.** SPR0PT is read from `chip_shd` (bit 0 ignored), then
+    POS/CTL with one 4-byte REU fetch.
+  - **Image and colours** are read again only when SPR0PT, POS or CTL
+    changed, or `disp_nconv` (low byte) moved. The image is up to 21
+    lines of DATA/DATB; the colours are LUT[COLOR17-19], one byte DMA each
+    into `$D027-$D029`.
+  - **Sprites and memory.** VIC sprite 0 = DATA & ~DATB (colour 17),
+    1 = ~DATA & DATB (18), 2 = DATA & DATB (19). The masks are exclusive,
+    so the colours are exact at full width. Blocks are at `disp_sprb`
+    (`@under disp $D400-$D7FF`, VIC blocks $50-$52) and the pointers at
+    `c2v_screen + $3F8`, written at `$01` = `%xx100` under `sei`.
+  - **State** is in `c2v_args` + 180..211 plus the module's own two bytes,
+    which are zero when staged. After a resume the module is staged again
+    and rebuilds everything from `chip_shd` and guest memory.
+  - **Position.** In lores pixels: SX = HSTART + 1 − (2 · (DDFSTRT &
+    $FC) + 9), lores (DDFSTRT & $F8) + 17. These are the playfield's first
+    fetched pixel, which the fit view shows at C64 x = 0 (HRM: the sprite
+    pixel at hcount H shows with playfield hcount H + 1). SY = VSTART −
+    DIWSTRT V.
+    - Fit view: VIC X = 24 + SX, VIC Y = 50 + SY − `disp_crop`.
+    - 1:1 view: VIC X = 24 + 2 · (SX − 4 · `disp_px`) (X-expanded), VIC Y
+      = 50 + SY − `disp_crop`. With LACE, 50 + 2 · (SY − `disp_crop`),
+      Y-expanded.
+    - Off X 0-$1FF or Y 0-255, the pointer is hidden.
+  - **Pan (1:1).** When the pointer comes within 32 C64 pixels (16 lores;
+    LACE 16 field lines) of a window edge, the window re-centres on it:
+    `disp_px` := clamp(SX − 80, 0, 160) / 4 and `disp_py` := clamp(SY − 100,
+    LACE 50, 0, `disp_ymax`). C = 1 only if px or the window's line
+    changed, so a clamped edge never converts. Hysteresis: after a pan the
+    pointer is ≥ 48 C64 px from every edge.
+  - **Arming guard (fix round 1).** Before calling through `spr_vec`,
+    `disp_vw` (BHI) compares the module's ID at `spr_vec` + 3..6 with
+    `spr_id`. On a mismatch, for example a tool stub or a resume that did
+    not re-stage the module, it clears `spr_vec`'s high byte (disarmed) and
+    returns C = 0. Test: `run_spr` leg spr, case `guard-overwritten`.
+  - **Hand-off rule.** Whoever launches a session stages the module at
+    `$C600` and arms it after the last stub, `test_load_chunk` or
+    runner-helper write that can touch `$C000-$C8FF`, and again after every
+    resume. W13-W's loader does this at the merge.
+    - Arm order (`run_spr.arm`, fix round 2): `spr_vec` high := 0, then
+      `spr_id`, then `spr_vec` low, then `spr_vec` high (this last write
+      arms). Then `$D01B`/`$D01C` := 0.
+    - **A resume disarms the pointer module.** snap.s's restore clears
+      `spr_vec` high after the BSS image (supervisor, at the merge), and the
+      launcher re-stages and re-arms it.
+    - The ID guard catches a module whose ID bytes were overwritten. A stub
+      written inside the module that leaves `$C603-$C606` intact is not
+      caught (rev-vis round 2); only the rule above prevents that.
+    - On an ID mismatch the guard also hides VIC sprites 0-2 (`$D015` bits
+      0-2 := 0).
+  - **The module is full:** 768 B, `$C600-$C8FF`, 0 B spare; `sval`/`son`
+    are its last two bytes (`$C8FE`/`$C8FF`). Any growth must trim first.
+  - **Pan gate (fix round 1).** The window re-centres only while the image
+    has a pixel (the OR of its 4 · height bytes). An empty pointer, such as
+    AROS's on the insert-disk screen, never moves the window: it keeps D1's
+    centre or the test-set offset.
+  - **Limits:**
+    - The height is capped at 21 lines (VIC; LACE 1:1 at 42 frame lines).
+    - The attach bit (sprite 1) is ignored.
+    - Sprite position is not dilated by BPLCON1 scroll.
+    - Sprites 1-7 are not shown.
+    - A pan converts at once, past the duty budget (user-paced, like F1).
+    - A pointer colour change alone (COLOR17-19, not display fields, so no
+      conversion), or an image edited in place at the same SPR0PT, stays
+      stale until the pointer moves (POS/CTL change) or the screen converts.
 - **C64 resources:** writes the c2v regions (bitmap, matrix under I/O,
   colour RAM, `c2v_stage` during `disp_init`, `c2v_args`), `$D011`,
   `$D016`, `$D018`, `$D020`, `$D021`, and `$DD00` bits 1–0 (bits 7–2 and
   the DDR kept; `mach.s` never writes port A, "Machine loop"). State is in
-  disp.s's BSS (whole page), host-visible in `runner.lbl`.
+  disp.s's BSS (whole page), host-visible in `runner.lbl`. W13-D: the
+  pointer module (not disp.s) writes VIC `$D000-$D005`, `$D010`, `$D015`,
+  `$D017`, `$D01B`-`$D01D`, `$D027-$D029`, the sprite pointers
+  `$D3F8-$D3FA` and the blocks `$D400-$D4BF` (`@under disp $D400-$D7FF`).
 - **Guest resources:** `disp_lut` `$DF0000-$DF0FFF` (rc `guest.inc`,
   owner disp): the REU bytes under the trapped custom-chip bank. Every
   guest access to bank `$DF` goes to `chip.s` (open bus), never the REU,
@@ -1256,6 +1424,15 @@ Tests: `tests/aros_boot.py` (legs `m1`, `m2`, `m3`, `ablate`, `wkhook`,
   the serial ring and the counters while the guest runs and ends the
   session (VICE: the harness releases the instance; U64E: the DeviceLock
   hold's restore resets the C64).
+- **buf_case in machine mode (W13-W).** `$C000-$C8FF` is the machine-mode
+  code area, test-time only (never in the PRG): mboot `$C000-$C1FF`
+  (asserted: its link size), the td module `$C200-$C5FF`, W13-D's spr
+  `$C600-$C8FF`. mach_run is called from mboot and stays inside it, so the
+  area stays resident; a resume's fresh load re-stages it
+  (`tests/aros_wb.WbMachine.load_driver`). `tests/aros_resume.py`'s REU stub
+  moved from `$C700` to `$CC00` (buf_result, unused in machine mode;
+  `$CB00` is its data page); `tests/ureu_probe.py`'s stub stays at `$C700`
+  (it never runs with a module staged).
 - **`mach_s` per host** (measured, `docs/PERF.md` "AROS boot"), chosen
   for SPEED only: **3 on the U64E at 48 MHz** (fix round 2, L8: picked by
   the time to m3, the no-media screen, which is bound by guest time: s = 3
@@ -1544,7 +1721,8 @@ the UCI model).
 - **Nothing else writes the snapshot region**: the memory API traps every
   guest access to `$DF0000-$DFFFFF` to chip.s, which never addresses the
   REU (no REC programming in chip.s/cia.s/cop.s); the only REU users under
-  `$DF` are disp.s (the LUT, `$DF0000-$DF0FFF`) and snap.s (the snapshot
+  `$DF` are disp.s (the LUT, `$DF0000-$DF0FFF`, and W13-D's zero row
+  `disp_zero`, `$DF4000-$DF40FF`, all zero: `zero_check` still holds) and snap.s (the snapshot
   area, and `SNAP_SAV` `+$2E00-$2EFF`: snap_res's own save of the scratch
   page at every resume entry, F1). Checked after m3 on every backend: the
   REU from the end of the BSS image to `SNAP_SAV`, from `SNAP_SAV` + 256 to
@@ -1576,6 +1754,15 @@ the UCI model).
   suspend copies the tag into the header, resume compares the header's tag
   with the one declared now and refuses an all-zero tag (`$EA`). (In the REU, not MAIN: 32 bytes of
   DATA tipped the MAIN layout over a page, see the Wave 12 report.)
+
+- **W13-W module ID** (`SNAP_VER` 2): a snapshot taken with the td module
+  armed carries `td_vec`/`td_mid` in the image; the resume driver re-stages
+  the modules first, and a module whose ID differs is refused AFTER the
+  restore, by MAIN code: `td_call` calls nothing and the first frame hook
+  halts the machine with st_halt 1, st_reason `TD_HALT_MOD` = `$57`
+  (`snap_st` already reads `$20`). Snapshots without td (`td_vec` = 0) are
+  unaffected. A `SNAP_VER` 1 file is refused `$E1` (`test_snap_file`
+  case "version 1").
 
 ### State inventory
 
@@ -1612,4 +1799,319 @@ before `snap_keep`).
 | VIC registers, `$DD00` bank, bitmap, matrix, colour RAM | hardware / `$D000`, `$E000` | — | rebuilt by the forced conversion (I2) | derived from `disp_st` + guest memory |
 | c2v pair tables, `c2v_args` | `$B900-$BAFF`, `$BF00` | — | `disp_init` → `c2v_init`; args per conversion | derived |
 | LUT | REU `$DF0000` | — | `disp_init` stashes it | derived |
+| W13-D zero row `disp_zero` | REU `$DF4000-$DF40FF` | — | `disp_init` stashes it | derived (zeros) |
+| W13-D view state `disp_view`/`px`/`py`/`ymax`/`one` | `disp.s` BSS | image | restored | the 1:1 view survives a resume |
+| W13-D D2 `spr_vec`, `spr_id` | `disp.s` BSS | image | restored as saved; the module they point at is NOT in the image: `disp_vw` compares the module's ID (`spr_vec` + 3..6) with `spr_id` every frame hook and disarms (`spr_vec` high byte := 0) on a mismatch | the hand-off rule below re-stages and re-arms |
+| W13-D D2 pointer module, its state | `$C600-$C8FF`, `c2v_args` + 180..212 | — | re-staged and re-armed by whoever launches the session (hand-off rule); its state is zero when staged and rebuilt from `chip_shd` + guest memory | test-time module, not in the PRG |
+| W13-D D2 sprite blocks, pointers | RAM under I/O `$D400-$D4BF`, `$D3F8-$D3FA` | — | rebuilt by the module's first image read | derived |
 | guest memory | REU chip RAM, slow RAM + `$DC0000-$DEFFFF`, ROM banks | stays (REU-resident) / file spans 2-5 | stays / LOAD_REU | the guest's RAM. AROS WRITES `$DC0000-$DEFFFF` (unmapped in the profile; not zero after m3 on both Ultimates), so the slow-RAM span runs to `$DEFFFF`. `$200000-$BEFFFF` and `$E80000-$F7FFFF` read zero after m3 (`aros_resume` m3 leg, Ultimate) and are not filed: a resume needs them zero, as the boot does (`host/machine.ZERO_SPANS`) |
+
+## Input (joystick -> mouse) (W13-I)
+
+Owner: inp (`runtime/ops/inp.s`; in `chip.s` the POTINP read, now `jmp
+inp_pot` padded to its old size so no module moves, labelled `; W13-I`;
+one call line in `mach.s`). Design: `docs/WAVE13_BRIEF.md`
+"W13-I". Reference: `host/inp_ref.py` (`Inp.frame` the rule, `scan` the
+CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
+`host/tests/test_inp.py`.
+
+- **When.** `inp_frame` runs once per machine-loop service pass that
+  posted a VERTB: `mach.s` `fhook` calls it first (`jsr inp_frame ;
+  W13-I`), whether or not a frame hook (`mach_fhook`) is installed, with
+  `$01` = `$35`, A/X/Y clobbered. A pass that catches up several frames
+  runs it once, and VERTBs that pass during the hook are counted, not
+  hooked (the existing `fhk`/`skip` rule). So every VERTB the guest sees
+  has had exactly one `inp_frame` since the previous one (test `guest`).
+  Nothing is on the per-instruction path (`perf_cycles --max-delta 0`).
+- **Source.** `inp_src` = 0: the real CIA1 is scanned into `inp_joy` and
+  `inp_key`. Otherwise those two bytes are the host's override, the test
+  seam for VICE and unattended hardware legs. `inp_joy` bits 0-4 =
+  up/down/left/right/fire, 1 = pressed (the harness's `inject_joystick`
+  polarity). `inp_key`: `$10` = F1, `$20` = C= (the keys' matrix rows).
+- **Scan** (the only CIA1 port reader in machine mode). Port 2 drives the
+  keyboard's column lines (port A), so the scan keeps them apart like this:
+  1. **Stick.** DDRA = `$00`: nothing is driven, so only port 2 can pull
+     PA0-4 low. joy = `~PRA & $1F`. A held key cannot reach it, because no
+     row is low. DDRB is never written: it stays `$00` (KERNAL, hle_con).
+     The one way through is a row pulled low from outside (a port-1 stick)
+     *and* a key held on that row in columns 0-4: the stick then reads that
+     column's direction, as on any C64. On the C64U (2026-10-09), rows 6-7
+     driven low by a test read as DOWN (column 1), consistent with SHIFT
+     LOCK latched (column 1, row 7). Port 2 also read UP held at every
+     speed, even with PA0 driven high: something outside the CIA holds it,
+     the stick or its cable (`build/evidence/w13-inp/green/c64u_pa_diag.log`).
+  2. **Idle.** PRA = `$FF` first, then DDRA = `$FF` (the latch is high
+     before the outputs turn on, so the old latch never drives PA). A PRB bit low with no column
+     selected is a row held by port 1, or by a key in a column the stick
+     pulls. That key is *unknown* this frame and keeps its last state:
+     `key = ((new ^ old) & idle) ^ old`. Cases: F1 with the stick up; C=
+     while the stick pulls the column of S/F/H/K/F3 and that key is held.
+  3. **Keys.** F1 is read on column 0 (PRA `$FE`) row 4, then C= on column
+     7 (PRA `$7F`) row 5, with no settle wait between them.
+     - MEASURED (rev-inp, C64U, 2026-10-09: `build/evidence/w13-inp/settle/c64u_settle.log`,
+       probe `build/evidence/w13-inp/settle/settle.s`):
+       rows recover at once at 1, 48 and 64 MHz, and a column 1 → column 7
+       read shows no phantom.
+     - The U64E is unmeasured.
+     - A held F3 (column 0, row 5) reading as C= is checked by the attended
+       script's F3/C= step.
+  4. **Restore.** On exit the scan puts back CIA1 DDRA and PRA as they were
+     on entry: PRA first, then DDRA. The PRA value is the one *read* on
+     entry, because the 6526 returns the pins, not the latch. DDRB and PRB
+     are never written.
+     - The caller's CIA1 port A is unchanged by a frame, unless a port-2
+       switch is closed at entry. That latch bit then stays 0 until the
+       caller rewrites PRA. (Leg `real` checks DDRA `$F0`/PRA `$5A` →
+       `$F0`/`$5F`.)
+     - Callers that read CIA1 set it up themselves (`hle_con.s:401-405`),
+       and no runtime code calls the KERNAL. The restore is a precaution
+       kept under the page pad (supervisor, fix round 1).
+  - **Cost** (leg `cost`: 6502 cycles per call, VICE, screen off, the
+    minimum of 5; CPU speed does not change it):
+    - the real scan with nothing held: 277;
+    - the override, idle: 166;
+    - the override with every bit set: 245;
+    - worst case: 356 (the real scan plus all four mouse-loop bits);
+    - the real scan costs 111 more than the override.
+    rev-inp's independent measurement agrees (277/166/245/356).
+  - **Lateness.** `run_irq` `lag` (s = 0, screen on) is gated with the
+    override at P = 3200 for drift and max; see "Event seam".
+    - The W13 frame hooks moved the servable edge from < 3000 to
+      ≈ 3050-3100 φ2. The old P = 3000 numbers ("2921-3485 over 7 runs")
+      were fresh-session samples of a drifting series.
+    - With the real scan at P = 3200 × 240: max 2779-3106 φ2, slope
+      +183 to +292 (3 runs, recorded only).
+  - **Coverage gap.** A real key or stick press through CIA1 (the scan's
+    positive path) is covered only by the attended script
+    (`tests/run_inp.py --attended`):
+    - VICE cannot hold a matrix key and ignores JOYPORT_SET;
+    - the Ultimate's `inject_joystick` writes the PRA latch only;
+    - the C64U's stick reads Up held.
+    The unattended legs cover the scan's isolation: rows driven low, the
+    undriven reading, the CIA1 restore.
+  - The Ultimate's `inject_joystick` writes the PRA *latch* (c64-test-
+    harness `backends/ultimate64.py` `inject_joystick`). With DDRA = `$00`
+    the latch is not on the pins, so it cannot reach `inp_joy` (leg
+    `noinj`). VICE 3.10 ignores the harness's JOYPORT_SET: the probe on
+    2026-10-09 saw no change at `$DC00`/`$DC01` with any controlport or
+    joydev setting. The real-scan leg therefore holds rows low through
+    DDRB/PRB instead.
+- **Rule** (per frame, from `inp_joy`/`inp_key`; `host/inp_ref.Inp`):
+  - **Mouse.** dir = joy & `$0F`. n = `inp_n`, set to 0 when dir = 0.
+    step = 1 + n/2, then n += 1 while n < `INP_NMAX` (30). The steps run
+    1, 1, 2, 2, ..., `INP_CAP` = 16 counter units per frame.
+    - Up subtracts the step from JOY0DAT's Y counter (`chip_shd+$0A`, the
+      high byte), down adds it. Left and right do the same on the X
+      counter (`chip_shd+$0B`). Each counter is a u8 and wraps, as on the
+      Amiga.
+    - Opposite bits cancel. Diagonals move both axes. Changing direction
+      without centring keeps the speed. Centring resets it.
+  - **Left button** = fire. CIA-A PRA pin bit 6 (/FIR0) is low while fire
+    is held. Pin bit 7 (/FIR1) is forced high. Pins 0-5 (W13-W's 2-5) are
+    kept: read-modify-write of `cia_st+CIA_PIN`, mirrored as `INP_PIN`
+    (host test). After a `cia_reset` (pins `$EB`, both released) the pins
+    are back within one frame.
+  - **Right button** = C= (the Amiga has no C= key). The POTINP read
+    (`chip.s` → `inp_pot`) returns `$FB00` while `inp_key` bit 5 is set,
+    else `$FF00` as before
+    (bit 10, DATLY, low). The POTGO output bits are not modelled.
+  - **View key.** On an F1 press edge (down now, up the frame before),
+    `inp_view` |= 1. W13-D clears the bits it consumes (I1). No other C64
+    key reaches the guest in this wave.
+- **Resume (I2).** The snapshot image carries `inp_src`/`inp_joy`/`inp_key`
+  as they were at suspend; the resume path itself does not touch inp
+  state. The host that launches a resume owns `inp_src`:
+  - Real input: write `inp_src` = 0.
+  - Scripted input: write `inp_src` = 1 with `inp_joy`/`inp_key` = 0.
+  - Timing: snap_resume restores the image and continues mach_run without
+    returning, so the write must come after the restore. On the Ultimate
+    it is a memory write while the guest runs; VICE writes through the
+    monitor.
+  - Test boots: `tests/aros_boot.py` sets `inp_src` = 1 with no input right
+    after the runner loads (`--real-input` keeps 0), so a test snapshot
+    resumes scripted and idle.
+  - Who writes it: W13-W's I3 helper (`tests/aros_wb.py`) and the demo
+    resume must write `inp_src` = 0 after the resume for the user's stick
+    to work.
+- **State.** `inp_src`, `inp_joy`, `inp_key`, `inp_view`, `inp_n`,
+  `inp_kp` (MAIN BSS, in this order, zero = idle; inp.s links after
+  mach.s and before snap.s, so the W12-T snapshot image carries them, I2).
+  Scratch: rc zp `inp $9A-$9B` (`inp_t`, `inp_u`). It is live only inside
+  one call and not saved or restored: the "free zp" row of the
+  suspend/resume inventory now starts at `$9C`.
+- **Host-visible** (`runner.lbl`): `inp_frame`, `inp_pot`, `inp_src`,
+  `inp_joy`, `inp_key`, `inp_view`, `inp_n`.
+- **Link order.** inp.s links after mach.s and before snap.s (Makefile).
+  - chip.s keeps its size. Only mach.s grows (+3 B, the call), so only
+    snap.s and ureu.s move. core.s is unchanged.
+  - **Layout.** W13-I's CODE growth (inp.s plus mach.s's +3) is padded
+    (`inp_pad`) to exactly `$100`, so RODATA, DATA and BSS keep every page
+    offset. RODATA tables are read with abs,X on the per-instruction path,
+    and some straddle a page (g5_flow's 32-byte table). Any other shift
+    changes which entries cross: perf_cycles measured "stack" +1/3 cycle
+    per instruction at +207 B, and mem/stream/copy +1/2 at +3 B.
+  - **MAIN.** The segments grow by 262 B: inp code 198 B, pad 55 B, mach
+    3 B, BSS 6 B. The BSS end moves `$9C0B` → `$9D11`, the same as without
+    the pad, because BSS starts on a page.
+  - Any later CODE growth shifts RODATA again. That is a layout rule for the
+    supervisor (e.g. page-align RODATA in `runtime/c64.cfg`).
+
+| guest memory | REU chip RAM, slow RAM + `$DC0000-$DEFFFF`, ROM banks | stays (REU-resident) / file spans 2-5 | stays / LOAD_REU | the guest's RAM. AROS WRITES `$DC0000-$DEFFFF` (unmapped in the profile; not zero after m3 on both Ultimates), so the slow-RAM span runs to `$DEFFFF`. `$200000-$BEFFFF` (W13-W: `$2DC000-$BEFFFF`; the staged disk below it is in span 2) and `$E80000-$F7FFFF` read zero after m3 (`aros_resume` m3 leg, Ultimate) and are not filed: a resume needs them zero, as the boot does (`host/machine.ZERO_SPANS`) |
+| W13-W disk image | REU `$200000-$2DBFFF` (`TD_ADF`) | file span 2 (the chip span runs to `$2DBFFF`, `SNAP_VER` 2) / stays (REU-resident) | LOAD_REU / stays | the staged DF0 disk and its overlay travel with the snapshot; zero without a disk |
+| W13-W drive and device state (`td_*`) | `td.s` BSS | image | restored | drive lines, the patched slot and its original target; the CIA-A pins live in `cia_st` (image) |
+
+## HLE trackdisk and DF0 (W13-W)
+
+Owner: td (`runtime/ops/td.s` (MAIN: state and guarded entries),
+`tests/aros/td.s` (the machine-mode module: all the code), the `; W13-W`
+lines in `cia.s`, rc `machine.inc` region `td`, `host/adf_overlay.py`,
+`tests/aros_wb.py`).
+Design and observations: `build/evidence/w13-wb/PROGRESS.md` (boot model,
+pinned ROM, 3.1 Workbench disk). Tests: `host/tests/test_td.py` (td.s on
+the in-process 6502 + REC model with the REU's 512 KB address wrap: the
+drive lines against the boot model's `Floppy`, the locate/patch -- **L8
+guard: names may be in ROM** (`test_fhook_finds_names_in_rom`: AROS's
+resident names are in the ROM banks; a guard that refused them never
+patched BeginIO on the C64U, fix round 1) while nodes, SysBase and the
+I/O banks are refused (`test_fhook_walk_stays_in_ram`) --, every request
+class, reads across `$80000`, 10 mutants),
+`host/tests/test_adf_overlay.py`, `tests/aros_wb.py` (legs `w`, `nohle`,
+`resume`).
+
+- **Split (supervisor budget ruling).** MAIN holds only the cia.s hook,
+  `td_call`/`td_fcall` and the state (all BSS, so the W12-T image carries
+  it): 94 B (cia.o CODE +12, td.o CODE +50, BSS +32; but DATA now ends past
+  `$8BFF`, so the page-aligned BSS moved from `$8C00` to `$8D00`: BSS end
+  `$9C0B` -> `$9D2B`, +288 B of the space below `$9FFF`). The code is a machine-mode module, `tests/aros/td.s`,
+  assembled at test time against `runner.lbl` (the `-D` symbols it lists
+  with `.ifndef`/`.error`) at `TD_ORG` = `$C200` (end <= `$C600`; layout:
+  mboot `$C000-$C1FF`, td `$C200-$C5FF`, W13-D's spr `$C600-$C8FF`),
+  entry `TD_ORG` = `jmp td_arm`, ID at `TD_ORG+3` (4 bytes: SHA-1 of the
+  binary with them zero, stamped by `tests/aros_wb.build_module`). The
+  generic loader (`aros_wb.MODULES`) stages every module with the boot
+  driver and again on every fresh load before a resume.
+- **Off by default.** `td_vec` = 0 (program mode, a boot without a disk,
+  every existing suite and snapshot): `td_call` returns C=0 at once, CIA-A
+  PRA pins stay `$EB`. The module is armed only when the host set `td_on`
+  (a disk is staged) and the boot driver called `TD_ORG` (after
+  `cia_reset`, `cop_reset`, `snap_arm`; `tests/aros_wb.py` assembles a
+  variant of `mboot.s` with that one call): `td_arm` sets `td_vec`/`td_fvec`
+  (the module's PRB and frame-hook entries), `td_mid` := the module ID,
+  chains `td_fcall` in front of the frame hook. It also zeroes the drive
+  and device state (`td_zero` .. `TD_NZERO`: pins, motor, cylinder,
+  change, slot, counters; fix round 1 L5), so a second boot in one session
+  starts clean.
+- **Module ID (resume).** `td_call` and `td_fcall` compare `TD_ORG+3..6`
+  with `td_mid` first. A different module (a resume after a rebuild):
+  `td_call` calls nothing, `td_fcall` halts the machine with st_halt 1,
+  st_reason `TD_HALT_MOD` (`$57`) -- see "Suspend/resume". Tests:
+  `test_td.test_other_module_id_refuses`, mutant `nomid`; VICE leg
+  `resume` (a `TD_VARIANT` build).
+- **The disk** (rc `td $200000-$2DBFFF`, `TD_ADF`): 901,120 bytes, block n
+  at `TD_ADF + 512 n`, right after chip RAM. Staged after the ROM: VICE by
+  `test_load_chunk` (image with the overlay applied); the Ultimates by the
+  runner's `ureu_ld` from `<vol>/amiga64/amiga-os-310-workbench.adf` (byte
+  count checked by ureu.s) plus the overlay's blocks by the harness's REU
+  write. Both: `aros_sum` of the 901,120 bytes must equal the host's image.
+  No guest instruction touches the region: the boot model's watch over the
+  whole boot to Workbench idle saw no access to banks `$20-$B7` (only `$B8`
+  Akiko, `$E8` autoconfig, `$F0` reads), and the region is never a RAM,
+  board or ROM candidate (AROS sizes chip RAM to `$200000`, finds no
+  autoconfig board). It reads zero without a disk.
+- **The overlay** (`host/adf_overlay.py`): `S/Startup-Sequence` replaced
+  in the file's own data blocks (WB_BOOT §4.3 `trim`, default; `min`;
+  `full` = none), byte for byte the boot model's `--startup` image. The
+  ADF and every device file stay untouched. Files over 72 blocks follow
+  their extension blocks (T_LIST, parent = the header, checksummed; fix
+  round 1 L3; on the user's disk Libs/asl.library and amigaguide.datatype).
+  Only OFS/FFS (`DOS\0`-`DOS\3`) images: dircache and later dostypes
+  are refused (L4). Refused: a block outside
+  2..1759, not 512 bytes, a header or OFS data block whose checksum does
+  not sum to 0, a header whose data-block table changed.
+- **The drive** (`td_prb`, the W13-W hook in `cia.s` `wr_prb`, CIA-B
+  only, `A` = the written value): the boot model's `Floppy` on the pins
+  `PRB | ~DDRB`. `/SEL0` (bit 3) low selects DF0; `/MTR` (bit 7) is latched
+  at the `/SEL0` fall; a `/STEP` (bit 0) rise while selected moves the head
+  (DIR bit 1 high: towards cylinder 0, else in, clamped 0..83) and sets
+  `/CHNG` high (disk present). CIA-A PRA input pins (`cia_st+CIA_PIN`,
+  bits 2-5 only, read-modify-write; W13-I owns 6-7): `$3C` while DF0 is
+  deselected, else `/RDY` (5) high iff the motor is off, `/TK0` (4) high iff
+  not at cylinder 0, `/WPRO` (3) low (write-protected), `/CHNG` (2) high
+  once a step saw the disk. `td_arm` sets `$3C` after `cia_reset`. DDRB
+  writes are not hooked: the ROM writes DDRB = `$FF` once, before any
+  meaningful PRB value (observed).
+- **The device.** `td_fhook` (chained in front of the frame hook) walks
+  `SysBase->DeviceList` (`$4`, +350; at most 32 nodes per frame; SysBase,
+  every node and every name pointer must lie in chip RAM `$000000-$1FFFFF`
+  or slow RAM `$C00000-$DBFFFF` (a name pointer may also point into the
+  ROM banks, where AROS keeps its resident names), else the walk stops: it
+  never reads the trapped `$BF`/`$DF` banks or the disk region, fix round 1
+  L8; the name compare includes the terminator) until
+  `trackdisk.device` appears, checks that its BeginIO slot (LVO -30) is
+  `JMP abs.l`, keeps the target (`td_orig`) and rewrites the slot through
+  `mem_write32`/`mem_write16` (W12-C's write check drops a cached window)
+  to `move.b d0,$BFD100` -- a CIA-B PRB write of the same 6 bytes. When
+  that write reaches `td_prb` with `st_ipc` = the slot (`td_slot`; the
+  exception-mode loop's PC of the current instruction; `$FFxxxx` = none),
+  nothing is stored and `td_bio` serves the IORequest at A1 (exec/io.h):
+  - quick `CMD_READ` / `ETD_READ`: `io_Length` bytes of the image at
+    `io_Offset` copied to `io_Data`, `io_Actual` = `io_Length`,
+    `io_Error` 0; then the device's RTS (PC := [A7], A7 += 4);
+  - quick `CMD_WRITE`, `TD_FORMAT`, `TD_RAWWRITE` (and their `ETD_`
+    forms): `io_Error` 28 (TDERR_WriteProt), `io_Actual` 0, RTS;
+  - anything else (non-quick requests, `TD_MOTOR`, `TD_CHANGESTATE`,
+    `TD_PROTSTATUS`, `TD_GETGEOMETRY`, `TD_ADDCHANGEINT`, ...): PC :=
+    `td_orig`, AROS's own trackdisk.device, which sees the drive above
+    (write-protected). Observed with the trim script: 55 quick reads
+    served, 7-9 requests passed, no write, no disk DMA.
+  - `io_Offset + io_Length` beyond the image (or either >= 16 MB):
+    `io_Error` 20 (TDERR_NotSpecified), `io_Actual` 0, nothing copied.
+  - **Limit (writes):** only QUICK `CMD_WRITE`/`TD_FORMAT`/`TD_RAWWRITE`
+    get TDERR_WriteProt here; non-quick ones go to the native path, and
+    nothing is proven about what it does with them (no disk DMA exists;
+    the drive lines say write-protected). The brief's "any write request
+    returns the write-protect error" holds for quick requests only. None
+    was observed (the filesystem sees TD_PROTSTATUS and never writes).
+  - **Limit:** a NON-quick `CMD_READ`/`ETD_READ` goes to the native path,
+    which needs disk DMA that does not exist: it would never complete. It is
+    counted in `td_nqr`; `aros_wb` fails if it is not 0 (none observed in the
+    boot to Workbench idle: every read is a DoIO).
+  The trap is safe because MOVE stores last and `ea_store` tail-calls
+  `mem_write8`: after the store the instruction only retires, so the new
+  r_pc/r_a7 take effect as the next instruction (flags: MOVE's, which no
+  BeginIO caller relies on).
+- **The copy.** REU -> `TD_BUF` (`blt_abuf`, `$B600-$B6FF`, shared with
+  blt.s, supervisor-approved: blits run synchronously inside a
+  custom-register write, so none is in flight inside the BeginIO trap (a
+  CIA write) or the frame hook (a service pass)) -> REU, one chunk
+  per destination page piece (`c = min(n, 256 - dst & $FF)`), REC address
+  control 0; `code_invpg` for each chunk's page (the bytes bypass
+  `mem_write*`); `mem_rec_dirty` at the end (C1). A chunk whose
+  destination is bank `$BF` or `$DF` is never moved (the REU under the I/O
+  banks, "I/O trap" F2): the request ends with `io_Error` 20 and
+  `io_Actual` 0 (the chunks before it were copied). **Chunks** (fix round 1, H1):
+  `c = min(n, 256 - (dst & $FF), 256 - (src & $FF))` -- the REC carries the
+  REU address through bits 0-18 only, so a transfer running past a 512 KB
+  line wraps to the line's start; a chunk inside one 256-byte page on both
+  sides never crosses one (512 KB lines are page-aligned), on the image
+  side (TD_ADF + `$80000`: blocks 1023/1024, e.g. Libs/asl.library) and on
+  the guest side alike. Tested on a REC model with that wrap and a
+  non-periodic image (mutant `nosrccap`). **Cost** (VICE, phi2-exact, the
+  whole trap from `td_call` to the RTS, `aros_wb` leg `cost`): 512 B
+  3775 cycles (59 us at 64 MHz), 1024 B 5736 (90 us); with an unaligned
+  `io_Data` 4654 / 7437 (more chunks): ~1.8k fixed (decode, io fields,
+  RTS through the memory API) + ~1k per chunk (two DMAs, `code_invpg`).
+- **Scratch.** Inside the trap and the frame hook td.s uses the
+  interpreter's EA/ALU operands `t_ea..t_res` (`$60-$6F`): dead at an
+  instruction boundary and after `ea_store`'s tail call (`t_op1+3` the
+  chunk length, `t_op2+3` io_Error, `t_res+3` the walk count). `m_addr`/
+  `m_val` are the memory API's. Evidence: the `zpjunk` VICE build (all 16
+  bytes set to junk at every trap/hook exit) boots to the same Workbench.
+- **Host-visible** (runner.lbl): `td_on` (host: 1 = disk staged), `td_vec`,
+  `td_mid`, `td_slot`, `td_orig`, `td_nrd` (u16 reads served), `td_npas`,
+  `td_nqr` (u8), `td_cyl`, `td_mot`, `td_chg`, and the block watch: `td_wa` (host: the
+  watched block's REU address bits 15-9 with bit 8 clear, bits 23-16),
+  `td_whit` (chunks read from it, mod 256).
+- **Snapshots.** All state is BSS (W12-T image) or `cia_st`; the disk is
+  in file span 2 (`SNAP_VER` 2). A snapshot taken before the slot is
+  patched resumes into the walk; after it, into the trap.

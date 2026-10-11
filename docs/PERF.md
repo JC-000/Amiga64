@@ -862,6 +862,89 @@ quantised: three final runs at 69.5–70.2 s (guest frame 626–633), one at
 m2 −6.0 s (59.88 → 53.93 s) and m3 −10.9 s (98.05 → 87.2 s) on average (rev-cwin round 2, recomputed from the table's runs); the U64E m2 spread (51.3–57.1 s) is wider than the C64U's, so m2 is "steady" on the C64U only. (hw3 = the final code except the
 slow path's $01 restore; hw4 = the final tree.)
 
+## (o) The 1:1 view and the pointer (W13-D)
+
+CONTRACTS "Display refresh (S3.5)", "1:1 view (W13-D)" and "Pointer
+sprite (W13-D)"; docs/C2V.md "1:1 view (W13-D)". These are VICE x64sc PAL
+CIA2 TA→TB counts as in (j) [MEASURED VICE], screen blanked. Evidence is in
+`build/evidence/w13-vis/`.
+
+**Conversion.** `tests/run_pf.py --leg view --perf`, the same 256-line
+hires-4 random picture, 200 lines converted:
+
+| Entry | fit | 1:1 |
+|---|---:|---:|
+| `disp_refresh`, hires4, random | 1,097,489 | 2,354,662 (fix round 1: + `disp_ozero`'s test per line) |
+| `disp_frame`, gen unchanged (W12-V: 100) | 130 | 130 |
+
+- **Why 1:1 costs 2.1×.** The 1:1 view converts twice over the same
+  rows: a counting pass, then the colour rule, then a pass that writes the
+  matrix. `disp_frame`'s idle path costs +30 φ2: the F1 test and the
+  `spr_vec` test in `disp_vw`. Each pass is ~1.1 M φ2. A random picture is the near worst case:
+  every cell has pixels and a pick.
+- **Per cell line:** ~70 φ2 (4 × (load, XOR mask), 3 ORs, the store, the
+  fg test). Per line, the looped fetch of 4 × 40 B is ~250 φ2.
+- **Duty budget.** At 64 MHz a 1:1 conversion is ~37 ms. Under the duty
+  budget (`DISP_N` = 24 frames at s = 4) a screen changing every frame
+  costs 2.35 M / (2.35 M + 24 × 14188 × 16) = 30% of guest time at 1 MHz,
+  above S3_PLAN §2.3's 20%. At 48/64 MHz it is < 1%. The fit view is
+  unchanged (17.9%).
+
+**F1 and the pan, to a finished picture** [MEASURED HW]. `tests/run_spr.py
+--legs hw`: AROS at the insert-disk screen, timed by host polls of
+`disp_nconv` (one REST read each, ~0.1 s):
+
+| Host | F1 → 1:1 picture | pan (pointer module) → picture |
+|---|---:|---:|
+| C64U, 64 MHz, s = 4 | 0.27 s (module armed), 0.25 s (disarmed) | +0.14 s |
+| U64E, 48 MHz, s = 3 | 0.12 s (armed and disarmed) | +0.13 s |
+
+These are the first run's numbers. On the insert-disk screen AROS's
+pointer sits at the top-left, so the centred window re-centred on it at
+once, and that second conversion was a real pan. Since fix round 1 the pan
+follows only a pointer with a non-empty image, and AROS's insert-disk
+pointer is empty, so F1 converts once (C64U 0.23 s armed, 0.15 s disarmed:
+`fix1/hw/c64u_spr.txt`). A pan takes the same forced path as F1. A window
+move by a test-set offset plus the pixel epoch is not forced: it waits for
+the duty budget (24 guest frames ≈ 5.4 s at s = 4, measured 4.7 s). The values are at the polls' resolution. The conversion itself is
+~37 ms at 64 MHz; the rest is the next frame hook and the poll.
+
+**The pointer, per `disp_frame` call** (`tests/run_spr.py --legs spr`,
+`spr_frame` called directly as `disp_vw` calls it, `$01` = `$35`):
+
+| Case | φ2 |
+|---|---:|
+| no change (cache hit: PT/POS/CTL and `disp_nconv` equal) | 839 |
+| position change (POS/CTL: the image is read again, as the brief asks) | 4,838 |
+| the frame after it | 839 |
+| image change (SPR0PT) | 5,539 |
+| shown → hidden | 63 |
+| hidden → hidden (no VIC write, checked) | 54 |
+
+Fix round 1 numbers. `disp_vw`'s ID guard adds ~50 φ2 per armed frame. The
+image read also ORs the image's bytes, for the pan gate.
+
+- **What a frame costs.** The common case is ~0.8k φ2: one 4-byte REU
+  fetch, the decode and the VIC writes. Every move or image change adds
+  the 84-byte fetch, 3 colour DMAs and the 192-byte block conversion
+  under `sei` (~3.6k).
+- **Against the frame.** At s = 4 a guest frame is 227k φ2: 0.35%, or 2%
+  for a frame with a move. At 64 MHz this is noise.
+- **The module.** It is 768 bytes at `$C600-$C8FF` after fix round 1. Its
+  state is in `c2v_args` + 180..212.
+
+**Memory (MAIN).** The BSS end goes from $9C0B to $9E0B: **+512 B**
+(budget 544 B).
+- c2v CODE +1 page: the 1:1 kernel, 9 B spare.
+- disp CODE +1 page: LACE, hires BPU 1-3, the 1:1 hooks.
+- disp BSS: 12 B in its page.
+- BHI tail: $A778-$A7DA (99 B: the F1 toggle, the `spr_vec` hook with its
+  ID guard, `disp_ozero`).
+- Every module after c2v moves by +$100 and every module after disp by
+  +$200, by whole pages only (`build/evidence/w13-vis/mapdiff.txt`).
+- core.s is unchanged, and `perf_cycles --max-delta 0` passes against the
+  base.
+
 ## (e) Caveats
 
 - Every number above comes from **hand-written cycle comments**, not

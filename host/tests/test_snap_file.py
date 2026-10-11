@@ -34,12 +34,13 @@ pytestmark = pytest.mark.skipif(shutil.which("cl65") is None,
 
 SHIM = U.SHIM + """
 .export mach_fhook, mach_now, mach_rdc, mach_run, emu_reset, disp_init
-.export mem_rec_dirty, calls, code_invall
+.export mem_rec_dirty, calls, code_invall, spr_vec
 .segment "BSS"
 mach_fhook: .res 2
 mach_now:   .res 4
 .segment "SBSS"               ; (after all BSS: outside the image)
 calls:      .res 6            ; mach_rdc, mach_run, emu_reset, disp_init, rec_dirty, code_invall
+spr_vec:    .res 2            ; W13-D: snap.s disarms it on resume (outside the image here)
 .segment "CODE"
 mach_rdc:   inc calls+0
             rts
@@ -66,6 +67,7 @@ MEMORY {
 SEGMENTS {
     ZEROPAGE: load = ZP, type = zp, optional = yes;
     CODE:     load = MAIN, type = ro;
+    LOWCODE:  load = MAIN, type = ro, optional = yes;   # Wave 13: ureu.s
     SCODE:    load = MAIN, type = ro;
     RODATA:   load = MAIN, type = ro, optional = yes;
     DATA:     load = MAIN, type = rw, optional = yes;
@@ -321,12 +323,17 @@ def test_frozen_suspend_spins_with_the_snapshot_intact(build):
 
 @pytest.mark.parametrize("case,code", [
     ("header byte", 0xE2), ("state byte", 0xE5), ("truncated", 0xE7),
-    ("rom id", 0xE4), ("zero rom id", 0xEA), ("missing", 0xE6), ("build id", 0xE3)])
+    ("rom id", 0xE4), ("zero rom id", 0xEA), ("missing", 0xE6), ("build id", 0xE3),
+    ("version 1", 0xE1)])                               # W13-W: a SNAP_VER 1 file
 def test_file_refusals(build, case, code):
     f, _ = suspended_file(build)
     f = bytearray(f)
     if case == "header byte":
         f[F.H_FLAGS] ^= 0x01
+    elif case == "version 1":                          # W13-W: Wave 12's layout, consistently summed
+        f[4] = 1
+        struct.pack_into("<I", f, 10 + 2 * 7 + 3, 0x200000)    # its chip span
+        struct.pack_into("<I", f, F.HDR_SUM, F.fletcher(bytes(f[:F.HDR_SUM])))
     elif case == "state byte":
         f[256 + 0x340] ^= 0xFF
     elif case == "truncated":
@@ -413,3 +420,22 @@ def test_unstamped_build_refuses_before_any_uci(build):
     r.poke("snap_bid", bytes(8))
     assert r.resume(F.RQ_FILE) == 1 and r.st() == 0xE8
     assert r.dev.log == [b"\x01\x03"]                  # no OPEN: only the failure close
+
+
+# --- Wave 13 (supervisor; rev-vis round 3): a resume disarms the pointer module
+def test_file_resume_disarms_the_pointer_module(build):
+    f, _r0 = suspended_file(build)
+    r = fresh(build, f)
+    r.poke("spr_vec", b"\x00\xC6")                 # armed (outside the image in this shim)
+    assert r.resume(F.RQ_FILE) == 0 and r.st() == F.ST_RES
+    assert r.peek("spr_vec", 2)[1] == 0
+
+
+def test_refused_resume_leaves_spr_vec(build):
+    f, _r0 = suspended_file(build)
+    f = bytearray(f)
+    f[300] ^= 1                                    # a state byte: refused before the restore
+    r = fresh(build, bytes(f))
+    r.poke("spr_vec", b"\x00\xC6")
+    assert r.resume(F.RQ_FILE) == 1
+    assert r.peek("spr_vec", 2)[1] == 0xC6

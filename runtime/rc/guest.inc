@@ -119,7 +119,11 @@ snap_base = $DF1000     ; W12-T (supervisor-approved): snapshot area (header at 
 .ifndef snap_end
 snap_end  = $DF3FFF     ; W12-T (supervisor-approved): last byte of the snapshot area (inclusive)
 .endif
-; @region io $DF4000-$DFFFFF custom-chip bank: trapped to chip.s by the memory API, never guest RAM (W11-A: shrunk out of free; both profiles reserve it) ; W12-T (supervisor-approved): was $DF1000-
+; @region disp $DF4000-$DF40FF W13-D: a zero row (256 B, stashed by disp_init) the hires kernels fetch for the planes a 1-3-plane hires picture lacks; under the trapped $DF bank (never guest-visible)
+.ifndef disp_zero
+disp_zero = $DF4000     ; W13-D disp: zero row for absent hires planes (row advance 0)
+.endif
+; @region io $DF4100-$DFFFFF custom-chip bank: trapped to chip.s by the memory API, never guest RAM (W11-A: shrunk out of free; both profiles reserve it) ; W12-T (supervisor-approved): was $DF1000- ; W13-D: was $DF4000- (disp zero row split off)
 
 ; @region hle $E00000-$FFFFFF HLE DOS RAMDISK - dos.library file store, 2 MB (WS-B2, docs/HLE_DOS.md: header + 32-entry directory, data from +$1000)
 .ifndef dosio_rd_base

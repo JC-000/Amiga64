@@ -1175,3 +1175,81 @@ after the launch (budget 15 s). The test file was deleted; `/SD/amiga64`
 then holds only the ADF. (The ROM staging of that boot fell back to
 `test_load_chunk`, 1393 s: the SocketDMA service was off after the
 morning's power-cycle, the fw 1.1.0 behaviour in the Wave 12 brief.)
+
+## Joystick port 2 and the keyboard matrix (W13-I, 2026-10-09)
+
+Package W13-I (`runtime/ops/inp.s`, contract "Input (joystick -> mouse)").
+Evidence: `build/evidence/w13-inp/green/` and the reviewer's
+`build/evidence/w13-inp/settle/` (rev-inp's probe `settle.s` and its C64U log).
+
+- **The harness's `inject_joystick` cannot reach a DDRA = `$00` read.**
+  [MEASURED HW, C64U and U64E]
+  - On the Ultimate it is a memory write of the CIA1 *PRA latch*: `$DC00`
+    for port 2, value ^ `$1F` (c64-test-harness `backends/ultimate64.py`
+    `inject_joystick`).
+  - A latch drives the pins only where DDRA = 1. inp.s reads port 2 with
+    DDRA = `$00`, so an injection never shows in `inp_joy` (leg `noinj`:
+    three injections, `inp_joy` unchanged on both devices).
+  - For an emulator that reads the stick this way, the injection is not a
+    joystick. Unattended legs use the inp.s override (`inp_src` = 1)
+    instead.
+- **VICE 3.10 ignores the harness's JOYPORT_SET** (binary monitor `$A2`).
+  - Ports 0/1 were accepted but changed neither `$DC00` nor `$DC01`, with
+    any `-controlport1device`/`-controlport2device`/`-joydev` setting and
+    after a delay. Ports 2/3 were refused (error `$01`).
+  - So no VICE leg can press a stick. The real-scan leg makes rows low with
+    the CIA itself (DDRB/PRB).
+- **Row recovery at turbo.** [MEASURED HW, C64U, rev-inp]
+  - After a column is deselected, rows read idle again at once at 1, 48
+    and 64 MHz: zero polls low after PRA = `$FF` or DDRA = `$00`.
+  - A column 1 → column 7 read shows no phantom.
+  - inp.s therefore reads its two key columns back to back. The U64E is
+    unmeasured.
+- **The C64U's port 2 reads Up held (2026-10-09).** [MEASURED HW]
+  - PA0 reads low at 1 and 64 MHz even with DDRA = `$FF`, PRA = `$FF`, so
+    something outside the CIA holds it: the stick or its cable
+    (`green/c64u_pa_diag.log`).
+  - Rows 6-7 driven low read as stick Down (column 1), consistent with
+    SHIFT LOCK latched (column 1 / row 7).
+  - The U64E's port 2 reads idle.
+  - Effect on a boot with the real input: the mouse moves every frame.
+    AROS reached m3 in 126 s at guest frame 1136, against 69.3 s at frame
+    628 for the base PRG on the same C64U session. Test boots now use the
+    idle override (`aros_boot`/`aros_resume`, `--real-input` to opt out).
+
+## Workbench 3.1 from the ADF (W13-W, 2026-10-09)
+
+`tests/aros_wb.py` on the final W13-W tree (gate PRG, build ID
+`b32b9a4597ae6674`), trim Startup-Sequence (WB_BOOT §4.3), mach_s 3,
+the user's `amiga-os-310-workbench.adf` LOAD_REU'd from device storage
+(`ureu_ld`, 901,120 bytes, count checked) plus the overlay's 5 blocks by
+the harness's REU write, `aros_sum` equal to the host's image. Times from
+the runner start (after the DeviceLock wait and the reboot):
+
+| Device | MHz | ADF load | w1 block 0 | w2 S-S block 408 | Workbench (Disk.info, block 886) |
+|---|---:|---:|---:|---:|---:|
+| C64U fw 1.1.0 (`/SD`) | 64 | 1.2-1.5 s | 76-91 s | 99-112 s | **130.5 s** (target 240 s) |
+| U64E fw 3.15 (`/USB1`) | 48 | 0.4 s | 74-82 s | 103-111 s | **147.1-154.8 s** |
+| C64U, `full` script | 64 | 1.3 s | 76.0 s | 98.7 s | **372.0 s** |
+
+At Workbench idle the guest (read from the REU) shows the screen "Workbook
+1.0  Chip: 1987k, Fast: 1530k" with a window (full script: "Fast: 1380k"),
+the BeginIO slot still patched, no MemHeader over the disk; the serial text
+equals the boot model's (416 bytes, no alert).
+
+**Suspend/resume through a file** (`/SD/amiga64/wb-snap-test.bin`, SNAP_VER
+2: 6.1 MB with the disk in the chip span): suspend 19.1-19.8 s; after a
+reset, a fresh runner load (modules re-staged) and the whole REU zeroed,
+resume 6.55-6.64 s (LOAD_REU included), the Workbench running with the same
+picture **9.4-9.8 s** after the launch (target 20 s). Suspended mid-boot
+(after w2), the resumed guest reads Disk.info 28 s later (10 reads served
+after the resume). U64E: suspend 3.4 s, resume 1.34-1.36 s, picture back
+3.8 s. A resume onto a different td module build halts with st_reason
+`$57` on both devices. Test files deleted; configs IDENTICAL after every
+hold (`build/evidence/w13-wb/SESSION.log`).
+
+**Left on the C64U for the demo:** `/SD/amiga64/wb-snap.bin` (build ID
+`b32b9a4597ae6674`, td module ID `0df7f472`): `python3 -m tests.aros_wb
+--prg build/<final>/runner.prg --legs demo --backend u64 --mhz 64 --vol
+/SD` resumes it (guest running 7.6 s after the launch). It needs a PRG
+with the same build ID and the same td module.

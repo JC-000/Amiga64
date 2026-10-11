@@ -80,6 +80,7 @@ POLL_S = 0.02                   # U64E: the ring holds CHIP_SERSZ (1024) bytes, 
 POLL_VICE_S = 0.25              # VICE: every monitor read halts the 6510 (warp is slower)
 EVID = os.path.join(ROOT, "build", "evidence", "w11-aros")
 VERBOSE = False
+REAL_INPUT = False      # W13-I: --real-input keeps the physical port 2 (inp_src = 0)
 DRV_OVERRIDE: list = [None]
 INFRA = "INFRA: "                # a failure of the rig, not of the code under test     # a mutant driver source (--mutants)
 
@@ -146,6 +147,11 @@ class Machine:
         self.one_get = not self.vice
         self.drv, self.dl = build_driver(os.path.splitext(prg)[0] + ".lbl", d,
                                          DRV_OVERRIDE[0])
+        if not REAL_INPUT:              # W13-I: idle scripted input (inp_src = 1,
+            try:                        # W13-I: no stick, no key): the physical
+                self.w(self.lab("inp_src"), b"\x01\0\0")   # W13-I: port 2 cannot
+            except KeyError:            # W13-I: perturb a test boot; a PRG
+                pass                    # W13-I: without W13-I has no inp_src
 
     def w(self, addr: int, data: bytes) -> None:
         from c64_test_harness import write_bytes
@@ -1335,9 +1341,12 @@ def main(argv=None) -> int:
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--mutants", action="store_true")
     ap.add_argument("--only")
+    ap.add_argument("--real-input", action="store_true",   # W13-I
+                    help="W13-I: read the real joystick/keys (default: idle override)")
     a = ap.parse_args(argv)
-    global VERBOSE
+    global VERBOSE, REAL_INPUT          # W13-I: REAL_INPUT
     VERBOSE = a.verbose
+    REAL_INPUT = a.real_input           # W13-I
     s = ([int(x) for x in a.s.split(",")] if a.s is not None else
          [BOOT_S_VICE if a.backend == "vice" else BOOT_S_U64])
     if a.mutants:

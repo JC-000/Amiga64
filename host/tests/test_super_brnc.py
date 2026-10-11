@@ -65,6 +65,13 @@ def _labels(tmp: Path) -> dict[str, int]:
 
 def test_guard_fails_the_link_and_warn_only_escapes(tmp_path: Path) -> None:
     src = _tree(tmp_path)
+    # Wave 13: MAIN is nearly full, and the straddle pad below (up to 255 B)
+    # would overflow it; this test only checks the link guard, so its copy
+    # of the config gets a larger MAIN (the PRG is never run).
+    cfg = src / "runtime" / "c64.cfg"
+    t = cfg.read_text(encoding="utf-8")
+    assert t.count("size = $97FF") == 1
+    cfg.write_text(t.replace("size = $97FF", "size = $98FF"), encoding="utf-8")
     ok = _link(src, tmp_path)
     assert ok.returncode == 0, ok.stdout + ok.stderr
     assert MSG not in ok.stdout + ok.stderr

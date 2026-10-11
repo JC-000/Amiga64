@@ -122,6 +122,7 @@ MEMORY {
 SEGMENTS {
     ZEROPAGE: load = ZP, type = zp, optional = yes;
     CODE:     load = MAIN, type = ro;
+    LOWCODE:  load = MAIN, type = ro, optional = yes;   # Wave 13: ureu.s
     SCODE:    load = MAIN, type = ro;
     RODATA:   load = MAIN, type = ro, optional = yes;
     DATA:     load = MAIN, type = rw, optional = yes;

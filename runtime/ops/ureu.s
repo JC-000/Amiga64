@@ -92,7 +92,7 @@ ureu_n   = ureu_pl + 4          ; this chunk's length (u24; +3 = 0)
 ureu_acc = dosio_buf + $F8      ; ureu_chk's shift register (u24)
 .assert UREU_RMAX <= $F0, error, "the reply must not reach ureu_pl"
 
-.segment "CODE"
+.segment "LOWCODE"              ; Wave 13 (supervisor): the STARTUP->DISPATCH slack
 
 ; ureu_bank — A/X = SCODE routine; BASIC out ($37 -> $36) around it.  C
 ; and A from the routine are returned; X/Y clobbered.
@@ -295,7 +295,7 @@ ureu_xfer:
         sec
         rts
 
-.segment "CODE"                 ; (MAIN: SNAPHI is full; runs with BASIC in or out)
+.segment "LOWCODE"              ; (MAIN low slack: SNAPHI is full; runs with BASIC in or out)
 
 ; ureu_chk — the reply must begin "$" + the chunk length as EXACTLY 6
 ; upper-case hex digits, zero-filled + " " (dos.cc:276/309 "$%6x ...",

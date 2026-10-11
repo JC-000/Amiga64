@@ -51,13 +51,14 @@
 .import mach_fhook, mach_rdc, mach_now, mach_run
 .import emu_reset, mem_rec_dirty, disp_init
 .import code_invall             ; I1 (W12-C, core.s)
+.import spr_vec                 ; W13-D (supervisor): a resume disarms the pointer module
 .import dosio_buf
 .import ureu_bank, ureu_open, ureu_xfer, ureu_close
 .import ureu_ra, ureu_rl
 .importzp UREU_LOAD, UREU_SAVE, UREU_FRD, UREU_FWR
 .import __BSS_RUN__
 
-SNAP_VER  = 1                   ; I3: = host/snapfmt.VERSION
+SNAP_VER  = 2                   ; I3: = host/snapfmt.VERSION (W13-W: 2, the chip span covers the staged disk)
 SNAP_HDR  = snap_base           ; rc: header, 256 bytes
 SNAP_ZP   = snap_base + $100    ; zero page image
 SNAP_DST  = snap_base + $200    ; disp_st page image
@@ -552,6 +553,9 @@ snap_rest:
         ldy #D_BSS              ; exact: snap_req.. after snap_keep untouched
         jsr snap_dma
 .endif
+        lda #0                  ; W13-D (supervisor, rev-vis option B): the image
+        sta spr_vec+1           ; carries spr_vec, the module is not in it: come up
+                                ; disarmed; the launcher re-stages and re-arms
 .ifndef SNAP_MUT_NOCIA
         ; CIA #2 time base := ~mach_now (mach.s: C = ~(TB:TA)).  Stopped,
         ; loaded (a TAHI/TBHI write to a stopped timer and the force-load
@@ -672,7 +676,7 @@ snap_sp:                        ; the file's spans (= host/snapfmt.py)
         .faraddr SNAP_ZP
         .dword $200 + SNAP_KEEPR
         .faraddr AROS_CHIP
-        .dword AROS_CHIP_END - AROS_CHIP + 1
+        .dword TD_ADF_END - AROS_CHIP + 1 ; W13-W: chip RAM AND the staged disk after it (TD_ADF)
         .faraddr AROS_SLOW      ; slow RAM AND $DC0000-$DEFFFF up to the LUT:
         .dword disp_lut - AROS_SLOW ; AROS writes there (measured: not zero at m3)
         .faraddr AROS_EXT

@@ -74,7 +74,7 @@ EVID = os.path.join(ROOT, "build", "evidence", "w12-reu")
 SUSPEND_FRAME = 50              # mid: the suspend request (the model's first serial line is at frame 95)
 M3_BUDGET_S = 15.0              # brief: m3's hash again within 15 s (the Ultimate)
 M3_BUDGET_VICE_S = 60.0         # VICE: a 1 MHz C64 in warp (host-dependent), reported
-STUB = 0xC700                   # host REU access stub (buf_case tail)
+STUB = 0xCC00                   # host REU access stub (buf_result, free in machine mode; W13-W: was $C700, now the td/spr modules' area)
 SBUF = 0xCB00                   # its data page (buf_result, unused here)
 RUN_TIMEOUT = 900.0
 INFRA = AB.INFRA
@@ -780,11 +780,23 @@ def build_mutant(prg: str, name: str) -> str:
         raise RuntimeError(f"mutant {name}: MAIN labels moved: {bad[:5]}")
     a, b = open(prg, "rb").read(), open(mprg, "rb").read()
     top = 0xB100 - 0x0801 + 2
-    lo, hi = la["snap_arm"], la["ureu_sv"] + 8      # snap.s + ureu.s MAIN code
+    # snap.s's MAIN code runs from snap_arm to CODE's end (snap.s links last
+    # in CODE); ureu.s's MAIN code is LOWCODE (Wave 13 supervisor: the
+    # STARTUP->DISPATCH slack).  Both ranges come from the base build's map.
+    import re
+    segs = {m.group(1): (int(m.group(2), 16), int(m.group(3), 16))
+            for m in re.finditer(r"^(\w+)\s+([0-9A-F]{6})\s+([0-9A-F]{6})\s",
+                                 open(os.path.splitext(prg)[0] + ".map").read(), re.M)}
+    ok = [(la["snap_arm"], segs["CODE"][1] + 1)]
+    if "LOWCODE" in segs:
+        ok.append((segs["LOWCODE"][0], segs["LOWCODE"][1] + 1))
+    else:
+        ok = [(la["snap_arm"], la["ureu_sv"] + 8)]
+    inside = lambda x: any(lo <= x < hi for lo, hi in ok)   # noqa: E731
     diff = [i - 2 + 0x0801 for i in range(top) if a[i] != b[i]]
-    if any(not lo <= x < hi for x in diff):
+    if any(not inside(x) for x in diff):
         raise RuntimeError(f"mutant {name}: MAIN bytes differ outside snap/ureu code: "
-                           f"{[hex(x) for x in diff if not lo <= x < hi][:5]}")
+                           f"{[hex(x) for x in diff if not inside(x)][:5]}")
     if a[top:] == b[top:]:
         raise RuntimeError(f"mutant {name}: identical to the base (define unused?)")
     return mprg
@@ -907,7 +919,11 @@ def main(argv=None) -> int:
     ap.add_argument("--vol", default="/USB1",
                     help="m3file: the storage volume (U64E /USB1, C64U /SD)")
     ap.add_argument("--jobs", type=int, default=3, help="--mutants: VICE sessions at once")
+    ap.add_argument("--real-input", action="store_true",   # W13-I
+                    help="W13-I: boot with the real joystick/keys (default: idle "
+                         "override, inp_src = 1; the snapshot image carries it)")
     a = ap.parse_args(argv)
+    AB.REAL_INPUT = a.real_input        # W13-I: aros_boot.Machine writes inp_src
     set_vol(a.vol)
     s = a.s if a.s is not None else (AB.BOOT_S_VICE if a.backend == "vice" else AB.BOOT_S_U64)
     if a.mutants:

@@ -51,7 +51,8 @@ def test_profile_loaded_and_clean():
     assert own[(0xF80000, 0xFFFFFF)] == "aros"          # Kickstart ROM
     assert own[(0xBF0000, 0xBFFFFF)] == "io"
     assert own[(0xDF1000, 0xDF3FFF)] == "snap"         # W12-T: suspend snapshot (Q3)
-    assert own[(0xDF4000, 0xDFFFFF)] == "io"           # W12-T: was $DF1000-
+    assert own[(0xDF4100, 0xDFFFFF)] == "io"           # W12-T: was $DF1000-; W13-D: $DF4000-
+    assert own[(0xDF4000, 0xDF40FF)] == "disp"         # W13-D: the zero row
     assert own[(0xDF0000, 0xDF0FFF)] == "disp"
 
 
@@ -88,7 +89,7 @@ def test_teeth_guest_inc_old_free_region():
 
 def test_teeth_region_straddles_bank():
     t = PROFILE.read_text().replace(
-        "; @region free $200000-$BEFFFF", "; @region free $200000-$BF0FFF").replace(
+        "; @region free $2DC000-$BEFFFF", "; @region free $2DC000-$BF0FFF").replace(   # W13-W: was $200000-
         "; @region io $BF0000-$BFFFFF", "; @region io $BF1000-$BFFFFF")
     assert any("straddles the I/O bank" in e for e in _prof(t))
 

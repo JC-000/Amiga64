@@ -21,7 +21,9 @@ $(BUILD)/gen/dispatch.s: host/gen_dispatch.py runtime/core.s $(wildcard runtime/
 # W11-B: blt.s after cop.s, before disp.s
 # W12-T: snap.s then ureu.s after mach.s (their BSS last: snap.s's image ends
 # at snap_keep, so nothing of theirs but snap_chain is in it)
-RUNTIME_SRC := $(filter-out runtime/ops/chip.s runtime/ops/cia.s runtime/ops/cop.s runtime/ops/blt.s runtime/ops/disp.s runtime/ops/mach.s runtime/ops/snap.s runtime/ops/ureu.s,$(wildcard runtime/*.s runtime/ops/*.s tests/runner/*.s)) runtime/ops/chip.s runtime/ops/cia.s runtime/ops/cop.s runtime/ops/blt.s runtime/ops/disp.s runtime/ops/mach.s runtime/ops/snap.s runtime/ops/ureu.s
+# W13-I: inp.s after mach.s, before snap.s (its BSS inside the snapshot image)
+# W13-W: td.s after inp.s, before snap.s
+RUNTIME_SRC := $(filter-out runtime/ops/chip.s runtime/ops/cia.s runtime/ops/cop.s runtime/ops/blt.s runtime/ops/disp.s runtime/ops/mach.s runtime/ops/inp.s runtime/ops/td.s runtime/ops/snap.s runtime/ops/ureu.s,$(wildcard runtime/*.s runtime/ops/*.s tests/runner/*.s)) runtime/ops/chip.s runtime/ops/cia.s runtime/ops/cop.s runtime/ops/blt.s runtime/ops/disp.s runtime/ops/mach.s runtime/ops/inp.s runtime/ops/td.s runtime/ops/snap.s runtime/ops/ureu.s
 RUNTIME_INC := runtime/macros.inc $(wildcard runtime/rc/*.inc) $(wildcard runtime/ops/*.inc)
 
 $(BUILD)/runner.prg: $(RUNTIME_SRC) $(RUNTIME_INC) $(BUILD)/gen/dispatch.s runtime/c64.cfg host/snapfmt.py

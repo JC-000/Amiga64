@@ -82,6 +82,7 @@
 .import cop_w0, cop_w1                          ; W10-P cop: S3.5 display/copper registers
 .export c_wrw, chip_a, chip_vl, chip_vh         ; W10-P cop: the copper's MOVE path
 .import blt_w, blt_dmaconr                      ; W11-B blt: S3.6 blitter
+.import inp_pot                                 ; W13-I inp: the POTINP read (right button)
 .export chip_blitirq                            ; W11-B blt: INTREQ BLIT on completion
 
 CHIP_LOGN_MASK = 63     ; @value log ring entries - 1
@@ -410,7 +411,7 @@ p0:     lda chip_a
         beq vposr
         cmp #$06                ; VHPOSR (W8-L: live after mach_init)
         beq vhposr
-        cmp #$16                ; POTINP: right button up
+        cmp #$16                ; POTINP: right button (W13-I: inp_pot)
         beq potinp
         cmp #$18                ; SERDATR: TBE | TSRE
         beq serdatr
@@ -439,9 +440,8 @@ vhposr: jsr c_beam
         lda mach_bh
         sta chip_vl
         rts
-potinp: lda #$FF
-        sta chip_vh
-        rts
+potinp: jmp inp_pot               ; W13-I: chip_vh := $FB (C= held) or $FF
+        .res 3, $EA             ; W13-I: chip.s keeps its size (no module moves)
 serdatr:
         lda #$30
         sta chip_vh
