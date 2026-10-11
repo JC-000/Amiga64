@@ -43,7 +43,7 @@ from tests import aros_boot as A  # noqa: E402
 EVID = os.path.join(ROOT, "build", "evidence", "w13-vis")
 MODEL_VIEW = os.path.join(ROOT, "build", "aros", "model_view.json")
 OFFSET = (40, 77)               # the aros1 leg's test-set window: the text, right half
-VIEWS = ((20, 77), OFFSET)      # the 1:1 windows the aros1 leg shows: centred (LACE: ymax 156 / 2), the text
+VIEWS = ((20, R.ONE_PY_DEFAULT), OFFSET)   # the 1:1 windows the aros1 leg shows: F1's (W14-D: the top), the text
 
 
 def view_hash(bitmap: bytes, screen: bytes, vic: dict) -> str:
@@ -200,14 +200,14 @@ def leg_aros1(prg: str, s: int, timeout: float, out: str, rep: dict) -> list[str
             fails.append("F1: inp_view bit 0 not consumed")
         if (st1["disp_view"], st1["disp_one"], st1["disp_px"]) != (1, 1, R.PX_CENTRE):
             fails.append(f"F1: view state {st1}, want view 1, one 1, px {R.PX_CENTRE}")
-        if st1["disp_crop"] != st0["disp_ymax"] // 2:
+        if st1["disp_crop"] != R.ONE_PY_DEFAULT:
             fails.append(f"F1: the window's line {st1['disp_crop']}, want "
-                         f"disp_ymax / 2 = {st0['disp_ymax'] // 2} (centred)")
+                         f"{R.ONE_PY_DEFAULT} (W14-D: the top)")
         mv = model_view()
         if mv is not None:
             hit = mv.get(h1)
             rep["one"]["model"] = hit
-            if not hit or hit["view"] != [20, st0["disp_ymax"] // 2]:
+            if not hit or hit["view"] != [20, R.ONE_PY_DEFAULT]:
                 fails.append(f"1:1: {h1[:12]} is not a model 1:1 frame of the centred "
                              f"window ({len(mv)} model hashes)")
             else:
@@ -565,7 +565,7 @@ def spr_expect(case: dict) -> dict:
     one = bool(view) and hires
     ymax = max(0, L - (100 if lace else 200))
     cur = {"ddfstrt": d["ddfstrt"], "diwstrt": d["diwstrt"], "bplcon0": d["bplcon0"],
-           "crop": (L - 200) // 2}
+           "crop": 0}                  # W14-D: the fit view keeps the top
     lut = R.build_lut()
     if case.get("dma", 0x8320) & 0x20 == 0:
         return {"hidden": True, "px": px, "py": py, "pans": 0}

@@ -320,6 +320,12 @@ def enable_ci(m: WbMachine, rep: dict) -> None:
 
 def model_wb(script: str) -> tuple[dict | None, str]:
     path = os.path.join(ROOT, "build", "aros", f"model_wb_{script}.json")
+    if os.path.exists(path):                    # W14-D: a stale crop rule is rebuilt
+        sys.path.insert(0, os.path.join(ROOT, "tests", "aros"))
+        import model_frames as MF
+        with open(path) as f:
+            if json.load(f).get("crop_rule") != MF.CROP_RULE:
+                os.remove(path)
     if not os.path.exists(path):
         if not os.path.exists(AB.VENV_PY):
             return None, f"no s3probe venv at {AB.VENV_PY}"

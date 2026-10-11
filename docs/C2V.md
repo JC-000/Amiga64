@@ -390,8 +390,12 @@ blank border look it up with one byte DMA each.
   **first** 40 / 80 bytes of each fetched row, and skip = fetch − row + mod.
 - **Modulo:** plane p (0-based) uses BPL1MOD if p is even and BPL2MOD if it
   is odd. Pointers and modulos ignore bit 0 (word DMA).
-- **Vertical:** if L > 200, the picture is cropped about the centre
-  (`(L − 200) / 2` rows skipped, by advancing each plane pointer). If L <
+- **Vertical:** if L > 200, the first 200 lines from DIWSTRT are shown and
+  the rest is cropped at the bottom (W14-D; Wave 10-13 cropped about the
+  centre, `(L − 200) / 2` rows skipped). So a Workbench title bar, its menus
+  and the pointer's start position stay on screen. With LACE the fit view
+  shows one field, and its field lines 0-199 are the frame's top, so LACE
+  needs no rule of its own. If L <
   200, all 200 lines are converted and lines L..199 are then cleared to 0,
   i.e. colour 0, which is what the Amiga shows below DIWSTOP.
 - **The 512 KB line** (the S3.5 entry criterion from "Caller contract"
@@ -580,8 +584,9 @@ so both fields are shown.
   - The fit view still shows one field (frozen).
 - **Toggle:** F1 (`inp_view` bit 0, W13-I's I1 byte). Until W13-I lands,
   disp.s defines a stand-in under `DISP_INPV_LOCAL`.
-  - It flips `disp_view` and centres the window: `disp_px` = 20,
-    `disp_py` = `disp_ymax` / 2.
+  - It flips `disp_view` and opens the window at the top, centred
+    horizontally: `disp_px` = 20, `disp_py` = 0 (W14-D; was `disp_ymax` /
+    2).
 - **Rows past the picture** (frame line ≥ `disp_lines`) read 0 in all four
   stage rows: `disp_ozero` (disp.s, BHI), called by `c2v_ones` after each
   line's fetch, against `c2v_v_olim` (`c2v_args` + 145), which `disp_one1`

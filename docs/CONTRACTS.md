@@ -1067,6 +1067,20 @@ spec: `docs/C2V.md` "Row skip", "Display refresh (S3.5)". Reference:
     2048 nibble-packed; supervisor-approved); `disp_init` unpacks it, once,
     into the same 4096 REU bytes at `disp_lut` and stops at exactly 4096
     entries (`disp_init` 126,616 φ2 cycles, base 120,006–120,225).
+- **Fit-view crop (W14-D).** A picture taller than 200 lines shows its
+  first 200 lines from DIWSTRT: `disp_crop` = 0, a crop from the bottom
+  (was the centre, (L − 200) / 2). A Workbench title bar, its menus and
+  the pointer start stay visible. The bottom lines are the ones hidden now:
+  lines 200-255 of a 256-line screen (L − 200 in general). They are reachable
+  in the 1:1 view by panning down (`disp_py` up to `disp_ymax` = L − 200;
+  run_pf view step `right-bottom` shows lines 56-255). AROS's insert-disk
+  text (field line ~150) is inside the fit window. LACE uses the same rule: the fit view
+  shows one field, whose first 200 lines are the frame's top. Lines below
+  the 200th are not shown. The pointer module maps vertical positions
+  through `disp_crop`, so it follows unchanged (fit: VIC Y = 50 + VSTART −
+  DIWSTRT V). Reference `c2v_ref.disp_decide`; tests
+  `host/tests/test_fit_top.py`; model frames `tests/aros/model_frames.py`
+  `CROP_RULE = "top"` (stale JSONs are rebuilt by their loaders).
 - **1:1 view (W13-D).** Spec: `docs/C2V.md` "1:1 view (W13-D)", "Hires
   with 1-3 planes (W13-D)".
   - Reference: `c2v_ref.one_cells`, `convert_one`, `disp_decide_view`,
@@ -1082,8 +1096,9 @@ spec: `docs/C2V.md` "Row skip", "Display refresh (S3.5)". Reference:
   - **The toggle.** `inp_view` (I1; until W13-I lands, disp.s's stand-in
     under `DISP_INPV_LOCAL`) bit 0 is an edge.
     - `disp_frame` consumes it first, clearing bit 0 only.
-    - It flips `disp_view` and sets `disp_px` = 20 and `disp_py` =
-      `disp_ymax` / 2: the window is centred.
+    - It flips `disp_view` and sets `disp_px` = 20 and `disp_py` = 0: the
+      window starts at the top, centred horizontally (W14-D; was
+      `disp_ymax` / 2).
     - It converts at once, ignoring gen, the snapshot compare and the duty
       budget.
   - **The decision.** For hires (BPU 1-4) with `disp_view` = 1:
@@ -1188,8 +1203,8 @@ spec: `docs/C2V.md` "Row skip", "Display refresh (S3.5)". Reference:
     are its last two bytes (`$C8FE`/`$C8FF`). Any growth must trim first.
   - **Pan gate (fix round 1).** The window re-centres only while the image
     has a pixel (the OR of its 4 · height bytes). An empty pointer, such as
-    AROS's on the insert-disk screen, never moves the window: it keeps D1's
-    centre or the test-set offset.
+    AROS's on the insert-disk screen, never moves the window: it keeps F1's
+    default (W14-D: the top) or the test-set offset.
   - **Limits:**
     - The height is capped at 21 lines (VIC; LACE 1:1 at 42 frame lines).
     - The attach bit (sprite 1) is ignored.

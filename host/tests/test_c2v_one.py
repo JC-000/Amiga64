@@ -94,7 +94,7 @@ def _st(lines, hires=True, bpu=4):
 def test_view_window_and_clamp():
     st = _st(256)
     fit = R.disp_decide_view(st)
-    assert not fit["one"] and fit["ymax"] == 56 and fit["crop"] == 28
+    assert not fit["one"] and fit["ymax"] == 56 and fit["crop"] == 0   # W14-D (was 28)
     one = R.disp_decide_view(st, 1, px=7, py=200)
     assert one["one"] and one["crop"] == 56 and one["px"] == 7
     assert one["src"][0] == 0x10000 + 56 * 80
