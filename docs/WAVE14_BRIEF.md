@@ -101,3 +101,4 @@ The supervisor merges W14-M then W14-D, re-runs the gate, has a fresh adversaria
   - Known limit: the 1351 at turbo (docs/HARDWARE.md).
   - Supervisor at the merge: snap.s zeroes inp_mon on resume, as it does spr_vec.
 - **MAIN layout limit:** CODE must end below $8D00 and LOWCODE below $0900; BSS ends at $9F47. A future wave needs a MAIN restructure.
+- **Variant layout:** the FETCH_DIRECT link-check variant shifts core BSS, which put td_fvec on a page end ("jmp (abs)" straddle). The td vector asserts are now product-layout only (`.ifndef FETCH_DIRECT`); a layout-independent vector placement is a follow-up.
