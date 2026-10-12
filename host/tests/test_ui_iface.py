@@ -5,7 +5,7 @@
   from I-1 alone (tests.run_modui.expect_fields), over special and random
   views.  Any disagreement is a bug in the model or in the expectation.
 * L3: the mod_view offsets ui.s uses (MV_*, CH_*) against the C header
-  (fixtures/mod/ui/mod_view_mirror.h, W15-M's mod_view.h mirrored; also
+  (fixtures/mod/mod_view.h, W15-M's I-1 header; also
   against W15-M's own copy when that worktree is present).
 * B1: the font against the C64 character ROM (evidence-only; skipped when
   the ROM is not installed locally).
@@ -21,8 +21,10 @@ from host import ui_preview as U
 from tests import run_modui as M
 
 UI_S = os.path.join(U.ROOT, "fixtures", "mod", "ui", "ui.s")
-MIRROR = os.path.join(U.ROOT, "fixtures", "mod", "ui", "mod_view_mirror.h")
-W15M = os.path.join(U.ROOT, "..", "w15-mod", "fixtures", "mod", "mod_view.h")
+# Integration (supervisor, W15 merge): the mirror is dropped; the UI reads
+# W15-M's header, fixtures/mod/mod_view.h, the single I-1 source.
+HEADER = os.path.join(U.ROOT, "fixtures", "mod", "mod_view.h")
+MIRROR = W15M = HEADER
 
 
 def screen(v):
@@ -94,7 +96,7 @@ def _struct_offsets(path):
     return out
 
 
-@pytest.mark.parametrize("path", [MIRROR, W15M])
+@pytest.mark.parametrize("path", [HEADER])
 def test_mod_view_offsets(path):
     if not os.path.exists(path):
         pytest.skip(f"{path} not present")
@@ -109,11 +111,6 @@ def test_mod_view_offsets(path):
                  ("effect", "CH_FX"), ("param", "CH_PAR"), ("vu", "CH_VU")):
         assert o[("mod_chan", f)] == eq[e], f
 
-
-def test_mirror_is_w15m_copy():
-    if not os.path.exists(W15M):
-        pytest.skip("W15-M's worktree is not present")
-    assert open(MIRROR, "rb").read() == open(W15M, "rb").read()
 
 
 def test_pack_mod_view_matches_header():
