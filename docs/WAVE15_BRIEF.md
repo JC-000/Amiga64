@@ -209,3 +209,30 @@ Facts (docs/C2V.md, CONTRACTS "Display refresh"):
 3. A fresh adversarial reviewer per package; fix rounds until MERGE.
 4. The supervisor merges in the order P, M, U (or as ruled), then runs its own serial gate and the U64E listening demo with the user.
 5. On a landing request: commit, push and open the PR at once, with the honest test state.
+
+## Addendum: supervisor rulings (2026-10-12)
+- **Time base (W15-P R3 = W15-M's proposal):**
+  - The player profile runs at **s = 0** on the U64E.
+  - The replay is paced in real time by CIA-B TA: tick_e = (1022727/50) >> s = 20455 at s = 0. VBL-speed songs count as 125 BPM.
+  - VERTB (72.08 Hz) paces only ui_frame and the mod_view publish.
+  - The replay runs from the level-6 interrupt with tick catch-up.
+  - Paula interrupts use R = E per colour clock as a profile factor (0.28834 at s = 0 on the U64E).
+  - Known deviation: E = 1.0227 MHz in this profile.
+  - Backlog: an exact real-time E in mach.s (option a).
+  - To verify: the s = 0 guest-starvation backlog item.
+- **W15-P memory:**
+  - The `aud` module at $CA00-$CDFF (code to $CCFF, state block $CD00). Player profile only, mutually exclusive with aros_resume (rescheck claim plus a module-ID guard).
+  - The chip.s router ≤ 32 B CODE plus a 2 B BSS `aud_vec`.
+  - mach slot 6.
+  - The sampler's own IRQ is never enabled.
+  - The sampler backend is enabled only by a host flag inside the U64E hold.
+- **W15-M:**
+  - No new C64 bytes. The mboot load path.
+  - The guest map: image $010000-$03FFFF, params $000480, status $0004C0, MOD $080000-$1FFFFF.
+  - `fixtures/mod/mod_view.h` is W15-M's; W15-U includes it read-only.
+  - Paula LC/LEN follow HRM latch semantics (latched at DMA start and at each block end).
+- **W15-U:**
+  - Guest chip RAM $040000-$07FFFF.
+  - ui_frame at 72 Hz, averaging ≤ ~400 68k instructions per call (worst ≤ ~1500); incremental drawing.
+  - Open: CPU-drawn pixels do not mark the display dirty (CONTRACTS +105). W15-U proposes a mechanism; the supervisor rules.
+- **I-1 semantics:** vu decays per replay tick; elapsed += 125/BPM per tick (16.16, in 1/50 s).
