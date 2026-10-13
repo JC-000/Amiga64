@@ -32,11 +32,14 @@
 ;     of the last move passed on (1 = negative, the pot's sense); a d of
 ;     +-1 against it is idle jitter (the user's 1351 at rest: POTX $C9/$CA,
 ;     POTY $AB/$AC): held, ref kept; any other d != 0 passes, ref := v,
-;     bit 7 := d < 0.  Y negated; the counts added since the last frame hook
-;     (inp_macc, s8) saturate at +-MCLAMP = 63: AROS reads JOY0DAT once a
-;     frame, after the hook, as a signed 8-bit delta, so two windows give
-;     <= 126, never a wrap (rev14-mouse HIGH-1 and its round 2: 127 + 31
-;     had wrapped); JOY0DAT += the clamped part.
+;     bit 7 := d < 0.  Y negated; the travel since the last frame hook
+;     (inp_macc, u8 per axis: the sum of |counts| added) saturates at
+;     MCLAMP = 63 and only the part within it is added to JOY0DAT: AROS
+;     reads JOY0DAT once a frame, after the hook, as a signed 8-bit delta,
+;     so the counts between two reads (two windows) are <= 126 for any
+;     stream, reversals included, never a wrap (rev14-mouse HIGH-1 and its
+;     round 2: 127 + 31 had wrapped; rev16-i M-1: a signed +-63 sum let an
+;     in-window reversal reach 189).
 ;   frame (X = 0): a port or source change since the last frame -> inp_mok
 ;     := 0 (the next sample is a new reference); the left button's delivery,
 ;     one transition per frame (delivered and (up now or a press pending)
@@ -108,7 +111,7 @@
 CIA_PIN   = 32                  ; @value cia.s CIA_PIN (inp.s INP_PIN)
 JOY0      = $0A                 ; @value JOY0DAT in chip_shd (Y, then X)
 QMAX      = 2                   ; @value pending left presses at most
-MCLAMP    = 63                  ; @value W16-I: counts a frame-hook window (host/inp_ref.MCLAMP)
+MCLAMP    = 63                  ; @value W16-I: travel (|counts|) a frame-hook window (host/inp_ref.MCLAMP)
 
 ; --- A: $C980-$C9FE ----------------------------------------------------------
 .segment "CODE"
@@ -221,23 +224,26 @@ mv:     tya
         bcs :+
         eor #$FF                ; Y: negate (C = 0)
         adc #1
-:       clc
-        adc inp_macc,x          ; acc + d (-95..94: no overflow), saturated
-        bmi :+                  ; at +-MCLAMP
-        cmp #MCLAMP+1
-        bcc sat
-        lda #MCLAMP
-        bne sat
-:       cmp #<-MCLAMP
-        bcs sat
-        lda #<-MCLAMP
-sat:    tay                     ; the new acc
-        sec
-        sbc inp_macc,x          ; the part that may still be added
+:       tay                     ; d, the axis's sense (-32..32)
         clc
+        bpl :+
+        eor #$FF                ; |d| = ~d + 1 (the carry)
+        sec
+:       adc inp_macc,x          ; travel + |d| (<= 95), saturated at MCLAMP
+        cmp #MCLAMP+1
+        bcc :+
+        lda #MCLAMP
+:       sta inp_u               ; the new travel (v is no longer needed)
+        sec
+        sbc inp_macc,x          ; |the part that may still be added|
+        cpy #$80                ; C = 1: d < 0
+        bcc :+
+        eor #$FF                ; negated (C = 1)
+        adc #0
+:       clc
         adc chip_shd+JOY0,x
         sta chip_shd+JOY0,x
-        tya
+        lda inp_u
         sta inp_macc,x
 nx:     dex
         bpl lp

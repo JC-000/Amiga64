@@ -89,7 +89,7 @@ inp_ml:   .res 1        ; W14-M M2 override: mouse lines (inp_src != 0, module a
 inp_mlast: .res 1       ; W14-M M2: lines at the last look (press edges)
 inp_mq:   .res 1        ; W14-M M2: pending left presses (<= 2)
 inp_md:   .res 1        ; W14-M M2: the buttons as delivered (bit 4 left, 0 right)
-inp_macc: .res 2        ; W14-M M2: 1351 counts added since the frame hook: Y, X (s8, +-127)
+inp_macc: .res 2        ; W14-M M2: 1351 counts added since the frame hook: Y, X (W16-I: travel, u8 <= 63)
 inp_mps:  .res 1        ; W14-M M2: inp_mport | inp_src << 1 at the last frame (a change: new reference)
 inp_mns:  .res 2        ; W14-M M2: 1351 samples taken (u16 LE, wraps; tests)
 

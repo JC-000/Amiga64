@@ -527,7 +527,7 @@ def leg_cost(rig: Rig) -> list[str]:
                                                   rig.r(rig.lab("inp_mpot"), 2)]))
                 mheld = mpath(0)                # 1 count against it: held jitter
                 rig.frame()
-                msat = mpath(62, pre=3)         # +31 a sample, saturated at +-63
+                msat = mpath(62, pre=3)         # +31 a sample, the travel saturated at 63
                 rig.reset(src=0)
                 stage_inpm(rig)
                 mframer = best() - over - real0
@@ -555,9 +555,10 @@ def leg_mouse(rig: Rig) -> list[str]:
     "Input"): inp_msamp called by the host like a slot firing, a frame every
     4 samples; scripted pots (POTY, POTX) with bit-0/bit-7 noise, the mod-64
     wrap, the +-31 limit; JOY0DAT against host/inp_ref after every sample.
-    The clamp (rev14-mouse HIGH-1; W16-I: +-63, the round-2 margin): 14
-    samples of +31 counts inside one frame deliver +63 (X) / -63 (Y), so
-    AROS's read, one per window anywhere after the hook, sees <= 126.  Then the buttons (lines
+    The clamp (rev14-mouse HIGH-1; W16-I: a travel budget of 63 a window,
+    the round-2 margin and rev16-i M-1): 14 samples of +31 counts inside one
+    frame deliver +63 (X) / -63 (Y), so AROS's read, one per window anywhere
+    after the hook, sees <= 126 for any stream.  Then the buttons (lines
     in inp_ml, each held 2 frames): left -> /FIR0, right -> POTINP DATLY,
     OR-ed with the stick's fire and C=."""
     rig.need()
@@ -665,7 +666,14 @@ def leg_mhyst(rig: Rig) -> list[str]:
       (a reversal's first count is held one sample, not lost).
     - straddle: 14 x +31 in a window, the hook, 14 x +31: read at the
       window's start and at the next one's end, JOY0DAT moved 126 (<= 126:
-      no s8 wrap for AROS; rev14-mouse round 2 had 158)."""
+      no s8 wrap for AROS; rev14-mouse round 2 had 158).
+    - reversal (fix 1, rev16-i M-1's repro): hook; -32, -31; read; +31 x5;
+      hook; +31 x2; read: +62 / -62 between the reads (the window's travel
+      budget; the signed +-63 sum gave 188, an s8 -68 for AROS).
+    - rstream: random +-31/32 samples with the sign flipping inside windows,
+      reads anywhere (often late): <= 126 between any two reads.
+    - alias (rev16-i L-1, the documented edge): last move -, +1 held, +31
+      passes as -32; last move +, -1 held, -32 passes as +31 (X)."""
     rig.need()
     if not rig.mouse:
         return ["mhyst: this PRG has no inp_msamp (no W14-M)"]
@@ -753,6 +761,61 @@ def leg_mhyst(rig: Rig) -> list[str]:
     if (dx, dy) != (126, -126):
         f.append(f"mhyst straddle: dx {dx} dy {dy} between reads one window apart, want "
                  "126 / -126 (<= 126: AROS's s8 never wraps)")
+
+    def moved(m, tag, py, px, ds, tot):             # samples d (both axes), unwrapped sums
+        for d in ds:
+            py, px = py + 2 * d & 0x7E, px + 2 * d & 0x7E
+            j = rig.state()["joy0dat"]
+            y1, x1 = sample(m, tag, py, px)
+            tot[0] += s8(y1 - (j >> 8))
+            tot[1] += s8(x1 - (j & 0xFF))
+        return py, px
+    m, _ = start()                                  # reversal (rev16-i M-1)
+    frame(m)
+    sample(m, "reversal", 0x40, 0x40)
+    frame(m)
+    py, px = moved(m, "reversal", 0x40, 0x40, (-32, -31), [0, 0])
+    tot = [0, 0]                                    # AROS read (late: travel 63)
+    py, px = moved(m, "reversal", py, px, (31,) * 5, tot)
+    frame(m)
+    moved(m, "reversal", py, px, (31, 31), tot)    # AROS read (late again)
+    log(f"  mhyst reversal: counts between the reads dy {tot[0]} dx {tot[1]} "
+        "(want -62 / 62; the signed clamp: 188)")
+    if tot != [-62, 62]:
+        f.append(f"mhyst reversal: dy {tot[0]} dx {tot[1]} between two late reads around an "
+                 "in-window reversal, want -62 / 62 (<= 126: rev16-i M-1)")
+    m, _ = start()                                  # rstream
+    frame(m)
+    rng = random.Random(16)
+    py = px = 0x40
+    sample(m, "rstream", py, px)
+    since, worst, reads = [0, 0], 0, 0
+    for w in range(24):
+        frame(m)
+        n = rng.randint(4, 14)
+        read = n - rng.randint(0, 2) if rng.random() < 0.6 else rng.randint(0, n)
+        for k in range(n + 1):
+            if k == read:
+                worst, reads, since = max(worst, *map(abs, since)), reads + 1, [0, 0]
+            if k < n:
+                d = rng.choice((-32, -31, 31, 31, -32))
+                py, px = moved(m, f"rstream{w}.{k}", py, px, (d,), since)
+    log(f"  mhyst rstream: {reads} reads, worst {worst} counts between two reads "
+        "(want <= 126)")
+    if worst > 126:
+        f.append(f"mhyst rstream: {worst} counts between two reads with in-window reversals "
+                 "(want <= 126: AROS's s8 never wraps)")
+    for sg, want in ((-1, -32), (1, 31)):            # alias: the stale reference
+        m, _ = start()
+        frame(m)
+        sample(m, "alias", 0x40, 0x40 - 6 * sg)
+        sample(m, "alias", 0x40, 0x40)              # a move of 3 counts: direction sg
+        sample(m, "alias", 0x40, 0x40 - 2 * sg)     # 1 count against it: held
+        x0 = rig.state()["joy0dat"] & 0xFF
+        x1 = sample(m, "alias", 0x40, 0x40 - 2 * sg + (62 if sg < 0 else -64) & 0x7E)[1]
+        log(f"  mhyst alias after {'+-'[sg < 0]}: {s8(x1 - x0)} (want {want}: the documented edge)")
+        if s8(x1 - x0) != want:
+            f.append(f"mhyst alias after {'+-'[sg < 0]}: dx {s8(x1 - x0)}, want {want}")
     rig.reset(src=1)
     return f
 
@@ -864,6 +927,49 @@ def stage_inpm(rig: Rig, defines: tuple = ()) -> bytes:
     return ma
 
 
+TRAVEL = """\
+:       tay                     ; d, the axis's sense (-32..32)
+        clc
+        bpl :+
+        eor #$FF                ; |d| = ~d + 1 (the carry)
+        sec
+:       adc inp_macc,x          ; travel + |d| (<= 95), saturated at MCLAMP
+        cmp #MCLAMP+1
+        bcc :+
+        lda #MCLAMP
+:       sta inp_u               ; the new travel (v is no longer needed)
+        sec
+        sbc inp_macc,x          ; |the part that may still be added|
+        cpy #$80                ; C = 1: d < 0
+        bcc :+
+        eor #$FF                ; negated (C = 1)
+        adc #0
+:       clc
+        adc chip_shd+JOY0,x
+        sta chip_shd+JOY0,x
+        lda inp_u
+        sta inp_macc,x
+"""
+SIGNED = """\
+:       clc
+        adc inp_macc,x
+        bmi :+
+        cmp #MCLAMP+1
+        bcc sat
+        lda #MCLAMP
+        bne sat
+:       cmp #<-MCLAMP
+        bcs sat
+        lda #<-MCLAMP
+sat:    tay
+        sec
+        sbc inp_macc,x
+        clc
+        adc chip_shd+JOY0,x
+        sta chip_shd+JOY0,x
+        tya
+        sta inp_macc,x
+"""
 QMUT = [None]
 QMUTANTS = {    # tests/aros/inpm.s mutants (python3 -m tests.run_inp --qmutants)
     # no queue: the delivered left button is the lines now (stretch lost)
@@ -882,9 +988,14 @@ QMUTANTS = {    # tests/aros/inpm.s mutants (python3 -m tests.run_inp --qmutants
     "mref": ("        ldy inp_mok\n        bne :+\n        sta inp_mold,x          ; reference only (direction +)\n        beq nx                  ; (Z from ldy)\n:       sec\n",
              "        sec\n"),
     # no clamp: every sample's delta added (rev14-mouse HIGH-1: AROS wraps)
-    "noclamp": ("        bmi :+                  ; at +-MCLAMP\n        cmp #MCLAMP+1\n        bcc sat\n        lda #MCLAMP\n        bne sat\n:       cmp #<-MCLAMP\n        bcs sat\n        lda #<-MCLAMP\n", ""),
+    "noclamp": ("        cmp #MCLAMP+1\n        bcc :+\n        lda #MCLAMP\n", ""),
+    # W16-I fix 1 (rev16-i M-1): the round-0 signed +-MCLAMP sum instead of the travel
+    "csigned": (TRAVEL, SIGNED),
     # W16-I: the W14 clamp (+-127 a window: two windows wrap AROS's s8)
     "c127": ("MCLAMP    = 63 ", "MCLAMP    = 127 "),
+    # W16-I fix 1: the travel not counted for negative moves (|d| taken as ~d)
+    "tabs": ("        eor #$FF                ; |d| = ~d + 1 (the carry)\n        sec\n",
+             "        eor #$FF                ; |d| = ~d + 1 (the carry)\n        clc\n"),
     # W16-I: the frame does not restart the window's budget
     "noreset": ("        lda #0                  ; a new frame: nothing added yet\n        sta inp_macc\n        sta inp_macc+1\n", ""),
     # W16-I: no hysteresis (every +-1 passes: the idle wiggle)
@@ -913,7 +1024,8 @@ QMUTANT_LEGS = {"qnone": ["queue"], "qnorel": ["queue"], "qnosamp": ["queue"],
                 "noclamp": ["mouse"], "qnorest": ["mreal"], "qport": ["mreal"],
                 "qnomps": ["mouse"],
                 **{k: ["mouse", "mhyst"] for k in ("c127", "noreset", "hnone", "hrefupd",
-                                                    "hwide", "hnodir", "hsupall")}}
+                                                    "hwide", "hnodir", "hsupall",
+                                                    "csigned", "tabs")}}
 
 
 def leg_queue(rig: Rig) -> list[str]:

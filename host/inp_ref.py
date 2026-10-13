@@ -23,7 +23,7 @@ NMAX = CAP - 1            # n saturates here (inp.s INP_NMAX)
 F1, CBM = 0x10, 0x20      # inp_key bits (the keys' matrix rows)
 UP, DOWN, LEFT, RIGHT, FIRE = 1, 2, 4, 8, 16
 PIN_RESET = 0xEB          # CIA-A PRA input pins after cia_reset
-MCLAMP = 63               # W16-I: 1351 counts per frame-hook window (inpm.s MCLAMP)
+MCLAMP = 63               # W16-I: 1351 travel (|counts|) per frame-hook window (inpm.s MCLAMP)
 
 
 def m1351_delta(old: int, new: int) -> int:
@@ -67,10 +67,10 @@ class Inp:
     mb: int = 0           # inp_mb: the mouse port's lines (bit 4 left, 0 right)
     mold: list = None     # inp_mold (POTY, POTX): bits 1-6, bit 7 = last direction (W16-I)
     mok: bool = False     # inp_mok
-    macc: list = field(default_factory=lambda: [0, 0])   # inp_macc (Y, X), s8
+    macc: list = field(default_factory=lambda: [0, 0])   # inp_macc (Y, X): travel, u8 <= MCLAMP
 
     def frame(self, joy: int, key: int, mb: int = 0) -> dict:
-        self.macc = [0, 0]                    # inp.s module: a new frame (clamp)
+        self.macc = [0, 0]                    # inp.s module: a new frame (travel budget)
         self.key, self.mb = key, mb
         if key & ~self.kp & F1:
             self.view |= 1
@@ -113,10 +113,13 @@ class Inp:
                 continue
             if i == 0:
                 d = -d                        # 1351 Y up = Amiga Y down
-            # AROS reads s8 once per frame, after the hook: +-MCLAMP per window
-            # keeps two windows <= 126 (rev14-mouse round 2)
-            acc = max(-MCLAMP, min(MCLAMP, self.macc[i] + d))
-            step, self.macc[i] = acc - self.macc[i], acc
+            # AROS reads s8 once per frame, after the hook: a travel budget
+            # (sum of |counts|) of MCLAMP per window keeps the counts between
+            # two reads <= 126 for any stream (rev14-mouse round 2; rev16-i
+            # M-1: a signed +-63 sum let an in-window reversal reach 189)
+            t = min(MCLAMP, self.macc[i] + abs(d))
+            step = t - self.macc[i] if d > 0 else self.macc[i] - t
+            self.macc[i] = t
             if i == 0:
                 self.y = (self.y + step) & 0xFF
             else:
