@@ -413,6 +413,7 @@ def check_timing(c: Case, recs: bytes, n: int) -> list[str]:
 
 S0_WALL_S = 120.0                       # the s = 0 gate's wall budget
 MASKED_MAX_INSTR = 32                   # a bound; measured max 14 (stub UI) / 23 (W15-U's ui.s)
+RETRIG_MAX_INSTR = 140                  # product build; measured max 127 (basic), probe 113 (W15-RT)
 LATE_BOUND_E = 3 * FRAME_E              # catch-up on a slow host (VICE s = 6)
 DRIFT_BOUND_E = 2048                    # the tempo: no drift between the ends
 
@@ -441,6 +442,8 @@ class Model:
         self.ipl = 0
         self.writes: list[tuple[int, int]] = []  # Paula/DMACON writes by the program
         self.ctl: list[tuple[int, int]] = []     # DMACON/INTENA/INTREQ writes by the program
+        self.retrig: list[int] = []     # instructions from a DMACON clear to IPL < 2
+        self._clr = None
         self.ui_ctl: list[tuple[int, int]] = []  # every custom write by the UI's code
         self.ui_range = (syms.get("__ui_lo", 0), syms.get("__ui_hi", 0))
         self.cur_pc = 0
@@ -475,8 +478,11 @@ class Model:
     def on_instr(self, pc):
         self.icount += 1
         self.cur_pc = pc & 0xFFFFFF
-        lvl = self.ipl
-        if lvl and lvl <= (self.cpu.r_sr() >> 8) & 7:
+        lvl, sr_ipl = self.ipl, (self.cpu.r_sr() >> 8) & 7
+        if self._clr is not None and sr_ipl < 2:   # the stage is deliverable
+            self.retrig.append(self.icount - self._clr)
+            self._clr = None
+        if lvl and lvl <= sr_ipl:
             self.masked_run += 1
             if self.masked_run > self.masked_max:
                 self.masked_max = self.masked_run
@@ -496,6 +502,8 @@ class Model:
         if self._st and pc == self._st[0] and sp == self._st[1]:
             self.stage_cost.append(self.icount - self._st[2])
             self._st = None
+        if pc == self.syms.get("finish"):
+            self._clr = None                # the end: no stage follows
         if pc == self.syms.get("_ui_frame"):
             self.ui_calls += 1
         if pc == self.syms.get("do_tick"):
@@ -533,6 +541,9 @@ class Model:
                 self.writes.append((r, v))
             if r in (0x096, 0x09A, 0x09C):
                 self.ctl.append((r, v))
+            if (r == 0x096 and not v & 0x8000 and v & 0xF and self._clr is None
+                    and self._dt is not None):   # a tick's (not mod_init's)
+                self._clr = self.icount
         self.cs.custom_write(r, v)
 
     def c_w8(self, a, v):
@@ -687,6 +698,7 @@ def run_model(img: bytes, syms: dict, c: Case) -> tuple[list[str], "Model"]:
         f.append(f"{c.name}: an interrupt stayed pending under the IPL for "
                  f"{m.masked_max} instructions (bound {MASKED_MAX_INSTR})")
     c.masked_max = m.masked_max
+    c.retrig_max = max(m.retrig, default=0)
     # ui_frame once per UI_DIV frames (+1: the run may end mid-period)
     fr = struct.unpack_from(">I", st, 12)[0]
     div = max(1, c.uidiv)
@@ -820,7 +832,8 @@ def leg_model(defs: list[str], cost: bool, quick: bool, ui_src: str | None = Non
         if c.name.startswith("fz") and not f:
             continue                        # the fuzz: failures only (a summary below)
         log(f"model {c.name}: {len(c.ticks)} ticks, {m.icount} instr, masked max "
-            f"{getattr(c, 'masked_max', '-')} instr, "
+            f"{getattr(c, 'masked_max', '-')} instr, retrigger "
+            f"{getattr(c, 'retrig_max', '-')} instr, "
             f"{time.monotonic() - t0:.1f}s, timing worst "
             f"{getattr(c, 'timing_worst', '-')} E (drift {getattr(c, 'timing_drift', '-')}): "
             f"{'ok' if not f else 'FAIL'}")
@@ -830,9 +843,38 @@ def leg_model(defs: list[str], cost: bool, quick: bool, ui_src: str | None = Non
     if extra:
         nf = sum(1 for c in extra if c.name.startswith("fz"))
         log(f"model: {len(extra) - nf} malformed cases, {nf} fuzz songs (seed 1512)")
+    fails += retrig_gate(defs)
     if cost:
         fails += leg_cost(defs)
     return fails
+
+
+def retrig_gate(defs: list[str]) -> list[str]:
+    """W15-RT: the retrigger gap, product build (no trace), model speed.
+    Instructions from each DMACON clear a tick writes to the first
+    instruction at IPL < 2 (the level-2 DMACON-set stage deliverable): the
+    channel's silence on the U64E (~25 us per instruction, the U64E
+    measurement of build/evidence/w15-m3/u64e_1).  The song's end (finish)
+    is not a retrigger.  Red: the replay before W15-RT (464/316 for the
+    probe; evidence build/evidence/w15-rt)."""
+    from tests import run_player
+    out = os.path.join(ROOT, "build", "mod-retrig" + ("-" + "-".join(defs) if defs else ""))
+    img, syms = build(list(defs), out)
+    gate = [c for c in cases() if c.e_per_cyc == (1, 10) and c.s is None]
+    gate.append(Case("probe", run_player.probe_song(), PF_STOPEND | PF_REALTIME,
+                     tick_e=20455, timing=False))
+    f, worst = [], {}
+    for c in gate:
+        c.flags &= ~PF_TRACE
+        m = Model(img, syms, c)
+        m.run(max_e=(c.max_frames + 2) * FRAME_E)
+        worst[c.name] = max(m.retrig, default=0)
+        if worst[c.name] > RETRIG_MAX_INSTR:
+            f.append(f"{c.name}: a retrigger's DMACON clear stayed {worst[c.name]} "
+                     f"instructions from its stage (product build; bound {RETRIG_MAX_INSTR})")
+    log(f"retrigger gap (product, instructions clear -> IPL < 2): max {max(worst.values())}, "
+        f"probe {worst['probe']}; {worst}")
+    return f
 
 
 def leg_cost(defs: list[str]) -> list[str]:
