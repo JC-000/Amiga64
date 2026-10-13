@@ -140,7 +140,12 @@ G_UIFR          equ     100     ; l G_FRAMES at the last UI call
 G_VFR           equ     104     ; l VBL tempo: the frames already turned into ticks
 G_TOD           equ     88      ; l trace: CIA-A TOD (frames) at the tick's start
 G_BEAM          equ     92      ; l trace: VPOSR:VHPOSR with it
+        ifd     MOD_HUNK                ; W16-X: AROS owns CIA-B TB, so the TA
+G_SWU           equ     108             ; w underflows are counted by l6_ciab
+G_SIZE          equ     110
+        else
 G_SIZE          equ     108
+        endc
 
 ; PWA value,disp / PWAL value,disp: a Paula write to the channel registers
 ; at a4 (= CUSTOM + AUD0LC + 16 * channel); the trace build logs it too
@@ -478,7 +483,9 @@ _mod_start:
         move.b  #$82,CIAA_ICR           ; mask: TB
         move.b  #$7f,CIAB_ICR
         clr.b   CIAB_CRA
+        ifnd    MOD_HUNK                ; (W16-X: CIA-B TB is not ours)
         clr.b   CIAB_CRB
+        endc
         bsr     timer_update            ; PF_REALTIME: the tick timer now
         move.w  #$c000|INT_MINE,INTENA(a5)  ; SET INTEN EXTER VERTB PORTS
         movem.l (sp)+,d2-d7/a2-a6
@@ -550,7 +557,14 @@ l3_vbl: move.w  #$0020,CUSTOM+INTREQ   ; the nested (busy) path: 3 instructions
 .rte:   rte
 
 l6_ciab:
+        ifd     MOD_HUNK                ; W16-X: CIA-B TB is AROS's, so every TA
+        btst    #0,CIAB_ICR             ; underflow is counted here (acknowledge:
+        beq.s   .nu                     ; releases the hold)
+        addq.w  #1,G+G_SWU
+.nu:
+        else
         tst.b   CIAB_ICR                ; acknowledge (releases the hold)
+        endc
         move.w  #$2000,CUSTOM+INTREQ    ; EXTER, after the ICR read
         addq.w  #1,STATUS+S_L6
         tst.b   G+G_BUSY
@@ -659,6 +673,15 @@ tick_loop:
 
 ; read_tb: d1.w := CIA-B timer B (consistent: high byte read around low)
 read_tb:
+        ifd     MOD_HUNK                ; W16-X: the software count, as a down
+        btst    #0,CIAB_ICR             ; counter like TB's; an underflow not yet
+        beq.s   .sw                     ; delivered is counted here (whoever reads
+        addq.w  #1,G+G_SWU              ; the flag first counts it)
+.sw:    moveq   #0,d1
+        move.w  G+G_SWU,d1
+        not.w   d1
+        rts
+        endc
 .rd:    moveq   #0,d1
         move.b  CIAB_TBHI,d1
         move.b  CIAB_TBLO,d2
@@ -692,8 +715,17 @@ l2_ciaa:
 ; The DMA stages
 ; ===========================================================================
 stage_arm:
+        ifd     MOD_HUNK                ; W16-X: the delay from the profile's E rate
+        move.w  PARAM+P_STAGEE,d0
+        bne.s   .e
+        move.w  #STAGE_E,d0
+.e:     move.b  d0,CIAA_TBLO
+        lsr.w   #8,d0
+        move.b  d0,CIAA_TBHI            ; one-shot: loads and starts
+        else
         move.b  #STAGE_E&$ff,CIAA_TBLO
         move.b  #STAGE_E>>8,CIAA_TBHI     ; one-shot: loads and starts
+        endc
         rts
 
 ; one stage: 1 = DMACON set, 2 = the repeat LC/LEN
@@ -788,12 +820,18 @@ timer_update:
         move.b  d2,CIAB_TAHI            ; running: the latch only
         tst.w   d6
         bne.s   .r
+        ifd     MOD_HUNK                ; W16-X: the software count from 0
+        clr.w   G_SWU(a6)
+        else
         st      CIAB_TBLO               ; TB latch $FFFF (stopped: loads)
         st      CIAB_TBHI
+        endc
         move.w  #$ffff,G_TBLAST(a6)
         clr.w   G_UNDER(a6)
         move.l  G_FRAMES(a6),G_VFR(a6)  ; frames after the switch are no ticks
+        ifnd    MOD_HUNK
         move.b  #$51,CIAB_CRB           ; start, count TA underflows, load
+        endc
         move.b  #$11,CIAB_CRA           ; start, continuous, load
         move.b  #$81,CIAB_ICR           ; mask: TA
 .r:     rts
@@ -815,7 +853,9 @@ finish:
         moveq   #$0f,d1
         bsr     pw
         clr.b   CIAB_CRA
+        ifnd    MOD_HUNK                ; (W16-X: CIA-B TB is not ours)
         clr.b   CIAB_CRB
+        endc
         move.b  #$7f,CIAB_ICR
         move.b  #$08,CIAA_CRB
         move.b  #$7f,CIAA_ICR
