@@ -155,6 +155,86 @@ def test_add_in_a_taken_slot_appends_to_the_chain():
     assert [a.read_file(a.lookup(n)) for n in ["Tool"] + twins] == [blob(10, i + 3) for i in range(4)]
 
 
+def _chain(a: O.Adf, dk: int, slot: int) -> list[int]:
+    out, k = [], struct.unpack_from(">I", a.block(dk), 24 + 4 * slot)[0]
+    while k:
+        out.append(k)
+        k = struct.unpack_from(">I", a.block(k), 496)[0]
+    return out
+
+
+def test_a_chain_stays_in_ascending_block_order():
+    """rev16-d L3: a header that lands on a lower block than the chain's
+    tail goes in its place (every multi-entry chain on the user's Commodore
+    disks ascends)."""
+    e = F.DiskEdit(disk())
+    slot = e.adf.name_hash("Tool")
+    twins = [n for n in (f"N{i}" for i in range(400)) if e.adf.name_hash(n) == slot][:3]
+    ks = [e.add_file(n, blob(600, i + 2)) for i, n in enumerate(["Tool"] + twins[:2])]
+    e.delete(twins[0])                   # the middle's blocks are free again: the
+    k = e.add_file(twins[2], blob(10))   # next header takes the lowest of them
+    assert ks[0] < k < ks[2]
+    img = e.data()
+    F.fsck(img)
+    a = O.Adf(img)
+    assert _chain(a, O.ROOT, slot) == [ks[0], k, ks[2]]
+    assert a.read_file(a.lookup(twins[2])) == blob(10)
+    assert [a.read_file(a.lookup(n)) for n in ("Tool", twins[1])] == [blob(600, 2), blob(600, 4)]
+
+
+def test_files_are_written_with_every_protection_bit_clear():
+    """rev16-d L2: protection +320 is 0 (RWED allowed; the bits deny when
+    set): Workbench refuses to run a tool with E set."""
+    raw = disk()
+    out = F.modwb_image(raw, blob(3000), blob(700, 3), drop="Classes/DataTypes/big.datatype")
+    a = O.Adf(out)
+    for n in (F.MODWB_TOOL, F.MODWB_INFO, F.MODWB_MOD):
+        assert struct.unpack_from(">I", a.header(a.lookup(n)), 320)[0] == 0, n
+
+
+def test_fsck_refuses_an_extension_block_with_a_wrong_own_key():
+    """rev16-d L1: an extension block's +4 header_key is itself (FAQ)."""
+    e = F.DiskEdit(disk())
+    hk = e.add_file("Big", blob(100 * 512))
+    img = e.data()
+    ek = struct.unpack_from(">I", O.Adf(img).block(hk), 504)[0]
+    assert ek
+    F.fsck(img)
+    with pytest.raises(O.AdfError, match="extension block .* header_key"):
+        F.fsck(_poke(img, ek, 4, hk))
+
+
+def test_a_near_full_disk_allocates_below_the_root():
+    """rev16-d L4 (without the user's disk): every block above the root
+    taken, the file goes below it."""
+    e = F.DiskEdit(disk())
+    top = [k for k in range(O.ROOT + 1, O.BLOCKS) if e.is_free(k)]
+    e.add_file("Filler", blob(512 * (len(top) - 2)))   # header + 1 extension + data
+    assert not any(e.is_free(k) for k in range(O.ROOT + 1, O.BLOCKS))
+    hk = e.add_file("Low", blob(3000))
+    ks = [hk] + e.adf.file_blocks(hk)
+    assert max(ks) < O.ROOT
+    F.fsck(e.data())
+    assert e.adf.read_file(hk) == blob(3000)
+
+
+def test_names_compare_as_the_filesystem_folds_them():
+    """rev16-d L6: Latin-1 names only; on a non-intl disk only a-z fold,
+    so a-grave and A-grave are two names."""
+    e = F.DiskEdit(disk())
+    assert not e.adf.intl
+    with pytest.raises(O.AdfError, match="Latin-1"):
+        e.add_file("Tool€", b"x")
+    lo, up = "AGRà", "AGRÀ"              # one hash slot on DOS\1
+    assert e.adf.name_hash(lo) == e.adf.name_hash(up)
+    e.add_file(lo, b"1")
+    e.add_file(up, b"2")                 # not a duplicate on DOS\1
+    a = e.adf
+    assert a.read_file(a.lookup("agrà")) == b"1"
+    assert a.read_file(a.lookup("agrÀ")) == b"2"
+    F.fsck(e.data())
+
+
 def test_delete_frees_and_unlinks_a_chain_middle():
     e = F.DiskEdit(disk())
     a = e.adf

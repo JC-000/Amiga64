@@ -111,13 +111,18 @@ class Adf:
         n = min(b[BLOCK - 80], 30)
         return b[BLOCK - 79:BLOCK - 79 + n].decode("latin-1")
 
+    def fold(self, name: str) -> str:
+        """The filesystem's upper case: a-z, and on an intl disk also the
+        Latin-1 a-grave..thorn (not the division sign); W16-D, rev16-d L6:
+        names compare by this, not by Python's lower()."""
+        return "".join(chr(ord(c) - 32) if 97 <= ord(c) <= 122 or
+                       (self.intl and 224 <= ord(c) <= 254 and ord(c) != 247) else c
+                       for c in name)
+
     def name_hash(self, name: str) -> int:
         h = len(name)
-        for c in name:
-            o = ord(c)
-            if 97 <= o <= 122 or (self.intl and 224 <= o <= 254 and o != 247):
-                o -= 32
-            h = (h * 13 + o) & 0x7FF
+        for c in self.fold(name):
+            h = (h * 13 + ord(c)) & 0x7FF
         return h % HT_SIZE
 
     def header(self, k: int) -> bytes:
@@ -137,7 +142,7 @@ class Adf:
                 if not k:
                     return None
                 h = self.header(k)
-                if self.bname(h).lower() == part.lower():
+                if self.fold(self.bname(h)) == self.fold(part):
                     break
                 k = _l(h, BLOCK - 16)
             else:

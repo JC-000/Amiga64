@@ -640,7 +640,8 @@ def make_disk(a, raw: bytes) -> Disk:                     # W16-D
         with open(a.modwb_prg, "rb") as f:                  # W16-D
             player = f.read()                               # W16-D
     else:                                                   # W16-D: the stand-in
-        defs = ("MUT_NORESTORE",) if a.modwb_mutant == "norestore" else ()   # W16-D
+        defs = {"norestore": ("MUT_NORESTORE",),            # W16-D
+                "keepanchor": ("MUT_KEEPANCHOR",)}.get(a.modwb_mutant, ())   # W16-D
         if a.modwb_exit == "end":                           # W16-D: leaves by itself
             defs += ("MAXF=200",)                           # W16-D
         # W16-D: the stand-in publishes the app anchor only over a valid
@@ -652,7 +653,8 @@ def make_disk(a, raw: bytes) -> Disk:                     # W16-D
                                                "modwb"), defs)   # W16-D
     mod = modgen.songs()[a.modwb_mod]                       # W16-D
     return MW.ModDisk(raw, a.script, player, mod,
-                      with_info=a.modwb_mutant != "noinfo")  # W16-D
+                      with_info=a.modwb_mutant != "noinfo",  # W16-D
+                      standin=not a.modwb_prg)              # W16-D
 
 
 def run(a, rom, raw: bytes) -> tuple[list[str], dict]:
@@ -1890,7 +1892,8 @@ def main(argv=None) -> int:
     ap.add_argument("--modwb-exit", default="click", choices=("click", "end"),   # W16-D
                     help="W16-D leg modwb: leave by a left click, or wait for the song end")
     ap.add_argument("--modwb-mutant", default=None,                      # W16-D
-                    choices=("noinfo", "noclick", "norestore", "wrongicon", "noprof"),
+                    choices=("noinfo", "noclick", "norestore", "wrongicon", "noprof",   # W16-D
+                             "stuckpic", "keepanchor"),                                   # W16-D
                     help="W16-D red: leg modwb must fail")
     ap.add_argument("--tag", default=None, help="report name (default: backend-script)")
     a = ap.parse_args(argv)
@@ -1937,4 +1940,9 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # W16-D fix round 1: run main() in THE tests.aros_wb module, so the CLI
+    # flags (E2E_FROZEN, ...) are the ones the leg modules importing it read
+    # (under -m this file is __main__, a second copy: --e2e-frozen never
+    # reached tests/aros_modwb, green/vice-frozen{,2} ran live)
+    from tests import aros_wb as _wb                        # W16-D
+    sys.exit(_wb.main())                                    # W16-D

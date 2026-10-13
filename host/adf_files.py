@@ -47,8 +47,9 @@ from host.adf_overlay import (BLOCK, BLOCKS, HT_SIZE, ROOT, ST_FILE, ST_ROOT,
 BM_FLAG, BM_PAGES, BM_EXT = BLOCK - 200, BLOCK - 196, BLOCK - 96
 ST_SOFTLINK, ST_LINKDIR, ST_LINKFILE = 3, 4, -4
 # a fixed date for every block this module writes (reproducible overlays):
-# 2026-10-12 00:00 = 17,817 days after 1978-01-01
-DATE = (17817, 0, 0)
+# 2026-10-12 00:00 = 17,816 days after 1978-01-01 (rev16-d L7: was 17,817,
+# the 13th)
+DATE = (17816, 0, 0)
 
 
 def bitmap_checksum(b) -> int:
@@ -129,7 +130,10 @@ def fsck(data: bytes, check_bitmap: bool = True) -> set[int]:
         k = _l(h, BLOCK - 8)
         while k:
             use(k, f"{p} (extension)")
-            k = _l(a.block(k), BLOCK - 8)
+            e = a.block(k)
+            if _l(e, 4) != k:           # FAQ: +4 header_key, "itself" (rev16-d L1)
+                raise AdfError(f"{p}: extension block {k} has header_key {_l(e, 4)}")
+            k = _l(e, BLOCK - 8)
         for i, k in enumerate(blocks):
             use(k, f"{p} (data {i})")
             if not a.ffs:
@@ -225,6 +229,10 @@ class DiskEdit:
         parent, _, name = path.strip("/").rpartition("/")
         if not 1 <= len(name) <= 30 or any(c in name for c in ":/"):
             raise AdfError(f"{path!r}: bad name")
+        try:                            # rev16-d L6: the BCPL name is Latin-1
+            name.encode("latin-1")
+        except UnicodeEncodeError:
+            raise AdfError(f"{path!r}: not a Latin-1 name") from None
         pk = self.adf.lookup(parent) if parent else ROOT
         if pk is None:
             raise AdfError(f"{parent}: no such drawer")
@@ -233,18 +241,27 @@ class DiskEdit:
         return pk, name
 
     def _link(self, pk: int, k: int, name: str) -> None:
-        """Append header k at the end of its hash slot's chain in pk."""
+        """Insert header k into its hash slot's chain in pk, the chain kept
+        in ascending block order (rev16-d L3: as every multi-entry chain on
+        the user's Commodore disks is; the filesystem finds a name in any
+        order)."""
         slot = 24 + 4 * self.adf.name_hash(name)
         p = self.blk(pk)
         c = _l(p, slot)
-        if not c:
+        if not c or c > k:
+            h = self.blk(k)
+            struct.pack_into(">I", h, BLOCK - 16, c)
+            self.put(k, h)
             struct.pack_into(">I", p, slot, k)
             self.put(pk, p)
             return
         while True:
             h = self.blk(c)
             nxt = _l(h, BLOCK - 16)
-            if not nxt:
+            if not nxt or nxt > k:
+                n = self.blk(k)
+                struct.pack_into(">I", n, BLOCK - 16, nxt)
+                self.put(k, n)
                 struct.pack_into(">I", h, BLOCK - 16, k)
                 self.put(c, h)
                 return
@@ -376,15 +393,19 @@ def icon_spot(a: O.Adf, w: int, h: int, drawer: str = "") -> tuple[int, int]:
     """A free drawer position for a w x h icon: the first spot, row by row
     (y from 4, x from 3, steps of 8), clear of every positioned icon in the
     drawer (box + label + GAP) and inside the drawer window's DrawerData
-    width (less 30 for the borders).  Deterministic for a given disk."""
+    width and height (less 30 / 20 for the borders; rev16-d L8: the height
+    was not bounded).  Labels count as LABEL_H rows under the image, not by
+    their width (rev16-d L8, kept: a label wider than its image may reach
+    into the GAP of a neighbour; the product's spot, (299, 4) on the user's
+    disk, does not change).  Deterministic for a given disk."""
     from host import wbicon as W
     dk = a.lookup(drawer) if drawer else ROOT
     own = a.lookup(f"{drawer}.info" if drawer else "Disk.info")
-    win_w = 300
+    win_w, win_h = 300, 400
     if own is not None:
         do = W.parse(a.read_file(own))
         if do.drawer:
-            win_w = struct.unpack_from(">h", do.drawer, 4)[0]
+            win_w, win_h = struct.unpack_from(">hh", do.drawer, 4)
     boxes = []
     d = a.header(dk)
     for slot in range(HT_SIZE):
@@ -401,7 +422,7 @@ def icon_spot(a: O.Adf, w: int, h: int, drawer: str = "") -> tuple[int, int]:
                 if do and do.x != W.NO_POSITION:
                     boxes.append((do.x, do.y, do.x + do.image.width, do.y + do.image.height + LABEL_H))
             k = _l(hb, BLOCK - 16)
-    for y in range(4, 400, 8):
+    for y in range(4, max(5, win_h - 20 - h - LABEL_H), 8):
         for x in range(3, max(4, win_w - 30 - w), 8):
             x1, y1 = x + w, y + h + LABEL_H
             if all(x1 + GAP <= b[0] or x >= b[2] + GAP or y1 + GAP <= b[1] or y >= b[3] + GAP

@@ -148,3 +148,212 @@ def test_find_player_icon_selected_form():
                 mem.b[p + y * ROWB + x // 8] ^= 0x80 >> (x % 8)
     got = MW.find_player_icon(mem.read, st, WIN)
     assert got and got["selected"] and (got["x0"], got["y0"]) == (100, 30)
+
+
+# -- fix round 1 (H1): the region search, the bulk frozen reader ---------------
+
+def test_find_player_icon_in_a_region_and_the_window_fallback():
+    mem = Mem()
+    st = screen(mem, 100, 30)
+    box = (84, 22, 164, 60)              # the stored position's box
+    got = MW.find_player_icon(mem.read, st, WIN, box)
+    assert got and (got["x0"], got["y0"]) == (100, 30)
+    assert MW.find_player_icon(mem.read, st, WIN, (200, 22, 280, 60)) is None
+    ic, how = MW.icon_search(mem.read, st, WIN, (200, 22, 280, 60))
+    assert how == "window" and (ic["x0"], ic["y0"]) == (100, 30)
+    assert MW.icon_search(mem.read, st, WIN, box)[1] == "box"
+    assert MW.find_player_icon(mem.read, st, WIN, (100, 30, 147, 50)) is None   # too small
+
+
+def test_the_region_search_reads_only_the_box_rows():
+    mem = Mem()
+    st = screen(mem, 100, 30)
+    st["bplcon0"] = 0x2000 | 0x8000      # the Workbench's 2 planes
+    seen = set()
+
+    def rd(a, n):
+        seen.update(range(a & ~0xFF, a + n, 0x100))
+        return mem.read(a, n)
+    MW.find_player_icon(rd, st, WIN, (84, 22, 164, 60))
+    assert len(seen) <= 2 * 14          # 39 rows of 80 bytes per plane (~16 pages)
+
+
+def test_expected_box_from_the_stored_position():
+    class D:
+        icon = W.parse(W.player_icon(299, 4))
+    dw = {"x": 47, "y": 27, "w": 390, "h": 118, "bl": 4, "bt": 15}
+    x0, y0, x1, y1 = MW.expected_box(dw, D)
+    assert (x0 + MW.ICON_MARGIN[0], y0 + MW.ICON_MARGIN[1]) == (350, 47)    # vice1's find
+    assert (x1 - x0, y1 - y0) == (48 + 2 * MW.ICON_MARGIN[0], 22 + 2 * MW.ICON_MARGIN[1])
+
+
+def run_stub(code: bytes, org: int, ram: bytearray, reu: bytes, dirty: int) -> int:
+    """The 6502 subset bulk_stub uses, with a REU at $DF0x (fetch on $DF01
+    bit 7, REU -> C64); -> the number of fetches."""
+    ram[org:org + len(code)] = code
+    pc, x, a, z, n, sp, fetches = org, 0, 0, False, False, [], 0
+    regs = bytearray(16)
+    while True:
+        op = ram[pc]
+        w = ram[pc + 1] | ram[pc + 2] << 8
+        if op == 0xA2:                    # ldx #
+            x = ram[pc + 1]; z = x == 0; pc += 2          # noqa: E702
+        elif op == 0xA9:                  # lda #
+            a = ram[pc + 1]; pc += 2                       # noqa: E702
+        elif op == 0xBD:                  # lda abs,x
+            a = ram[w + x]; pc += 3                        # noqa: E702
+        elif op == 0x8D:                  # sta abs
+            if 0xDF00 <= w <= 0xDF0F:
+                regs[w & 15] = a
+                if w == 0xDF01 and a & 0x80:
+                    assert a == 0x91 and regs[0x0A] == 0
+                    c64 = regs[2] | regs[3] << 8
+                    src = regs[4] | regs[5] << 8 | regs[6] << 16
+                    ln = regs[7] | regs[8] << 8 or 0x10000
+                    ram[c64:c64 + ln] = reu[src:src + ln]
+                    fetches += 1
+            else:
+                ram[w] = a
+            pc += 3
+        elif op == 0xE8:                  # inx
+            x = (x + 1) & 0xFF; z = x == 0; pc += 1        # noqa: E702
+        elif op == 0xE0:                  # cpx #
+            z = x == ram[pc + 1]; pc += 2                  # noqa: E702
+        elif op == 0xD0:                  # bne
+            off = ram[pc + 1]
+            pc += 2 + (off - 256 if off & 0x80 else off) if not z else 2
+        elif op == 0x20:                  # jsr
+            assert w == dirty
+            sp.append(pc + 2)
+            pc = w if w in ram_routines else pc + 3
+        elif op == 0x60:                  # rts
+            return fetches
+        else:
+            raise AssertionError(f"opcode ${op:02X} at ${pc:04X}")
+
+
+ram_routines: set = set()                 # jsr mem_rec_dirty: stepped over
+
+
+@pytest.mark.parametrize("pages", [[0x20000], [0x1F00, 0x2000, 0xC80500], list(range(0x10000, 0x10000 + 31 * 256, 256))])
+def test_bulk_stub_fetches_each_page_to_the_buffer(pages):
+    reu = bytes((i * 7 + (i >> 8) * 3 + (i >> 16)) & 0xFF for i in range(0xC80600))
+    ram = bytearray(0x10000)
+    code = MW.bulk_stub(0xCC00, pages, 0xE0, 0x1234)
+    assert len(code) == 256
+    assert run_stub(code, 0xCC00, ram, reu, 0x1234) == len(pages)
+    for i, pg in enumerate(pages):
+        assert ram[0xE000 + 256 * i:0xE100 + 256 * i] == reu[pg:pg + 256]
+    with pytest.raises(AssertionError):
+        MW.bulk_stub(0xCC00, list(range(32)), 0xE0, 0x1234)
+
+
+class FakeT:
+    def __init__(self, ram):
+        self.ram = ram
+
+    def read_memory(self, a, n):
+        assert n <= 1024
+        return bytes(self.ram[a:a + n])
+
+
+class FakeM:
+    """A frozen Ultimate: C64 RAM, the REU = the guest's memory, the runner
+    call executing the stub; *rom_at_e000*: the read-back sees ROM."""
+    vice = False
+
+    def __init__(self, reu, rom_at_e000=False):
+        self.ram, self.reu, self.rom = bytearray(0x10000), reu, rom_at_e000
+        self.t, self.tg = FakeT(self.ram), object()
+        if rom_at_e000:
+            self.t = FakeT(bytearray(b"\xEA" * 0x10000))
+
+    def w(self, a, data):
+        self.ram[a:a + len(data)] = data
+
+
+class FakeSn:
+    a_dirty = 0x1234
+
+    def __init__(self, m):
+        self.m, self.n = m, 0
+
+    def reu_read(self, a, n):
+        self.n += 1
+        return bytes(self.m.reu[a:a + n])
+
+
+def _reader(monkeypatch, rom=False):
+    from tests import harness_util as HU
+    reu = bytes((i * 13 + (i >> 9)) & 0xFF for i in range(0x40000))
+    m = FakeM(reu, rom)
+    monkeypatch.setattr(HU, "call_runner",
+                        lambda tg, addr, to: run_stub(bytes(m.ram[addr:addr + 256]), addr,
+                                                      m.ram, reu, FakeSn.a_dirty))
+    monkeypatch.setattr(MW, "BULK_OK", [None])
+    return MW.FrozenReader(m, FakeSn(m)), reu
+
+
+def test_frozen_reader_bulk_then_cache(monkeypatch):
+    rd, reu = _reader(monkeypatch)
+    rd.prefetch([(0x10010, 3000), (0x20000, 160)])
+    assert rd.stats == {"single": 1, "bulk_calls": 1, "bulk_pages": 13}   # 1: the check
+    assert MW.BULK_OK[0] is True
+    assert rd(0x10010, 3000) == reu[0x10010:0x10010 + 3000]
+    assert rd(0x1020000, 160) == reu[0x20000:0x20000 + 160]                 # 24-bit bus
+    assert rd.stats["single"] == 1                                          # all cached
+    rd.prefetch([(0x30000, 40 * 256)])
+    assert rd.stats["bulk_calls"] == 3 and rd.stats["bulk_pages"] == 53     # 31 + 9
+
+
+def test_frozen_reader_falls_back_when_the_read_back_is_not_ram(monkeypatch):
+    rd, reu = _reader(monkeypatch, rom=True)
+    rd.prefetch([(0x10000, 2048)])
+    assert MW.BULK_OK[0] is False
+    assert rd(0x10000, 2048) == reu[0x10000:0x10800]                       # page by page
+    rd.prefetch([(0x20000, 2048)])
+    assert rd.stats["bulk_calls"] == 1
+
+
+class FakeE:
+    def __init__(self, m):
+        self.m = m
+
+    def frames_wait(self, k, timeout=120.0):
+        self.m.f += k
+
+
+def test_settle_td_waits_for_a_quiet_read_count():
+    class M:
+        f = 0
+
+        def frames(self):
+            return self.f
+
+        def b(self, name, n=1):
+            assert name == "td_nrd"
+            return struct.pack("<H", min(self.f // 20, 9))      # reads until frame 180
+    m = M()
+    out = MW.settle_td(m, FakeE(m), quiet=120, limit=1500)
+    assert out["quiet"] and out["reads"] == 9 and 300 <= out["frames"] <= 320
+    m.f = 0
+    out = MW.settle_td(m, FakeE(m), quiet=120, limit=100)
+    assert not out["quiet"] and out["frames"] <= 110
+
+
+@pytest.mark.parametrize("vice,hashes,ok", [
+    (True, ["H0"], True), (True, ["H1"], False),
+    (False, ["W", "W", "W"], True), (False, ["H1", "W", "W"], False),
+    (False, ["W", "X", "Y"], False)])
+def test_return_picture(monkeypatch, vice, hashes, ok):
+    from tests import aros_wb as WB
+    monkeypatch.setattr(WB, "force_conv", lambda m, timeout: None)
+    it = iter(hashes)
+
+    class M:
+        f = 0
+    m = M()
+    m.vice = vice
+    rt: dict = {}
+    fails = MW.return_picture(m, FakeE(m), lambda: next(it) * 10, "H0" * 10, "H1" * 10, rt)
+    assert (not fails) == ok, (fails, rt)

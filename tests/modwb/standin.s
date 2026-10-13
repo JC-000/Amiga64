@@ -27,6 +27,7 @@
 ; pr_CLI +172; GfxBase gb_copinit +38; MEMF_CHIP 2.  Custom chips: INTREQR
 ; $01E, COP1LC $080, COPJMP1 $088, INTREQ $09C.
 ; MUT_NORESTORE (red): the restore leaves our copper list.
+; MUT_KEEPANCHOR (red, fix round 1): the anchor is never withdrawn.
 
 SysBase         equ     4
     ifnd MAXF
@@ -176,10 +177,12 @@ anchor_init:
 
 ; anchor_end: 'MWBA' cleared first (nothing else is written after it).
 anchor_end:
+    ifnd MUT_KEEPANCHOR
         tst.b   profok-vars(a5)
         beq.s   .r
         clr.l   ANCHOR_AT
         clr.b   profok-vars(a5)
+    endif
 .r:     rts
 
     ifnd STANDIN_NOPROF
