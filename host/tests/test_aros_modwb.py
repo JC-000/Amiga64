@@ -543,3 +543,100 @@ def test_display_back_still_fails_on_a_used_plane_or_bplcon0():
                                      "bplpt": [0x3AB8, 0x8AB8, 0x1F44B8, 0, 0, 0]})
     # red norestore (fix2/red-norestore): the stand-in's BPLCON0 $0200 left in place
     assert not MW.display_back(_WB, {"bplcon0": 0x0200, "bplpt": list(_WB["bplpt"])})
+
+
+# W16-E4 (rev16-e 3, 4): Music.close on a fake stream (the reviewer's
+# vacuous passes: a truncated capture, zero-filled drops, a stream that did
+# not start; npark after the return), and a quiet play window as a control
+RATE = 48000.0
+_MARKS = {"dclick": 1.0, "takeover": 20.0, "play1": 26.0, "exit": 28.0, "ret1": 40.0}
+
+
+def _tone(sec: float, amp: float = 4500.0):
+    import numpy as np
+    t = np.arange(int(sec * RATE)) / RATE
+    return amp * np.sqrt(2) * np.sin(2 * np.pi * 300 * t)
+
+
+def _music(monkeypatch, tmp_path, mono=None, dropped=0, filled=(), sil=(0, 0, 0),
+           start_error=None):
+    import types
+    from tests.paula import hw16
+    monkeypatch.setattr(MW, "STREAM_DIR", [str(tmp_path)])
+    cl = types.SimpleNamespace()
+    m = types.SimpleNamespace(aud=True, vice=False,
+                              tg=types.SimpleNamespace(transport=types.SimpleNamespace(client=cl)))
+    z = dict(frame=0, nw=0, nfire=0, ndat=0, now=0, nres=0, npark=0)
+    monkeypatch.setattr(MW, "aud_counters", lambda _m: dict(z))
+
+    def stream(_c):
+        if start_error:
+            raise start_error
+        return object(), 0.0
+    monkeypatch.setattr(hw16, "stream", stream)
+    monkeypatch.setattr(hw16, "stream_stop", lambda c, cap, wav: {
+        "mono": mono, "rate": RATE, "packets": 1, "dropped": dropped,
+        "filled": list(filled), "intact": True})
+    mu = MW.Music(m, types.SimpleNamespace(standin=False), "t")
+    mu.start()
+    mu.rep["counters"] = {"play0": z, "play1": dict(z, nw=1400, nfire=430, npark=400),
+                          "ret0": z, "ret1": dict(z, nw=sil[0], nfire=sil[1], npark=sil[2])}
+    mu.rep["marks"] = dict(_MARKS)
+    return mu.close()
+
+
+def _good():
+    import numpy as np
+    x = np.concatenate([np.zeros(int(2 * RATE)), _tone(26.0)[:int(26 * RATE)],
+                        np.zeros(int(12 * RATE))])
+    return x + np.random.default_rng(1).normal(0, 9, len(x))
+
+
+def test_music_close_passes_a_good_stream(monkeypatch, tmp_path):
+    assert _music(monkeypatch, tmp_path, _good()) == []
+
+
+def test_music_close_fails_a_truncated_capture(monkeypatch, tmp_path):
+    f = _music(monkeypatch, tmp_path, _good()[:int(27.5 * RATE)])
+    assert any("samples" in x for x in f), f
+
+
+def test_music_close_fails_zero_filled_drops_in_a_window(monkeypatch, tmp_path):
+    import numpy as np
+    x = np.concatenate([_good()[:int(28 * RATE)], np.zeros(int(12 * RATE))])
+    f = _music(monkeypatch, tmp_path, x, dropped=900,
+               filled=[(int(28 * RATE), int(12 * RATE))])
+    assert any("fill" in x for x in f), f
+
+
+def test_music_close_fails_when_the_stream_did_not_start(monkeypatch, tmp_path):
+    f = _music(monkeypatch, tmp_path, None, start_error=OSError("no route"))
+    assert any("stream did not start" in x for x in f), f
+
+
+def test_music_close_fails_a_quiet_play_window(monkeypatch, tmp_path):
+    import numpy as np
+    x = np.random.default_rng(1).normal(0, 9, int(40 * RATE))
+    assert any("quiet" in y for y in _music(monkeypatch, tmp_path, x))
+
+
+def test_music_close_fails_npark_after_the_return(monkeypatch, tmp_path):
+    f = _music(monkeypatch, tmp_path, _good(), sil=(0, 0, 300))
+    assert any("after the return" in x for x in f), f
+
+
+# W16-E4 (rev16-e 6): CIA-A's TB control, latch and the ICR enable mask are
+# the same before the launch and after the return (the device evidence)
+_CIA = {"a": {"crb": 0x01, "tbl": 0xFFFF, "msk": 0x0B, "tb": 0x1234, "icr": 0},
+        "b": {"crb": 0x00, "tbl": 0x0100, "msk": 0x02}}
+
+
+def test_cia_a_kept_accepts_the_same_timer():
+    after = {"a": dict(_CIA["a"], tb=0x0042, icr=0x02), "b": dict(_CIA["b"], crb=0x08)}
+    assert MW.cia_a_kept(_CIA, after) == []
+
+
+@pytest.mark.parametrize("k,v", [("crb", 0x08), ("tbl", 0x0123), ("msk", 0x09)])
+def test_cia_a_kept_fails_a_changed_timer(k, v):
+    f = MW.cia_a_kept(_CIA, {"a": dict(_CIA["a"], **{k: v}), "b": _CIA["b"]})
+    assert len(f) == 1 and k in f[0], f

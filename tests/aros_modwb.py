@@ -156,6 +156,7 @@ PLAY_NW_MIN, PLAY_BLOCKS_MIN = 150, 40  # W16-E: nw; nfire + npark (block ends: 
 # be > 1000 (4.5x under the measured, 48x over the floor) and > 10x the pre-
 # launch floor; silence < 200 (hw16 rbsil's bound: 10x the floor, 22x under play)
 PLAY_RMS_MIN, PLAY_OVER_FLOOR, SILENT_RMS_MAX = 1000.0, 10.0, 200.0
+WIN_MIN_FILL = 0.9                      # W16-E4: a window's samples, of its length x rate
 STREAM_DIR: list = [None]               # W16-E: aros_wb --out (the WAVs); None: no stream
 
 
@@ -170,6 +171,16 @@ def cia_state(m) -> dict:               # W16-E: runtime/ops/cia.s cia_st (CIA_*
                      "alm": int.from_bytes(raw[23:26], "little")}
     out["now"] = int.from_bytes(m.r(m.lab("cia_now"), 4), "little")
     return out
+
+
+def cia_a_kept(c0: dict, c2: dict) -> list[str]:     # W16-E4 (rev16-e 6)
+    """CIA-A TB is AROS's free-running counter: its control (CRB), its latch
+    and the ICR enable mask are the same after the return as before the
+    launch.  (The player masks CIA-A's interrupts during play, $7F to
+    CIAA_ICR, and the restore writes the mask it found back.)"""
+    a0, a2 = c0["a"], c2["a"]
+    return [f"return: CIA-A {k} ${a2[k]:02X}, before the launch ${a0[k]:02X} (TB is AROS's)"
+            for k in ("crb", "tbl", "msk") if a2[k] != a0[k]]
 
 
 def aud_counters(m) -> dict:            # W16-E
@@ -224,10 +235,14 @@ class Music:                            # W16-E
         """Stop the stream; -> fails.  Counters: aud served the replay's
         writes and block ends over the play window, and nothing over the
         silence window after the return.  Stream: rms during the play
-        window, and silence after the exit."""
+        window, and silence after the exit; W16-E4: each window whole (the
+        capture reaches its end) and free of zero fill, the time base
+        intact, and a stream that did not start fails."""
         if not self.on:
             return []
         f: list[str] = []
+        if "stream_error" in self.rep:  # W16-E4: on an Ultimate with --audio
+            f.append(f"music: the stream did not start ({self.rep['stream_error']})")
         c, mk = self.rep["counters"], self.rep["marks"]
         if "play0" in c and "play1" in c:
             d = self.rep["play_delta"] = self.delta(c["play0"], c["play1"])
@@ -235,7 +250,7 @@ class Music:                            # W16-E
                 f.append(f"music: aud's counters did not move while the player ran ({d})")
         if "ret0" in c and "ret1" in c:
             d = self.rep["silence_delta"] = self.delta(c["ret0"], c["ret1"])
-            if d["nw"] or d["nfire"]:
+            if d["nw"] or d["nfire"] or d["npark"]:          # W16-E4: npark too
                 f.append(f"music: aud still served writes or block ends after the return ({d})")
         if self.cap is not None:
             from tests.paula import hw16
@@ -246,16 +261,33 @@ class Music:                            # W16-E
                 self.rep["stream_error"] = repr(ex)
                 return f + [f"music: the stream did not stop cleanly ({ex!r})"]
             s = self.rep["stream"] = {"wav": wav, "packets": au["packets"], "dropped": au["dropped"],
+                                      "filled": au.get("filled", []), "intact": au.get("intact"),
                                       "seconds": round(len(au["mono"]) / au["rate"], 1)}
+            if au.get("intact") is False:
+                f.append(f"music: the stream's time base is broken ({au['dropped']} dropped, "
+                         f"not all filled): the windows cannot be placed")
+
+            def win(k: str, lo: float, hi: float) -> dict:
+                """W16-E4: [lo, hi) s, which must be whole and free of fill."""
+                w = s[k] = hw16.win_stats(au, lo, hi)
+                a, b = int(lo * au["rate"]), int(hi * au["rate"])
+                if w["n"] < WIN_MIN_FILL * (b - a):
+                    f.append(f"music: the {k} window has {w['n']} samples of {b - a} "
+                             f"(the capture ends at {s['seconds']} s)")
+                fill = [r for r in s["filled"] if r[0] < b and r[0] + r[1] > a]
+                if fill:
+                    f.append(f"music: the {k} window holds zero fill (dropped packets) at "
+                             f"frames {fill[:4]}")
+                return w
             if "dclick" in mk:
-                s["pre"] = hw16.win_stats(au, 0.0, mk["dclick"])
+                win("pre", 0.0, mk["dclick"])
             if "takeover" in mk and "play1" in mk:
-                s["play"] = hw16.win_stats(au, mk["takeover"] + 1.0, mk["play1"])
+                win("play", mk["takeover"] + 1.0, mk["play1"])
                 floor = s.get("pre", {}).get("rms", 0.0) * PLAY_OVER_FLOOR
                 if not s["play"]["rms"] > max(PLAY_RMS_MIN, floor):
                     f.append(f"music: the stream is quiet while the player ran ({s['play']})")
             if "exit" in mk and "ret1" in mk:
-                s["silence"] = hw16.win_stats(au, mk["exit"] + 1.0, mk["ret1"])
+                win("silence", mk["exit"] + 1.0, mk["ret1"])
                 if not s["silence"]["rms"] < SILENT_RMS_MAX:
                     f.append(f"music: the stream is not silent after the exit ({s['silence']})")
         log(f"  music {self.tag}: {self.rep}")
@@ -1058,6 +1090,7 @@ def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, d
     # view, not what a frozen look's fresh load and resume leave behind
     pic = return_picture(m, e, hash_now, h0, h1, rt, forced, due)
     rt["cia"] = cia_state(m)            # W16-E: live, the OS's timers after the return
+    fails += cia_a_kept(la["cia"], rt["cia"])   # W16-E4
     if mu.on:                           # W16-E: the silence window, live, before the frozen look
         mu.cnt("ret0")
         e.frames_wait(MUSIC_FRAMES)

@@ -133,19 +133,19 @@ REVIEW_MUTANTS = {
     "noint": ["MW_MUT_NOINT"],              # INTENA not restored
     "E3_atbcrb": ["MW_MUT_ATBCRB"],         # W16-E3: the restore stops CIA-A TB (the old code)
     "E3_atbclaim": ["MW_MUT_ATBCLAIM"],     # W16-E3: ciaa TB claimed (AddICRVector) again
+    "E4_nowait": ["MOD_MUT_NOWAIT"],        # W16-E4: stage_wait does not wait (rev16-e 1)
 }
 # killed by the model only: the write order (VICE sees the end state and
 # polls), or a model case (an injected stall, a model E rate)
 MODEL_ONLY_MUTANTS = {"anchorfirst", "latchrace", "R3_noreread", "R4_nolatchcount",
-                      "R7_stageeignored", "R8_owednever"}
+                      "R7_stageeignored", "R8_owednever", "E4_nowait"}
 
 # bounds of the model's timing checks (fix round 1)
 JITTER_E = 600            # a tick's lateness above its floor, no stall injected
 STAGE_SLACK_E = 150       # stage delay: P_STAGEE + the level-2 entry
 GRID_LATE_E = 128         # the software grid's constant lateness (replay.s SW_GUARD)
-SILENCE_MAX_INSTR = 200   # retrigger silence: a DMACON clear to its set (product)
-SILENCE_EXEMPT = {20455: "s = 0 (Amiga-rate tick_e): modwb never runs there; the bound "   # W16-E3
-                         "applies at the Workbench profile, tick_e 2557, s = 3 (ruling)"}
+SILENCE_MAX_INSTR = 130   # retrigger silence: a DMACON clear to its set (product), the
+                          # busy-wait excluded (W16-E4: green <= 114, OWEDFULL >= 143)
 
 log = RM.log
 
@@ -518,9 +518,9 @@ def check(c: Case, rd, hw: dict) -> list[str]:
     if (hw["maska_hw"], hw["maskb_hw"]) != (pre_a, PRE_MASKB):
         f.append(f"{c.name}: CIA ICR enable masks ${hw['maska_hw']:02X}/"
                  f"${hw['maskb_hw']:02X}, want ${pre_a:02X}/${PRE_MASKB:02X}")
-    if xs[137] != xs[136]:              # W16-E; W16-E3: every case (CIA-A TB never touched)
+    if xs[137] != xs[136]:              # W16-E; W16-E3: every case (CIA-A TB never programmed)
         f.append(f"{c.name}: CIA-A CRB ${xs[137]:02X} after, ${xs[136]:02X} before "
-                 "(CIA-A TB is AROS's, never touched)")
+                 "(CIA-A TB is AROS's, never programmed)")
     vbl, ta, wto = struct.unpack_from(">H", xs, 30)[0], struct.unpack_from(">H", xs, 32)[0], xs[34]
     if wto or vbl != c.wait:
         f.append(f"{c.name}: after the return {vbl} VERTBs of {c.wait} (a wait timed out: {wto})")
@@ -818,7 +818,8 @@ def resolve(exe: bytes, ld: str, syms: dict, names) -> dict[str, int]:
 
 
 SYM_NAMES = ("G", "sw_one", "sw_wlatch", "sw_now", "sw_amb", "do_tick", "stage_step",
-             "finish", "stage_arm")      # W16-E3: stage_arm
+             "finish", "stage_arm",      # W16-E3: stage_arm
+             "ta_cnt", "stage_wait")     # W16-E4: the busy-wait, counted apart
 TURN_E = 300              # "turn": a frame boundary this close is forced inside sw_now
 
 
@@ -852,8 +853,10 @@ class Model(RM.Model):
         self._one = None
         self.arms: list[int] = []           # E of each stage_arm entry (W16-E3)
         self.sets: list[int] = []           # E of each audio DMACON set
-        self.silence: list[tuple[int, int]] = []   # a tick's clear -> its set: (all
-        self.hi = 0                         # instructions, those at IPL >= 2)
+        self.silence: list[tuple[int, int, int]] = []  # a tick's clear -> its set: (all
+        self.hi = 0                         # instructions, those at IPL >= 2, those of
+        self.hiw = 0                        # them in stage_wait and its ta_cnts: W16-E4)
+        self._wait = None                   # stage_wait's (return PC, SP) while inside
         self._sclr = None
         self.injected = 0
         self.irq_kicks = 0
@@ -878,9 +881,15 @@ class Model(RM.Model):
                 self.anchor_last = b
                 ncalls = (self.mem.r32(XS + 44) - XLOG) // LOG_ENT
                 self.anchor_log.append((ncalls, b))
+        sy, inj = self.sy, self.case.inject
+        if p == sy.get("stage_wait"):       # W16-E4: inside stage_wait, until it returns
+            self._wait = (self.mem.r32(self.cpu.r_sp()), self.cpu.r_sp() + 4)
+        elif self._wait and p == self._wait[0] and self.cpu.r_sp() == self._wait[1]:
+            self._wait = None
         if (self.cpu.r_sr() >> 8) & 7 >= 2:
             self.hi += 1
-        sy, inj = self.sy, self.case.inject
+            if self._wait and sy["ta_cnt"] <= p < sy["sw_now"]:
+                self.hiw += 1
         if self.case.grid:
             if p == sy.get("sw_one"):
                 self._one = (self.mem.r32(self.cpu.r_sp()), self.cpu.r_sp() + 4)
@@ -912,10 +921,11 @@ class Model(RM.Model):
             if v & 0x8000:
                 self.sets.append(self.e)
                 if self._sclr and v & self._sclr[1]:
-                    self.silence.append((self.icount - self._sclr[0], self.hi - self._sclr[2]))
+                    self.silence.append((self.icount - self._sclr[0], self.hi - self._sclr[2],
+                                         self.hiw - self._sclr[3]))
                     self._sclr = None
             elif self._dt is not None and self._sclr is None:
-                self._sclr = (self.icount, v & 0xF, self.hi)
+                self._sclr = (self.icount, v & 0xF, self.hi, self.hiw)
         if self.cur_pc == self.sy.get("finish"):
             self._sclr = None
         super().c_w16(a, v)
@@ -993,21 +1003,30 @@ class Model(RM.Model):
             if c.inject in ("old", "new") and (self.injected < 100 or self.amb < self.injected):
                 f.append(f"{c.name}: {self.injected} stalls injected, sw_amb ran {self.amb}x")
         want_se = (c.tick_e * 300 + 20455 // 2) // 20455 if c.tick_e else 0
-        # (the model's own E rate, no stall around the latch writes: the
-        # level-2 entry's E then depend on the rate and the stall)
+        d = []
+        for k, a in enumerate(self.arms):
+            nxt = self.arms[k + 1] if k + 1 < len(self.arms) else 1 << 62
+            s = next((x for x in self.sets if a <= x < nxt), None)
+            if s is not None:
+                d.append(s - a)
+        # W16-E4 (rev16-e 1): the floor, every product case.  The busy-wait
+        # is the only thing that holds the stage back now: never under
+        # P_STAGEE E (no profile: STAGE_E), at any E rate or stall
+        floor = (want_se or 1) if c.tick_e else 300
+        if product and d and min(d) < floor:
+            f.append(f"{c.name}: the stage delay is {min(d)} E at least (of {len(d)}), want "
+                     f">= P_STAGEE {floor}")
+        # (the ceiling: the model's own E rate, no stall around the latch
+        # writes: the level-2 entry's E then depend on the rate and the stall)
         if (product and want_se and want_se + STAGE_SLACK_E < 300 and c.epc == (1, 10)
                 and not c.inject):
-            d = []
-            for k, a in enumerate(self.arms):
-                nxt = self.arms[k + 1] if k + 1 < len(self.arms) else 1 << 62
-                s = next((x for x in self.sets if a <= x < nxt), None)
-                if s is not None:
-                    d.append(s - a)
             med = sorted(d)[len(d) // 2] if d else None
-            c.stage_res = (len(d), med)
+            c.stage_res = (len(d), med, min(d) if d else None)
             if med is None or med > want_se + STAGE_SLACK_E:
                 f.append(f"{c.name}: the stage delay is {med} E (median of {len(d)}), want "
                          f"P_STAGEE {want_se} + at most {STAGE_SLACK_E}")
+        elif product and d:
+            c.stage_res = (len(d), "floor only", min(d))
         return f
 
 
@@ -1058,40 +1077,45 @@ def leg_model(defs: list[str], red: bool = False, only: list[str] | None = None)
 
 def silence_gate(defs: list[str]) -> list[str]:
     """The retrigger silence (rev16-x LOW-MEDIUM-5), product build, model
-    speed, at tick_e 20455 and 2557: from each DMACON clear a tick writes to
-    the DMACON set of the same channel(s), the instructions run at IPL >= 2
-    (the handlers, and W15's IPL-raised publish/wait in the foreground: what
-    holds the level-2 stage back).  All instructions are logged too: at
-    20455 they include the UI's foreground work during the 300 E stage,
-    which the stage's interrupt does not wait for.  Red: MOD_MUT_OWEDFULL
+    speed: from each DMACON clear a tick writes to the DMACON set of the
+    same channel(s), the instructions run at IPL >= 2 (the handlers, and
+    W15's IPL-raised publish/wait in the foreground: what holds the level-2
+    stage back).  All instructions are logged too.  Red: MOD_MUT_OWEDFULL
     (a full count in the gap).
-    W16-E3: the stages busy-wait at IPL 2 (no CIA-A TB), so the bound is
-    asserted at the Workbench profile only (tick_e 2557, s = 3); 20455 is
-    measured and logged, exempt with SILENCE_EXEMPT's reason."""
+    W16-E4 (rev16-e 2): the stages busy-wait in stage_wait (no CIA-A TB),
+    which is counted apart: the bound is on the gap's work without the
+    wait, asserted at tick_e 20455, 2557 and with no profile (modwb's
+    P_TICKE 0 path: VICE, an Ultimate without the block).  The wait's own
+    IPL-2 instructions are logged per profile, a known limit (its length is
+    held by the stage delay's floor and ceiling in timing_checks)."""
     from tests import run_player
     out = os.path.join(ROOT, "build", "modwb-silence" + ("-" + "-".join(defs) if defs else ""))
     exe = build(list(defs), out)
     stub = build_stub(out)
     syms = map_syms(out)
+    if not syms["ta_cnt"][1] < syms["stage_wait"][1] < syms["sw_now"][1]:
+        raise SystemExit("silence_gate: want ta_cnt, stage_wait, sw_now in that order")
     songs = {"probe": run_player.probe_song(), "basic": modgen.songs()["basic"],
              "tempo": modgen.songs()["tempo"], "retrig": modgen.songs()["retrig"]}
     f, res = [], {}
-    for te in (20455, 2557):
+    for te in (20455, 2557, 0):
         for n, raw in songs.items():
-            c = Case(f"sil_{n}_{te}", n, raw=raw, tick_e=te, prof=profile_block(te, s=3))
+            c = Case(f"sil_{n}_{te or 'noprof'}", n, raw=raw, tick_e=te,
+                     prof=profile_block(te, s=3) if te else PROF_NORT)
             m = Model(c, c.chunks(exe, stub), launcher_code_len(out),
                       resolve(exe, c.ld, syms, SYM_NAMES))
             m.run(max_e=c.max_frames * RM.FRAME_E)
-            hi = max((x[1] for x in m.silence), default=0)
-            res[c.name] = (len(m.silence), hi, max((x[0] for x in m.silence), default=0))
+            work = max((x[1] - x[2] for x in m.silence), default=0)
+            wait = max((x[2] for x in m.silence), default=0)
+            res[c.name] = (len(m.silence), work, wait, max((x[0] for x in m.silence), default=0))
             if not m.silence:
                 f.append(f"{c.name}: no retrigger seen")
-            elif te in SILENCE_EXEMPT:                                  # W16-E3
-                log(f"  {c.name}: {hi} instructions at IPL >= 2: EXEMPT ({SILENCE_EXEMPT[te]})")
-            elif hi > SILENCE_MAX_INSTR:
-                f.append(f"{c.name}: retrigger silence {hi} instructions at IPL >= 2 over "
-                         f"{len(m.silence)} retriggers (bound {SILENCE_MAX_INSTR})")
-    log(f"retrigger silence (product; n, max IPL>=2, max all): {res}")
+            elif work > SILENCE_MAX_INSTR:
+                f.append(f"{c.name}: retrigger silence {work} instructions at IPL >= 2 "
+                         f"without the stage wait, over {len(m.silence)} retriggers (bound "
+                         f"{SILENCE_MAX_INSTR})")
+    log("retrigger silence (product; n, max IPL>=2 without the wait, max IPL>=2 in "
+        f"stage_wait (known limit, not asserted), max all): {res}")
     return f
 
 
@@ -1252,6 +1276,8 @@ def main(argv=None) -> int:
         return 1 if bad else 0
     if a.silence_red:
         f = silence_gate(["MOD_MUT_OWEDFULL"])
+        for x in f:
+            print("    " + x)
         print(f"run_modwb silence red: {'FAIL as expected' if f else 'PASSED (no teeth!)'}")
         return 0 if f else 1
     if a.red:

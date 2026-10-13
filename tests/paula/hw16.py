@@ -154,7 +154,11 @@ def stream_stop(client, cap, wav: str) -> dict:
         raw = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").reshape(
             -1, w.getnchannels()).astype(np.float64)
     return {"mono": raw.mean(axis=1), "rate": float(fr),
-            "packets": info.packets_received, "dropped": info.packets_dropped}
+            "packets": info.packets_received, "dropped": info.packets_dropped,
+            # W16-E4: where the harness zero-filled lost packets (frames), and
+            # whether the sample index is still a clock
+            "filled": list(getattr(info, "filled_frame_ranges", ())),
+            "intact": bool(getattr(info, "time_base_intact", not info.packets_dropped))}
 
 
 def win_stats(au: dict, lo: float, hi: float) -> dict:

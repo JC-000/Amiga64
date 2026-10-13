@@ -24,12 +24,16 @@
 ; timers resume; leg A's `Wait 5` after the return passed).  A left button
 ; held longer than LMB_WAIT frames after the exit reaches the Workbench.
 ;
-; CIA-A timer B is never claimed or touched (W16-E3): AROS runs it as a
+; CIA-A timer B is never claimed or programmed (W16-E3): AROS runs it as a
 ; free-running counter with no ciaa.resource owner, and claiming it (even
 ; restored as found) made later launches from the same Workbench session
 ; fail intermittently (build/evidence/w16-e3: 3 of 11 launches with it,
 ; 0 of 14 without).  The replay's DMA stages busy-wait on CIA-B TA's
-; counter instead (replay.s MW_NO_ATB, set by the Makefile).
+; counter instead (replay.s MW_NO_ATB, set by the Makefile).  What the
+; player does touch on CIA-A: _mod_start and finish write $7F to CIAA_ICR
+; (every CIA-A interrupt masked during play, TB's too) and the restore
+; writes the enable mask it found back (A_MASKA); CRB and the TB latch are
+; never written (W16-E4: the e2e asserts all three before == after).
 ;
 ; AmigaOS facts: os.i (public documentation, cited in
 ; build/evidence/w16-x/PROGRESS.md).  Mutants (tests/run_modwb.py):
@@ -668,7 +672,7 @@ restore:
         move.w  d0,AUD0LC+8+$20(a5)
         move.w  d0,AUD0LC+8+$30(a5)
         clr.b   CIAB_CRA                ; our timer stopped (ciab TB is AROS's and
-                                        ; ciaa TB too, W16-E3: never touched)
+                                        ; ciaa TB too, W16-E3: never programmed)
         ifd     MW_MUT_ATBCRB           ; (mutant: the old restore, CIA-A TB stopped)
         move.b  #$08,CIAA_CRB
         endc

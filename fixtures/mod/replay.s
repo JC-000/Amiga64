@@ -493,7 +493,7 @@ _mod_start:
         add.w   #$10,d0
         dbra    d7,.v
         move.b  #$7f,CIAA_ICR
-        ifnd    MW_NO_ATB               ; W16-E3: CIA-A TB never touched (the
+        ifnd    MW_NO_ATB               ; W16-E3: CIA-A TB never programmed (the
         move.b  #$08,CIAA_CRB           ; timer B one-shot, stopped
         move.b  #$82,CIAA_ICR           ; mask: TB
         endc                            ; W16-E3:  stages busy-wait, stage_arm)
@@ -645,6 +645,12 @@ run_loop:
 .m:
         endc
         ifnd    MOD_MUT_EMITARM
+; W16-E4 (rev16-e 5), a known limit of the modwb build (MW_NO_ATB): this
+; stage_arm runs at IPL 7 (the sr above), so its two stage_waits busy-wait
+; 2 x P_STAGEE E (s = 3: ~76 E; no profile: 600+ E) with VERTB and L6 held
+; (held, not lost: sw_count counts from time).  The model never reaches it
+; (rev16-e: all 662 stage_arm entries of the product cases ran at IPL 2).
+; Not changed, so the device evidence stays valid for the shipped binary.
         cmp.b   #1,G_STAGE(a6)          ; the stages: from the loop's end
         bne.s   .h
         tst.b   G_ARMED(a6)             ; unless emit armed them
@@ -968,6 +974,9 @@ ta_cnt:
 ; (PF_REALTIME).  A reload (the counter went up) adds G_UNXT, the period
 ; after a reload.  At most $7FFF polls (a stopped TA).  d0-d2 used.
 stage_wait:
+        ifd     MOD_MUT_NOWAIT          ; (W16-E4, rev16-e 1: the stage delay's
+        rts                             ; floor red: no wait at all)
+        endc
         movem.l d3-d5,-(sp)
         moveq   #0,d4
         move.w  PARAM+P_STAGEE,d4
