@@ -111,13 +111,18 @@ class Adf:
         n = min(b[BLOCK - 80], 30)
         return b[BLOCK - 79:BLOCK - 79 + n].decode("latin-1")
 
+    def fold(self, name: str) -> str:
+        """The filesystem's upper case: a-z, and on an intl disk also the
+        Latin-1 a-grave..thorn (not the division sign); W16-D, rev16-d L6:
+        names compare by this, not by Python's lower()."""
+        return "".join(chr(ord(c) - 32) if 97 <= ord(c) <= 122 or
+                       (self.intl and 224 <= ord(c) <= 254 and ord(c) != 247) else c
+                       for c in name)
+
     def name_hash(self, name: str) -> int:
         h = len(name)
-        for c in name:
-            o = ord(c)
-            if 97 <= o <= 122 or (self.intl and 224 <= o <= 254 and o != 247):
-                o -= 32
-            h = (h * 13 + o) & 0x7FF
+        for c in self.fold(name):
+            h = (h * 13 + ord(c)) & 0x7FF
         return h % HT_SIZE
 
     def header(self, k: int) -> bytes:
@@ -137,7 +142,7 @@ class Adf:
                 if not k:
                     return None
                 h = self.header(k)
-                if self.bname(h).lower() == part.lower():
+                if self.fold(self.bname(h)) == self.fold(part):
                     break
                 k = _l(h, BLOCK - 16)
             else:
@@ -182,6 +187,7 @@ class Overlay:
     blocks: list[tuple[int, bytes]] = field(default_factory=list)   # (block, 512 bytes)
     header: int | None = None       # the file's header block
     data_blocks: list[int] = field(default_factory=list)
+    files: bool = False             # W16-D: files added/deleted (host/adf_files.py)
 
     @property
     def first_data(self) -> int | None:
@@ -251,6 +257,8 @@ def check(data: bytes, ov: Overlay) -> None:
             raise AdfError(f"overlay block {k} outside 2..{BLOCKS - 1}")
         if len(b) != BLOCK:
             raise AdfError(f"overlay block {k}: {len(b)} bytes")
+        if ov.files:                    # W16-D: FFS data blocks are raw bytes, so
+            continue                    # the whole applied image is checked below
         t = _l(b, 0)
         if k == ov.header or t == T_HEADER or (not a.ffs and t == T_DATA):
             if not checksum_ok(b):
@@ -260,6 +268,12 @@ def check(data: bytes, ov: Overlay) -> None:
             table = [_l(b, 24 + 4 * (HT_SIZE - 1 - i)) for i in range(n)]
             if table != ov.data_blocks[:n]:
                 raise AdfError(f"overlay header {k}: data-block table changed")
+    if ov.files:                        # W16-D: the whole tree and the bitmap
+        from host.adf_files import fsck
+        img = bytearray(data)
+        for k, b in ov.blocks:
+            img[k * BLOCK:(k + 1) * BLOCK] = b
+        fsck(bytes(img))
 
 
 def apply(data: bytes, ov: Overlay) -> bytes:
@@ -272,7 +286,13 @@ def apply(data: bytes, ov: Overlay) -> bytes:
 
 
 def reu_writes(ov: Overlay, base: int) -> list[tuple[int, bytes]]:
-    """(REU address, block) pairs for an image staged at *base*."""
+    """(REU address, block) pairs for an image staged at *base*.  W16-D
+    (rev16-p L7): every block must be 0 <= k < 1760 and 512 bytes, so no
+    overlay can write past the image (W16-P's profile block and the app
+    anchor follow it at $2DC000)."""
+    for k, b in ov.blocks:                                       # W16-D
+        if not 0 <= k < BLOCKS or len(b) != BLOCK:               # W16-D
+            raise AdfError(f"reu_writes: block {k} ({len(b)} bytes) outside the image")
     return [(base + k * BLOCK, b) for k, b in ov.blocks]
 
 
