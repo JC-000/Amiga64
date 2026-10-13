@@ -11,7 +11,8 @@ again and raises the interrupt again.  So the CPU writes the NEXT block's
 location while the current one plays.  AUDxPER (colour clocks per sample)
 and AUDxVOL (0-64; bit 6 = full volume) act on the sound at once.  DMA off stops the
 channel.  Sampler facts are docs/HARDWARE.md "U64 sampler (Ultimate
-Audio)": sample time = (rate + 1) * 160 ns + 118 ns, volume 0-63 (64 wraps
+Audio)": sample time = (rate + 1) * 160 ns + c (c per device, ``sample_c``;
+the W10-H law's 118 ns picks RATE), volume 0-63 (64 wraps
 to 0), START = $1000000 + REU offset, REPEAT A/B relative to START, no IRQ
 at a loop point, a stopped voice holds its last sample.
 
@@ -76,9 +77,26 @@ def sampler_rate(per: int) -> int:
     return max(0, min(v, 0xFFFF))
 
 
-def sample_ns(rate: int) -> float:
-    """The sampler's measured sample time law (HARDWARE W10-H)."""
-    return (rate + 1) * 160.0 + 118.0
+# The sampler's fixed step per sample (the "+ c" of the sample time law), by
+# the device's /v1/info product name (HARDWARE "U64 sampler", W16-A: one
+# 8-clock voice slot of the core clock).  The C64U's is 80 ns at 1 and 64 MHz
+# alike, the U64E's 120 ns (sup16 probe captures, +-0.01 ns).  SAMPLE_C_LAW is
+# the W10-H poll-timing fit: RATE_K/RATE_C above and the guest module
+# (tests/paula/aud.s) pick RATE with it on every device, so sampler_rate and
+# its tests keep it (a per-device RATE_C is backlog: <= 0.12 % at PER 113);
+# only what the hardware then plays uses the device's constant.
+SAMPLE_C_LAW = 118.0
+SAMPLE_C_NS = {"Ultimate 64 Elite": 120.0, "C64 Ultimate": 80.0}
+
+
+def sample_c(product: str | None) -> float:
+    """The sample time constant for a device (SAMPLE_C_LAW if unmeasured)."""
+    return SAMPLE_C_NS.get(product or "", SAMPLE_C_LAW)
+
+
+def sample_ns(rate: int, c: float = SAMPLE_C_LAW) -> float:
+    """The sampler's sample time for RATE: (rate + 1) x 160 ns + c."""
+    return (rate + 1) * 160.0 + c
 
 
 def paula_ns(per: int) -> float:
