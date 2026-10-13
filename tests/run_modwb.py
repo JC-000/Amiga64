@@ -134,11 +134,12 @@ REVIEW_MUTANTS = {
     "E3_atbcrb": ["MW_MUT_ATBCRB"],         # W16-E3: the restore stops CIA-A TB (the old code)
     "E3_atbclaim": ["MW_MUT_ATBCLAIM"],     # W16-E3: ciaa TB claimed (AddICRVector) again
     "E4_nowait": ["MOD_MUT_NOWAIT"],        # W16-E4: stage_wait does not wait (rev16-e 1)
+    "E5_stagee4": ["MOD_MUT_STAGEE4"],      # W16-E5: 4x STAGE_E, no profile (rev16-e2 1)
 }
 # killed by the model only: the write order (VICE sees the end state and
 # polls), or a model case (an injected stall, a model E rate)
 MODEL_ONLY_MUTANTS = {"anchorfirst", "latchrace", "R3_noreread", "R4_nolatchcount",
-                      "R7_stageeignored", "R8_owednever", "E4_nowait"}
+                      "R7_stageeignored", "R8_owednever", "E4_nowait", "E5_stagee4"}
 
 # bounds of the model's timing checks (fix round 1)
 JITTER_E = 600            # a tick's lateness above its floor, no stall injected
@@ -1017,14 +1018,16 @@ class Model(RM.Model):
             f.append(f"{c.name}: the stage delay is {min(d)} E at least (of {len(d)}), want "
                      f">= P_STAGEE {floor}")
         # (the ceiling: the model's own E rate, no stall around the latch
-        # writes: the level-2 entry's E then depend on the rate and the stall)
-        if (product and want_se and want_se + STAGE_SLACK_E < 300 and c.epc == (1, 10)
-                and not c.inject):
+        # writes: the level-2 entry's E then depend on the rate and the stall.
+        # W16-E5 (rev16-e2 1): at every profile, no profile (STAGE_E) too;
+        # no stage at all fails with a profile only (the error-path cases
+        # never play)
+        if product and c.epc == (1, 10) and not c.inject and (d or c.tick_e):
             med = sorted(d)[len(d) // 2] if d else None
             c.stage_res = (len(d), med, min(d) if d else None)
-            if med is None or med > want_se + STAGE_SLACK_E:
+            if med is None or med > floor + STAGE_SLACK_E:
                 f.append(f"{c.name}: the stage delay is {med} E (median of {len(d)}), want "
-                         f"P_STAGEE {want_se} + at most {STAGE_SLACK_E}")
+                         f"P_STAGEE {floor} + at most {STAGE_SLACK_E}")
         elif product and d:
             c.stage_res = (len(d), "floor only", min(d))
         return f
@@ -1086,8 +1089,9 @@ def silence_gate(defs: list[str]) -> list[str]:
     which is counted apart: the bound is on the gap's work without the
     wait, asserted at tick_e 20455, 2557 and with no profile (modwb's
     P_TICKE 0 path: VICE, an Ultimate without the block).  The wait's own
-    IPL-2 instructions are logged per profile, a known limit (its length is
-    held by the stage delay's floor and ceiling in timing_checks)."""
+    IPL-2 instructions are logged per profile, not asserted here: its
+    length is held by the stage delay's floor and ceiling in timing_checks,
+    both asserted at every profile (W16-E5)."""
     from tests import run_player
     out = os.path.join(ROOT, "build", "modwb-silence" + ("-" + "-".join(defs) if defs else ""))
     exe = build(list(defs), out)
@@ -1115,7 +1119,7 @@ def silence_gate(defs: list[str]) -> list[str]:
                          f"without the stage wait, over {len(m.silence)} retriggers (bound "
                          f"{SILENCE_MAX_INSTR})")
     log("retrigger silence (product; n, max IPL>=2 without the wait, max IPL>=2 in "
-        f"stage_wait (known limit, not asserted), max all): {res}")
+        f"stage_wait (bounded by timing_checks), max all): {res}")
     return f
 
 

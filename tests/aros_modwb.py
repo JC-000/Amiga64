@@ -157,6 +157,7 @@ PLAY_NW_MIN, PLAY_BLOCKS_MIN = 150, 40  # W16-E: nw; nfire + npark (block ends: 
 # launch floor; silence < 200 (hw16 rbsil's bound: 10x the floor, 22x under play)
 PLAY_RMS_MIN, PLAY_OVER_FLOOR, SILENT_RMS_MAX = 1000.0, 10.0, 200.0
 WIN_MIN_FILL = 0.9                      # W16-E4: a window's samples, of its length x rate
+WIN_MIN_S = 1.0                         # W16-E5: a judged (play, silence) window's length
 STREAM_DIR: list = [None]               # W16-E: aros_wb --out (the WAVs); None: no stream
 
 
@@ -237,7 +238,8 @@ class Music:                            # W16-E
         silence window after the return.  Stream: rms during the play
         window, and silence after the exit; W16-E4: each window whole (the
         capture reaches its end) and free of zero fill, the time base
-        intact, and a stream that did not start fails."""
+        intact, and a stream that did not start fails; W16-E5: the play and
+        silence windows at least WIN_MIN_S long."""
         if not self.on:
             return []
         f: list[str] = []
@@ -267,8 +269,14 @@ class Music:                            # W16-E
                 f.append(f"music: the stream's time base is broken ({au['dropped']} dropped, "
                          f"not all filled): the windows cannot be placed")
 
-            def win(k: str, lo: float, hi: float) -> dict:
-                """W16-E4: [lo, hi) s, which must be whole and free of fill."""
+            def win(k: str, lo: float, hi: float, judged: bool = True) -> dict:
+                """W16-E4: [lo, hi) s, which must be whole and free of fill;
+                W16-E5 (rev16-e2 3): a judged window at least WIN_MIN_S long
+                (a collapsed one is empty: rms 0 reads silent).  pre is the
+                play floor's reference only (0.05-0.1 s on the devices)."""
+                if judged and hi - lo < WIN_MIN_S:
+                    f.append(f"music: the {k} window is {hi - lo:.2f} s ({lo:.2f}..{hi:.2f}), "
+                             f"want >= {WIN_MIN_S} s")
                 w = s[k] = hw16.win_stats(au, lo, hi)
                 a, b = int(lo * au["rate"]), int(hi * au["rate"])
                 if w["n"] < WIN_MIN_FILL * (b - a):
@@ -280,7 +288,7 @@ class Music:                            # W16-E
                              f"frames {fill[:4]}")
                 return w
             if "dclick" in mk:
-                win("pre", 0.0, mk["dclick"])
+                win("pre", 0.0, mk["dclick"], judged=False)
             if "takeover" in mk and "play1" in mk:
                 win("play", mk["takeover"] + 1.0, mk["play1"])
                 floor = s.get("pre", {}).get("rms", 0.0) * PLAY_OVER_FLOOR

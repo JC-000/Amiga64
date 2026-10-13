@@ -559,7 +559,7 @@ def _tone(sec: float, amp: float = 4500.0):
 
 
 def _music(monkeypatch, tmp_path, mono=None, dropped=0, filled=(), sil=(0, 0, 0),
-           start_error=None):
+           start_error=None, intact=True, marks=None):
     import types
     from tests.paula import hw16
     monkeypatch.setattr(MW, "STREAM_DIR", [str(tmp_path)])
@@ -576,12 +576,12 @@ def _music(monkeypatch, tmp_path, mono=None, dropped=0, filled=(), sil=(0, 0, 0)
     monkeypatch.setattr(hw16, "stream", stream)
     monkeypatch.setattr(hw16, "stream_stop", lambda c, cap, wav: {
         "mono": mono, "rate": RATE, "packets": 1, "dropped": dropped,
-        "filled": list(filled), "intact": True})
+        "filled": list(filled), "intact": intact})
     mu = MW.Music(m, types.SimpleNamespace(standin=False), "t")
     mu.start()
     mu.rep["counters"] = {"play0": z, "play1": dict(z, nw=1400, nfire=430, npark=400),
                           "ret0": z, "ret1": dict(z, nw=sil[0], nfire=sil[1], npark=sil[2])}
-    mu.rep["marks"] = dict(_MARKS)
+    mu.rep["marks"] = dict(_MARKS, **(marks or {}))
     return mu.close()
 
 
@@ -623,6 +623,35 @@ def test_music_close_fails_a_quiet_play_window(monkeypatch, tmp_path):
 def test_music_close_fails_npark_after_the_return(monkeypatch, tmp_path):
     f = _music(monkeypatch, tmp_path, _good(), sil=(0, 0, 300))
     assert any("after the return" in x for x in f), f
+
+
+# W16-E5 (rev16-e2 2, 3): a broken time base; a collapsed or short judged
+# window (rms 0 of an empty window read "silent")
+def test_music_close_fails_a_broken_time_base(monkeypatch, tmp_path):
+    f = _music(monkeypatch, tmp_path, _good(), dropped=40, intact=False)
+    assert any("time base" in x for x in f), f
+
+
+def _endless():
+    import numpy as np
+    x = np.concatenate([np.zeros(int(2 * RATE)), _tone(38.0)])
+    return x + np.random.default_rng(1).normal(0, 9, len(x))
+
+
+@pytest.mark.parametrize("k,marks", [
+    ("silence", {"exit": 39.5}),                    # exit + 1 > ret1: collapsed
+    ("silence", {"exit": 38.2}),                    # 0.8 s
+    ("play", {"takeover": 25.5}),                   # takeover + 1 > play1: collapsed
+    ("play", {"takeover": 24.5})])                  # 0.5 s
+def test_music_close_fails_a_short_window(monkeypatch, tmp_path, k, marks):
+    x = _endless() if k == "silence" else _good()
+    f = _music(monkeypatch, tmp_path, x, marks=marks)
+    assert any(f"the {k} window is" in y for y in f), f
+
+
+def test_music_close_takes_a_short_pre_window(monkeypatch, tmp_path):
+    # the devices' dclick mark is 0.05-0.1 s: pre is the floor's reference
+    assert _music(monkeypatch, tmp_path, _good(), marks={"dclick": 0.05}) == []
 
 
 # W16-E4 (rev16-e 6): CIA-A's TB control, latch and the ICR enable mask are

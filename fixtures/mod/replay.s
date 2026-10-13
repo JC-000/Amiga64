@@ -985,6 +985,9 @@ stage_wait:
         endc
         bne.s   .e
         move.w  #STAGE_E,d4
+        ifd     MOD_MUT_STAGEE4         ; (W16-E5, rev16-e2 1: the no-profile
+        lsl.w   #2,d4                   ; ceiling red: 4x STAGE_E)
+        endc
 .e:     bsr     ta_cnt
         move.w  d1,d3                   ; d3 = the last counter
         move.w  #$7fff,d5
