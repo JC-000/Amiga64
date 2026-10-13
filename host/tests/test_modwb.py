@@ -202,7 +202,10 @@ def test_launcher_hunks(tmp_path):
     kinds = [(s.kind, s.memory_flags) for s in ex.segments]
     assert kinds[0] == ("code", 0)
     chip = [s for s in ex.segments if s.memory_flags == 1]
-    assert len(chip) == 1 and chip[0].kind == "bss" and chip[0].alloc_size == 0x100 + 0xF00 + 48000
+    # the state struct (the anchor's target, rule 3) and the UI's buffers
+    assert [s.kind for s in chip] == ["data", "bss"]
+    assert chip[0].alloc_size >= W.ST_SIZE and chip[0].data[:W.ST_SIZE] == bytes(W.ST_SIZE)
+    assert chip[1].alloc_size == 0x100 + 0xF00 + 48000
     for s in ex.segments:
         if s.kind != "bss":
             assert len(s.data) == s.alloc_size, f"{s.kind}: a tail only LoadSeg would clear"

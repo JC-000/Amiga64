@@ -41,6 +41,7 @@ CIAA_ICR        equ     $bfed01
 CIAA_TALO       equ     $bfe401
 CIAA_TAHI       equ     $bfe501
 CIAA_CRA        equ     $bfee01
+CIAA_TODLO      equ     $bfe801
 CIAB_ICR        equ     $bfdd00
 CIAB_TBLO       equ     $bfd600
 CIAB_TBHI       equ     $bfd700
@@ -101,6 +102,9 @@ XS_SVEC         equ     96              ; 7 l the autovectors $64-$7C before the
 XS_TB           equ     124             ; w CIA-B TB interrupts in the wait (the OS's other timer)
 XS_CRB0         equ     126             ; b CIA-B CRB before the call ...
 XS_CRB1         equ     127             ; b ... and after
+XS_TOD0         equ     128             ; b CIA-A TODLO read alone right after the return ...
+XS_TOD1         equ     129             ; b ... and after the wait: a TOD latch the launcher
+                                        ; left held makes the first one stale
 
 XLOG            equ     $005000         ; log entries, 24 bytes each
 XLOG_END        equ     $010000
@@ -150,7 +154,7 @@ LOG     macro                           ; lib, lvo: one entry, all registers kep
 ; ===========================================================================
 start:  move.w  #$2700,sr
         lea     XS,a0
-        moveq   #128/4-1,d0             ; (XS_SVEC is written before the call)
+        moveq   #136/4-1,d0             ; (XS_SVEC is written before the call)
 .cs:    clr.l   (a0)+
         dbra    d0,.cs
         move.l  #'XSTS',XS+XS_MAGIC
@@ -269,6 +273,7 @@ start:  move.w  #$2700,sr
         move.b  #3,XS+XS_PHASE
         move.l  sp,XS+XS_USP
         move.l  curdir,XS+XS_CURDIR
+        move.b  CIAA_TODLO,XS+XS_TOD0   ; (releases a latch, as the OS's read would)
         ; the OS's interrupts must work again: XP_WAIT VERTBs, counting TA
         move.w  tacount,d5
         move.w  tbcount,d3
@@ -286,7 +291,8 @@ start:  move.w  #$2700,sr
         addq.w  #1,XS+XS_VBL
         subq.w  #1,d6
         bne     .w
-.w3:    move.w  tacount,d0
+.w3:    move.b  CIAA_TODLO,XS+XS_TOD1
+        move.w  tacount,d0
         sub.w   d5,d0
         move.w  d0,XS+XS_TA
         move.w  tbcount,d0

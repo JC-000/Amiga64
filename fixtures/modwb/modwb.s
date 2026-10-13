@@ -112,7 +112,8 @@ start:  movem.l d2-d7/a2-a6,-(sp)
         moveq   #ST_FAILED,d0
         bsr     set_state
         bsr     report
-.ok:    bsr     release
+.ok:    bsr     anchor_end              ; withdrawn first, before anything is freed
+        bsr     release
         move.l  sysbase,a6
         move.l  wbmsg,d2
         beq.s   .x
@@ -128,7 +129,10 @@ start:  movem.l d2-d7/a2-a6,-(sp)
 .r:     movem.l (sp)+,d2-d7/a2-a6
         rts
 
-; the anchor: the state struct's pointer at ANCHOR_AT (one accessor)
+; anchor_init: the state struct, the profile block's validity, and the
+; app anchor (CONTRACTS "Audio (Paula)", the anchor rules): published only
+; when the profile block is valid; +4/+8/+12 first, 'MWBA' last.  The
+; struct is in a chip hunk (rule 3: chip or slow RAM; even).
 anchor_init:
         lea     mwst,a0                 ; cleared here: a hunk's tail beyond its
         moveq   #A_SIZE/2-1,d0          ; stored bytes need not be zero
@@ -142,20 +146,69 @@ anchor_init:
         move.l  #STATUS,A_STATUS(a0)
         move.l  #PARAM,A_PARAM(a0)
         move.l  #UI_COP,A_UICOP(a0)
+        bsr     prof_check
+        ifd     MW_MUT_ANCHORANY
+        moveq   #1,d0                   ; (mutant: published without a valid block)
+        endc
+        move.b  d0,profok
+        beq.s   .r
         lea     ANCHOR_AT,a1
+        ifd     MW_MUT_ANCHORFIRST
+        move.l  #'MWBA',(a1)            ; (mutant: the magic first)
+        endc
         move.l  a0,4(a1)
         clr.l   8(a1)
         clr.l   12(a1)
-        move.l  #'MWBA',(a1)
+        move.l  #'MWBA',(a1)            ; last
+.r:     rts
+
+; anchor_end: withdraw the anchor ('MWBA' cleared first, before release
+; frees the MOD and the claims; the struct itself lives until the hunks are
+; unloaded after the return).  Nothing writes the anchor afterwards.
+anchor_end:
+        tst.b   profok
+        beq.s   .r
+        clr.l   ANCHOR_AT
+        clr.b   profok
+.r:     rts
+
+; prof_check: d0.b = nonzero when W16-P's profile block is valid ('A64P',
+; version 1, size 64, ~sum of the longs +0..+56 at +60).  Keeps a0.
+prof_check:
+        movem.l d1-d2/a0,-(sp)
+        moveq   #0,d2
+        lea     PROF_AT,a0
+        cmp.l   #'A64P',(a0)
+        bne.s   .x
+        cmp.l   #$00010040,4(a0)
+        bne.s   .x
+        moveq   #14,d1
+        moveq   #0,d0
+.s:     add.l   (a0)+,d0
+        dbra    d1,.s
+        not.l   d0
+        cmp.l   (a0),d0
+        bne.s   .x
+        moveq   #1,d2
+.x:     move.l  d2,d0
+        movem.l (sp)+,d1-d2/a0
         rts
 
-; set_state: d0.b = ST_*; the anchor's +8 = seq (u16), +10 = the state
+; set_state: d0.b = ST_*; the anchor's +8 (one long) = seq << 16 | state << 8
 set_state:
         move.b  d0,mwst+A_STATE
-        lea     ANCHOR_AT+8,a0
-        addq.w  #1,(a0)
-        move.b  d0,2(a0)
-        rts
+        addq.w  #1,aseq
+        tst.b   profok
+        beq.s   .r
+        move.l  d1,-(sp)
+        move.w  aseq,d1
+        swap    d1
+        clr.w   d1
+        move.b  d0,d1
+        lsl.w   #8,d1
+        move.l  d1,ANCHOR_AT+8
+        move.l  (sp)+,d1
+.r:     rts
 
 ; ===========================================================================
 ; run: d0 = ERR_* (0: played and restored)
@@ -375,18 +428,8 @@ params: lea     PARAM,a1
         lea     STATUS,a0                       ; crt0's part of the status block
         move.l  #'MSTA',S_MAGIC(a0)
         move.b  #1,S_STATE(a0)
-        lea     PROF_AT,a0              ; W16-P: 'A64P', version 1, size 64,
-        cmp.l   #'A64P',(a0)            ; ~sum of the longs +0..+56 at +60
-        bne.s   .x
-        cmp.l   #$00010040,4(a0)
-        bne.s   .x
-        moveq   #14,d1
-        moveq   #0,d0
-.s:     add.l   (a0)+,d0
-        dbra    d1,.s
-        not.l   d0
-        cmp.l   (a0),d0
-        bne.s   .x
+        tst.b   profok                  ; W16-P's block, valid
+        beq.s   .x
         btst    #2,PROF_AT+26           ; real time meaningful (an Ultimate; not
         beq.s   .x                      ; VICE warp): else the Amiga's timing
         move.l  PROF_AT+12,d0           ; tick_e: E per 1/50 s
@@ -744,7 +787,9 @@ intname_s:      dc.b    "modwb",0
         section DATA,data
 allocmap:       dc.b    $0f
         even
-mwst:   dcb.b   A_SIZE,0                ; the state struct (the anchor's target)
+
+        section mwchip,data_c           ; the state struct (the anchor's target):
+mwst:   dcb.b   A_SIZE,0                ; chip RAM, first in its hunk
         even
 
         section BSS,bss
@@ -757,6 +802,7 @@ ciabbase:       ds.l    1
 wbmsg:          ds.l    1
 cliarg:         ds.l    1
 clilen:         ds.l    1
+aseq:           ds.w    1
 name:           ds.l    1
 fh:             ds.l    1
 olddir:         ds.l    1
@@ -765,6 +811,7 @@ oldssp:         ds.l    1
 oldsp:          ds.l    1
 cdset:          ds.b    1
 ownblit:        ds.b    1
+profok:         ds.b    1
 audopen:        ds.b    1
 lmbup:          ds.b    1
 ints:           ds.b    4*IS_SIZE

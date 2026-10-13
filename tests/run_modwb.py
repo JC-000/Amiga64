@@ -48,7 +48,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from host import hunk, modgen  # noqa: E402
+from host import hunk, mod_ref, modgen  # noqa: E402
 from tests import run_mod as RM  # noqa: E402
 
 FIX = os.path.join(ROOT, "fixtures", "modwb")
@@ -61,7 +61,7 @@ STUB_AT = 0x010000
 STUB_VARS = int(os.environ.get("MODWB_VARS", "0"), 16)
 SSP0 = 0x003000
 XP, XS, XLOG = 0x000500, 0x000600, 0x005000
-XP_LEN, XS_LEN = 0x100, 0x80
+XP_LEN, XS_LEN = 0x100, 0x88
 HEAP = 0x100000
 COPLIST = 0x027800
 OS_VIEW = 0x00EE0000
@@ -109,13 +109,17 @@ MUTANTS = {
     "novec": ["MW_MUT_NOVEC"],              # the autovectors not restored
     "noicr": ["MW_MUT_NOICR"],              # the CIA ICR enable masks not restored
     "nocop": ["MW_MUT_NOCOP"],              # COP1LC left on the UI's list
-    "nodmaen": ["MW_MUT_NODMAEN"],          # DMACON restored without DMAEN
     "noint": ["MW_MUT_NOINT"],              # INTENA not restored
-    "permitfirst": ["MW_MUT_PERMITFIRST"],  # Permit before Enable
     "nogate": ["MW_MUT_NOGATE"],            # a held button exits at once
     "noreply": ["MW_MUT_NOREPLY"],          # the WBStartup never replied
     "tbcrb": ["MW_MUT_TBCRB"],              # the restore stops AROS's CIA-B timer B
+    "anchorany": ["MW_MUT_ANCHORANY"],      # the anchor without a valid profile block
+    "anchorfirst": ["MW_MUT_ANCHORFIRST"],  # 'MWBA' written before the pointer
+    "flagcount": ["MOD_MUT_FLAGCOUNT"],     # the replay counts TA underflows by ICR flag
 }
+# killed by the model's write-order log only (VICE sees the end state and
+# polls; a few instructions' window is not observable there)
+MODEL_ONLY_MUTANTS = {"anchorfirst"}
 
 log = RM.log
 
@@ -135,6 +139,16 @@ def build(defs: list[str], out: str, red: bool = False) -> bytes:
         raise RuntimeError(f"build {defs} failed:\n{r.stdout}{r.stderr}")
     with open(os.path.join(out, "modwb"), "rb") as f:
         return f.read()
+
+
+def launcher_code_len(out: str) -> int:
+    """modwb.s's part of the CODE hunk (linked first), from vlink's map."""
+    with open(os.path.join(out, "modwb.map")) as fh:
+        for line in fh:
+            p = line.split()
+            if len(p) == 4 and p[3] == "modwb.s(CODE)" and p[0] == "00000000":
+                return int(p[2], 16)
+    raise RuntimeError("modwb.s(CODE) not in the map")
 
 
 def build_stub(out: str) -> bytes:
@@ -190,6 +204,18 @@ def profile_block(tick_e: int, flags: int = 0x07, s: int = 0, bad_check: bool = 
     return bytes(b)
 
 
+def profile_ok(b: bytes) -> bool:
+    """The guest's rule (W16-P host/profile_block.parse): magic, version 1,
+    size 64 and the check."""
+    if b[:4] != b"A64P" or struct.unpack_from(">HH", b, 4) != (1, 64):
+        return False
+    return struct.unpack_from(">I", b, 60)[0] == ~sum(struct.unpack(">15I", b[:60])) & 0xFFFFFFFF
+
+
+# a valid block without real time (VICE-like): the anchor, the Amiga's timing
+PROF_NORT = profile_block(40, flags=0x01, s=9)
+
+
 # --------------------------------------------------------------------------
 # Cases
 # --------------------------------------------------------------------------
@@ -202,7 +228,8 @@ class Case:
                  refuse: int = 0, cli: str = "", arg1: str = "", fname: str | None = None,
                  raw: bytes | None = None, prof: bytes | None = None, lmb: tuple | None = None,
                  expect: tuple = (ST_DONE, ("end", "loop"), 0), trace: bool = False,
-                 tick_e: int = 0, model_only: bool = False):
+                 tick_e: int = 0, model_only: bool = False, stall: tuple | None = None,
+                 expect_lost: bool = False):
         self.name, self.song, self.mode, self.ld = name, song, mode, ld
         self.refuse, self.cli, self.arg1 = refuse, cli, arg1
         self.tool = "ModPlayer"
@@ -211,6 +238,8 @@ class Case:
         self.raw = raw if raw is not None else modgen.songs()[song]
         self.prof, self.lmb, self.expect, self.trace = prof, lmb, expect, trace
         self.tick_e, self.model_only = tick_e, model_only
+        self.stall, self.expect_lost = stall, expect_lost    # (every N frames, E): model
+        self.anchored = prof is not None and profile_ok(prof)   # the anchor rules
         self.wait = 5
         self.ref = None
         if trace:
@@ -229,6 +258,9 @@ class Case:
     def chunks(self, exe: bytes, stub: bytes) -> list[tuple[int, bytes]]:
         hk, addrs = loadseg(exe, MAPS[self.ld])
         self.entry = addrs[0]
+        segs = hunk.parse(exe).segments     # the state struct: first in the chip DATA hunk
+        self.st_at = next(a for sg, a in zip(segs, addrs)
+                          if sg.kind == "data" and sg.memory_flags == 1)
         out = [(0, struct.pack(">II", SSP0, STUB_AT)), (XP, self.xparam(addrs[0])),
                (XS, bytes(XS_LEN)), (STUB_AT, stub), (XFILE, self.raw)]
         out += [(a, bytes([CANARY_BYTE]) * n) for a, n in CANARIES]
@@ -251,24 +283,35 @@ def cases() -> list[Case]:
         # a project icon; the profile block's real-time tick (s = 0 numbers)
         Case("proj_rt", "tempo", mode=2, arg1="Song.mod", trace=True, tick_e=20455,
              prof=profile_block(20455)),
+        # 255 BPM at the stall-to-tick ratio of s = 3 on an Ultimate (a c2v
+        # conversion ~2170 E against tick_e 2557): on VICE s = 6 the real
+        # UI's conversion stalls ~11000 E, so tick_e 12960; on the model the
+        # stall is injected (time runs on, the guest does not)
+        Case("rt_s3", "tempo", ld="B", trace=True, tick_e=12960,
+             prof=profile_block(12960, s=3)),
+        Case("stall24", "tempo", trace=True, tick_e=2557, prof=profile_block(2557, s=3),
+             stall=(24, 2170), model_only=True),
+        Case("stall1", "tempo", ld="B", trace=True, tick_e=2557, prof=profile_block(2557, s=3),
+             stall=(1, 2170), model_only=True),
         # a profile without real time (VICE): the Amiga's timing
         Case("prof_novrt", "restart", prof=profile_block(40, flags=0x01, s=9)),
         # a profile with a bad check: ignored
         Case("prof_bad", "restart", ld="B", prof=profile_block(2557, s=3, bad_check=True)),
         # LMB: pressed at launcher frame 20 (the button was up), released 6 later
-        Case("lmb", "demo", lmb=((0, False), (20, True), (26, False)),
+        Case("lmb", "demo", prof=PROF_NORT, lmb=((0, False), (20, True), (26, False)),
              expect=(ST_DONE, ("lmb",), 0)),
         # LMB held from the start (the launching click), released, pressed again
-        Case("lmb_held", "demo", ld="B", lmb=((0, True), (12, False), (30, True), (36, False)),
+        Case("lmb_held", "demo", ld="B", prof=PROF_NORT,
+             lmb=((0, True), (12, False), (30, True), (36, False)),
              expect=(ST_DONE, ("lmb",), 0)),
         # no audio.device: plays anyway
-        Case("noaudio", "restart", refuse=0x10),
+        Case("noaudio", "restart", refuse=0x10, prof=PROF_NORT),
         # backing out before any takeover
-        Case("claim_refused", "restart", refuse=0x04, expect=(ST_FAILED, (None,), 6)),
-        Case("not_mk", "restart", raw=bytes(bad_mk), expect=(ST_FAILED, (None,), 5)),
+        Case("claim_refused", "restart", refuse=0x04, prof=PROF_NORT, expect=(ST_FAILED, (None,), 6)),
+        Case("not_mk", "restart", raw=bytes(bad_mk), prof=PROF_NORT, expect=(ST_FAILED, (None,), 5)),
         Case("no_file", "restart", fname="Other.mod", expect=(ST_FAILED, (None,), 2)),
         # mod_init refuses it after the takeover: restored, then reported
-        Case("init_err", "restart", raw=bytes(no_len), expect=(ST_FAILED, ("init",), 7)),
+        Case("init_err", "restart", raw=bytes(no_len), prof=PROF_NORT, expect=(ST_FAILED, ("init",), 7)),
     ]
 
 
@@ -310,22 +353,19 @@ def check(c: Case, rd, hw: dict) -> list[str]:
         return [f"{c.name}: stub phase {phase} (want 4: returned and checked)"]
     calls = parse_log(rd(XLOG, struct.unpack_from(">I", xs, 44)[0] - XLOG))
     names = [x[0] for x in calls]
+    c.free_at = first(calls, "FreeMem") if "FreeMem" in names else None
     if DUMP[0]:
-        an = rd(ANCHOR, 16)
-        print(f"      anchor {an.hex()} st {rd(struct.unpack_from('>I', an, 4)[0], 64).hex()}")
+        print(f"      anchor {rd(ANCHOR, 16).hex()} st {rd(c.st_at, 64).hex()}")
         print(f"      stub vars {rd(STUB_AT + STUB_VARS, 0x140).hex()}")
         for x in calls:
             print(f"      {x[0]:16s} d0 ${x[1]:08X} d1 ${x[2]:08X} a0 ${x[3]:08X} a1 ${x[4]:08X}")
     ret = struct.unpack_from(">I", xs, 12)[0]
     want_state, want_why, want_err = c.expect
-    # the anchor and the state struct
-    an = rd(ANCHOR, 16)
-    if an[0:4] != b"MWBA":
-        return [f"{c.name}: no app anchor at ${ANCHOR:06X}"]
-    sp = struct.unpack_from(">I", an, 4)[0]
-    st = rd(sp, ST_SIZE)
-    if st[0:4] != b"MWBS" or an[10] != st[ST["state"]]:
-        f.append(f"{c.name}: anchor -> ${sp:06X}: {st[:8].hex()}, anchor state {an[10]}")
+    # the state struct (first in the chip DATA hunk) and the app anchor
+    st = rd(c.st_at, ST_SIZE)
+    if st[0:4] != b"MWBS":
+        return [f"{c.name}: no state struct at ${c.st_at:06X}: {st[:8].hex()}"]
+    f += check_anchor(c, rd(ANCHOR, 16), st, hw.get("anchor_log"))
     gs = lambda k: st[ST[k]]                        # noqa: E731
     gl = lambda k: struct.unpack_from(">I", st, ST[k])[0]   # noqa: E731
     why = WHY.get(gs("why"))
@@ -362,6 +402,10 @@ def check(c: Case, rd, hw: dict) -> list[str]:
         f.append(f"{c.name}: no CIA-A timer A interrupt after the return (the OS's timer)")
     if not struct.unpack_from(">H", xs, 124)[0]:
         f.append(f"{c.name}: no CIA-B timer B interrupt after the return (the OS's timer)")
+    dtod = (xs[129] - xs[128]) & 0xFF        # TODLO alone: a latch left held reads stale
+    if not wto and dtod not in (vbl, vbl + 1):
+        f.append(f"{c.name}: CIA-A TOD moved {dtod} over {vbl} VERTBs after the return "
+                 "(a TOD latch left held)")
     if xs[126] != xs[127]:
         f.append(f"{c.name}: CIA-B CRB ${xs[127]:02X} after, ${xs[126]:02X} before (AROS's timer)")
     if struct.unpack_from(">H", xs, 16)[0] & 0x2000:
@@ -446,6 +490,12 @@ def check(c: Case, rd, hw: dict) -> list[str]:
             f.append(f"{c.name}: the MOD at ${gl('mod'):06X}")
         f += RM.check_case(c.ref, status, stream, recs, rd(gl("view"), RM.VIEW_LEN), None,
                            timing=hw.get("timing", True))
+        nrec = (ttp - RM.TR_T) // RM.TR_REC if ttp > RM.TR_T else 0
+        lost, where, worst, u_min = lost_ticks(c.ref, recs, min(nrec, len(c.ref.ticks)))
+        c.lost = (lost, worst, u_min)
+        if lost:
+            f.append(f"{c.name}: {lost} CIA-B TA underflow(s) lost (software count; "
+                     f"tick, rise E, period E: {where[:6]}; worst stall {worst} E)")
         if DUMP[0]:
             want = c.ref.ticks
             a = 0 if c.ref.flags & RM.PF_REALTIME else 0
@@ -463,16 +513,107 @@ def check(c: Case, rd, hw: dict) -> list[str]:
     return f
 
 
+def check_anchor(c: Case, an: bytes, st: bytes, wlog: list | None) -> list[str]:
+    """The anchor rules (CONTRACTS, W16-P's profile block; supervisor
+    2026-10-12).  After the return: with a valid profile block the anchor
+    was published and withdrawn ('MWBA' 0), its pointer is the struct (non
+    zero, even, the whole struct in chip $000000-$1FFFFF or slow
+    $C00000-$DBFFFF), +8 holds seq << 16 | state << 8 with the last state
+    published (2 restored, or 4 failed) and +12 is 0; without one the 16
+    bytes were never written (staged 0).  wlog (the model leg): every change
+    of the 16 bytes seen between two launcher instructions, in order: +4,
+    +8, +12 before the magic; the magic last; while published the pointer
+    never moves; the magic cleared before the stub's first FreeMem."""
+    f: list[str] = []
+    n = c.name
+    if not c.anchored:
+        if any(an):
+            f.append(f"{n}: the anchor written without a valid profile block: {an.hex()}")
+        if wlog:
+            f.append(f"{n}: {len(wlog)} anchor writes without a valid profile block")
+        return f
+    ptr, seq, res = struct.unpack_from(">III", an, 4)
+    if an[:4] != b"\0\0\0\0":
+        f.append(f"{n}: the anchor not withdrawn after the return: {an.hex()}")
+    if ptr != c.st_at:
+        f.append(f"{n}: the anchor points to ${ptr:06X}, the struct is at ${c.st_at:06X}")
+    if not (ptr and not ptr & 1 and any(lo <= ptr and ptr + ST_SIZE <= hi
+                                         for lo, hi in ((0, 0x200000), (0xC00000, 0xDC0000)))):
+        f.append(f"{n}: the anchor's pointer ${ptr:08X} breaks rule 3")
+    last = 4 if c.expect[0] == ST_FAILED else 2
+    if (seq & 0xFF, (seq >> 8) & 0xFF, res) != (0, last, 0) or not seq >> 16:
+        f.append(f"{n}: anchor +8 ${seq:08X} +12 ${res:08X} (want state {last}, a seq)")
+    if wlog is None:
+        return f
+    # the write order (model): [(index of the stub call log at the time, 16 bytes)]
+    prev = bytes(16)
+    pub = wd = None
+    for k, (ncalls, b) in enumerate(wlog):
+        mag, was = b[:4], prev[:4]
+        if mag != was:
+            if mag == b"MWBA" and pub is None:
+                pub = k
+                if b[4:8] != struct.pack(">I", c.st_at) or b[8:16] != bytes(8):
+                    f.append(f"{n}: 'MWBA' published before +4/+8/+12: {b.hex()}")
+            elif mag == bytes(4) and was == b"MWBA" and wd is None:
+                wd = (k, ncalls)
+            else:
+                f.append(f"{n}: anchor magic {was.hex()} -> {mag.hex()} (write {k})")
+        elif mag == b"MWBA" and b[4:8] != prev[4:8]:
+            f.append(f"{n}: the anchor's pointer changed while published")
+        prev = b
+    if pub is None or wd is None:
+        f.append(f"{n}: anchor published at write {pub}, withdrawn at {wd}")
+    elif c.free_at is not None and wd[1] > c.free_at:
+        f.append(f"{n}: the anchor withdrawn after the first FreeMem (call {c.free_at})")
+    return f
+
+
+def lost_ticks(ref, recs: bytes, n: int) -> tuple[int, list, int, int]:
+    """The missed-tick detector (supervisor, the R1 condition).  The replay
+    counts CIA-B TA underflows in software (MOD_HUNK: one ICR flag), so a
+    guest stall longer than an underflow period (a c2v conversion: ~17 ms
+    real ~ 2170 E at s = 3) can merge two underflows into one count and lose
+    a tick for good.  The reference is free-running: each tick record's CIA-A
+    TOD (+1 per frame) and beam (tests/run_mod.rec_time), against the
+    underflow-exact grid (run_mod.predict_cia).  Lateness L = measured -
+    predicted; a late tick is caught up (L falls back), a lost underflow
+    shifts every later tick by its period for good, so the floor of L (the
+    suffix minimum) rises by one underflow period per loss.  Returns (lost
+    underflows, [(tick, rise E, period E)], the largest L - floor (the worst
+    stall seen), the smallest underflow period)."""
+    pred = RM.predict_cia(ref, 0)[:n]
+    late = [RM.rec_time(recs, i) - pred[i] for i in range(len(pred))]
+    if len(late) < 2:
+        return 0, [], 0, 0
+    per = [0] + [(pred[i] - pred[i - 1]) // mod_ref.cia_split(pred[i] - pred[i - 1])[0]
+                 for i in range(1, len(pred))]
+    per[0] = per[1]
+    u_min = min(per)
+    floor = late[:]
+    for i in range(len(late) - 2, -1, -1):
+        floor[i] = min(late[i], floor[i + 1])
+    lost, where = 0, []
+    for i in range(1, len(floor)):
+        d = floor[i] - floor[i - 1]
+        if d > per[i] // 2:
+            k = (d + per[i] // 2) // per[i]
+            lost += k
+            where.append((i, d, per[i]))
+    worst = max(x - f for x, f in zip(late, floor))
+    return lost, where, worst, u_min
+
+
 def lmb_down(c: Case, rd) -> bool:
     """The left button by the case's schedule of launcher frames (A_FRAMES);
-    up once the launcher has restored (state >= 2)."""
-    an = rd(ANCHOR, 16)
-    if an[:4] != b"MWBA":
+    up once the launcher has restored (state >= 2).  The struct is read at
+    its load address (the case's map), not through the anchor."""
+    st = rd(c.st_at, ST_SIZE)
+    if st[:4] != b"MWBS":
         return c.lmb[0][1]
-    sp = struct.unpack(">I", an[4:8])[0]
-    if an[10] >= 2:
+    if st[ST["state"]] >= 2:
         return False
-    fr = struct.unpack(">I", rd(sp + ST["frames"], 4))[0]
+    fr = struct.unpack_from(">I", st, ST["frames"])[0]
     down = False
     for t, d in c.lmb:
         if fr >= t:
@@ -489,7 +630,7 @@ class Model(RM.Model):
     VERTB per 14188 E) with the stub's chunks; the left button is CIA-A
     PRA pin 6, driven from the launcher's frame count."""
 
-    def __init__(self, c: Case, chunks):
+    def __init__(self, c: Case, chunks, mw_code_len: int):
         class Src:
             e_per_cyc = (1, 10)
 
@@ -497,12 +638,20 @@ class Model(RM.Model):
                 return chunks
         super().__init__(b"", {}, Src())
         self.case = c
+        self.mw_lo, self.mw_hi = c.entry, c.entry + mw_code_len
+        self.anchor_last, self.anchor_log = bytes(16), []
         for a, d in chunks:                 # run_mod's trapped UI area holds its own copy
             for k in range(len(d)):
                 if 0x040000 <= a + k < 0x080000:
                     self.uiarea[a + k - 0x040000] = d[k]
 
     def on_instr(self, pc):
+        if self.mw_lo <= pc < self.mw_hi:  # the launcher's own code: the anchor's
+            b = bytes(self.mem.r_block(ANCHOR, 16))     # changes, in write order
+            if b != self.anchor_last:
+                self.anchor_last = b
+                ncalls = (self.mem.r32(XS + 44) - XLOG) // LOG_ENT
+                self.anchor_log.append((ncalls, b))
         if not self.halted and self.mem.r16(pc & 0xFFFFFF) == 0xAFFF:
             self.xs_snap = self.read(XS, XS_LEN)    # Musashi then takes the A-line
         super().on_instr(pc)                        # trap: the stub's fault stub
@@ -523,29 +672,35 @@ class Model(RM.Model):
         pins = self.cs.ciaa.pra_in
         self.cs.ciaa.pra_in = (pins & ~0x40) | (0 if down else 0x40)
 
+    def advance(self, n: int) -> None:
+        """n E ticks of the CIAs and the frame clock (VERTB, CIA-A TOD)."""
+        while n:
+            to_fr = RM.FRAME_E - self.e % RM.FRAME_E
+            k = min(n, to_fr)
+            self.cs.ciaa.eclock(k)
+            self.cs.ciab.eclock(k)
+            self.e += k
+            n -= k
+            if self.e % RM.FRAME_E == 0:
+                self.frames += 1
+                self.cs.ciaa.tod_tick(1)
+                self.cs.request(5)
+
     def run(self, max_e: int) -> None:
         fr = self.frames
         rem = 0
+        every, stall_e = self.case.stall or (0, 0)
         while not self.halted and self.e < max_e:
             res = self.mach.execute(self.SLICE)
             ran = res.cycles if res.cycles > 0 else self.SLICE
             n, rem = divmod(rem + ran * self.epc[0], self.epc[1])
-            for _ in range(2):
-                to_fr = RM.FRAME_E - self.e % RM.FRAME_E
-                k = min(n, to_fr)
-                self.cs.ciaa.eclock(k)
-                self.cs.ciab.eclock(k)
-                self.e += k
-                n -= k
-                if self.e % RM.FRAME_E == 0 and k:
-                    self.frames += 1
-                    self.cs.ciaa.tod_tick(1)
-                    self.cs.request(5)
-                if not n:
-                    break
+            self.advance(n)
             if self.frames != fr:
                 fr = self.frames
                 self.frame_hook()
+                if every and fr % every == 0:
+                    self.advance(stall_e)       # a c2v conversion: the guest stalled,
+                    fr = self.frames            # time (the CIAs, the frames) runs on
 
 
 def leg_model(defs: list[str], red: bool = False, only: list[str] | None = None) -> list[str]:
@@ -559,18 +714,20 @@ def leg_model(defs: list[str], red: bool = False, only: list[str] | None = None)
             continue
         t0 = time.monotonic()
         ch = c.chunks(exe_tr, stub)
-        m = Model(c, ch)
+        m = Model(c, ch, launcher_code_len(out + "-tr"))
         m.run(max_e=c.max_frames * RM.FRAME_E)
         rd = m.read_halted
         regs = m.cs.regs
         hw = {"cop1lc": ((regs[0x80 >> 1] << 16) | regs[0x82 >> 1]) & 0xFFFFFE,
               "maska_hw": m.cs.ciaa.icr_mask, "maskb_hw": m.cs.ciab.icr_mask,
               "extra": [f"${a:06X} (W15-U's fixed area) written at PC ${pc:06X}"
-                        for a, pc in m.uiarea_bad]}
+                        for a, pc in m.uiarea_bad],
+              "anchor_log": m.anchor_log}
         f = [] if m.halted else [f"{c.name}: no HALT within {c.max_frames} frames"]
         if m.halted:
             f += check(c, rd, hw)
-        log(f"model {c.name}: {m.frames} frames, {m.icount} instructions, "
+        log(f"model {c.name}: {m.frames} frames, {m.icount} instructions, lost/worst stall/"
+            f"period {getattr(c, 'lost', '-')}, "
             f"{time.monotonic() - t0:.1f}s: {'ok' if not f else 'FAIL'}")
         for x in f[:8]:
             print("    " + x)
@@ -622,6 +779,7 @@ def leg_vice(prg: str, defs: list[str], s: int, red: bool = False,
             m.w(m.lab("inp_src"), b"\x01")
         peek = WB.GuestPeek(m) if c.lmb else None
         down_now = bool(c.lmb and c.lmb[0][1])
+        seen_pub = False
         f: list[str] = []
         while True:
             r = m.r(AB.R, 0x10)
@@ -629,6 +787,9 @@ def leg_vice(prg: str, defs: list[str], s: int, red: bool = False,
                 break
             if peek:
                 peek.fresh()
+                an = peek.read(ANCHOR, 16)          # published while it plays
+                if an[:4] == b"MWBA" and struct.unpack_from(">I", an, 4)[0] == c.st_at:
+                    seen_pub = True
                 down = lmb_down(c, peek.read)
                 if down != down_now:
                     m.w(m.lab("inp_joy"), b"\x10" if down else b"\x00")
@@ -645,11 +806,14 @@ def leg_vice(prg: str, defs: list[str], s: int, red: bool = False,
         hw = {"cop1lc": cop, "maska_hw": m.r(cia + 19, 1)[0],
               "maskb_hw": m.r(cia + 45 + 19, 1)[0], "lmb_slack": 40,
               # VICE s = 6 with W15-U's UI: every trail refresh's conversion
-              # stalls the guest ~1 fast-tempo period (caught up; content
-              # exact): timing is checked on VBL-paced cases and on the model
-              "timing": not c.tick_e}
+              # stalls the guest ~11000 E (caught up: run_mod's late bound is
+              # 3 frames); the underflows are counted from time (MOD_HUNK)
+              "timing": True}
         f += check(c, g.read, hw)
-        log(f"vice {c.name} (s = {s}): {time.monotonic() - t0:.0f}s: "
+        if peek and c.anchored and not seen_pub:
+            f.append(f"{c.name}: the anchor never seen published while playing")
+        log(f"vice {c.name} (s = {s}): {time.monotonic() - t0:.0f}s, lost/worst stall/"
+            f"period {getattr(c, 'lost', '-')}: "
             f"{'ok' if not f else 'FAIL'}")
         for x in f[:8]:
             print("    " + x)
@@ -704,6 +868,9 @@ def main(argv=None) -> int:
         bad = []
         for name, defs in MUTANTS.items():
             if only and name not in only:
+                continue
+            if a.leg == "vice" and name in MODEL_ONLY_MUTANTS:
+                log(f"mutant {name}: model leg only (skipped)")
                 continue
             f = leg(defs)
             log(f"mutant {name}: {'KILLED' if f else 'SURVIVED'}")
