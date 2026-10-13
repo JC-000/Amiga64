@@ -144,6 +144,7 @@ MODEL_ONLY_MUTANTS = {"anchorfirst", "latchrace", "R3_noreread", "R4_nolatchcoun
 # bounds of the model's timing checks (fix round 1)
 JITTER_E = 600            # a tick's lateness above its floor, no stall injected
 STAGE_SLACK_E = 150       # stage delay: P_STAGEE + the level-2 entry
+NO_PLAY = {"busy", "claim_refused", "not_mk", "no_file", "init_err"}   # error paths: no stage
 GRID_LATE_E = 128         # the software grid's constant lateness (replay.s SW_GUARD)
 SILENCE_MAX_INSTR = 130   # retrigger silence: a DMACON clear to its set (product), the
                           # busy-wait excluded (W16-E4: green <= 114, OWEDFULL >= 143)
@@ -1020,9 +1021,9 @@ class Model(RM.Model):
         # (the ceiling: the model's own E rate, no stall around the latch
         # writes: the level-2 entry's E then depend on the rate and the stall.
         # W16-E5 (rev16-e2 1): at every profile, no profile (STAGE_E) too;
-        # no stage at all fails with a profile only (the error-path cases
-        # never play)
-        if product and c.epc == (1, 10) and not c.inject and (d or c.tick_e):
+        # no stage at all fails unless the case is one of the error paths that
+        # never play (rev16-e2 R2-1: exempt by name, not by profile)
+        if product and c.epc == (1, 10) and not c.inject and (d or c.name not in NO_PLAY):
             med = sorted(d)[len(d) // 2] if d else None
             c.stage_res = (len(d), med, min(d) if d else None)
             if med is None or med > floor + STAGE_SLACK_E:
