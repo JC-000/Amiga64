@@ -444,3 +444,26 @@ def test_the_picture_hash_masks_only_the_title_bar(vice):
     assert MW.picture_hash(body, mask, vice) != h0
     pen = dict(raw, colram=bytes(80) + b"\x05" + bytes(919))                        # row 2's pens
     assert MW.picture_hash(pen, mask, vice) != h0
+
+
+_WB = {"bplcon0": 0xA200, "bplpt": [0x3AB8, 0x8AB8, 0, 0, 0, 0]}
+
+
+def test_display_back_ignores_a_disabled_planes_stale_pointer():
+    # W16-E u64e-click / c64u-click run 1: the UI's BPL3PT left behind at BPU 2
+    st2 = {"bplcon0": 0xA200, "bplpt": [0x3AB8, 0x8AB8, 0x1F44B8, 0, 0, 0]}
+    assert MW.display_back(_WB, st2)
+    # the old rule (all six pointers) failed this real return
+    assert (st2["bplpt"], st2["bplcon0"]) != (_WB["bplpt"], _WB["bplcon0"])
+
+
+def test_display_back_still_fails_on_a_used_plane_or_bplcon0():
+    for i in (0, 1):                    # red: an ENABLED plane's pointer differs
+        pts = list(_WB["bplpt"])
+        pts[i] = 0x1F44B8
+        assert not MW.display_back(_WB, {"bplcon0": 0xA200, "bplpt": pts})
+    # red: the UI's BPLCON0 (3 planes) left in place
+    assert not MW.display_back(_WB, {"bplcon0": 0xB200,
+                                     "bplpt": [0x3AB8, 0x8AB8, 0x1F44B8, 0, 0, 0]})
+    # red norestore (fix2/red-norestore): the stand-in's BPLCON0 $0200 left in place
+    assert not MW.display_back(_WB, {"bplcon0": 0x0200, "bplpt": list(_WB["bplpt"])})

@@ -877,7 +877,7 @@ def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, d
         fails.append(f"return: the app anchor is still published ({v2['app']})")
     if F.MODWB_TOOL in v2["tasks"]:
         fails.append(f"return: a task named {F.MODWB_TOOL} still exists ({v2['tasks']})")
-    if (st2["bplpt"], st2["bplcon0"]) != (st0["bplpt"], st0["bplcon0"]):
+    if not display_back(st0, st2):     # W16-E: the enabled planes only
         fails.append(f"return: the display is not the Workbench's (bplpt/bplcon0 "
                      f"{rt['bplpt']} {rt['bplcon0']}, before {[hex(p) for p in st0['bplpt']]} "
                      f"${st0['bplcon0']:04X})")
@@ -886,6 +886,17 @@ def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, d
         fails.append(f"return: windows {rt['windows']} / layers {rt['layers']}, before "
                      f"{wb0} / {v0['screen']['layers']}")
     return fails
+
+
+def display_back(st0: dict, st2: dict) -> bool:      # W16-E
+    """The Workbench's display is back: BPLCON0 and the pointers of the
+    planes it enables (BPU, bits 14-12).  A disabled plane's pointer is not
+    fetched: the real player's UI (3 planes) leaves BPL3PT behind and the
+    Workbench's copper list (2 planes) never reloads it (u64e-click,
+    c64u-click run 1: [$3AB8, $8AB8, $1F44B8] at BPLCON0 $A200)."""
+    bpu = min((st0["bplcon0"] >> 12) & 7, 6)
+    return (st2["bplcon0"] == st0["bplcon0"]
+            and list(st2["bplpt"][:bpu]) == list(st0["bplpt"][:bpu]))
 
 
 def picture_hash(raw: dict, mask: list[int], vice: bool) -> str:
