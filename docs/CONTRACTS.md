@@ -2258,6 +2258,39 @@ class, reads across `$80000`, 10 mutants),
   are refused (L4). Refused: a block outside
   2..1759, not 512 bytes, a header or OFS data block whose checksum does
   not sum to 0, a header whose data-block table changed.
+  - **Files (W16-D, supervisor rulings (a)/(b), 2026-10-12).**
+    `host/adf_files.py` adds and deletes files and drawers in the same
+    in-memory copy; its result is an `Overlay` with `files` set (every
+    changed block, the bitmap included).
+    - **Add:** blocks come from the bitmap, lowest first from 881 upwards,
+      then below 880. Header, T_LIST extension blocks and data (OFS with
+      its 24-byte headers, FFS raw) are written. The new header is
+      appended at the end of its hash slot's chain; an existing name is
+      refused. The bitmap bits are cleared.
+    - **Delete:** the header is unlinked (from the slot or from its chain
+      predecessor's `hash_chain`), and the header, extension and data
+      blocks are set free. A drawer must be empty.
+    - **Check:** `check()`/`apply()` validate a `files` overlay with
+      `fsck` on the applied image instead of the per-block rule (FFS data
+      blocks are raw and may look like headers). `fsck` checks:
+      - every header's type, checksum, key, parent and hash slot;
+      - the chains;
+      - every file's data, extension and OFS data headers, and its size;
+      - that no block is used twice;
+      - that the bitmap equals the complement of the used set, with its
+        checksum and `bm_flag`.
+    - **The modwb disk** (`--disk modwb`, `tests/aros_modwb.py`):
+      - `Classes/DataTypes/amigaguide.datatype` is deleted from the REU
+        copy (102 blocks; never from the user's file);
+      - `ModPlayer`, `ModPlayer.info` (WBTOOL, at a free spot computed from
+        the root icons) and `ModPlayer.mod` are added to the root.
+      - The leg watches the `Classes/DataTypes` header block from the
+        Workbench window to its end, and fails if it is read.
+      - Disk.info and the boot milestones are unchanged.
+    - **Bounds (rev16-p L7):** `reu_writes` refuses any block outside
+      0..1759 or not 512 bytes, and `DiskEdit.put` refuses any block
+      outside 2..1759. So no overlay can reach past `$2DBFFF`, where W16-P's
+      profile block and the app anchor (`$2DC000`) follow the image.
 - **The drive** (`td_prb`, the W13-W hook in `cia.s` `wr_prb`, CIA-B
   only, `A` = the written value): the boot model's `Floppy` on the pins
   `PRB | ~DDRB`. `/SEL0` (bit 3) low selects DF0; `/MTR` (bit 7) is latched

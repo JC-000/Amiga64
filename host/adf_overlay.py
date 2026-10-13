@@ -182,6 +182,7 @@ class Overlay:
     blocks: list[tuple[int, bytes]] = field(default_factory=list)   # (block, 512 bytes)
     header: int | None = None       # the file's header block
     data_blocks: list[int] = field(default_factory=list)
+    files: bool = False             # W16-D: files added/deleted (host/adf_files.py)
 
     @property
     def first_data(self) -> int | None:
@@ -251,6 +252,8 @@ def check(data: bytes, ov: Overlay) -> None:
             raise AdfError(f"overlay block {k} outside 2..{BLOCKS - 1}")
         if len(b) != BLOCK:
             raise AdfError(f"overlay block {k}: {len(b)} bytes")
+        if ov.files:                    # W16-D: FFS data blocks are raw bytes, so
+            continue                    # the whole applied image is checked below
         t = _l(b, 0)
         if k == ov.header or t == T_HEADER or (not a.ffs and t == T_DATA):
             if not checksum_ok(b):
@@ -260,6 +263,12 @@ def check(data: bytes, ov: Overlay) -> None:
             table = [_l(b, 24 + 4 * (HT_SIZE - 1 - i)) for i in range(n)]
             if table != ov.data_blocks[:n]:
                 raise AdfError(f"overlay header {k}: data-block table changed")
+    if ov.files:                        # W16-D: the whole tree and the bitmap
+        from host.adf_files import fsck
+        img = bytearray(data)
+        for k, b in ov.blocks:
+            img[k * BLOCK:(k + 1) * BLOCK] = b
+        fsck(bytes(img))
 
 
 def apply(data: bytes, ov: Overlay) -> bytes:
@@ -272,7 +281,13 @@ def apply(data: bytes, ov: Overlay) -> bytes:
 
 
 def reu_writes(ov: Overlay, base: int) -> list[tuple[int, bytes]]:
-    """(REU address, block) pairs for an image staged at *base*."""
+    """(REU address, block) pairs for an image staged at *base*.  W16-D
+    (rev16-p L7): every block must be 0 <= k < 1760 and 512 bytes, so no
+    overlay can write past the image (W16-P's profile block and the app
+    anchor follow it at $2DC000)."""
+    for k, b in ov.blocks:                                       # W16-D
+        if not 0 <= k < BLOCKS or len(b) != BLOCK:               # W16-D
+            raise AdfError(f"reu_writes: block {k} ({len(b)} bytes) outside the image")
     return [(base + k * BLOCK, b) for k, b in ov.blocks]
 
 
