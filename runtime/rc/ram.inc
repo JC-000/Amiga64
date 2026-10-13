@@ -20,11 +20,13 @@
 ; @region sys $0200-$03FF KERNAL/BASIC workspace + vectors - not claimable while ROMs may run (loader/boot path)
 
 ; @region hle $0400-$07E7 C64 text screen - HLE console output (VIC bank 0)
+; W15-P (supervisor-approved): aud segment B $0400-$07FF (tests/paula/aud.s; its tail $07E8-$07FF below, incl. the bank-0 sprite pointers $07F8-$07FF, unused in machine mode: the VIC is on bank 3): player profile only; machine mode never uses the HLE console screen (c2v's matrix is $D000); mutually exclusive with HLE console sessions and with aros_resume's READY. wait (which happens before staging); staged after any screen wait; aud.s checks B's ID before every entry
 .ifndef SCREEN
 SCREEN     = $0400      ; 40x25 screen RAM; hle.s cursor offset 0-999
 .endif
 
 ; @region free $07E8-$0800 screen-RAM tail + sprite pointers ($07F8-$07FF) - unused
+; W15-P (supervisor-approved): in the player profile $07E8-$07FF is aud segment B's tail (see $0400 above)
 
 ; --- Runner PRG (MAIN memory area, c64.cfg: $0801 size $97FF) --------------
 ; @region core $0801-$08FF PRG start: BASIC SYS stub (STARTUP) + link slack before DISPATCH alignment
@@ -82,6 +84,7 @@ buf_case   = $C000
 .endif
 
 ; @region run $C800-$CDFF buf_result - runner writes final state here (case results span at most $C800-$C97F)
+; W15-P (supervisor-approved, player profile only; mutually exclusive with aros_resume's $CB00/$CC00 stub and run_irq's/run_mach's P/R/LOG at $CA00-$CCFF, other sessions): the audio module tests/paula/aud.s, segment A $CA00-$CCFF (AUD_ORG, chip.s's router enters it when aud_mon = its ID byte 0), its state page $CD00-$CDFF; its VICE driver tests/paula/drv.s at $C200 with P/R at $C800-$C837
 .ifndef buf_result
 buf_result = $C800      ; contract range $C800-$CFFF; $CE00 page carved out below
 .endif
@@ -236,7 +239,10 @@ REC_ACTRL   = $DF0A
 .ifndef ULT_CMD_BASE
 ULT_CMD_BASE = $DF1C    ; control/command/response/status window
 .endif
-; @region free $DF20-$DFFF expansion I/O - unclaimed
+; @region aud $DF20-$DFFF W15-P: the U64 sampler ("Ultimate Audio", 7 voices x 32 bytes) when the config item "Map Ultimate Audio $DF20-DFFF" is on; written only by tests/paula/aud.s with cfg_hw set by the host inside a U64E hold (on VICE these addresses mirror the REC: never probed)
+.ifndef aud_samp
+aud_samp   = $DF20      ; W15-P: sampler voice 0's register block; voice v at + 32 v
+.endif
 
 ; W7-V c2v: VIC bank 3 output (RAM under KERNAL; writes need no banking, the VIC always reads RAM)
 ; @region c2v $E000-$FF3F c2v VIC hires/multicolour bitmap, 25 char rows (200 lines) in char-cell order (bank + $2000)

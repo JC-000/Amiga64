@@ -2314,3 +2314,198 @@ class, reads across `$80000`, 10 mutants),
 - **Snapshots.** All state is BSS (W12-T image) or `cia_st`; the disk is
   in file span 2 (`SNAP_VER` 2). A snapshot taken before the slot is
   patched resumes into the walk; after it, into the trap.
+
+## Audio (Paula) (W15-P)
+
+Owner: aud (`tests/paula/aud.s`, a machine-mode module; its hook in
+`runtime/ops/chip.s`). Design: `docs/WAVE15_BRIEF.md` W15-P and its
+addendum (rulings R1-R4, the fix-round rulings M5/M6). Reference:
+`host/paula_ref.py`. Tests: `tests/run_paula.py` (+ `tests/paula/drv.s`;
+VICE legs `latch`, `blocks`, `irq`, `reload`, `lencache`, `pervol`, `park`,
+`phase`, `bplpt`, `dmaoff`, `nomod`; `--mutants`, `--mutants --review`,
+`--perf`; U64E legs with `--hw u64`), `host/tests/test_paula_ref.py`,
+`host/tests/test_paula_layout.py`.
+
+- **What the guest can use** (WAVE15 I-3): AUDxLCH/AUDxLCL, AUDxLEN,
+  AUDxPER, AUDxVOL (`$0A0-$0DA`, channel x at + 16 x); DMACON DMAEN and
+  AUD0EN-AUD3EN; INTENA/INTREQ AUD0-AUD3 (bits 7-10, level 4). AUDxDAT
+  (CPU mode) is counted and ignored; ADKCON modulation is not modelled.
+  Nothing else is promised.
+- **The hook (MAIN, +21 B CODE, +1 B DATA).** `c_wrw`'s cop route (the
+  page-0 registers that are not SERDAT, INTENA/INTREQ or the blitter's) is
+  unchanged while the module is not armed: everything goes to `cop_w0`,
+  which ignores the audio registers. Armed, i.e. `aud_mon` (DATA, 0 at load,
+  in the STARTUP->DISPATCH slack) equals the module's ID byte 0 at
+  `AUD_ORG+3` (`AUD_ORG` = `$CA00`), the registers `$0A0-$0FE` and DMACON
+  (`$096`) enter the module instead: it hands `$0E0+` (BPLxPT) straight back
+  to `cop_w0` (`bplpt` leg), and calls `cop_w0` first for DMACON (cop.s
+  keeps owning DMACON, so DMACONR shows AUDxEN). **Cost of the router**
+  (6502 cycles, rev15-paula's count on the product layout): not armed +10
+  to +14 per write on the cop route's registers (the range and DMACON
+  tests); armed, BPLxPT ~+25 (the guard and the hand-back); DMACON ~1.35k
+  (the module's walk of the four channels, `--perf`). The router's branches do
+  not cross a page in the product layout; a later CODE shift that moves one
+  across adds 1 cycle per taken branch. MAIN is at its limit: run_pf's
+  `trace` variant keeps 4 B before its BSS page, and
+  `host/tests/test_paula_layout.py` fails if RODATA leaves `$8D00`.
+- **Where it lives (player profile only).** Segment A `$CA00-$CCFF`
+  (entries `+0` write, `+7` the slot-6 callback, `+10` init; config and
+  counters at `+13`), segment B `$0400-$07FF` (the text screen and its
+  sprite-pointer tail, unused in machine mode: the VIC is on bank 3), state
+  page `$CD00-$CDFF`. **Known limits:** segment A and the state page are
+  mutually exclusive with `aros_resume`'s stub (`$CB00`/`$CC00`) and with
+  run_irq's and run_mach's driver blocks (`$CA00-$CCFF`), which belong to
+  other sessions; coexisting with resume is backlog. Segment B is player
+  profile only: machine mode never uses the HLE console screen, so it is
+  mutually exclusive with HLE console sessions and with `aros_resume`'s
+  READY. wait (which happens before staging); it is staged only after any
+  harness READY./screen wait, and `run_paula`'s rig refuses to read the
+  region once it is staged (except its own integrity checks, which the U64E
+  runner repeats before every leg). **ID guard:** the router enters A only
+  when `aud_mon` equals A's ID byte 0; every entry then compares B's 4 ID
+  bytes with A's; a stale or missing B disarms the module (`aud_mon` := 0)
+  and stops every voice (B's high byte `$FF`, then CTRL 0: they hold their
+  last sample as DC until the next init) before any jump into B (`nomod`,
+  mutant `nobok`). Limit: A's own code is not checksummed (a corrupted A
+  with an intact ID byte would run); only the ID bytes are compared.
+- **Arming (host).** Stage A and B; write the config (`+13` u16
+  `cfg_r16`, `+15` u8 `cfg_hw`, `+16` u24 `cfg_zero`); `mach_cbv[6]` :=
+  `AUD_ORG+7`; call `AUD_ORG+10` (init); `aud_mon` := the ID byte 0.
+  Disarm: `aud_mon` := 0, `mach_cbv[6]` := 0.
+- **Model (Amiga HRM, audio).** AUDxLC/AUDxLEN are latches (LC bits 20-1,
+  so samples anywhere in 2 MB of chip RAM, `latch` plays one at `$180000`).
+  DMA start (DMAEN and AUDxEN both set) copies them into the playing block
+  and posts AUDx at once; every block end copies them again and posts
+  again; so a latch write takes effect at the next block (a block end that
+  falls between an LC and its LEN write reloads the half-written pair, as
+  on Paula). A block lasts 2 x LEN x PER colour clocks (LEN 0 = 65536 words,
+  PER 0 counts as 1), capped at 2^30 E. PER and VOL act on the voice (the
+  sound) at once. DMA off stops the channel. **Deviation (cost):** a
+  block's end is fixed when it starts, from the PER of that moment; a PER
+  written mid-block moves block ends from the next block on (an exact
+  rescale cost ~25k cycles per PER write). Error bound: the block end (the
+  AUDx post, and the 6510 reprogram of a block that does not loop in
+  hardware) is off by the rest of that block x |1 - new/old|, less than one
+  block; the pitch itself is exact at once.
+- **Time.** A colour clock is `cfg_r16` / 65536 E ticks: Amiga-nominal
+  13107 (E = CCK / 5); **the U64E player profile (s = 0, NTSC phi2)
+  18897** (R3; `host/paula_ref.r16_for`). Deadlines are fixed point
+  (E x 65536, 6 bytes) on a grid from DMA start, so a channel never drifts;
+  the grid is Paula time (2 x LEN x PER colour clocks), which differs from
+  the sampler's playback of the same block by the RATE rounding (at most
+  half a 160 ns step per sample: +0.059% at PER 428, `--hw` `irq`). The
+  block length is cached per channel, keyed on the playing block's LEN and
+  dropped by a PER write (`lencache`). One mach event slot, **slot 6**,
+  serves all four channels, armed at the earliest due tick,
+  ceil(deadline). A firing services every due channel's block and its next
+  blocks while they are due, up to 16 per pass; then the grid restarts at
+  now + one block (`st_nres` counts it: only blocks shorter than the host
+  can serve), so AUDx posts coalesce in INTREQ for blocks shorter than a
+  pass, as they would for a CPU too slow to acknowledge them. Lateness: the
+  seam's (≤ 4096 >> s E) plus at most one pass servicing the other channels
+  (VICE: the last post of every channel within (4096 + 12288) >> s E of its
+  due tick, `blocks`, which checks lateness on each channel's last post
+  only, the per-channel maximum having gone for space (rev15-paula L4); U64E s = 0: at most 138-149 E, measured with the
+  round-0 module's lateness log, `hw3`/`hw5`, before that log was dropped
+  for space).
+- **Parking (phase kept, M6).** A block end needs no work when the voice
+  loops the block in hardware (nothing to reload) and the channel's INTREQ
+  AUDx bit is still pending: another post would change nothing. Such a
+  channel's deadline advances by 2^k blocks >= `PARK_E` = 7094 E (half a
+  frame), so it stays on the block grid and is looked at again every 1/2 to
+  1 frame (plus up to a block for blocks longer than half a frame); once the
+  guest has acknowledged, that look ends the block (posts AUDx). So a replay
+  that ignores AUDx costs one look per channel per 1/2 to 1 frame even on
+  the 1-word null loop after a one-shot sample (U64E: 3.0% of the guest with
+  four such channels, `--hw` `ips`), a guest that acknowledges every block
+  keeps the exact grid (`irq`), and a late acknowledge gets its next post
+  within one frame (`park`). A loop change that drops the hardware loop (an
+  instrument change without a note on a parked channel) pulls the deadline
+  back to the first grid point after the write, so the 6510 reprograms at
+  the hardware's loop end (`phase`: within the seam bound). **Known limit
+  (rev15-paula L5):** the pull steps back one block at a time, at most 2^k
+  <= 2 x `PARK_E` / block + 1 iterations of ~200 cycles: 128 for a 1-word
+  loop at PER 113 (the shortest MOD period; ~25k cycles, ~0.6 ms at 48
+  MHz), but ~24k for LEN 1 at PER 0..2 (~5M cycles, ~0.1 s), an invalid
+  period (Paula's DMA needs >= 124) that a guest would have to program on
+  purpose.
+- **The sampler (U64 Ultimate Audio, HARDWARE "U64 sampler").** Channel x =
+  voice x. START = `$1000000` + the REU offset of the block (guest chip RAM
+  is the REU, flat); LENGTH = 2 x words (always even); RATE = (PER x
+  29563210 - 20761805) >> 24, clamped to 0..$FFFF (the nearest 160 ns step
+  to PER x 281.937 ns); VOL = min(vol, 63) (64 wraps to 0 there); PAN 0 for
+  channels 0/3, 15 for 1/2. **Hardware loop:** REPEAT A/B (relative to
+  START) + CTRL bit 1 only while the latched block starts inside the
+  voice's span and ends exactly where it ends (so B = LENGTH whenever
+  looping); the voice then plays Paula's next blocks with no 6510 work.
+  Otherwise the voice is reprogrammed at the block end, counted per
+  channel. DMA off plays the two zero bytes at `cfg_zero` (W13-D's
+  `disp_zero`, REU `$DF4000`, read-only) once, so the voice does not hold
+  its last sample as DC.
+- **Write order (M5): repeat is never off with REPEAT B == LENGTH, not even
+  between two writes** (the firmware hazard, HARDWARE "U64 sampler"):
+  - a reprogram: B := `$FFFFFF` (never LENGTH, which is even; a voice with B
+    beyond its LENGTH ends there normally), CTRL := 0 (a real stop: CTRL 2
+    does not stop a playing voice [MEASURED HW]), every other field, CTRL :=
+    1 or 3 (starts at START), then B := its value, low byte first (from
+    `$FFFFFF` every step stays >= `$FF0000`);
+  - a loop change while playing: B := `$FFFFFF`, A, CTRL (no restart
+    [MEASURED HW]), B low byte first; an unchanged loop rewrites A only.
+  - Proof: the VICE legs run the module's **log build** (`-D AUD_LOG`: every
+    sampler store is `jsr aud_log` into `tests/paula/drv.s`, same size), which
+    mirrors the registers, keeps a command ring and checks the state after
+    every write: no "repeat off with B == LENGTH", and no write to START or
+    LENGTH (+$04..+$0B) while the mirror's CTRL bit 0 is set (rewriting the
+    span of a voice that was not stopped lets it run on past a shorter
+    LENGTH: the hazard the U64E showed, HARDWARE "Paula on the U64
+    sampler"); every leg asserts both and that the mirror equals the
+    module's voice image (`logcheck`); `nomod` asserts the stale-B stop
+    (CTRL 0, B's high byte `$FF`) on every voice. Mutants `m5order` (a
+    reprogram without the B step), `nostop` (without CTRL 0), `bokstop` (no
+    stale-B stop) and `m5loop` (a loop change without the B step) are
+    killed.
+  - Torn fields while a voice plays: a live RATE (2 bytes) or a changed
+    loop's A (3 bytes) is written byte by byte; for the few microseconds in
+    between the voice may play one sample at a mixed rate, or jump to a
+    mixed A if it reaches B in that window. B itself never takes an earlier
+    value while repeat is on (each step stays at or beyond LENGTH).
+  - **Known limit (rev15-paula L2, kept):** an A change of a loop that stays
+    a loop is written directly (high byte first), not through B =
+    `$FFFFFF`; a torn A can momentarily exceed the new A (even LENGTH, if
+    the high byte grows first) if the voice hits B inside the write. The B
+    detour was not taken because a short loop reaching LENGTH while B is
+    beyond it would END instead of looping (a 2-sample null loop is ~0.25 ms
+    long, comparable to the write window), leaving a silent parked channel:
+    worse than the torn A. Trigger: a loop that stays a loop gets a new A
+    whose high byte differs from the old one (loops of 64 KB or more), and
+    the voice reaches B during the 3-byte write. Consequence: one jump to a
+    wrong A, possibly past LENGTH, so the voice plays sample memory beyond
+    the block until the next B or program. Contiguous A changes are rare in
+    replays (a new instrument's loop is normally a downgrade, reprogrammed at
+    the block end).
+  - **Known limit (rev15-paula L3):** an upgrade (a one-shot block turned
+    into a hardware loop by its latches) has a window of ~10 sampler writes
+    with B = `$FFFFFF` and repeat still off. Trigger: the voice reaches
+    LENGTH inside that window (the latches are written just as the block
+    ends). Consequence: the voice finishes, but the image says CTRL 3, so
+    the module never reprograms it and the channel parks silent until the
+    next retrigger (DMA off/on). Silence, not noise; rare.
+- **Rules.** The sampler's own end IRQ (CTRL bit 2) is **never** set:
+  `mach_irq` acknowledges CIA #1 only, so a level cartridge IRQ would
+  storm. The sampler is written **only when the host has set `cfg_hw`**
+  inside a U64E hold that maps it (`Map Ultimate Audio $DF20-DFFF`, restored
+  by the hold; the U64E runner silences every voice before the restore); it
+  is **never probed**: on VICE `$DF20-$DFFF` mirrors the REU's REC, where
+  `$DF21` (the command register, `$10` at power-up) would read like the
+  sampler's version byte and a write would start a DMA (the log build sets
+  `cfg_hw` = 1 on VICE because its stores go to the logger, never `$DF20`).
+- **Host-visible state** (the state page; layouts in `aud.s`'s header): per
+  channel a 32-byte voice image in the sampler's register layout (+0..+17;
+  +18..+1E the cached block length) and a 32-byte channel record (latches,
+  the playing block, the deadline, blocks started, programs, the E of the
+  latest post; +29..+31 are scratch); counters `st_nw`, `st_nfire`,
+  `st_ndat`, `st_now` (E of the latest DMACON, downgrade or firing),
+  `st_nres`, `st_npark`.
+- **Cost** (P3, VICE phi2-exact, `tests/run_paula.py --perf`): evidence
+  `build/evidence/w15-paula/final_perf.json` (the numbers are in the W15-P
+  report).

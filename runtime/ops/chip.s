@@ -84,6 +84,7 @@
 .import blt_w, blt_dmaconr                      ; W11-B blt: S3.6 blitter
 .import inp_pot                                 ; W13-I inp: the POTINP read (right button)
 .export chip_blitirq                            ; W11-B blt: INTREQ BLIT on completion
+.export aud_mon, AUD_ORG                        ; W15-P: the audio module's arm byte, org
 
 CHIP_LOGN_MASK = 63     ; @value log ring entries - 1
 CHIP_SERDAT    = $30    ; @value SERDAT register offset
@@ -100,6 +101,9 @@ CHIP_BLT0      = $40    ; @value first blitter register (BLTCON0); W11-B blt
 CHIP_BLT1      = $76    ; @value past the last (BLTADAT $074); W11-B blt
 CHIP_DMACONR   = $02    ; @value DMACONR (read-only) register offset; W11-B blt
 CHIP_BLITREQ   = $40    ; @value INTREQ low byte: BLIT (bit 6); W11-B blt
+CHIP_AUD0      = $A0    ; @value AUD0LCH, the first audio register; W15-P
+CHIP_DMACON    = $96    ; @value DMACON register offset; W15-P
+AUD_ORG        = buf_case + $A00 ; @value W15-P: the audio module (tests/paula/aud.s), $CA00-$CCFF
 
 .segment "BSS"
 chip_shd:   .res 512
@@ -116,6 +120,9 @@ chip_lh:    .res 1              ; log id, high byte
 chip_n:     .res 1              ; byte counter (long CIA accesses)
 chip_sx:    .res 1              ; caller's X
 chip_bk:    .res 1              ; beam latch: $80 armed (long read), 1 held
+
+.segment "DATA"                 ; W15-P: the STARTUP->DISPATCH slack (no MAIN page moves)
+aud_mon:    .byte 0             ; W15-P: host: the module's ID byte 0 = armed (0 = off)
 
 .segment "CODE"
 
@@ -556,7 +563,6 @@ cop:    cpx #CHIP_BLT0          ; W11-B blt: $040-$074 to the blitter
         cpx #CHIP_BLT1          ; W11-B blt
         bcs cop0                ; W11-B blt
         jmp blt_w               ; W11-B blt: BLTSIZE blits, BLTBDAT shifts
-cop0:   jmp cop_w0              ; W10-P cop: COPxLC/COPJMP/DIW/DDF/DMACON/BPLxPT
         ; --- SERDAT, out of line (keeps the branches above in reach of done)
 ser:    ldx chip_sern           ; SERDAT: chip_vl -> chip_ser[count & $3FF]:
         lda chip_sern+1         ; X = slot bits 7-0, the page = count bits 9-8
@@ -579,6 +585,17 @@ sinc:   inc chip_sern           ; then the count (u16; the store came first)
         bne done
         inc chip_sern+1
         rts
+        ; --- W15-P: the cop route, out of line (keeps ser in reach)
+cop0:   cpx #CHIP_AUD0          ; W15-P: $0A0+ (audio; $0E0+ BPLxPT: the
+        bcs aud                 ; W15-P: module hands those back to cop)
+        cpx #CHIP_DMACON        ; W15-P: DMACON (the module calls cop first)
+        bne c0                  ; W15-P
+aud:    lda aud_mon             ; W15-P: armed = the module's ID byte 0
+        beq c0                  ; W15-P: not armed: all of it to cop, as before
+        cmp AUD_ORG+3           ; W15-P: a stale or overwritten module is
+        bne c0                  ; W15-P: never entered
+        jmp AUD_ORG             ; W15-P: X = register, chip_vh:chip_vl
+c0:     jmp cop_w0              ; W10-P cop: COPxLC/COPJMP/DIW/DDF/DMACON/BPLxPT
 .endproc
 
 ; W11-B blt: chip_blitirq -- a finished blit raises INTREQ BLIT as the Paula
