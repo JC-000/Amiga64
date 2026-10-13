@@ -529,7 +529,12 @@ params: lea     PARAM,a1
 ; released at once (recorded: AROS owns both, R1).  d0 = 0 or ERR_CLAIM
 ; (whatever was kept is released by release)
 ; ---------------------------------------------------------------------------
-claim:  lea     ints,a0
+claim:  move.l  ciaabase,a6             ; W16-E: CIA-A TB as found, before the claim
+        moveq   #0,d0                   ; W16-E: (AROS runs it free with no resource
+        CALL    AbleICR                 ; W16-E:  owner: AddICRVector says free;
+        move.b  d0,atbmsk               ; W16-E:  build/evidence/w16-e2e diag3/4)
+        move.b  CIAA_CRB,atbcrb         ; W16-E
+        lea     ints,a0
         moveq   #3,d1
 .i:     move.b  #NT_INTERRUPT,LN_TYPE(a0)
         move.l  #intname_s,LN_NAME(a0)
@@ -651,6 +656,17 @@ restore:
         move.w  d0,AUD0LC+8+$30(a5)
         move.b  #$08,CIAA_CRB           ; our timers stopped (ciab TB is AROS's:
         clr.b   CIAB_CRA                ; never touched)
+        ifnd    MW_MUT_NOATB
+        btst    #0,atbcrb               ; W16-E: CIA-A TB found running: as found.
+        beq.s   .tbs                    ; W16-E: the latch cannot be read; $FFFF is
+        clr.b   CIAA_CRB                ; W16-E:  assumed (a free-running counter:
+        move.b  #$ff,CIAA_TBLO          ; W16-E:  measured on every AROS boot, U64E
+        move.b  #$ff,CIAA_TBHI          ; W16-E:  and C64U); continuous and stopped
+        move.b  atbcrb,d0               ; W16-E:  while the latch is written
+        or.b    #$10,d0                 ; W16-E: LOAD
+        move.b  d0,CIAA_CRB             ; W16-E
+.tbs:                                   ; W16-E
+        endc
         ifd     MW_MUT_TBCRB
         clr.b   CIAB_CRB
         endc
@@ -795,6 +811,17 @@ release:
 .cn:    addq.w  #1,d4
         cmp.w   #3,d4
         blo.s   .ci
+        ifnd    MW_MUT_NOATB
+        lea     mwst+A_CLAIM,a0         ; W16-E: ciaa TB kept (removed above) and its
+        tst.b   1(a0)                   ; W16-E:  interrupt enabled before the claim:
+        bne.s   .nab                    ; W16-E:  enabled again (RemICRVector cleared it)
+        btst    #CIAICRB_TB,atbmsk      ; W16-E
+        beq.s   .nab                    ; W16-E
+        move.l  ciaabase,a6             ; W16-E
+        move.w  #$82,d0                 ; W16-E: set TB
+        CALL    AbleICR                 ; W16-E
+.nab:                                   ; W16-E
+        endc
         move.l  fh,d1
         beq.s   .nf
         move.l  dosbase,a6
@@ -914,6 +941,8 @@ anch:           ds.b    1               ; we published the anchor
 busy:           ds.b    1               ; another instance's anchor: back out
 audopen:        ds.b    1
 lmbup:          ds.b    1
+atbcrb:         ds.b    1               ; W16-E: CIA-A CRB before the claim
+atbmsk:         ds.b    1               ; W16-E: CIA-A ICR enable mask before the claim
         ifd     MOD_TRACE
         cnop    0,4
 trbuf:          ds.l    1

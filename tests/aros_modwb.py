@@ -139,6 +139,130 @@ def no_deadline(what: str) -> None:
 
 
 # --------------------------------------------------------------------------
+# W16-E: step 6, the music (the real player with --audio).  LIVE reads only
+# (M2): aud's counters in C64 RAM, and on the Ultimates the UDP audio stream
+# from just before the double-click to after the return's silence window.
+# --------------------------------------------------------------------------
+
+AUD_CNT = 0xCA00 + 19                   # W16-E: tests/paula/aud.s +19: st_nw, st_nfire, st_ndat,
+AUD_CNT_FMT = "<HHBIBH"                 # st_now, st_nres, st_npark (12 bytes, LE)
+MUSIC_FRAMES = 64                       # W16-E: the silence window after the return (live frames)
+# W16-E: calibrated on u64e-click / c64u-click run 1 (the demo song, 64 frames):
+# play nw +1446/+1407, nfire +430/+428, npark +405/+398; silence all +0.
+# Floors ~10% of that (a slower profile or a quieter song still passes; a
+# player that stalls or never starts DMA does not); silence must be exact.
+PLAY_NW_MIN, PLAY_BLOCKS_MIN = 150, 40  # W16-E: nw; nfire + npark (block ends: DMA ran)
+# stream rms: play 4537 / 4518, idle floor (pre, silence) 8.6-20.8.  Play must
+# be > 1000 (4.5x under the measured, 48x over the floor) and > 10x the pre-
+# launch floor; silence < 200 (hw16 rbsil's bound: 10x the floor, 22x under play)
+PLAY_RMS_MIN, PLAY_OVER_FLOOR, SILENT_RMS_MAX = 1000.0, 10.0, 200.0
+STREAM_DIR: list = [None]               # W16-E: aros_wb --out (the WAVs); None: no stream
+
+
+def cia_state(m) -> dict:               # W16-E: runtime/ops/cia.s cia_st (CIA_* layout), live
+    out = {}
+    for name, off in (("a", 0), ("b", 45)):     # CIA_SZ = 45
+        raw = m.r(m.lab("cia_st") + off, 41)
+        out[name] = {"pra": raw[0], "prb": raw[1], "tal": raw[4] | raw[5] << 8,
+                     "tbl": raw[6] | raw[7] << 8, "ta": raw[8] | raw[9] << 8,
+                     "tb": raw[10] | raw[11] << 8, "cra": raw[16], "crb": raw[17],
+                     "icr": raw[18], "msk": raw[19], "tod": int.from_bytes(raw[20:23], "little"),
+                     "alm": int.from_bytes(raw[23:26], "little")}
+    out["now"] = int.from_bytes(m.r(m.lab("cia_now"), 4), "little")
+    return out
+
+
+def aud_counters(m) -> dict:            # W16-E
+    nw, nfire, ndat, now, nres, npark = struct.unpack(AUD_CNT_FMT, m.r(AUD_CNT, 12))
+    return {"frame": m.frames(), "nw": nw, "nfire": nfire, "ndat": ndat, "now": now,
+            "nres": nres, "npark": npark}
+
+
+class Music:                            # W16-E
+    """Step 6 for one launch cycle: cnt(k) records aud's counters, mark(k)
+    the stream time; close() stops the stream and judges.  Off (records
+    why) for the stand-in or without --audio."""
+
+    def __init__(self, m, disk, tag: str):
+        self.m, self.tag, self.t0, self.cap = m, tag, None, None
+        self.on = bool(m.aud) and not disk.standin
+        self.rep: dict = {"counters": {}, "marks": {}}
+        if not self.on:
+            self.rep["off"] = "the stand-in" if disk.standin else "no --audio"
+        self.stream = self.on and not m.vice and STREAM_DIR[0] is not None
+
+    def start(self) -> None:
+        if not self.on:
+            return
+        if self.stream:
+            from tests.paula import hw16
+            try:
+                self.cap, self.t0 = hw16.stream(self.m.tg.transport.client)
+            except Exception as ex:     # noqa: BLE001 - the counters still judge
+                self.rep["stream_error"] = repr(ex)
+                self.stream = False
+        if self.t0 is None:
+            self.t0 = time.monotonic()
+        self.cnt("before")
+
+    def mark(self, k: str) -> None:
+        if self.on and self.t0 is not None:
+            self.rep["marks"][k] = round(time.monotonic() - self.t0, 2)
+
+    def cnt(self, k: str) -> dict:
+        if not self.on:
+            return {}
+        self.mark(k)
+        c = self.rep["counters"][k] = aud_counters(self.m)
+        return c
+
+    @staticmethod
+    def delta(a: dict, b: dict) -> dict:
+        return {k: (b[k] - a[k]) % (1 << 16) for k in ("nw", "nfire", "npark")}
+
+    def close(self) -> list[str]:
+        """Stop the stream; -> fails.  Counters: aud served the replay's
+        writes and block ends over the play window, and nothing over the
+        silence window after the return.  Stream: rms during the play
+        window, and silence after the exit."""
+        if not self.on:
+            return []
+        f: list[str] = []
+        c, mk = self.rep["counters"], self.rep["marks"]
+        if "play0" in c and "play1" in c:
+            d = self.rep["play_delta"] = self.delta(c["play0"], c["play1"])
+            if d["nw"] < PLAY_NW_MIN or d["nfire"] + d["npark"] < PLAY_BLOCKS_MIN:
+                f.append(f"music: aud's counters did not move while the player ran ({d})")
+        if "ret0" in c and "ret1" in c:
+            d = self.rep["silence_delta"] = self.delta(c["ret0"], c["ret1"])
+            if d["nw"] or d["nfire"]:
+                f.append(f"music: aud still served writes or block ends after the return ({d})")
+        if self.cap is not None:
+            from tests.paula import hw16
+            wav = os.path.join(STREAM_DIR[0], f"modwb_{self.tag}.wav")
+            try:
+                au = hw16.stream_stop(self.m.tg.transport.client, self.cap, wav)
+            except Exception as ex:     # noqa: BLE001
+                self.rep["stream_error"] = repr(ex)
+                return f + [f"music: the stream did not stop cleanly ({ex!r})"]
+            s = self.rep["stream"] = {"wav": wav, "packets": au["packets"], "dropped": au["dropped"],
+                                      "seconds": round(len(au["mono"]) / au["rate"], 1)}
+            if "dclick" in mk:
+                s["pre"] = hw16.win_stats(au, 0.0, mk["dclick"])
+            if "takeover" in mk and "play1" in mk:
+                s["play"] = hw16.win_stats(au, mk["takeover"] + 1.0, mk["play1"])
+                floor = s.get("pre", {}).get("rms", 0.0) * PLAY_OVER_FLOOR
+                if not s["play"]["rms"] > max(PLAY_RMS_MIN, floor):
+                    f.append(f"music: the stream is quiet while the player ran ({s['play']})")
+            if "exit" in mk and "ret1" in mk:
+                s["silence"] = hw16.win_stats(au, mk["exit"] + 1.0, mk["ret1"])
+                if not s["silence"]["rms"] < SILENT_RMS_MAX:
+                    f.append(f"music: the stream is not silent after the exit ({s['silence']})")
+        log(f"  music {self.tag}: {self.rep}")
+        return f
+
+
+# --------------------------------------------------------------------------
 # the disk
 # --------------------------------------------------------------------------
 
@@ -674,10 +798,13 @@ def _leg(m, rom, disk: ModDisk, s: int, rep: dict, vol, timeout: float,
         return int.from_bytes(m.r(m.lab("chip_shd") + 0x80, 4), "big") & 0xFFFFFE
 
     def dclick() -> None:
+        dclick.frames = [m.frames()]    # W16-E: the guest frame of each edge
         for _ in range(2):
             e.mouse_btn(WB.J_FIRE)
+            dclick.frames.append(m.frames())
             e.frames_wait(2)
             e.mouse_btn(0)
+            dclick.frames.append(m.frames())
             e.frames_wait(2)
 
     e.mouse_on(s)
@@ -739,8 +866,15 @@ def _leg(m, rom, disk: ModDisk, s: int, rep: dict, vol, timeout: float,
     #    the proof that the Workbench answers and got its memory back --------
     for n in (1, 2):
         rep.setdefault("runs", []).append({})
-        f = launch_cycle(m, e, disk, rep["runs"][-1], look, disp, cop1lc, hash_now, dclick,
-                         dw, frozen, gap_wait, due, mutant if n == 1 else None, exit_mode)
+        mu = Music(m, disk, f"run{n}")  # W16-E: step 6
+        f = []
+        try:
+            f = launch_cycle(m, e, disk, rep["runs"][-1], look, disp, cop1lc, hash_now, dclick,
+                             dw, frozen, gap_wait, due, mutant if n == 1 else None, exit_mode,
+                             mu)        # W16-E
+        finally:                        # W16-E: the stream stops on every path
+            f += mu.close()
+            rep["runs"][-1]["music"] = mu.rep
         fails += [f"run {n}: {x}" for x in f]
         if f:
             break
@@ -758,7 +892,7 @@ def _leg(m, rom, disk: ModDisk, s: int, rep: dict, vol, timeout: float,
 
 def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, dclick,
                  dw: dict, frozen: bool, gap_wait, due, mutant: str | None,
-                 exit_mode: str) -> list[str]:
+                 exit_mode: str, mu: "Music | None" = None) -> list[str]:
     """Steps 4-8 once: the icon, the double-click, the takeover, the exit
     and the return (see the module doc)."""
     fails: list[str] = []
@@ -814,7 +948,13 @@ def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, d
     la["goto"] = nav
     if not nav["ok"]:
         return [f"launch: the pointer did not reach the icon ({nav})"]
+    mu = mu or Music(m, disk, "x")      # W16-E: step 6 (off unless the real player, --audio)
+    mu.start()                          # W16-E: the stream from here, the counters "before"
+    mu.mark("dclick")                   # W16-E
+    td0 = m.td()                        # W16-E: does the launch read the disk?
+    la["cia"] = cia_state(m)            # W16-E: live, the OS's timers before the launch
     dclick()
+    la["dclick_frames"] = getattr(dclick, "frames", None)   # W16-E
 
     # -- 5. takeover: LIVE C64-side state only (M2) ------------------------------------
     tk = rep.setdefault("takeover", {})
@@ -825,11 +965,23 @@ def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, d
         e.frames_wait(5)
     tk.update(cop1lc=f"${cop1lc():06X}", frames=m.frames() - f2,
               wall_s=round(time.monotonic() - t2, 1))
+    tk["td"] = {"dclick": td0, "end": m.td()}   # W16-E
     if cop1lc() == cop0:
         if mutant == "wrongicon":       # fix round 3, F2: evidence that Prefs opened
             tk["windows_after"] = [w["title"] for w in look(windows, "windows after")]
             log(f"  wrongicon: windows after the double-click {tk['windows_after']}")
+        # W16-E diagnosis (run 2 on the devices): did the double-click reach
+        # Workbench, did a task start, did the disk get read?
+        try:
+            tk["diag_hash"] = hash_now()[:12]
+            tk["diag_view"] = look(lambda rd: guest_view(rd, disp(), dw, region), "takeover failure")
+            tk["diag_td"] = m.td()
+            tk["diag_cia"] = cia_state(m)
+            log(f"  takeover failure diag: {tk}")
+        except Exception as ex:         # noqa: BLE001 - the verdict stands
+            tk["diag_error"] = repr(ex)
         return [f"takeover: COP1LC stayed ${cop0:06X} ({tk})"]
+    mu.mark("takeover")                 # W16-E
     # the converter starts a conversion at most once per DISP_N = 24 guest
     # frames (CONTRACTS "Display refresh"), so the new picture may come
     # that much later (vice2 run 2: a fixed 10-frame wait saw the old one)
@@ -844,12 +996,14 @@ def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, d
     cops, cols, va, vb = [], [], {}, {}
     if not frozen:                      # VICE live: GuestPeek, the guest's time runs on
         va = look(app_state, "app")
+    mu.cnt("play0")                     # W16-E: aud's counters over the same 64 frames
     f0 = m.frames()
     while m.frames() - f0 < 64:
         due("the takeover")
         e.frames_wait(4)
         cops.append(cop1lc())
         cols.append(display_diag(m, disp)["shd_color00"])
+    mu.cnt("play1")                     # W16-E
     if not frozen:
         vb = look(app_state, "app")
     tk.update(hash=h1[:12], app=[va, vb], cop1lc_seen=sorted({f"${c:06X}" for c in cops}),
@@ -870,14 +1024,18 @@ def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, d
         fails.append(f"takeover: the stand-in's COLOR00 did not alternate ({tk['color00_seen']})")
     elif not disk.standin:
         tk["alive"] = "frozen path: the real player's music counters (W16-P aud, step 6)"
+        if not mu.on:                   # W16-E: then nothing shows the real player runs
+            fails.append("takeover: the real player on the frozen path needs --audio "
+                         "(its liveness is aud's counters, step 6)")
     if mutant == "stuckpic":            # red: the converter unhooked (cop_dhook high
         m.w(m.lab("cop_dhook") + 1, b"\0")     # byte 0 = none): the C64 keeps this picture
 
-    # -- 6. the music: W16-X / W16-P state (pending) ------------------------------------------
-    rep["music"] = "pending: W16-P aud counters, read live (not checked yet)"
+    # -- 6. the music (W16-E): aud's counters play0 -> play1 above, the stream;
+    #    judged by mu.close() with the silence window after the return -------------------------
 
     # -- 7. exit ---------------------------------------------------------------------------------
     ex = rep.setdefault("exit", {"mode": exit_mode})
+    mu.mark("exit_sent")                # W16-E
     if exit_mode == "click" and mutant != "noclick":
         e.mouse_btn(WB.J_FIRE)
         e.frames_wait(3)
@@ -890,6 +1048,7 @@ def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, d
         e.frames_wait(5)
     ex.update(frames=m.frames() - f3, wall_s=round(time.monotonic() - t3, 1),
               cop1lc=f"${cop1lc():06X}")
+    mu.cnt("exit")                      # W16-E
 
     # -- 8. return ---------------------------------------------------------------------------------
     rt = rep.setdefault("return", {})
@@ -898,6 +1057,11 @@ def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, d
     # the picture first (fix round 2, R2-1): live C64 reads, the user's
     # view, not what a frozen look's fresh load and resume leave behind
     pic = return_picture(m, e, hash_now, h0, h1, rt, forced, due)
+    rt["cia"] = cia_state(m)            # W16-E: live, the OS's timers after the return
+    if mu.on:                           # W16-E: the silence window, live, before the frozen look
+        mu.cnt("ret0")
+        e.frames_wait(MUSIC_FRAMES)
+        mu.cnt("ret1")
     v2 = look(lambda rd: guest_view(rd, st2, None), "return")
     rt.update(cop1lc=f"${cop1lc():06X}", copinit=v2["copinit"] and f"${v2['copinit']:06X}",
               app=v2["app"], windows=[w["title"] for w in v2["windows"]],

@@ -521,6 +521,7 @@ def test_the_picture_hash_masks_only_the_title_bar(vice):
     assert MW.picture_hash(pen, mask, vice) != h0
 
 
+# W16-E: the return's display check counts only the planes BPLCON0 enables
 _WB = {"bplcon0": 0xA200, "bplpt": [0x3AB8, 0x8AB8, 0, 0, 0, 0]}
 
 
