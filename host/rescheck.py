@@ -112,6 +112,8 @@ FILE_OWNERS = {
     "runtime/ops/ureu.s": "snap",       # W12-T (supervisor-approved) UCI REU I/O
     "runtime/ops/inp.s": "inp",         # W13-I joystick -> mouse (machine-mode input)
     "runtime/ops/td.s": "td",           # W13-W HLE trackdisk and the DF0 drive
+    "tests/paula/aud.s": "aud",         # W15-P the audio module (machine-mode, test-time)
+    "tests/paula/drv.s": "aud",         # W15-P its VICE driver
 }
 
 # Owners by glob, for module families that grow by file (checked after the

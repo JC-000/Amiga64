@@ -1272,3 +1272,60 @@ with the same build ID and the same td module.
   - u64_hold restores only the categories it snapshots, so a hold passes such a state through unchanged. Before SID or input work, check that the SID Sockets read Enabled/8580.
 - **Don't open the Ultimate menu while a hold runs.** Opening the C64U's firmware menu during a hold wedged it: REST timed out, the hold's config restore failed, and only a hard power cycle recovered it.
 - **The joystick used in Wave 13** has its UP switch stuck closed: port 2 reads $01 when idle. `inp_stuck` = $01 masks it (`--stuck 0x01`). With it, Workbench could be driven by joystick (left, right and down).
+
+## Paula on the U64 sampler (W15-P, 2026-10-12)
+
+Question (WAVE15 W15-P P2): do Paula's four channels, driven by a guest
+program through the `aud` module (CONTRACTS "Audio (Paula)"), play on the
+U64E's sampler at Paula's pitch and level, and do the program's AUDx
+interrupts and its guest time keep real time at the player profile (s = 0)?
+
+**Answer: [MEASURED HW] yes.** Instrumental only (the UDP audio stream on
+the host; nobody listened). Conditions: U64E `Ultimate 64 Elite` fw 3.15,
+FPGA 126, core 1.50, NTSC; found at Turbo Manual / CPU Speed 48, REU
+Enabled 16 MB; one DeviceLock hold per run (`tests/bench/u64_session.
+u64_hold`), CPU speed 48 + reboot, `C64 and Cartridge Settings / Map Ultimate
+Audio $DF20-DFFF` Enabled inside the hold (`$DF21` read `$10` by the 6510),
+every voice silenced before the restore, every hold's config read back
+IDENTICAL afterwards (the item back to Disabled). Runner: `tests/run_paula.py
+--hw u64` (product PRG with the W15-P router, the product module staged at
+`$CA00`/`$0400`, checked before every leg, `cfg_hw` = 1, s = 0, `cfg_r16` =
+18897). Evidence: `build/evidence/w15-paula/hw8/` (the fix-round module,
+every leg, one hold), `report.json`, one WAV per capture; the round-0 module's
+holds `hw3`/`hw4`.
+
+| Leg | Result (hw8) |
+|---|---|
+| pitch (square of 32 samples, VOL 64) | PER 124/214/428/856/1712: 892.84/518.43/259.11/129.47/64.73 Hz; the sampler law (`(rate+1) x 160 + 118` ns, RATE from the module's formula) within 0.03% (asserted 0.05%), Paula (PAL CCK) within 0.11%; 0 packets dropped |
+| vol (a live VOL write) | 64 and 63: the same level (64 is capped to 63); 32: 0.508; 16: 0.254 (32/63 = 0.508, 16/63 = 0.254); 0: silent (rms 11) |
+| off (a DC sample, then DMA off) | mean -2 before, +4408 playing, -2 after DMA off: the module's zero play (the W13-D `disp_zero` row) leaves no DC |
+| pan | channels 0/3: L 6645 / R 2142, 1/2 mirrored: Amiga sides (the leak is the Audio Mixer's, W10-H) |
+| four | four channels at once: four fundamentals at 0.94-1.00 of the largest peak |
+| irq (AUD0, 32-sample blocks, PER 428) | 776 handler entries = 776 blocks for 216 VERTB frames (2.997 s by the time base); the tone lasted 3.007 s by the stream's own clock: **guest time at s = 0 is real time** (R3). The block grid runs on Paula time (2 x LEN x PER colour clocks x `cfg_r16`): +0.059% against the sampler's playback at PER 428 (3.861 ms against 3.859 ms per block), the RATE rounding bound (at most half a 160 ns step per sample) |
+| ips (s = 0, 48 MHz; idle guest loop, no display, no guest interrupts) | 84.1k guest IPS idle (1166 instructions per 72 Hz frame); 81.5k with four channels parked on 1-word null loops (3.0% cost: a look every 1/2 to 1 frame per channel); no starvation at s = 0 (R3 caution). (The round-0 module, one look per frame without phase: 82.7k, 1.6%) |
+| oneshot | a 512-sample one-shot (61.7 ms) then a 1-word null loop: the tone ends after 63.4 ms (2 ms windows), then silence, DC 0: the 6510-timed reprogram lands within ~2 ms of the sampler's block end |
+| ctrl (CTRL rewritten 3 -> 1 -> 3 while playing: the LC write drops the loop, the LEN write restores it) | the loop's tail began 0.4996 s after the start (no restart: 0.494 s; a restart at the write: 0.633 s; asserted +-20 ms) |
+| liveper (PER 428 -> 214 mid-block, the tail as the probe) | the write at 0.145 s (seen in the audio); the tail began at 0.324 s (no restart: 0.319 s; a restart: 0.391 s; asserted +-20 ms) |
+| livevol (VOL 64 -> 32 mid-block) | the write at 0.14 s; the tail began at 0.4986 s (no restart: 0.494 s; a restart: 0.634 s) |
+| live (PER 428 -> 214, the old two-tone leg) | 259.1 Hz then 518.4 Hz, asserted against the law |
+| sign | a looped `$7F` gives DC +8750, `$80` -8820 (asserted: signed 8-bit) |
+| red_rate | the module with RATE one step high fails the pitch check at PER 428 (-0.15%) and 124 (-0.46%) |
+| red_off | the zero play pointed at non-zero data leaves DC +4408: the off check fails |
+
+New sampler facts [MEASURED HW]:
+- **A live RATE or VOL write** changes a playing voice without a restart
+  (`liveper`, `livevol`: the tail onset is the no-restart prediction within
+  5 ms, 65-140 ms away from a restart's).
+- **Rewriting CTRL** of a playing voice (3 -> 1 -> 3) does not restart it
+  (`ctrl`).
+- **CTRL 2 (enable off, repeat on) does not stop a playing voice**, and a
+  voice whose LENGTH is rewritten below its current position runs on past
+  it, through the REU (fix round, `hw5`-`hw7`: a reprogram that began with
+  CTRL 2 left a voice playing memory beyond its block until the next real
+  stop: noise and dead legs afterwards). CTRL 0 stops it; the module's
+  reprogram begins with B := `$FFFFFF`, CTRL 0 (CONTRACTS "Write order").
+- **Samples are signed** 8-bit, so Amiga sample data plays unconverted.
+- The audio stream's own clock agrees with the time base to 0.3% (tone
+  lengths 1.50-1.51 s for 108 frames = 1.498 s).
+- Not shown on hardware: the REPEAT B == LENGTH hazard itself (the module
+  never produces that state, proven on the VICE command log).
