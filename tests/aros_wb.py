@@ -973,11 +973,47 @@ def map_sampler(tg, prg: str) -> None:                  # W16-P
     log("  W16-P: sampler mapped and proven ($DF20-$DFFF = $00 $10 x 112)")
 
 
+def check_modwb_mutant(prg, mutant) -> None:              # W16-D fix round 3, F3
+    """norestore, keepanchor and noprof are stand-in build defines: with
+    --modwb-prg they would not apply, and the red would run green."""
+    if prg and mutant in ("norestore", "keepanchor", "noprof"):
+        raise SystemExit(f"--modwb-mutant {mutant} is a stand-in build define: "
+                         f"it cannot run with --modwb-prg")
+
+
+def make_disk(a, raw: bytes) -> Disk:                     # W16-D
+    """The staged disk: the user's ADF with the script overlay; with
+    --disk modwb also the player, its icon and a MOD (tests/aros_modwb)."""   # W16-D
+    if getattr(a, "disk", "wb") != "modwb":                 # W16-D
+        return Disk(raw, a.script)                          # W16-D
+    from host import modgen                                 # W16-D
+    from tests import aros_modwb as MW                      # W16-D
+    if a.modwb_prg:                                         # W16-D: W16-X's program
+        with open(a.modwb_prg, "rb") as f:                  # W16-D
+            player = f.read()                               # W16-D
+    else:                                                   # W16-D: the stand-in
+        defs = {"norestore": ("MUT_NORESTORE",),            # W16-D
+                "keepanchor": ("MUT_KEEPANCHOR",)}.get(a.modwb_mutant, ())   # W16-D
+        if a.modwb_exit == "end":                           # W16-D: leaves by itself
+            defs += ("MAXF=200",)                           # W16-D
+        # W16-D: the stand-in publishes the app anchor only over a valid
+        # profile block, which W16-P's launcher writes with --audio; without
+        # it the anchor is published unconditionally (red noprof: not)
+        if not getattr(a, "audio", False) and a.modwb_mutant != "noprof":   # W16-D
+            defs += ("STANDIN_NOPROF",)                     # W16-D
+        player = MW.build_standin(os.path.join(os.path.dirname(os.path.abspath(a.prg)),
+                                               "modwb"), defs)   # W16-D
+    mod = modgen.songs()[a.modwb_mod]                       # W16-D
+    return MW.ModDisk(raw, a.script, player, mod,
+                      with_info=a.modwb_mutant != "noinfo",  # W16-D
+                      standin=not a.modwb_prg)              # W16-D
+
+
 def run(a, rom, raw: bytes) -> tuple[list[str], dict]:
     rep: dict = {"prg": os.path.abspath(a.prg), "backend": a.backend, "script": a.script,
                  "host": os.environ.get("U64_HOST") if a.backend == "u64" else None,
                  "mhz": a.mhz if a.backend == "u64" else None}
-    disk = Disk(raw, a.script)
+    disk = make_disk(a, raw)            # W16-D: --disk modwb adds the player files
     rep["blocks"] = disk.blocks
     s = a.s if a.s is not None else (AB.BOOT_S_VICE if a.backend == "vice" else AB.BOOT_S_U64)
     rep["mach_s"] = s
@@ -1028,6 +1064,10 @@ def run(a, rom, raw: bytes) -> tuple[list[str], dict]:
                 fails += leg_e2e(m, rom, disk, s, r, a.vol, a.timeout, t_run, a.e2e_mutant)
             elif leg == "demo-boot":
                 fails += leg_demo_boot(m, rom, disk, s, r, a.vol, a.timeout, t_run, a.hold_s)
+            elif leg == "modwb":        # W16-D
+                from tests import aros_modwb as MW                                   # W16-D
+                fails += MW.leg_modwb(m, rom, disk, s, r, a.vol, a.timeout, t_run,  # W16-D
+                                      a.modwb_mutant, a.modwb_exit)                  # W16-D
             elif leg == "cost":
                 fails += (leg_cost(m, r) if a.legs[0] == "cost" else
                           ["cost: run it first in the session (--legs cost,...): see leg_cost"])
@@ -2243,6 +2283,18 @@ def main(argv=None) -> int:
                          "profile block at guest $2DC000")
     ap.add_argument("--aud-mutant", default=None, choices=AUD_MUTANTS,   # W16-P
                     help="W16-P red: leg aud with this defect (must fail)")
+    ap.add_argument("--disk", default="wb", choices=("wb", "modwb"),      # W16-D
+                    help="W16-D: modwb = the player, its icon and a MOD added (REU copy only)")
+    ap.add_argument("--modwb-prg", default=None,                         # W16-D
+                    help="W16-D: the player hunk executable (default: the stand-in)")
+    ap.add_argument("--modwb-mod", default="demo",                       # W16-D
+                    help="W16-D: host.modgen song for ModPlayer.mod")
+    ap.add_argument("--modwb-exit", default="click", choices=("click", "end"),   # W16-D
+                    help="W16-D leg modwb: leave by a left click, or wait for the song end")
+    ap.add_argument("--modwb-mutant", default=None,                      # W16-D
+                    choices=("noinfo", "noclick", "norestore", "wrongicon", "noprof",   # W16-D
+                             "stuckpic", "keepanchor"),                                   # W16-D
+                    help="W16-D red: leg modwb must fail")
     ap.add_argument("--tag", default=None, help="report name (default: backend-script)")
     a = ap.parse_args(argv)
     a.legs = [x for x in a.legs.split(",") if x]
@@ -2253,8 +2305,10 @@ def main(argv=None) -> int:
         raise SystemExit("--audio cannot run with --watch, leg cost or --resume-mutant "
                          "(their stubs/labels share aud's $CA00-$CDFF or the PRG)")
     STUCK[0] = a.stuck
-    if a.watch and "e2e" in a.legs:     # WATCH_AT/WATCH_N lie in GuestPeek's PEEK_BUF page
+    if a.watch and ("e2e" in a.legs or "modwb" in a.legs):   # W16-D: modwb peeks too
+        # WATCH_AT/WATCH_N lie in GuestPeek's PEEK_BUF page
         raise SystemExit("--watch cannot run with leg e2e (both use $CD00-$CDFF)")
+    check_modwb_mutant(a.modwb_prg, a.modwb_mutant)          # W16-D fix round 3, F3
     TD_DEFINES[:] = a.td_define
     TD_MUTANT[0] = a.td_mutant
     E2E_FROZEN[0] = a.e2e_frozen
@@ -2292,4 +2346,9 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # W16-D fix round 1: run main() in THE tests.aros_wb module, so the CLI
+    # flags (E2E_FROZEN, ...) are the ones the leg modules importing it read
+    # (under -m this file is __main__, a second copy: --e2e-frozen never
+    # reached tests/aros_modwb, green/vice-frozen{,2} ran live)
+    from tests import aros_wb as _wb                        # W16-D
+    sys.exit(_wb.main())                                    # W16-D
