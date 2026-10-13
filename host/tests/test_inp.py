@@ -9,7 +9,7 @@ import re
 import pytest
 
 from host import inp_ref
-from host.inp_ref import CBM, CAP, DOWN, F1, FIRE, LEFT, NMAX, RIGHT, UP, Inp, Matrix, scan
+from host.inp_ref import CBM, CAP, DOWN, F1, FIRE, LEFT, MCLAMP, NMAX, RIGHT, UP, Inp, Matrix, scan
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -205,23 +205,268 @@ def test_msamp_reference_axes_and_sign():
     assert (m.y, m.x) == ((-2 - 40 * 30) & 0xFF, (3 - 40 * 30) & 0xFF)
 
 
-def test_msamp_clamps_each_frame_at_127():
-    """rev14-mouse HIGH-1: AROS reads JOY0DAT as a signed 8-bit delta per
-    frame; 14 samples of +31 inside one frame must deliver +127, not wrap."""
+def test_msamp_clamps_each_frame_at_63():
+    """rev14-mouse HIGH-1 and its round-2 margin (W16-I, ruled 63): AROS
+    reads JOY0DAT as a signed 8-bit delta once a frame, after the hook; 14
+    samples of +31 inside one frame deliver +63 (the window's travel budget),
+    so two windows stay <= 126."""
     m = Inp()
     m.msamp(0x40, 0x00)
     x0 = m.x
     for _ in range(14):
         m.msamp(0x40, m.mold[1] + 62 & 0x7F)                  # +31 counts each
-    assert (m.x - x0) & 0xFF == 127 and m.y == 0
+    assert (m.x - x0) & 0xFF == 63 and m.y == 0
     m.frame(0, 0)                                             # the next frame
     m.msamp(0x40, m.mold[1] + 62 & 0x7F)
-    assert (m.x - x0) & 0xFF == 127 + 31
+    assert (m.x - x0) & 0xFF == 63 + 31
     m = Inp()
     m.msamp(0x00, 0x40)
     for _ in range(14):                                       # Y: 1351 up = Amiga -
         m.msamp(m.mold[0] + 62 & 0x7F, 0x40)
-    assert m.y == (-127) & 0xFF
+    assert m.y == (-63) & 0xFF
+
+
+def s8(v: int) -> int:
+    return v - 256 if v & 0x80 else v
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_msamp_two_windows_never_wrap(seed):
+    """W16-I (rev14-mouse round 2): AROS reads JOY0DAT once per window, at
+    any point after the hook; saturated one-way flicks (+-31 a sample, 6-20
+    samples a window, the direction flipping between windows) never move
+    more than 126 counts between two reads."""
+    import random
+    rng = random.Random(seed)
+    m = Inp()
+    m.msamp(0x40, 0x40)
+    since = [0, 0]                    # counts added since the last read, unwrapped
+    worst = 0
+    sign = 1
+    for w in range(60):
+        m.frame(0, 0)
+        if rng.random() < 0.1:
+            sign = -sign
+        n = rng.randint(6, 20)
+        read = rng.randint(0, n) if w > 1 else (0, n)[w]   # w 0-1: the worst case
+        for k in range(n + 1):
+            if k == read:                                     # AROS's VBL read
+                worst = max(worst, *map(abs, since))
+                since = [0, 0]
+            if k < n:
+                y, x = m.y, m.x
+                m.msamp(m.mold[0] + 62 * sign & 0x7E, m.mold[1] - 62 * sign & 0x7E)
+                since[0] += s8((m.y - y) & 0xFF)              # each sample <= 31
+                since[1] += s8((m.x - x) & 0xFF)
+    assert worst == 126              # (read early, then late: two full windows)
+
+
+def signed_clamp_msamp(m: Inp, poty: int, potx: int) -> None:
+    """The W16-I round-0 clamp (a signed +-MCLAMP sum per window), on the
+    same model: the mutant the travel budget replaced (rev16-i M-1)."""
+    new = [poty & 0x7E, potx & 0x7E]
+    if not m.mok:
+        m.mold, m.mok = new, True
+        return
+    for i in (0, 1):
+        d, m.mold[i] = inp_ref.m1351_hyst(m.mold[i], new[i])
+        d = -d if i == 0 else d
+        acc = max(-MCLAMP, min(MCLAMP, m.macc[i] + d))
+        step, m.macc[i] = acc - m.macc[i], acc
+        if i == 0:
+            m.y = (m.y + step) & 0xFF
+        else:
+            m.x = (m.x + step) & 0xFF
+
+
+def reversal_streams(msamp, seeds=range(400), windows=40):
+    """rev16-i M-1's property: random +-31/32 streams with the sign flipping
+    INSIDE windows (and some random d), AROS's read anywhere in a window
+    (often late).  Returns (the worst |counts| between two reads, reads)."""
+    import random
+    worst = reads = 0
+    for seed in seeds:
+        rng = random.Random(seed)
+        m = Inp()
+        msamp(m, 0x40, 0x40)
+        since = [0, 0]
+        for w in range(windows):
+            m.frame(0, 0)
+            n = rng.randint(4, 16)
+            read = n - rng.randint(0, 3) if rng.random() < 0.5 else rng.randint(0, n)
+            for k in range(n + 1):
+                if k == read:
+                    worst = max(worst, *map(abs, since))
+                    reads += 1
+                    since = [0, 0]
+                if k < n:
+                    dd = []
+                    for _ in (0, 1):
+                        if rng.random() < 0.9:
+                            dd.append(rng.choice((-32, -31, 31, 31, -32)))
+                        else:
+                            dd.append(rng.randint(-32, 31))
+                    y, x = m.y, m.x
+                    msamp(m, m.mold[0] + 2 * dd[0] & 0x7E, m.mold[1] + 2 * dd[1] & 0x7E)
+                    since[0] += s8((m.y - y) & 0xFF)
+                    since[1] += s8((m.x - x) & 0xFF)
+    return worst, reads
+
+
+def test_msamp_reversals_inside_windows_never_wrap():
+    """rev16-i M-1: the window's TRAVEL (sum of |counts|) is the budget, so
+    the counts between two reads are <= 63 + 63 = 126 for any stream; the
+    old signed +-63 sum reached 189 with an in-window reversal and a late
+    read (the mutant must exceed 127 on the same streams)."""
+    worst, reads = reversal_streams(lambda m, py, px: m.msamp(py, px))
+    assert reads > 10000 and worst == 126
+    worst_old, _ = reversal_streams(signed_clamp_msamp, seeds=range(100))
+    assert worst_old > 127
+
+
+def rev16i_repro(msamp):
+    """rev16-i M-1's VICE repro on X (Y negated the same way on Y): hook;
+    -32, -31; AROS read; +31 x5; hook; +31 x2; AROS read.  Returns the
+    unwrapped (dy, dx) between the two reads."""
+    m = Inp()
+    msamp(m, 0x40, 0x40)
+    m.frame(0, 0)
+    seq = [(-32, -31), "read", *[(31,)] * 5, "hook", (31,), (31,), "read"]
+    since, out = [0, 0], None
+    for e in seq:
+        if e == "read":
+            out, since = tuple(since), [0, 0]
+            continue
+        if e == "hook":
+            m.frame(0, 0)
+            continue
+        for d in e:
+            y, x = m.y, m.x
+            msamp(m, m.mold[0] + 2 * d & 0x7E, m.mold[1] + 2 * d & 0x7E)
+            since[0] += s8((m.y - y) & 0xFF)
+            since[1] += s8((m.x - x) & 0xFF)
+    return out
+
+
+def test_msamp_rev16i_repro():
+    """W16-I fix 1: the repro's second read sees +62 (Y -62): the window's
+    travel was spent by -63 before the read, so +31 x5 adds nothing; the
+    next window adds +62.  The old signed clamp gave +188 (s8 -68)."""
+    assert rev16i_repro(lambda m, py, px: m.msamp(py, px)) == (-62, 62)
+    assert rev16i_repro(signed_clamp_msamp) == (-188, 188)
+
+
+def test_msamp_travel_kept_in_macc():
+    """inp_macc per axis is the window's travel, u8 <= MCLAMP (Y and X the
+    same, whatever the signs), zeroed by the frame hook."""
+    m = Inp()
+    m.msamp(0x40, 0x40)
+    m.msamp(0x40 + 20, 0x40 - 20)                             # Y +10, X -10
+    assert m.macc == [10, 10]
+    m.msamp(0x40 + 10, 0x40 - 10)                             # back 5 each
+    assert m.macc == [15, 15] and (s8(m.y), s8(m.x)) == (-5, -5)
+    for _ in range(6):
+        m.msamp(m.mold[0] + 40 & 0x7E, m.mold[1] - 40 & 0x7E)
+    assert m.macc == [MCLAMP, MCLAMP]
+    m.frame(0, 0)
+    assert m.macc == [0, 0]
+
+
+def jitter(m: Inp, n: int = 40) -> list:
+    """The user's idle 1351 (C64U, 2026-10-12): POTX $C9/$CA, POTY $AB/$AC,
+    a frame every 4 samples; the JOY0DAT (Y, X) after each sample."""
+    out = []
+    for i in range(n):
+        if i % 4 == 0:
+            m.frame(0, 0)
+        o = m.msamp((0xAB, 0xAC)[i & 1], (0xC9, 0xCA)[i & 1])
+        out.append((o["joy0dat"] >> 8, o["joy0dat"] & 0xFF))
+    return out
+
+
+@pytest.mark.parametrize("before", ["ref", "plus", "minus"])
+def test_hyst_user_idle_pairs_hold_still(before):
+    """W16-I: the idle +-1 count alternation moves the pointer at most one
+    count per axis (right after a move in its direction), then never."""
+    m = Inp()
+    if before == "ref":
+        m.msamp(0xAB, 0xC9)
+    else:
+        s = 1 if before == "plus" else -1
+        m.msamp((0xAB - 20 * s) & 0xFF, (0xC9 - 20 * s) & 0xFF)
+        for k in (12, 6, 0):                                  # a move that ends at rest
+            m.msamp((0xAB - k * s) & 0xFF, (0xC9 - k * s) & 0xFF)
+    y0, x0 = m.y, m.x
+    seq = jitter(m)
+    for (y, x) in seq:
+        assert abs(s8((y - y0) & 0xFF)) <= 1 and abs(s8((x - x0) & 0xFF)) <= 1
+    assert len(set(seq[4:])) == 1
+
+
+def test_hyst_slow_ramp_keeps_every_count():
+    """W16-I: one count a sample passes 1:1; a reversal holds its first count
+    one sample, then passes it (delayed, never lost).  A frame every 4
+    samples (as leg mhyst): the window's travel budget is not reached."""
+    m = Inp()
+    m.msamp(0x40, 0x40)
+    m.msamp(0x44, 0x44)                                       # +2: direction +
+    y0, x0 = m.y, m.x
+    p = 0x44
+    for i in range(32):
+        if i % 4 == 0:
+            m.frame(0, 0)
+        p = p + 2 & 0x7E
+        m.msamp(p, p)
+        assert (m.x - x0) & 0xFF == i + 1 and (y0 - m.y) & 0xFF == i + 1
+    xs = []
+    for i in range(32):
+        if i % 4 == 0:
+            m.frame(0, 0)
+        p = p - 2 & 0x7E
+        m.msamp(p, p)
+        xs.append(s8((m.x - x0) & 0xFF))
+    assert xs[0] == 32 and xs[1] == 30 and xs[-1] == 0        # held one, then 2
+    assert all(b - a in (0, -1, -2) for a, b in zip(xs, xs[1:]))
+    assert (m.y, m.x) == (y0, x0)
+
+
+def test_hyst_direction_kept_in_mold_bit7():
+    """The module keeps the last passed direction in inp_mold bit 7 (1 =
+    negative, the pot's own sense); held samples keep the reference."""
+    m = Inp()
+    m.msamp(0x40, 0x40)
+    assert m.mold == [0x40, 0x40]
+    m.msamp(0x3C, 0x44)                                       # Y -2, X +2
+    assert m.mold == [0x80 | 0x3C, 0x44]
+    m.msamp(0x3E, 0x42)                                       # +-1 against: held
+    assert m.mold == [0x80 | 0x3C, 0x44]
+    m.msamp(0x3A, 0x46)                                       # +-1 along: passes
+    assert m.mold == [0x80 | 0x3A, 0x46]
+
+
+def test_hyst_stale_alias_plus31():
+    """rev16-i L-1 (documented, CONTRACTS): last move -, a +1 held, then
+    +31 from there: +32 from the stale reference, which passes as -32."""
+    from host.inp_ref import m1351_hyst as h
+    mold = 0x80 | 0x40                                        # ref $40, direction -
+    assert h(mold, 0x42) == (0, mold)                         # +1 against: held
+    assert h(mold, 0x42 + 62 & 0x7E) == (-32, 0x80 | 0x00)    # +31 -> -32
+    assert h(0x40, 0x40 + 62) == (31, 0x40 + 62)              # not held: +31
+
+
+def test_hyst_stale_alias_minus32():
+    """rev16-i L-1, the other direction: last move +, a -1 held, then -32
+    from there: -33 from the stale reference, which passes as +31."""
+    from host.inp_ref import m1351_hyst as h
+    mold = 0x40                                               # ref $40, direction +
+    assert h(mold, 0x3E) == (0, mold)                         # -1 against: held
+    assert h(mold, 0x3E - 64 & 0x7E) == (31, 0x7E)            # -32 -> +31
+    assert h(0x40, 0x40 - 64) == (-32, 0x80 | 0x00)           # not held: -32
+
+
+def test_module_equates_match_reference():
+    e = equates("tests/aros/inpm.s")
+    assert num(e["MCLAMP"]) == inp_ref.MCLAMP == 63
 
 
 def test_mouse_buttons_or_with_stick_and_cbm():

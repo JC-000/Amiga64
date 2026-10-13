@@ -60,6 +60,7 @@
 .export mach_init, mach_run, mach_vec, mach_beam, mach_irq, mach_nmi
 .export mach_rdc
 .export mach_s, mach_on, mach_nmis, mach_bv, mach_bh, mach_next, mach_now
+.export mach_sl                ; W16-P: the latched shift, read by the WB launcher (aros_wb)
 .import emu_run, emu_step, chip_shd
 ; W9-I: the event seam (docs/CONTRACTS.md "Event seam (S3.3/S3.4)")
 .export mach_etime, mach_arm, mach_disarm, mach_post, mach_kick

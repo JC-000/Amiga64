@@ -34,8 +34,11 @@ Checks (asserted; the instrumental M3 gate):
   * pitch (Ultimates): the "probe" song plays one channel, a sine of 32
     samples, one note per 4 rows; every note's frequency in the captured
     audio against the sampler law for its Paula period (run_paula.f_expect,
-    PITCH_TOL) and against Paula's (0.5%), aligned to the audio by the
-    first onset;
+    PITCH_TOL; the sample time constant of the device's /v1/info product,
+    paula_ref.sample_c) and against Paula's (0.5%), aligned to the audio by
+    the first sustained tone (align); the stream rate implied by the last
+    note's onset within RATE_CHECK_TOL of the nominal (else the alignment,
+    not the pitch, is reported);
   * the UI updated (disp_nconv grew while it played);
   * headroom, reported: the deepest catch-up (S_MAXCU), stage flushes,
     level-6 entries, deliveries, the module's counters.
@@ -401,13 +404,33 @@ class Capture:
                 "rate_wall": len(raw) / (t1 - self.t0)}     # coarse: host clock
 
 
-def pitch_check(c: RM.Case, res: dict, au: dict, phi2: int, s: int) -> tuple[list[str], list]:
+ALIGN_HOLD = 0.05      # s: the first tone must last this long (a DC step is 1-2 10 ms windows)
+RATE_CHECK_TOL = 0.01  # the cross-check's bound: 1% of the 3.36 s span is 34 ms, under the
+                       # 20% margin (~92 ms) each pitch window keeps inside its note, and
+                       # 7x the spread of the measurement itself (+0.14% on both devices:
+                       # 20 ms windows, 5 ms hop); the sup16 C64U misalignment read +6.7%
+
+
+def align(au: dict, thr: float = 500.0) -> int:
+    """The audio's first sample of the song: the first tone held ALIGN_HOLD
+    seconds.  Not the first loud window: the C64U's stream steps from its
+    idle DC 0.22 s before the first note (W16-A, build/evidence/sup16/c64u-pitch)."""
+    from tests.run_paula import find_tone
+    return find_tone(au["mono"], au["rate"], thr=thr, hold=ALIGN_HOLD)[0]
+
+
+def pitch_check(c: RM.Case, res: dict, au: dict, phi2: int, s: int,
+                law_c: float | None = None) -> tuple[list[str], list]:
     """Each probe note's frequency (middle 60% of its rows) against the
-    sampler law and Paula; aligned by the first onset."""
-    from tests.run_paula import PITCH_TOL, f_expect, find_tone, peak
+    sampler law (*law_c*: the device's constant, paula_ref.sample_c) and
+    Paula; aligned by the first sustained tone; the stream-rate cross-check
+    asserted (RATE_CHECK_TOL)."""
+    from host import paula_ref as PR
+    from tests.run_paula import PITCH_TOL, f_expect, peak
+    law_c = PR.SAMPLE_C_LAW if law_c is None else law_c
     recs = res["recs"]
     f, rows = [], []
-    a, _ = find_tone(au["mono"], au["rate"])
+    a = align(au)
     t_first = RM.rec_time(recs, 0)
     sec = lambda i: ((RM.rec_time(recs, i) - t_first) << s) / phi2
     notes = []                                  # (first tick, last tick, period, instrument)
@@ -424,7 +447,7 @@ def pitch_check(c: RM.Case, res: dict, au: dict, phi2: int, s: int) -> tuple[lis
         m0, m1 = lo + 0.2 * (hi - lo), hi - 0.2 * (hi - lo)
         x = au["l"][a + int(m0 * au["rate"]):a + int(m1 * au["rate"])]   # channel 0: left
         pk = peak(x, au["rate"])
-        fs, fp = f_expect(per, 32)
+        fs, fp = f_expect(per, 32, law_c)
         rows.append({"per": per, "f": pk["f"], "f_sampler": fs, "f_paula": fp,
                      "t": round(lo, 3), "rms": pk["rms"]})
         if abs(pk["f"] / fs - 1) > PITCH_TOL:
@@ -441,16 +464,23 @@ def pitch_check(c: RM.Case, res: dict, au: dict, phi2: int, s: int) -> tuple[lis
         f_old = [rows[-2]["f_sampler"]] if len(rows) > 1 else []
         dt = onset(au["l"], au["rate"], a + int((sec(i_last) - 0.1) * au["rate"]),
                    a + int((sec(i_last) + 0.3) * au["rate"]), rows[-1]["f_sampler"], f_old)
-        if dt is not None:
+        if dt is None:
+            f.append("stream rate cross-check: the last note's onset is not in the audio "
+                     "(the alignment, not the pitch)")
+        else:
             t_audio = sec(i_last) - 0.1 + dt
-            rows.append({"rate_check": round(au["rate"] * t_audio / sec(i_last), 1),
+            rc = au["rate"] * t_audio / sec(i_last)
+            rows.append({"rate_check": round(rc, 1),
                          "note": "the stream rate implied by the last note's onset "
                                  "(+-5 ms windows: about +-0.2%)"})
+            if abs(rc / au["rate"] - 1) > RATE_CHECK_TOL:
+                f.append(f"stream rate cross-check: {rc:.1f} Hz vs {au['rate']:.1f} "
+                         f"(> {RATE_CHECK_TOL:.0%}): the alignment, not the pitch")
     return f, rows
 
 
 def note_ends(c: RM.Case, res: dict, au: dict, phi2: int, s: int, side: str = "l",
-              chan: int = 0) -> dict:
+              chan: int = 0, law_c: float | None = None) -> dict:
     """What follows each note's end on *chan* (output *side*), against what
     Paula should play (paula_ref's sampler law, the trace's write timeline):
 
@@ -461,15 +491,17 @@ def note_ends(c: RM.Case, res: dict, au: dict, phi2: int, s: int, side: str = "l
       pre-song floor), RMS (AC), the strongest spectral peak (a buzz), and
       the level relative to the note's own RMS;
     * the song end (DMACON off): the same, for 0.25 s.
-    Timestamps in seconds from the first trigger in the audio."""
+    Timestamps in seconds from the first trigger in the audio (align);
+    one-shot lengths by the device's sample time constant *law_c*."""
     import numpy as np
     from host import paula_ref as PR
-    from tests.run_paula import find_tone, peak
+    from tests.run_paula import peak
+    law_c = PR.SAMPLE_C_LAW if law_c is None else law_c
     x = au[side]
     rate = au["rate"]
     recs = res["recs"]
-    a, _ = find_tone(au["mono"], rate, thr=200.0)
-    floor = x[:max(1, a - int(0.05 * rate))]
+    a = align(au, thr=200.0)
+    floor = x[max(0, a - int(0.15 * rate)):max(1, a - int(0.05 * rate))]   # after a DC step
     base = float(floor.mean()) if len(floor) else 0.0
     noise = float(floor.std()) if len(floor) else 0.0
     t0 = RM.rec_time(recs, 0)
@@ -500,7 +532,7 @@ def note_ends(c: RM.Case, res: dict, au: dict, phi2: int, s: int, side: str = "l
                                 "gap_ms": round(best / rate * 1000, 2)})
         if not ln or not per or rln > 1:        # a looped note: retriggered, no end
             continue
-        dur = 2 * ln * PR.sample_ns(PR.sampler_rate(per)) / 1e9
+        dur = 2 * ln * PR.sample_ns(PR.sampler_rate(per), law_c) / 1e9
         nxt = sec(trig[k + 1][0]) if k + 1 < len(trig) else ts + dur + 0.25
         if ts + dur + 0.01 >= nxt:              # cut by the next trigger before its end
             continue
@@ -528,7 +560,8 @@ def note_ends(c: RM.Case, res: dict, au: dict, phi2: int, s: int, side: str = "l
     return out
 
 
-def demo_clicks(c: RM.Case, res: dict, au: dict, phi2: int, s: int) -> dict:
+def demo_clicks(c: RM.Case, res: dict, au: dict, phi2: int, s: int,
+                law_c: float | None = None) -> dict:
     """The demo mixes channels, so per-note residuals are not separable:
     count sample-to-sample discontinuities (a step > 8x the local RMS of
     the steps) on each output side, and how many fall within 5 ms of a
@@ -536,10 +569,10 @@ def demo_clicks(c: RM.Case, res: dict, au: dict, phi2: int, s: int) -> dict:
     same fraction of the time would catch by chance."""
     import numpy as np
     from host import paula_ref as PR
-    from tests.run_paula import find_tone
+    law_c = PR.SAMPLE_C_LAW if law_c is None else law_c
     rate = au["rate"]
     recs = res["recs"]
-    a, _ = find_tone(au["mono"], rate, thr=200.0)
+    a = align(au, thr=200.0)
     t0 = RM.rec_time(recs, 0)
     sec = lambda i: ((RM.rec_time(recs, i) - t0) << s) / phi2
     out = {}
@@ -558,7 +591,7 @@ def demo_clicks(c: RM.Case, res: dict, au: dict, phi2: int, s: int) -> dict:
                     per = next((v for r, v in t.writes if r == mod_ref.AUD[ch] + 6), 0)
                     rl = [v for r, v in t.writes if r == mod_ref.AUD[ch] + 4][-1:]
                     if ln and per and rl and rl[0] <= 1:          # one-shots only
-                        ends.append(sec(i) + 2 * ln * PR.sample_ns(PR.sampler_rate(per)) / 1e9)
+                        ends.append(sec(i) + 2 * ln * PR.sample_ns(PR.sampler_rate(per), law_c) / 1e9)
         ends = np.array(sorted(ends))
         near = sum(1 for t in clicks if len(ends) and np.abs(ends - t).min() < 0.005)
         span = len(x) / rate
@@ -650,6 +683,12 @@ def session(rig: Rig, out: str, a, fails: list[str], rep: dict) -> None:
     log(f"player built (UI_SRC={ui}, {' '.join(defs) or 'product'}), {len(img)} bytes; "
         f"s = {s}, tick_e = {round(phi_run / 50) >> s}, cfg_r16 = {r16}, cfg_hw = {hw}")
     rep.update(s=s, r16=r16, hw=hw)
+    product = rep.get("info", {}).get("product")
+    law_c = paula_ref.sample_c(product)
+    if not rig.vice:
+        rep["sampler_c_ns"] = law_c
+        log(f"sampler law: (rate + 1) x 160 + {law_c:g} ns ({product!r}"
+            f"{'' if product in paula_ref.SAMPLE_C_NS else ': unmeasured, the W10-H law'})")
     for c in cases(phi_run, s, a.seconds, a.attended, a.song):
         if a.only and c.name not in a.only.split(","):
             continue
@@ -682,7 +721,7 @@ def session(rig: Rig, out: str, a, fails: list[str], rep: dict) -> None:
                 if not au["intact"]:
                     f.append(f"{c.name}: the audio time base is not intact (resync/discard)")
                 if c.name == "probe":
-                    ne = note_ends(c, res, au, phi_run, s)
+                    ne = note_ends(c, res, au, phi_run, s, law_c=law_c)
                     lr["note_ends"] = ne
                     log(f"  note ends: floor rms {ne['floor_rms']}; song end {ne['song_end']}")
                     for e in ne["triggers"]:
@@ -694,11 +733,11 @@ def session(rig: Rig, out: str, a, fails: list[str], rep: dict) -> None:
                             f"({e['after_rel_db']} dB re the note's {e['note_rms']}), peak "
                             f"{e['after_peak_hz']} Hz, edge step {e['edge_max_step']}")
                 if c.name == "demo":
-                    dc = demo_clicks(c, res, au, phi_run, s)
+                    dc = demo_clicks(c, res, au, phi_run, s, law_c=law_c)
                     lr["demo_clicks"] = dc
                     log(f"  demo discontinuities: {dc}")
                 if c.name == "probe":
-                    pf, rows = pitch_check(c, res, au, phi_run, s)
+                    pf, rows = pitch_check(c, res, au, phi_run, s, law_c=law_c)
                     lr["pitch"] = rows
                     f += pf
                     for row in rows:

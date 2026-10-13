@@ -25,11 +25,17 @@ CIAB_ICR        equ     $bfdd00
 CIAB_CRA        equ     $bfde00
 CIAB_CRB        equ     $bfdf00
 
+        ifd     MOD_HUNK                ; W16-X: the AmigaOS launcher (fixtures/modwb/)
+        xref    VIEW,PARAM,STATUS       ; the three blocks live in its hunks
+        else
 VIEW            equ     $000400         ; I-1 mod_view, 72 bytes
+        endc
 VIEW_LEN        equ     72
 
 ; parameter block, host -> program
+        ifnd    MOD_HUNK
 PARAM           equ     $000480
+        endc
 P_MAGIC         equ     0               ; 'MPAR'
 P_MOD           equ     4               ; u32 guest address of the MOD
 P_LEN           equ     8               ; u32 its length
@@ -39,12 +45,15 @@ P_MAXT          equ     16              ; u32 stop after this many ticks (0 = no
 P_START         equ     20              ; u8 start position
 P_UIDIV         equ     21              ; u8 UI_DIV: publish + ui_frame every Nth VERTB (0, 1 = every one)
 P_MAXF          equ     24              ; u32 stop after this many frames (0 = no limit; MOD_TRACE builds only)
+P_STAGEE        equ     22              ; u16 E ticks per DMA stage (0 = STAGE_E; MOD_HUNK builds only, W16-X)
 PF_STOPEND      equ     0               ; bit: halt at the song end instead of looping
 PF_TRACE        equ     1               ; bit: write the trace (MOD_TRACE builds)
 PF_REALTIME     equ     2               ; bit: every tick from CIA-B TA (tick_e scaled)
 
 ; status block, program -> host
+        ifnd    MOD_HUNK
 STATUS          equ     $0004c0
+        endc
 S_MAGIC         equ     0               ; 'MSTA'
 S_STATE         equ     4               ; u8: 1 running, 2 done, 3 error, 4 fault
 S_ERR           equ     5               ; u8 error code (main's return value)
