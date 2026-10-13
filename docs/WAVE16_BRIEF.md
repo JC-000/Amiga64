@@ -83,3 +83,29 @@ Worktrees: `.claude/worktrees/w16-<pkg>`, branch `wave16/<pkg>`. Evidence goes i
 1. M0 notes to the supervisor (short message, details in PROGRESS.md). Rulings go into a brief addendum.
 2. Red first; reviewers per package; fix rounds until MERGE.
 3. The supervisor merges in the order P, I, X, D, gates, then runs the attended Workbench demo with the user.
+
+## Addendum: supervisor rulings (2026-10-12)
+- **Profile block (W16-P):**
+  - Guest $2DC000-$2DC03F, rc region `prof` $2DC000-$2DC0FF, right after the ADF staging ($200000-$2DBFFF).
+  - 64 B big-endian: 'A64P', ver, size, e_hz_q8, tick_e, frame_e, phi2_hz, s, host, flags, r16, MHz, and a check at +60.
+  - The host writes it only while the guest is stopped. If the check fails, the guest falls back to Amiga timing.
+- **App anchor (W16-X writes, host reads):**
+  - $2DC040-$2DC04F: +0 'MWBA', +4 a state-struct pointer, +8 seq/flags.
+  - It is the single way tests and e2e find the player (not tc_UserData, not a scan).
+- **aud in Workbench sessions (W16-P):**
+  - The same addresses and bytes. It is staged and init'ed last, before m.start or the snap_resume launch.
+  - GuestPeek saves and restores PEEK_BUF.
+  - leg cost and --watch refuse --audio.
+  - A mid-play snapshot resumes silent (a known limit).
+  - The sampler proof is differential (MAP item off vs on).
+  - Until the reboot-silence check is done, the player ends with DMA off.
+- **W16-X:**
+  - The OS-claim takeover/restore. It backs out cleanly if a claim fails.
+  - The MOD_HUNK/UI_HUNK switches, with the default W15 builds byte-identical.
+  - P_STAGEE from the profile E rate.
+  - The exit on LMB/fire or song end.
+  - Leg S (exec stub) is the gate; leg A (real AROS) runs on demand.
+- **W16-D:**
+  - amigaguide.datatype is deleted from the REU copy only, with an asserted no-read.
+  - The CONTRACTS overlay text is widened to cover adding and deleting files.
+- **W16-I:** the direction-following 1-count deadband, ±63 saturation, and 0 MAIN bytes.
