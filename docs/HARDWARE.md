@@ -1329,3 +1329,23 @@ New sampler facts [MEASURED HW]:
   lengths 1.50-1.51 s for 108 frames = 1.498 s).
 - Not shown on hardware: the REPEAT B == LENGTH hazard itself (the module
   never produces that state, proven on the VICE command log).
+
+## Wave 15 player on the Ultimates (W15-M M3, 2026-10-12)
+
+Found while running the integrated MOD player (`tests/run_player.py`;
+evidence `build/evidence/w15-m3/`):
+- **C64U fw 1.1.0, FPGA 122: the sampler maps.** "Map Ultimate Audio
+  $DF20-DFFF" is in "C64 and Cartridge Settings", and the 6510 reads
+  `$DF21 = $10`.
+- **The C64U is NTSC.** The VIC's last raster line is 262 and phi2 is
+  1022727 Hz. The player profile is therefore the U64E's: s = 0, tick_e
+  20455, cfg_r16 18897.
+- **The C64U on WiFi refuses UDP audio streaming.** `PUT
+  /v1/streams/audio:start` returns HTTP 500 with `{"errors":["No Operational
+  Network Interface"]}`. Instrumental audio runs only on the U64E; on the
+  C64U, run_player uses `--no-audio`.
+- **The C64U's stored config has turbo Off and the REU Disabled at 2 MB.**
+  prepare_target sets the REU to 16 MB inside the hold, so check the REU
+  after prepare.
+- **U64E fw 3.15: the audio stream rate is phi2 x 3/64 = 47940.34 Hz.**
+  This was confirmed against guest timing to -0.008%.

@@ -23,9 +23,12 @@
 ;   music stays exact but runs late); UI_DIV does not help there, it only
 ;   thins the UI calls when the UI itself is the load.
 ;   The DMA stages (CIA-A TB one-shot, level 2) take the same guard; the
-;   one-shot is armed at run_loop's end, never inside a tick, and a tick
-;   that finds stages still pending runs them first (S_FLUSH), so the
-;   write order is always tick N, its stages, tick N + 1.
+;   one-shot is armed by emit, the tick's last step, when no further tick
+;   is owed (the retrigger gap: DMACON clear to set is the tick's Paula
+;   writes + STAGE_E), else at run_loop's end (catch-up: nothing left
+;   pending under IPL 2 for a whole tick), and a tick that finds stages
+;   still pending runs them first (S_FLUSH), so the write order is always
+;   tick N, its stages, tick N + 1.
 ;
 ; C entries (vbcc ABI: d0-d1/a0-a1 scratch): int mod_init(void),
 ; void mod_start(void), void mod_wait_frame(void), void mod_publish(void),
@@ -125,6 +128,7 @@ G_PLAYM         equ     75
 G_STAGE         equ     76
 G_STGM          equ     77
 G_FLAGS         equ     78
+G_ARMED         equ     79      ; nonzero: emit armed stage 1's one-shot
 G_DELAY         equ     80
 G_BRK           equ     81      ; $FF = none
 G_JMP           equ     82
@@ -141,6 +145,7 @@ G_VFR           equ     104     ; l VBL tempo: the frames already turned into ti
 G_TOD           equ     88      ; l trace: CIA-A TOD (frames) at the tick's start
 G_BEAM          equ     92      ; l trace: VPOSR:VHPOSR with it
 G_SIZE          equ     108
+EMIT_MAX        equ     84      ; trace bytes one emit can log (21 writes)
 
 ; PWA value,disp / PWAL value,disp: a Paula write to the channel registers
 ; at a4 (= CUSTOM + AUD0LC + 16 * channel); the trace build logs it too
@@ -589,8 +594,8 @@ run_loop:
         cmp.l   G_VFR(a6),d0
         bne.s   .again
         bra.s   .end
-.cia:   bsr     read_tb
-        cmp.w   G_TBLAST(a6),d1
+.cia:   move.b  CIAB_TBLO,d1            ; an underflow since the last look
+        cmp.b   G_TBLAST+1(a6),d1       ; (TB counts them down by one)
         bne.s   .again
 .end:
         ifd     MOD_TRACE
@@ -602,6 +607,8 @@ run_loop:
         endc
         ifnd    MOD_MUT_EMITARM
         cmp.b   #1,G_STAGE(a6)          ; the stages: from the loop's end
+        bne.s   .h
+        tst.b   G_ARMED(a6)             ; unless emit armed them
         bne.s   .h
         bsr     stage_arm
 .h:
@@ -652,9 +659,9 @@ tick_loop:
 .tk:    addq.w  #1,d6
         move.w  d6,-(sp)
         bsr     do_tick
-        bsr     timer_update
         move.w  (sp)+,d6
-        bra.s   .lp
+        tst.b   G_ARMED(a6)             ; emit saw no tick owed: run_loop's
+        beq.s   .lp                     ; IPL-7 re-check is the only one left
 .r:     rts
 
 ; read_tb: d1.w := CIA-B timer B (consistent: high byte read around low)
@@ -855,7 +862,6 @@ do_tick:
         clr.b   G_LOOPFLAG(a6)
         bsr     row_start
 .eff:   bsr     effects
-        bsr     emit
         addq.l  #1,G_TICKS(a6)
         move.l  G_TICKS(a6),STATUS+S_TICKS
         ; elapsed: B of the interval after this tick
@@ -919,7 +925,9 @@ do_tick:
         cmp.l   G_TICKS(a6),d0
         bhi.s   .h
         st      G_HALTED(a6)
-.h:     tst.b   G_HALTED(a6)
+.h:     bsr     timer_update            ; (before emit: out of the retrigger gap)
+        bsr     emit                    ; last (the retrigger gap), before finish
+        tst.b   G_HALTED(a6)
         beq.s   .ret
         bsr     finish
 .ret:   rts
@@ -1598,64 +1606,133 @@ clampout:
         rts
 
 ; ---------------------------------------------------------------------------
-; emit: this tick's Paula writes (mod_ref's protocol), then arm the stages.
+; emit: this tick's Paula writes (mod_ref's protocol), then the stages.  The
+; tick's last step: from the DMACON clear to the set the channel is silent,
+; so the loops visit only the channels with work, and the trace build logs
+; inline through a2 (ELOG: 2 instructions a write, not tr_w's ~16).
 ; ---------------------------------------------------------------------------
-emit:   moveq   #0,d1
+ELOG    macro                           ; register, value
+        ifd     MOD_TRACE
+        move.w  \1,(a2)+
+        move.w  \2,(a2)+
+        endc
+        endm
+
+; EMLC n: channel n's trigger LC/LEN, if it plays (d2 = G_PLAYM)
+EMLC    macro
+        btst    #\1,d2
+        beq.s   .n\@
+        move.l  C_TLC+\1*CH_SIZE(a3),d1
+        move.l  d1,AUD0LC+\1*16(a5)
+        ifd     MOD_TRACE
+        swap    d1
+        ELOG    #AUD0LC+\1*16,d1
+        swap    d1
+        ELOG    #AUD0LC+\1*16+2,d1
+        endc
+        move.w  C_TLEN+\1*CH_SIZE(a3),d1
+        move.w  d1,AUD0LC+\1*16+4(a5)
+        ELOG    #AUD0LC+\1*16+4,d1
+.n\@:
+        endm
+
+; EMPV n: channel n's PER, VOL if touched (d2 = G_DIRTY): always on a
+; trigger (d4 = G_TRIGM), else only when changed
+EMPV    macro
+        btst    #\1,d2
+        beq.s   .n\@
+        move.w  C_OUTPER+\1*CH_SIZE(a3),d1
+        btst    #\1,d4
+        bne.s   .p\@
+        cmp.w   C_WPER+\1*CH_SIZE(a3),d1
+        beq.s   .v\@
+.p\@:   move.w  d1,C_WPER+\1*CH_SIZE(a3)
+        move.w  d1,AUD0LC+\1*16+6(a5)
+        ELOG    #AUD0LC+\1*16+6,d1
+.v\@:   moveq   #0,d1
+        move.b  C_OUTVOL+\1*CH_SIZE(a3),d1
+        btst    #\1,d4
+        bne.s   .w\@
+        cmp.b   C_WVOL+\1*CH_SIZE(a3),d1
+        beq.s   .n\@
+.w\@:   move.b  d1,C_WVOL+\1*CH_SIZE(a3)
+        move.w  d1,AUD0LC+\1*16+8(a5)
+        ELOG    #AUD0LC+\1*16+8,d1
+.n\@:
+        endm
+
+emit:   clr.b   G_ARMED(a6)
+        ifd     MOD_TRACE
+        bsr     elog_open
+        endc
+        lea     chans,a3
+        moveq   #0,d1
         move.b  G_TRIGM(a6),d1
         beq.s   .nt
-        move.w  #DMACON,d0
-        bsr     pw
-.nt:    tst.b   G_PLAYM(a6)
-        beq.s   .pv0
-        lea     chans,a3
-        lea     AUD0LC(a5),a4
-        moveq   #0,d7
-.lc:    btst    d7,G_PLAYM(a6)
-        beq.s   .lcn
-        move.l  C_TLC(a3),d1
-        PWAL    d1,0
-        move.w  C_TLEN(a3),d1
-        PWA     d1,4
-.lcn:   lea     CH_SIZE(a3),a3
-        lea     16(a4),a4
-        addq.w  #1,d7
-        cmp.w   #4,d7
-        blo.s   .lc
-.pv0:   tst.b   G_DIRTY(a6)
+        move.w  d1,DMACON(a5)
+        ELOG    #DMACON,d1
+.nt:    move.b  G_PLAYM(a6),d2
+        beq     .pv0
+        EMLC    0
+        EMLC    1
+        EMLC    2
+        EMLC    3
+.pv0:   move.b  G_DIRTY(a6),d2
         beq     .stg
-        lea     chans,a3
-        lea     AUD0LC(a5),a4
-        moveq   #0,d7
-.pv:    btst    d7,G_DIRTY(a6)
-        beq.s   .pn
-        move.w  C_OUTPER(a3),d1
-        btst    d7,G_TRIGM(a6)
-        bne.s   .wp
-        cmp.w   C_WPER(a3),d1
-        beq.s   .vv
-.wp:    move.w  d1,C_WPER(a3)
-        PWA     d1,6
-.vv:    moveq   #0,d1
-        move.b  C_OUTVOL(a3),d1
-        btst    d7,G_TRIGM(a6)
-        bne.s   .wv
-        cmp.b   C_WVOL(a3),d1
-        beq.s   .pn
-.wv:    move.b  d1,C_WVOL(a3)
-        PWA     d1,8
-.pn:    lea     CH_SIZE(a3),a3
-        lea     16(a4),a4
-        addq.w  #1,d7
-        cmp.w   #4,d7
-        blo.s   .pv
-.stg:   move.b  G_PLAYM(a6),d0
+        move.b  G_TRIGM(a6),d4
+        EMPV    0
+        EMPV    1
+        EMPV    2
+        EMPV    3
+.stg:
+        ifd     MOD_TRACE
+        bsr     elog_close
+        endc
+        move.b  G_PLAYM(a6),d0
         beq.s   .r
         move.b  d0,G_STGM(a6)
-        move.b  #1,G_STAGE(a6)          ; armed at run_loop's end
+        move.b  #1,G_STAGE(a6)
         ifd     MOD_MUT_EMITARM
-        bsr     stage_arm               ; mutant: armed inside the tick
+        bsr     stage_arm               ; mutant: armed inside the tick, always
+        else
+        tst.b   G_HALTED(a6)            ; the end: finish flushes them now
+        bne.s   .r
+        tst.w   G_TDUR(a6)              ; a further tick owed (catch-up):
+        beq.s   .vb                     ; run_loop's end arms them
+        move.b  CIAB_TBLO,d1            ; an underflow since the last look
+        cmp.b   G_TBLAST+1(a6),d1       ; (TB counts them down by one)
+        bne.s   .r
+        bra.s   .arm
+.vb:    move.l  G_FRAMES(a6),d0
+        cmp.l   G_VFR(a6),d0
+        bne.s   .r
+.arm:   bsr     stage_arm               ; none: armed now, the last step
+        st      G_ARMED(a6)
         endc
 .r:     rts
+
+        ifd     MOD_TRACE
+; elog_open: a2 := the write stream, room for a whole tick (EMIT_MAX), or
+; the sink (not tracing; overflow: flagged, the tick's writes not logged)
+elog_open:
+        lea     tr_sink,a2
+        tst.b   G_TRACE(a6)
+        beq.s   .r
+        move.l  G_TWP(a6),a0
+        cmp.l   #TR_WEND-EMIT_MAX,a0
+        bhi.s   .ovf
+        move.l  a0,a2
+.r:     rts
+.ovf:   st      STATUS+S_TOVF
+        rts
+
+elog_close:
+        cmp.l   #TR_W,a2                ; the sink: nothing to keep
+        blo.s   .r
+        move.l  a2,G_TWP(a6)
+        move.l  a2,STATUS+S_TWP
+.r:     rts
+        endc
 
 ; ---------------------------------------------------------------------------
 ; build_view: the shadow mod_view of this tick.
@@ -1727,3 +1804,6 @@ insts:  ds.b    31*IN_SIZE
 shadow: ds.b    VIEW_LEN
 _mod_done:
         ds.b    2
+        ifd     MOD_TRACE
+tr_sink: ds.b   EMIT_MAX
+        endc
