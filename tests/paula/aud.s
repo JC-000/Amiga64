@@ -350,7 +350,7 @@ dnx:    tya
         adc #32
         tay
         cpy #128
-        bne dch
+        bcc dch                 ; (bcc: any Y >= 128 ends the walk)
         lda tf
         beq :+
         jsr rearm
@@ -503,7 +503,7 @@ fnx:    tya
         adc #32
         tay
         cpy #128
-        bne fl
+        bcc fl                 ; (bcc: any Y >= 128 ends the walk)
         jmp rearm
 
 ; parkq — C = 1 when the voice loops this block in hardware (CTRL bit 1:
