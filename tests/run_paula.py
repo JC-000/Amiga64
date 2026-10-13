@@ -1207,6 +1207,7 @@ HW_S = 0                       # the player profile (R3)
 VBL_HZ = 1022727 / 14188       # VERTB at s = 0 on the NTSC U64E: 72.08 Hz
 VERTB = 0x0020
 HW_LOG: list[str] = []
+HW_LAW_C = [PR.SAMPLE_C_LAW]   # the sampler's constant (ns), set from /v1/info by hw_main
 
 
 def hlog(msg: str) -> None:
@@ -1340,8 +1341,12 @@ def seg(a, lo: float, hi: float):
     return a[int(len(a) * lo):int(len(a) * hi)]
 
 
-def find_tone(x, rate: float, thr: float = 500.0, win: float = 0.01) -> tuple[int, int]:
-    """First and last sample index where the *win*-second RMS exceeds thr."""
+def find_tone(x, rate: float, thr: float = 500.0, win: float = 0.01,
+              hold: float = 0.0) -> tuple[int, int]:
+    """First and last sample index where the *win*-second RMS exceeds thr.
+    *hold* > 0: the first is where it stays above thr for *hold* seconds (a
+    DC step, as the C64U's stream takes before a song, is one or two
+    windows; W16-A)."""
     import numpy as np
     w = int(rate * win)
     n = len(x) // w
@@ -1349,7 +1354,11 @@ def find_tone(x, rate: float, thr: float = 500.0, win: float = 0.01) -> tuple[in
     on = [i for i, v in enumerate(r) if v > thr]
     if not on:
         return 0, 0
-    return on[0] * w, (on[-1] + 1) * w
+    k = max(1, round(hold / win))
+    first = next((i for i in on if all(v > thr for v in r[i:i + k]) and i + k <= n), None)
+    if first is None:
+        return 0, 0
+    return first * w, (on[-1] + 1) * w
 
 
 def onset(x, rate: float, a: int, b: int, f_new: float, f_old: list[float],
@@ -1379,10 +1388,18 @@ def tone_stats(au: dict, tag: str) -> dict:
     return pk
 
 
-def f_expect(per: int, period: int) -> tuple[float, float]:
+def hw_ns(per: int) -> float:
+    """The sample time the device plays for PER (its RATE by the module's
+    law, its own constant: HW_LAW_C)."""
+    return PR.sample_ns(PR.sampler_rate(per), HW_LAW_C[0])
+
+
+def f_expect(per: int, period: int, law_c: float | None = None) -> tuple[float, float]:
     """(the sampler's frequency for RATE(per), Paula's) of a waveform of
-    *period* samples."""
-    return (1e9 / (period * PR.sample_ns(PR.sampler_rate(per))),
+    *period* samples; *law_c*: the sample time constant (default HW_LAW_C,
+    the device of this session)."""
+    c = HW_LAW_C[0] if law_c is None else law_c
+    return (1e9 / (period * PR.sample_ns(PR.sampler_rate(per), c)),
             PR.PAL_CCK / (period * per))
 
 
@@ -1532,7 +1549,7 @@ def hw_irq(rig: HwRig, out: str, rep: dict) -> list[str]:
     ts = tone_stats(au, "irq")
     m, st = rig.state()
     cnt = be(rig.guest_read(CNT, 4))
-    blk = 32 * PR.sample_ns(PR.sampler_rate(428)) * 1e-9
+    blk = 32 * hw_ns(428) * 1e-9
     t_guest = frames / VBL_HZ
     rep["irq"] = {"count": cnt, "nb": m[0]["nb"], "nirq": res["nirq"], "wall": res["wall"],
                   "tone_s": ts["tone_s"], "e_s": ((res["e1"] - res["e0"]) & 0xFFFFFFFF) / 1022727,
@@ -1656,7 +1673,7 @@ def hw_oneshot(rig: HwRig, out: str, rep: dict) -> list[str]:
     m, st = rig.state()
     a, b = find_tone(au["mono"], au["rate"], thr=500.0, win=0.002)
     dur = (b - a) / au["rate"]
-    want = 512 * PR.sample_ns(PR.sampler_rate(428)) * 1e-9
+    want = 512 * hw_ns(428) * 1e-9
     x, r0 = au["mono"], au["rate"]
     tail = float(np.mean(x[b + int(r0 * 0.1):b + int(r0 * 0.5)])) if b else 0.0
     tail5 = float(np.mean(x[b:b + int(r0 * 0.005)])) if b else 0.0   # the first 5 ms
@@ -1696,7 +1713,7 @@ def hw_ctrl(rig: HwRig, out: str, rep: dict) -> list[str]:
     m, st = rig.state()
     x, r0 = au["mono"], au["rate"]
     a, b = find_tone(x, r0)
-    st_ns = PR.sample_ns(PR.sampler_rate(428))
+    st_ns = hw_ns(428)
     f32, f16 = 1e9 / (32 * st_ns), 1e9 / (16 * st_ns)
     w = int(r0 * 0.02)
     sw = None
@@ -1734,7 +1751,7 @@ def hw_liveper(rig: HwRig, out: str, rep: dict) -> list[str]:
     res, au = rig.capture("liveper", pc, out)
     x, r0 = au["mono"], au["rate"]
     a, b = find_tone(x, r0)
-    s428, s214 = (PR.sample_ns(PR.sampler_rate(p_)) * 1e-9 for p_ in (428, 214))
+    s428, s214 = (hw_ns(p_) * 1e-9 for p_ in (428, 214))
     fa428, fa214, fb214 = 1 / (32 * s428), 1 / (32 * s214), 1 / (16 * s214)
     tw = onset(x, r0, a, b, fa214, [fa428])
     tb = onset(x, r0, a, b, fb214, [fa428, fa214])
@@ -1767,7 +1784,7 @@ def hw_livevol(rig: HwRig, out: str, rep: dict) -> list[str]:
     res, au = rig.capture("livevol", pc, out)
     x, r0 = au["mono"], au["rate"]
     a, b = find_tone(x, r0)
-    s428 = PR.sample_ns(PR.sampler_rate(428)) * 1e-9
+    s428 = hw_ns(428) * 1e-9
     tb = onset(x, r0, a, b, 1 / (16 * s428), [1 / (32 * s428)])
     w = int(r0 * 0.01)                          # the VOL step: the level halves
     lv = [float(np.std(x[i:i + w])) for i in range(a, b - w, w)]
@@ -1899,6 +1916,10 @@ def hw_main(prg: str, out: str, legs: list[str]) -> int:
         speed = [i.get("CPU Speed") for i in cats.values() if "CPU Speed" in i]
         hlog(f"found: {MAP_ITEM!r} in {where}, REU {reu}, CPU speed {speed}")
         rep.update(map_cat=where, reu=reu, speed_found=speed, info=hold["info"])
+        HW_LAW_C[0] = PR.sample_c(hold["info"].get("product"))
+        rep["sampler_c_ns"] = HW_LAW_C[0]
+        hlog(f"sampler law: (rate + 1) x 160 + {HW_LAW_C[0]:g} ns "
+             f"({hold['info'].get('product')!r})")
         if not where or not reu or reu[0][0] != "Enabled" or "16" not in str(reu[0][1]):
             fails.append(f"INFRA: needs the sampler item and a 16 MB REU: {where} {reu}")
         else:

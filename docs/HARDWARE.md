@@ -830,6 +830,33 @@ write) to the first poll that sees the status bit.
 - **Capacity**: 7 usable voices, so four Paula channels fit; 16-bit and
   interleave modes were not measured.
 
+### The C64U's sampler (W16-A, 2026-10-13) [MEASURED HW]
+
+C64 Ultimate fw 1.1.0 / fpga 122 / core 1.49 (uid 5D2518), NTSC, UDP audio
+stream at phi2 x 3/64; evidence `build/evidence/sup16/c64u-pitch/`.
+
+- **Sample time = (rate + 1) x 160 ns + 80 ns** (the U64E's: + 120 ns).
+  Fitted per note by the phase slope of the player probe's eight sine notes
+  (RATE 197..1507): every note -38.00 +- 0.01 ns from the 118 ns law, the
+  U64E's +2.00 +- 0.01 ns. The term is the same at **1 MHz and 64 MHz**
+  (PER 428 at 259.2070 Hz in both; `tests.paula.hw16 --legs rbsil --mhz 1`),
+  so it is the device, not the turbo: 80 ns is one 8-clock slot at 100 MHz,
+  where the U64E's 120 ns is one at 66.67 MHz [DERIVED]. The RATE the module
+  picks still uses the 118 ns law, so the C64U plays sharp by 38 ns per
+  sample: +0.016 % at PER 856, +0.12 % at PER 113 (about 2 cents; a per-device
+  RATE_C is in the backlog). The host's expectation is per device:
+  `host/paula_ref.sample_c` keyed by the `/v1/info` product name.
+- **Idle DC offset**: with no voice playing, the C64U's stream sits at a large
+  DC level that varies between sessions and reboots (left -8514 / right +385
+  before a player run; -29630 and +22327 before and after a reboot; -2 and
+  +8888 in another session). The U64E's sits within a few LSB of 0. When the
+  module arms (0.22 s before the player's first note), the level steps (left
+  -8523 -> about +4600, one sample step 10502). A "first loud window" onset
+  takes that step for the song's start, so audio analysis aligns on a
+  sustained tone instead (`tests/run_player.align`: 50 ms above threshold).
+- Noise floor: std 18.6 LSB, against the U64E's 9.2 (about +6 dB; about 52 dB
+  under a full-volume note). It does not affect pitch.
+
 ### End-of-sample IRQ [MEASURED HW]
 
 - Reaches the **C64 IRQ line** (not NMI): the 6510 entered the `$FFFE`

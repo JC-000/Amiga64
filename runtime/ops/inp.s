@@ -82,14 +82,14 @@ inp_mport: .res 1       ; W14-M host: mouse port, 0 = port 1 (stick on 2), 1 = p
 inp_mper: .res 4        ; W14-M host: 1351 sample period, E ticks, u32 (0 = no sampling)
 inp_mpot: .res 2        ; W14-M POTY, POTX: override input (inp_src != 0), else the last SID read
 inp_mb:   .res 1        ; W14-M mouse port lines, 1 = closed (bit 4 left, bit 0 right)
-inp_mold: .res 2        ; W14-M last POTY, POTX (bits 1-6)
+inp_mold: .res 2        ; W14-M ref POTY, POTX (bits 1-6); W16-I: bit 7 = last direction
 inp_mok:  .res 1        ; W14-M nonzero once inp_mold holds a sample
 inp_mon:  .res 1        ; W14-M host: the M2 module's ID byte 0 (0 = none)
 inp_ml:   .res 1        ; W14-M M2 override: mouse lines (inp_src != 0, module armed)
 inp_mlast: .res 1       ; W14-M M2: lines at the last look (press edges)
 inp_mq:   .res 1        ; W14-M M2: pending left presses (<= 2)
 inp_md:   .res 1        ; W14-M M2: the buttons as delivered (bit 4 left, 0 right)
-inp_macc: .res 2        ; W14-M M2: 1351 counts added since the frame hook: Y, X (s8, +-127)
+inp_macc: .res 2        ; W14-M M2: 1351 counts added since the frame hook: Y, X (W16-I: travel, u8 <= 63)
 inp_mps:  .res 1        ; W14-M M2: inp_mport | inp_src << 1 at the last frame (a change: new reference)
 inp_mns:  .res 2        ; W14-M M2: 1351 samples taken (u16 LE, wraps; tests)
 

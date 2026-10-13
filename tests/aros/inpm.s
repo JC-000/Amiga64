@@ -27,11 +27,19 @@
 ;     port 2 = PRA; DDRA := $C0 again); a left press edge adds 1 to inp_mq
 ;     (at most 2 pending).
 ;   sample (X = 3): POTY/POTX (the SID, or inp_mpot with the override) ->
-;     d = ((v & $7E) - old) mod 128, signed, / 2 (-32..31); Y negated; the
-;     counts added since the last frame hook (inp_macc, s8) saturate at
-;     +-127, so AROS, which reads JOY0DAT once a frame as a signed 8-bit
-;     delta, never sees a wrap (rev14-mouse HIGH-1: +217 counts moved the
-;     pointer -19 px); JOY0DAT += the clamped part.
+;     v = pot & $7E, d = (v - ref) mod 128, signed, / 2 (-32..31), ref =
+;     inp_mold bits 1-6.  W16-I hysteresis: inp_mold bit 7 = the direction
+;     of the last move passed on (1 = negative, the pot's sense); a d of
+;     +-1 against it is idle jitter (the user's 1351 at rest: POTX $C9/$CA,
+;     POTY $AB/$AC): held, ref kept; any other d != 0 passes, ref := v,
+;     bit 7 := d < 0.  Y negated; the travel since the last frame hook
+;     (inp_macc, u8 per axis: the sum of |counts| added) saturates at
+;     MCLAMP = 63 and only the part within it is added to JOY0DAT: AROS
+;     reads JOY0DAT once a frame, after the hook, as a signed 8-bit delta,
+;     so the counts between two reads (two windows) are <= 126 for any
+;     stream, reversals included, never a wrap (rev14-mouse HIGH-1 and its
+;     round 2: 127 + 31 had wrapped; rev16-i M-1: a signed +-63 sum let an
+;     in-window reversal reach 189).
 ;   frame (X = 0): a port or source change since the last frame -> inp_mok
 ;     := 0 (the next sample is a new reference); the left button's delivery,
 ;     one transition per frame (delivered and (up now or a press pending)
@@ -103,6 +111,7 @@
 CIA_PIN   = 32                  ; @value cia.s CIA_PIN (inp.s INP_PIN)
 JOY0      = $0A                 ; @value JOY0DAT in chip_shd (Y, then X)
 QMAX      = 2                   ; @value pending left presses at most
+MCLAMP    = 63                  ; @value W16-I: travel (|counts|) a frame-hook window (host/inp_ref.MCLAMP)
 
 ; --- A: $C980-$C9FE ----------------------------------------------------------
 .segment "CODE"
@@ -145,6 +154,21 @@ have:   and #$11
         bcs :+
         inc inp_mq
 :       rts
+; fira — the frame's end (moved from B, W16-I): /FIR0, then inp_macc := 0.
+fira:
+        ora inp_joy             ; /FIR0 low while stick fire or delivered left
+        and #$10
+        asl
+        asl
+        eor #$C0
+        eor cia_st+CIA_PIN
+        and #$C0
+        eor cia_st+CIA_PIN
+        sta cia_st+CIA_PIN
+        lda #0                  ; a new frame: nothing added yet
+        sta inp_macc
+        sta inp_macc+1
+        jmp inp_mrearm          ; (X = 0)
 .assert entry = buf_case + $980, error, "inpm A: org buf_case + 980 (the supervisor's range)"
 .assert * <= buf_case + $9FF, lderror, "inpm A: ends past buf_case + 9FE"
 
@@ -170,43 +194,56 @@ bbody:  jsr look
         sta inp_mpot+1
 lp:     lda inp_mpot,x
         and #$7E
-        pha
-        sec
-        sbc inp_mold,x
-        tay                     ; v - old
-        pla
-        sta inp_mold,x
-        lda inp_mok
-        beq nx                  ; reference only
-        tya
+        sta inp_u               ; v
+        ldy inp_mok
+        bne :+
+        sta inp_mold,x          ; reference only (direction +)
+        beq nx                  ; (Z from ldy)
+:       sec
+        sbc inp_mold,x          ; v - ref (bit 7: the direction, dropped)
         and #$7F
         cmp #$40                ; C = 1: negative
         bcc :+
         ora #$80
-:       ror                     ; signed / 2: -32..31
+:       ror                     ; d = signed / 2: -32..31
+        beq nx                  ; no move
+        tay
+        clc
+        adc #1
+        cmp #3
+        bcs mv                  ; |d| >= 2: a move
+        tya
+        eor inp_mold,x          ; W16-I: |d| = 1 against the last move's
+        bmi nx                  ; direction: idle jitter, held (ref kept)
+mv:     tya
+        and #$80
+        ora inp_u
+        sta inp_mold,x          ; ref := v, bit 7 := d < 0
+        tya
         cpx #1
         bcs :+
         eor #$FF                ; Y: negate (C = 0)
         adc #1
-:       sta inp_t               ; d
+:       tay                     ; d, the axis's sense (-32..32)
         clc
-        adc inp_macc,x          ; acc + d, saturated at +-127
-        bvc :+
-        lda inp_t
-        bmi neg
-        lda #$7F
-        bne :+
-neg:    lda #$81
-:       cmp #$80
-        bne :+
-        lda #$81
-:       tay                     ; the new acc
+        bpl :+
+        eor #$FF                ; |d| = ~d + 1 (the carry)
         sec
-        sbc inp_macc,x          ; the part that may still be added
-        clc
+:       adc inp_macc,x          ; travel + |d| (<= 95), saturated at MCLAMP
+        cmp #MCLAMP+1
+        bcc :+
+        lda #MCLAMP
+:       sta inp_u               ; the new travel (v is no longer needed)
+        sec
+        sbc inp_macc,x          ; |the part that may still be added|
+        cpy #$80                ; C = 1: d < 0
+        bcc :+
+        eor #$FF                ; negated (C = 1)
+        adc #0
+:       clc
         adc chip_shd+JOY0,x
         sta chip_shd+JOY0,x
-        tya
+        lda inp_u
         sta inp_macc,x
 nx:     dex
         bpl lp
@@ -241,19 +278,7 @@ keep:   tya                     ; inp_mb := delivered left | right now
         and #$01
         ora inp_md
         sta inp_mb
-        ora inp_joy             ; /FIR0 low while stick fire or delivered left
-        and #$10
-        asl
-        asl
-        eor #$C0
-        eor cia_st+CIA_PIN
-        and #$C0
-        eor cia_st+CIA_PIN
-        sta cia_st+CIA_PIN
-        lda #0                  ; a new frame: nothing added yet
-        sta inp_macc
-        sta inp_macc+1
-        jmp inp_mrearm          ; (X = 0)
+        jmp fira                ; (A: segment B is full; W16-I)
 
 .assert entryb = buf_result + $700, error, "inpm B: org buf_result + 700"
 .assert * <= buf_result + $7F0, lderror, "inpm B: ends past buf_result + 7EF"

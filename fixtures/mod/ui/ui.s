@@ -31,12 +31,14 @@
         xdef    _ui_init
         xdef    _ui_frame
 
+        ifnd    UI_HUNK                 ; (UI_HUNK, W16-X: a chip BSS hunk, at the end)
         ifnd    UI_BASE
 UI_BASE         equ     $070000         ; ruling 4: inside W15-U's $040000-$07FFFF
         endif
 UI_COP          equ     UI_BASE         ; copper list
 UI_KICK         equ     UI_BASE+$100    ; the epoch blit's target word
 UI_PL           equ     UI_BASE+$1000   ; planes, 48,000 bytes
+        endif
 STRIDE          equ     240             ; bytes per line, 3 planes
 CROW            equ     8*STRIDE        ; bytes per cell row
         ifnd    UI_CADENCE
@@ -956,3 +958,11 @@ txt_dash:       dc.b    "---"
         even
 ui_st:  ds.b    S_SIZE
         even
+
+        ifd     UI_HUNK                 ; W16-X: the AmigaOS launcher's build.  The
+        xdef    UI_COP
+        section uibuf,bss_c             ; same layout as at UI_BASE; LoadSeg puts it
+UI_COP  ds.b    $100                    ; in chip RAM and relocates every reference
+UI_KICK ds.b    $f00
+UI_PL   ds.b    48000
+        endif

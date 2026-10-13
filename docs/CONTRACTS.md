@@ -1964,14 +1964,69 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
     Per axis, v = pot & `$7E`, d = (v − old) mod 128 as a signed 7-bit
     value / 2 (−32..31); the Y delta is negated (the 1351's Y counts up,
     the Amiga's down).
-    - **The per-frame clamp** (rev14-mouse HIGH-1). AROS reads JOY0DAT once
-      a guest frame as a signed 8-bit delta, and about 14 samples land in
-      one frame at s = 3. So the counts added since the last frame hook
-      (`inp_macc`, s8 per axis) saturate at ±127, and only the clamped part
-      is added. 14 samples of +31 deliver +127 (`host/tests/test_inp.py`,
-      leg `mouse`), not a wrap (+217 had moved the pointer −19 px).
-      - The stick's ≤ 32 per frame comes on top, so a full-speed stick and
-        mouse together can still exceed 127.
+    - **The idle hysteresis** (W16-I; supervisor ruling 2026-10-12). At
+      rest a 1351 can alternate between two adjacent values (the user's, on
+      the C64U at 64 MHz: POTX `$C9/$CA`, POTY `$AB/$AC`, one count apart),
+      which the plain decode passes on as ±1 every sample: the pointer
+      wiggles. The decode is taken against a reference, `inp_mold` bits
+      1-6, and `inp_mold` bit 7 holds the direction of the last move passed
+      on (1 = negative, in the pot's sense, before the Y negation):
+      - d = 0: nothing;
+      - |d| = 1 **against** that direction: held, nothing added, the
+        reference kept (the idle jitter);
+      - otherwise: passed on, reference := v, bit 7 := d < 0.
+      The reference sample stores v with bit 7 = 0. The model is
+      `host/inp_ref.m1351_hyst`.
+      - At rest, a two-value jitter passes at most one count after the
+        pointer stops, then nothing (leg `mhyst` "jitter", the user's
+        exact pairs, after a + move, a − move and a fresh reference).
+      - Slow moves keep every count: one count a sample in one direction
+        passes 1:1; a reversal's first count is held until the next count
+        in the new direction, which then passes as 2 (leg `mhyst` "slow":
+        +1 × 32 then −1 × 32 return exactly). A lone one-count reversal
+        stays held (one count of backlash, half a lores pixel).
+      - The band is 1 count (the measured pair). After a held sample the
+        reference can be one count stale, toward the last direction's
+        opposite side, so a single sample one count beyond the decode's
+        −32..31 edge on that side aliases, in both directions:
+        - last move −, a +1 held, then +31: the offset from the
+          reference is +32, which passes as −32;
+        - last move +, a −1 held, then −32: the offset is −33, which
+          passes as +31.
+        This is the same edge as the plain decode's +32 ≡ −32, a known
+        limit (supervisor, fix 1: a step of 31-32 counts a sample, ≈ 3.7k
+        counts/s, is the sampler's Nyquist edge, where any 1351 decoder
+        aliases; `host/tests/test_inp.py` `test_hyst_stale_alias_*`, leg
+        `mhyst` "alias").
+    - **The per-window travel budget** (rev14-mouse HIGH-1; W16-I: 63, the
+      round-2 margin; fix 1: travel, rev16-i M-1). AROS reads JOY0DAT once
+      a guest frame as a signed 8-bit delta, in its VBL handler, after the
+      frame hook that posted the VERTB; about 14 samples land in one frame
+      at s = 3. So the travel since the last frame hook (`inp_macc`, u8
+      per axis: the sum of |counts| added) saturates at `MCLAMP` = 63, and
+      only the part of a sample's d within it is added. One AROS delta
+      spans at most the end of one window and the start of the next:
+      ≤ 63 + 63 = 126 for any stream, reversals included, never a wrap.
+      - At ±127 a late read saw 127 + 31 = 158, a backward jerk (W14).
+      - A signed ±63 sum (W16-I before fix 1) bounds the window's net, not
+        what follows a read: a reversal inside a window with a late read
+        reached 189 (rev16-i's repro: hook; −32, −31; read; +31 × 5; hook;
+        +31 × 2; read gave +188, an s8 −68). The travel budget gives +62.
+      - Tests: 14 samples of +31 deliver +63; two saturated windows read
+        early then late deliver 126; the repro; random streams with the
+        sign flipping inside windows and late reads stay ≤ 126
+        (`host/tests/test_inp.py`, legs `mouse` and `mhyst` "straddle",
+        "reversal", "rstream"; qmutant `csigned`, the signed sum, dies).
+      - A back-and-forth inside one window spends the budget both ways:
+        a wiggle of more than 63 counts of travel in one guest frame is
+        cut there (the reference still follows the 1351, so nothing is
+        lost but the cut part).
+      - The mouse moves at most 63 counts (~31 lores px) per guest frame,
+        ≈ 570 counts/s at s = 3; only a very fast flick reaches it.
+      - Limits: an AROS VBL that is skipped (three windows) can still wrap,
+        and the stick's ≤ 32 per frame comes on top. Resetting the budget
+        on the guest's JOY0DAT read (exact, ~16 B of MAIN in `c_rdw`) was
+        not taken (supervisor).
     - The scale is 1:1, one 1351 count per Amiga count.
     - The first sample after `inp_mok` = 0 only sets the reference. The
       module also clears `inp_mok` when `inp_mport` or `inp_src` changed
@@ -1980,9 +2035,10 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
     mouse right → POTINP DATLY (`inp_pot`).
   - **The input module** (`tests/aros/inpm.s`; the supervisor's ranges,
     asserted).
-    - **Segments:** A at `$C980-$C9FE` (89 of 127 B: entry, ID, the B check,
-      `look`) and B at `$CF00-$CFEF` (219 of 240 B: the decode, the clamp,
-      the queue).
+    - **Segments:** A at `$C980-$C9FE` (120 of 127 B: entry, ID, the B
+      check, `look`, and the frame's end `fira`: /FIR0 and `inp_macc` := 0,
+      moved from B in W16-I) and B at `$CF00-$CFEF` (226 of 240 B: the
+      decode with the hysteresis, the clamp, the queue).
     - **$CF00-$CFEF in machine mode** is otherwise unused: mboot uses `$CE00`
       and `$CFFF`, the Ultimate dispatcher `$CE00-$CEFF`, `run_irq`'s drv
       `$CFF0`, and `run_super_vectors`' `$CF00-$CF9F` only in its own HLE
@@ -2035,12 +2091,17 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
     - the frame hook: 327 (the real scan) / 198 (override, idle) without
       the module; +228 / +204 with it armed. The re-arm, when sampling is
       on, adds +383.
-    - a sample: 743 with the module (decode, clamp, queue look, re-arm),
-      400 without (the guard and the re-arm only).
+    - a sample: 743 with the W14 module (decode, clamp, queue look,
+      re-arm) on every path, 400 without (the guard and the re-arm only).
+      W16-I (leg `cost`, same session as the W14 module's 743): at rest
+      626, held jitter 664, moving 766, saturated 771; the frame call +3
+      (the `jmp fira`). Fix 1 (the travel budget; leg `cost`, same
+      session as the round-0 module): moving 791, saturated 793; at rest
+      and held unchanged.
     - Per second these scale with the rates: samples at ≈ 120 Hz real time
       on the Ultimate (any s), frames at 69.44 or 72.08 / 2^s Hz (PAL or
-      NTSC φ2; 8.7 / 9.0 at s = 3). That is ≈ 89k + 5.3k cycles/s, ≈ 0.15 %
-      of 64 MHz. On a 1 MHz VICE at s = 9 a 16-E-tick period would mean
+      NTSC φ2; 8.7 / 9.0 at s = 3). With the mouse moving (793 a sample)
+      that is ≈ 95k + 5.3k cycles/s, ≈ 0.16 % of 64 MHz. On a 1 MHz VICE at s = 9 a 16-E-tick period would mean
       ~890 samples a frame, so the scripted pots are sampled every 2048 E
       ticks there.
   - **Ramp:** not time-scaled (the limit above). The stick's ramp is
@@ -2186,7 +2247,7 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
   - Any later CODE growth shifts RODATA again. That is a layout rule for the
     supervisor (e.g. page-align RODATA in `runtime/c64.cfg`).
 
-| guest memory | REU chip RAM, slow RAM + `$DC0000-$DEFFFF`, ROM banks | stays (REU-resident) / file spans 2-5 | stays / LOAD_REU | the guest's RAM. AROS WRITES `$DC0000-$DEFFFF` (unmapped in the profile; not zero after m3 on both Ultimates), so the slow-RAM span runs to `$DEFFFF`. `$200000-$BEFFFF` (W13-W: `$2DC000-$BEFFFF`; the staged disk below it is in span 2) and `$E80000-$F7FFFF` read zero after m3 (`aros_resume` m3 leg, Ultimate) and are not filed: a resume needs them zero, as the boot does (`host/machine.ZERO_SPANS`) |
+| guest memory | REU chip RAM, slow RAM + `$DC0000-$DEFFFF`, ROM banks | stays (REU-resident) / file spans 2-5 | stays / LOAD_REU | the guest's RAM. AROS WRITES `$DC0000-$DEFFFF` (unmapped in the profile; not zero after m3 on both Ultimates), so the slow-RAM span runs to `$DEFFFF`. `$200000-$BEFFFF` (W13-W: `$2DC000-$BEFFFF`; the staged disk below it is in span 2; W16-P: except `prof` `$2DC000-$2DC0FF` in a Workbench session with `--audio`, host data that is non-zero by design, not filed, and rewritten by the launcher before every resume launch) and `$E80000-$F7FFFF` read zero after m3 (`aros_resume` m3 leg, Ultimate) and are not filed: a resume needs them zero, as the boot does (`host/machine.ZERO_SPANS`) |
 | W13-W disk image | REU `$200000-$2DBFFF` (`TD_ADF`) | file span 2 (the chip span runs to `$2DBFFF`, `SNAP_VER` 2) / stays (REU-resident) | LOAD_REU / stays | the staged DF0 disk and its overlay travel with the snapshot; zero without a disk |
 | W13-W drive and device state (`td_*`) | `td.s` BSS | image | restored | drive lines, the patched slot and its original target; the CIA-A pins live in `cia_st` (image) |
 
@@ -2258,6 +2319,39 @@ class, reads across `$80000`, 10 mutants),
   are refused (L4). Refused: a block outside
   2..1759, not 512 bytes, a header or OFS data block whose checksum does
   not sum to 0, a header whose data-block table changed.
+  - **Files (W16-D, supervisor rulings (a)/(b), 2026-10-12).**
+    `host/adf_files.py` adds and deletes files and drawers in the same
+    in-memory copy; its result is an `Overlay` with `files` set (every
+    changed block, the bitmap included).
+    - **Add:** blocks come from the bitmap, lowest first from 881 upwards,
+      then below 880. Header, T_LIST extension blocks and data (OFS with
+      its 24-byte headers, FFS raw) are written. The new header is
+      appended at the end of its hash slot's chain; an existing name is
+      refused. The bitmap bits are cleared.
+    - **Delete:** the header is unlinked (from the slot or from its chain
+      predecessor's `hash_chain`), and the header, extension and data
+      blocks are set free. A drawer must be empty.
+    - **Check:** `check()`/`apply()` validate a `files` overlay with
+      `fsck` on the applied image instead of the per-block rule (FFS data
+      blocks are raw and may look like headers). `fsck` checks:
+      - every header's type, checksum, key, parent and hash slot;
+      - the chains;
+      - every file's data, extension and OFS data headers, and its size;
+      - that no block is used twice;
+      - that the bitmap equals the complement of the used set, with its
+        checksum and `bm_flag`.
+    - **The modwb disk** (`--disk modwb`, `tests/aros_modwb.py`):
+      - `Classes/DataTypes/amigaguide.datatype` is deleted from the REU
+        copy (102 blocks; never from the user's file);
+      - `ModPlayer`, `ModPlayer.info` (WBTOOL, at a free spot computed from
+        the root icons) and `ModPlayer.mod` are added to the root.
+      - The leg watches the `Classes/DataTypes` header block from the
+        Workbench window to its end, and fails if it is read.
+      - Disk.info and the boot milestones are unchanged.
+    - **Bounds (rev16-p L7):** `reu_writes` refuses any block outside
+      0..1759 or not 512 bytes, and `DiskEdit.put` refuses any block
+      outside 2..1759. So no overlay can reach past `$2DBFFF`, where W16-P's
+      profile block and the app anchor (`$2DC000`) follow the image.
 - **The drive** (`td_prb`, the W13-W hook in `cia.s` `wr_prb`, CIA-B
   only, `A` = the written value): the boot model's `Floppy` on the pins
   `PRB | ~DDRB`. `/SEL0` (bit 3) low selects DF0; `/MTR` (bit 7) is latched
@@ -2379,14 +2473,15 @@ VICE legs `latch`, `blocks`, `irq`, `reload`, `lencache`, `pervol`, `park`,
   across adds 1 cycle per taken branch. MAIN is at its limit: run_pf's
   `trace` variant keeps 4 B before its BSS page, and
   `host/tests/test_paula_layout.py` fails if RODATA leaves `$8D00`.
-- **Where it lives (player profile only).** Segment A `$CA00-$CCFF`
+- **Where it lives (the player profile; W16-P: the Workbench profile too, below).** Segment A `$CA00-$CCFF`
   (entries `+0` write, `+7` the slot-6 callback, `+10` init; config and
   counters at `+13`), segment B `$0400-$07FF` (the text screen and its
   sprite-pointer tail, unused in machine mode: the VIC is on bank 3), state
   page `$CD00-$CDFF`. **Known limits:** segment A and the state page are
   mutually exclusive with `aros_resume`'s stub (`$CB00`/`$CC00`) and with
   run_irq's and run_mach's driver blocks (`$CA00-$CCFF`), which belong to
-  other sessions; coexisting with resume is backlog. Segment B is player
+  other sessions; W16-P: in a Workbench session aud is staged after the
+  resume stub's last use ("The Workbench profile" below). Segment B is player
   profile only: machine mode never uses the HLE console screen, so it is
   mutually exclusive with HLE console sessions and with `aros_resume`'s
   READY. wait (which happens before staging); it is staged only after any
@@ -2403,6 +2498,141 @@ VICE legs `latch`, `blocks`, `irq`, `reload`, `lencache`, `pervol`, `park`,
   `cfg_r16`, `+15` u8 `cfg_hw`, `+16` u24 `cfg_zero`); `mach_cbv[6]` :=
   `AUD_ORG+7`; call `AUD_ORG+10` (init); `aud_mon` := the ID byte 0.
   Disarm: `aud_mon` := 0, `mach_cbv[6]` := 0.
+- **The Workbench profile (W16-P; WAVE16 M0 rulings (1)-(4)).** `tests/aros_wb.py
+  --audio` (helpers `aud_stage`, `aud_arm`, leg `aud`):
+  - **Placement:** unchanged (A `$CA00-$CCFF`, state page `$CD00-$CDFF`,
+    B `$0400-$07FF`). Machine mode never writes the text screen (only
+    hle.s/hle_con.s do; the VIC is on bank 3). In a Workbench session A
+    shares `buf_result` with aros_resume's REU stub (`$CC00`, data `$CB00`:
+    fresh_load's scrub, `declare_rid`, `Snap.reu_read/write`), which only
+    runs while the guest does not. **Rule: aud is staged and init'ed last**,
+    right before `m.start` or the `snap_resume` launch. Leg `cost` (its stub
+    at `$CC80`), `--watch` (`$CDC0`) and `--resume-mutant` (another PRG's
+    labels) refuse `--audio`. GuestPeek (VICE e2e reads while the guest
+    runs) parks at `$CCF0` and fetches into `$CD00`: it saves that page and
+    the park bytes and writes both back before the 6510 runs on (leg `aud`:
+    `$CA00-$CDFF` unchanged across 20 peeks, counters aside; mutant
+    `peeknorest`).
+  - **The KERNAL cursor blink:** B is the text screen. After VICE's
+    `fresh_load` (READY., then `goto $080D`: the resume path) BLNSW (`$CC`)
+    is 0, and the KERNAL IRQ blinks the cursor at `$04F0` (bit 7) until
+    `mach_run`'s `sei`. The ID check cannot see that (B's code is not
+    checksummed), so `aud_stage` sets `$CC` := 1 before staging B. Leg `aud`
+    reads B 12 times over 1.2 s between staging and the resume launch
+    (mutant `blink`: B changed in 3 of 12 reads; probe
+    `build/evidence/w16-p/vice/blink_probe.py`).
+  - **Boot:** after `arm_spr`/`arm_inpm` and every runner stub: the profile
+    block (below), A + B (read back), the config (`cfg_r16` for the boot's
+    s, `cfg_hw` 1 only when the hold mapped and proved the sampler, `cfg_zero`
+    `$DF4000`), init, `mach_cbv[6]` := A+7, then `aud_mon` := the ID byte 0.
+    The guest runs armed from its first instruction (mutants `stagefirst`,
+    `nocbv`).
+  - **Resume:** `aud_mon` (DATA) is 0 after the fresh load and the state page
+    is not in the image. Before the launch (after `aros_fill` and
+    `declare_rid`): the block, A + B, config, init. After the guest runs:
+    `mach_sl` must equal the session's s (else the staged r16 is wrong:
+    refused; `mach_sl` is exported for this, label only, the PRG unchanged;
+    leg `aud` checks it equals the boot's s), then
+    `mach_cbv[6]`, then `aud_mon` (mutant `noresarm`).
+    **Known limit:** a snapshot taken while a channel plays resumes with
+    that channel silent and posting no AUDx until the guest's next DMA start
+    (the channel state is not in the image); the Workbench demo snapshot (no
+    audio) is unaffected. **Not shown (rev16-p L5):** that a Paula write
+    reaches the module after a resume: at the idle Workbench AROS writes no
+    audio register (`st_nw` 0 after every resume), so the re-arm is shown
+    statically (`aud_mon`, `mach_cbv[6]`, A/B intact); W16-X's program is the
+    dynamic proof. **Resume without `--audio` (rev16-p L6):** a snapshot
+    taken with aud armed carries `mach_cbv[6]` = `$CA07` (and maybe slot 6
+    armed); resumed without `--audio` nothing is staged there. The restore
+    and the continued run are one `snap_resume` call, so the host cannot
+    write between them; instead, before the launch, `_resume` writes `rts`
+    at `$CA07` (and `aud_mon` := 0, as after any fresh load), so such a
+    callback is a no-op, and once the guest runs it clears `mach_cbv[6]`
+    (high byte first). Leg `audres` (VICE): slot 6 pending ~30 frames ahead
+    at the suspend, `$CA00-$CA0F` as unknown RAM (a self-jump at `$CA07`;
+    zeros were not enough: the BRKs fell into the stale A the boot left in
+    RAM), the guest must run
+    45 frames past the resume and `mach_cbv[6]` read 0 (mutant `noguard`:
+    neither the rts nor the clear). The deadline falls after the host's
+    clear, so the leg shows the clear; the rts covers only the window
+    between the launch and the clear, which the leg does not hit.
+    `$CA07` is free in non-audio sessions (the resume stub uses `$CB00`
+    and `$CC00`). Leg `aud` disarms before its suspend, as the demo snapshot
+    is taken.
+  - **The hold (Ultimates):** `Map Ultimate Audio $DF20-DFFF` := Enabled
+    inside the hold (restored by it), the runner reloaded, then the
+    **differential sampler proof**, measured on the **U64E only** [MEASURED
+    HW, U64E fw 3.15, `build/evidence/w16-p/hw16`; the C64U is not measured
+    yet: its hold is pending, so `--audio` on the C64U may stop INFRA until
+    then]: the 6510's copy of `$DF20-$DFFF` reads
+    `$00 $10` in all 112 pairs with the item Enabled; Disabled, the window
+    reads changing bus data (`$DF21` = `$00`; two reads differ), so `$DF21`
+    alone is not the proof (on VICE the window is the REC's mirror). Without
+    the proof the session stops (INFRA). **Silence at the end:** the
+    session's closing `set_speed(1)` + reboot stops a voice that is still
+    playing on the **U64E** (hw16 `rbsil`, by the UDP audio stream: a
+    hardware-looped tone, 4394 rms, gone within ~0.3 s of the reboot
+    request; 34 rms after, noise, no 259 Hz line); no init call is needed
+    (none is possible while `mach_run` runs). The C64U (no stream: WiFi) is
+    to be checked instrumentally (hw16 `rbwin`: the window idle, playing and
+    after the reboot).
+  - **Time at s = 3** (both Ultimates): E = 1022727 / 8 = 127841 Hz,
+    `cfg_r16` 2362, a guest frame 111 ms real (VERTB 9.0 Hz). `PARK_E` stays
+    7094 E (55-111 ms real between parked looks: ~8x fewer per real second
+    than at s = 0); a late acknowledge is reposted within one guest frame
+    (111 ms real); the seam's lateness bound 4096 >> 3 = 512 E = 4 ms real.
+    VICE (s = 9): `cfg_r16` 37 (1.3% rounding: the dry backend only).
+    **Not measured:** the C64U's phi2 at 64 MHz (assumed NTSC 1022727).
+- **The profile block and the app anchor (W16-P; rc machine.inc `prof
+  $2DC000-$2DC0FF`).** A guest program cannot measure real time, so the host
+  tells it. Guest `$2DC000-$2DC03F`, right after the staged ADF: plain REU
+  memory outside chip and slow RAM (AROS never allocates it; no MemHeader
+  may cover it: leg `w`'s guest check), written by the host only while the
+  guest is stopped (boot: before `m.start`; resume: before the launch; the
+  snapshot file spans end at `$2DBFFF`), never torn. Zero in a session
+  without it. Big-endian:
+
+  | off | type | field |
+  |---|---|---|
+  | +0 | u32 | magic `'A64P'` |
+  | +4 | u16 | version 1 |
+  | +6 | u16 | size 64 |
+  | +8 | u32 | `e_hz_q8`: guest E ticks per real second x 256 (s = 3 NTSC: 32727264) |
+  | +12 | u32 | `tick_e`: round(E Hz / 50), the 125-BPM tick (s = 3: 2557); CIA period = tick_e x 125 / BPM |
+  | +16 | u32 | `frame_e` 14188 (E per guest frame) |
+  | +20 | u32 | `phi2_hz` (1022727 NTSC) |
+  | +24 | u8 | s |
+  | +25 | u8 | host: 0 VICE, 1 U64E, 2 C64U |
+  | +26 | u8 | flags: bit 0 aud armed, bit 1 the sampler is live (audible), bit 2 real time is meaningful (an Ultimate) |
+  | +27 | u8 | 0 |
+  | +28 | u16 | `cfg_r16` in force |
+  | +30 | u16 | CPU MHz (informative) |
+  | +32..+59 | | 0 |
+  | +60 | u32 | `~`(32-bit sum of the longs +0..+56) |
+
+  A guest takes it only when the magic, version 1, the size and the check
+  match; otherwise Amiga timing (tick_e 14188, VBL). Leg `aud` checks the
+  config and the block it reads back (GuestPeek) against values computed
+  from s and phi2 alone, not through `profile_block` (mutants `r16cfg`,
+  `blks0`), and zeroes `prof` before the resume's staging, as the Ultimate's
+  file resume leaves it, so the rewrite is proven (mutant `noresblk`). **The app anchor**
+  `$2DC040-$2DC04F` (supervisor, binding for W16-X/W16-D): written by the
+  guest program, only read by the host: +0 `'MWBA'`, +4 a pointer to the
+  app's state struct (mod_view etc.), +8 the guest's sequence/flags long,
+  +12 reserved. `$2DC050-$2DC0FF` reserved. **Anchor rules** (rev16-p M4):
+  1. the program writes the anchor only when the profile block is valid
+     (otherwise `$2DC040` may be anything: a real Amiga's memory);
+  2. publish +4, +8, +12 first and `'MWBA'` last; withdraw (on exit, before
+     the struct is freed) by clearing `'MWBA'` first: the host may read
+     between any two guest writes, so the magic gates the rest;
+  3. the pointer is never 0, is even, and the whole struct lies in chip RAM
+     (`$000000-$1FFFFF`) or slow RAM (`$C00000-$DBFFFF`);
+  4. the snapshot file spans end at `$2DBFFF`: a file resume loses the
+     anchor (the launcher rewrites only the block), so an app that relies on
+     it publishes it again after a resume.
+  Host side: `host/profile_block.py` (`build`, `parse`, `parse_anchor(raw,
+  size)`: a pointer that is 0, odd, or whose *size*-byte struct leaves its
+  RAM span is not to be followed), pytest `host/tests/test_profile_block.py`.
 - **Model (Amiga HRM, audio).** AUDxLC/AUDxLEN are latches (LC bits 20-1,
   so samples anywhere in 2 MB of chip RAM, `latch` plays one at `$180000`).
   DMA start (DMAEN and AUDxEN both set) copies them into the playing block
