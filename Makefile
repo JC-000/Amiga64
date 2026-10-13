@@ -1,7 +1,7 @@
 PY      := python3
 BUILD   := build
 
-.PHONY: all host-test runtime vectors vice-test smoke rescheck clean
+.PHONY: all host-test runtime vectors vice-test smoke rescheck clean prebuilt prebuilt-check
 .DELETE_ON_ERROR:               # W12-T: a failed stamp leaves no unstamped runner.prg
 
 all: runtime
@@ -47,6 +47,14 @@ smoke:
 # Resource-contract checker: runtime/rc/*.inc vs. sources (docs/RESOURCES.md)
 rescheck:
 	$(PY) -m host.rescheck
+
+# W17-B: the shipped binaries (prebuilt/ + MANIFEST) for users without cc65/vasm;
+# prebuilt-check rebuilds them to a temp dir and fails if prebuilt/ is stale
+prebuilt:
+	$(PY) -m tests.mk_prebuilt
+
+prebuilt-check:
+	$(PY) -m tests.mk_prebuilt --check
 
 clean:
 	rm -rf $(BUILD)

@@ -1,0 +1,33 @@
+# prebuilt/MANIFEST: written by `make prebuilt` (tests/mk_prebuilt.py); do not edit.
+# Checked by host/prebuilt.verify and host/tests/test_prebuilt.py; by hand:
+#   cd prebuilt && grep -v '^#' MANIFEST | shasum -a 256 -c
+#: build_id 0304ca617baf5a29
+#: tool ca65 ca65 V2.18 - N/A
+#: tool ld65 ld65 V2.18 - N/A
+#: tool cl65 cl65 V2.18 - N/A
+#: tool vasmm68k_mot vasm 2.0f (c) in 2002-2026 Volker Barthelmann / vasm M68k/CPU32/ColdFire cpu backend 2.8c (c) 2002-2026 Frank Wille / vasm motorola syntax module 3.19f (c) 2002-2026 Frank Wille
+#: tool vlink vlink V0.18a (c)1997-2025 by Frank Wille
+#: id td efefac6a
+#: id td_var 92f77b36
+#: id inpm a88f99f3
+#: id aud 74424008
+9f73c70e83a700a9225ed6afefd6e2be60d89dc9b177230dbed0d348592f7c75  runner.prg
+aec55eb01436d364a20e8eedad52cdeafe8c876a5078d85e296951f50a3e3554  runner.lbl
+cd3b3968a45b98574728bca84343e7c22aaac2b7bd56645395e124274dd46280  runner.map
+61f504931ffae53317367da9a8959fb00299fe0d4bf584c15338f252da7342e3  mboot.bin
+e1adf9be324dbffe653d52041319f8ce7ae4b11ac8af14b472661efb2152bd7e  mboot.lbl
+c74551e1b1f1f33952e531cca537c43a6e40c4e6017fd7cf581a4af9535d8a55  wbboot.bin
+fd24ab535c1f7a67d58af0e47973923a7504b234e2d4e6d2fec883329cac0643  wbboot.lbl
+af661200a4629269da59296d821b9dbf04e6e88ac0484f32512d28028f157b5b  td.bin
+bea10bd74ce5a8dfd27c9b1d68a89c34314bb23b398708eac36af164ee024915  td_var.bin
+8ea277c19ed35bd81f22c707f81fd2e4233851cf2c175b55ca84cfe42aadd4d5  spr.bin
+acd305d5212a7fb02eb6f22c38d932ae658764dfeb2a6cd66317050d9909d1a5  spr.lbl
+d2e2b0df248c0ebb897b56856761a625b4c1774707edaa173a879f83817b1b6b  inpm.a.bin
+7b97e8655f1a1a4db656ee0099fd4392c51847bd3da3f18d3ef382e048bb6275  inpm.b.bin
+7ad4283bb1e27010b5138c3f0bc8435fcabec205bd0568c8f8a0da7d680cacd8  aud.a.bin
+7fa02a2e8337abfb1fcf9191aa74ea9611ee2031530a774229ab578b6b2fbc12  aud.b.bin
+8bd23b1ba14ca77ed59f12cafc691ca629268a990cea3eb182f3c4e020f46542  aud.lbl
+38551b003853badccffe2b72a65ef92ae839305c5bd29818def5e3d38c5a3199  modwb
+483fc888c1e5da9c52894b7849512edec6b09690737dd5c8f3e52c571c33293b  modwb.map
+18481f00f62a1ab212a50b88c8a6632eee4419effffd103c87b1dd5d73862d0b  modwb_standin
+492a39f305ed142c1acf4ae571477d553235e30146513f0418699d1abff53fe8  modwb_standin_noprof

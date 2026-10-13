@@ -1,0 +1,14 @@
+al 00C16F .@out
+al 00C12E .@pc
+al 00C11E .@ssp
+al 00C0F9 .aros_boot
+al 00C0B5 .@byte
+al 00C0F0 .@done
+al 00C080 .@page
+al 00C185 .aros_a
+al 00C059 .@z
+al 00C052 .aros_sum
+al 00C014 .@lp
+al 00C183 .aros_n
+al 00C182 .aros_b
+al 00C000 .aros_fill

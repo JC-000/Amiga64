@@ -17,6 +17,10 @@ dist/
 *.map
 *.labels
 
+# W17-B: the shipped binaries (make prebuilt) are committed
+!prebuilt/*.prg
+!prebuilt/*.map
+
 # Amiga binaries (fixtures are committed explicitly; nothing else)
 *.adf
 *.rom

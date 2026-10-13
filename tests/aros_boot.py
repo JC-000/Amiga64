@@ -98,6 +98,10 @@ DRV_SRC = os.path.join(ROOT, "tests", "aros", "mboot.s")
 
 def build_driver(labels_path: str, out_dir: str,
                  src: str | None = None) -> tuple[bytes, dict]:
+    from host import prebuilt                                   # W17-B
+    if prebuilt.use(("ca65", "ld65"), "mboot", src and f"the driver {src}",   # W17-B
+                    labels_path):                               # W17-B
+        return prebuilt.module("mboot", labels_path), prebuilt.labels("mboot")   # W17-B
     from c64_test_harness import Labels
     from tests.harness_util import lookup_label
     labels = Labels.from_file(labels_path)
