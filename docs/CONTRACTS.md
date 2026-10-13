@@ -2052,45 +2052,14 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
       over the first 4 moving frames and 16.0 at the cap.
     - At s = 3 that is 15.2 and 138.9 px/s (PAL φ2) or 15.8 and 144.2 px/s
       (NTSC φ2). 320 lores px take 2.2-2.3 s at the cap.
-  - **Known limit: the 1351 at turbo; planned fix** (supervisor: approved
-    in principle for the next session).
-    - **Measured** (C64U, a genuine 1351 in port 1,
-      `build/evidence/w14-mouse/diag/run1.log`, `run_inp --attended
-      --mouse-diag`):
-      - 1 MHz, no frame scan: POTX `$51-$D3` (120 values), POTY `$4D-$CE`,
-        the full range;
-      - 64 MHz, with or without the scan and the module: POTX `$60-$80`
-        (33 values), POTY `$5C-$7C`.
-      The 64 MHz turbo compresses the SID pot readings to ~1/4. The pointer
-      stays in a small box (the decode sees each wrap as a reverse move).
-      It is the same with the 8580s, UltiSID, and Paddle Override on or off.
-      The buttons are right = PB0 and left = PB4 at both speeds.
-    - **Planned fix:** drop the CPU to 1 MHz only around each pot read.
-      - With Turbo Control in register mode ("C64U Turbo Registers" / "U64
-        Turbo Registers"), the 6510 writes the speed index to `$D031` (0 = 1
-        MHz … 15 = 64 MHz on the C64U):
-        - 1541u-315preview `software/u64/u64_config.cc:313`
-          (`speeds_u64ii[]`), `:316-317` (`speed_regs[]`,
-          `speedregs_regvalues[]`), `:1599-1610` (`C64_TURBOREGS_EN`);
-        - the bench notes `~/Documents/1541u-turbo-drafts/close-61.md:11-17`
-          (`$D031` changes the clock 47×, reads back; `$D030` reads `$FF`);
-        - `clock-issue-draft.md:72-83` (the C64U name of the mode; writes
-          are ignored for ~2 s after a reset, so prove the register live
-          first; the CIA #2 time base does not move with `$D031`).
-      - With "Manual" (today's holds) `$D031` does nothing.
-      - **The sampler:** save `$D031`, write 0, wait W φ2 on the time base
-        (CIA #2 or raster lines, never a CPU loop; about 2 SID cycles ≈ 1.1
-        ms), read POTX/POTY, restore `$D031`.
-      - **Gating:** by a host byte (the speed index to restore; 0 = never
-        touch `$D031`), set only by an Ultimate launcher that has set the
-        register mode and proven it live. VICE and 1 MHz are unchanged.
-      - **Cost:** at 120 Hz ≈ 13 % of the throughput, so sample at ≈ 50 Hz
-        (≈ 5.5 %, still 31 × 50 ≈ 1.5k counts/s). W and the rate are
-        host-set.
-      - **First, a confirming diag D:** the register mode, liveness, then W
-        = 0 / 0.6 / 1.1 / 2.2 ms while moving right. If no W restores the
-        range, fall back to a turbo-gated mod-32 decode of the window
-        (≈ 4× coarser, possibly device-specific).
+  - **The 1351 at turbo: no known limit** (resolved 2026-10-12, not
+    reproduced). The 2026-10-11 pot compression at 64 MHz (POTX `$60-$80`
+    while moving) did not recur on 2026-10-12, under Manual 64, under "C64U
+    Turbo Registers" at every `$D031` index, or in a rerun of the same code.
+    It was a transient device state. The planned `$D031` drop-to-1-MHz
+    sampler is dropped, and no runtime code touches `$D031`. Details, the
+    measurements and the "if it recurs" steps: `docs/HARDWARE.md` "Wave 14
+    hardware findings", and `tests/run_mturbo.py`.
   - **Closed loops on the pointer** (scripted input, the demo helpers).
     AROS moves the pointer sprite from JOY0DAT a few guest frames after
     the counters change, so a sprite position read right after a move is

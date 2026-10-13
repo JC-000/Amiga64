@@ -1256,18 +1256,46 @@ with the same build ID and the same td module.
 
 ## Wave 14 hardware findings (2026-10-11, C64U 10.53.21.158, fw 1.1.0)
 
-- **The 1351 mouse at turbo (open).** A genuine Commodore 1351 in port 1, measured with `tests/run_inp.py --attended --mouse-diag` (evidence: the w14-mouse worktree's `build/evidence/w14-mouse/diag/run1.log`):
+- **The 1351 mouse at turbo: RESOLVED, NOT REPRODUCED 2026-10-12.** On 2026-10-11 a genuine Commodore 1351 in port 1 read compressed pots at 64 MHz (`tests/run_inp.py --attended --mouse-diag`; evidence: the w14-mouse worktree's `build/evidence/w14-mouse/diag/run1.log`). On 2026-10-12 neither that same code nor `tests/run_mturbo.py` (W15) reproduced it, in any turbo mode or at any speed:
 
-  | Config | POTX while moving | POTY while moving |
+  | Run (POTX / POTY while moving) | 1 MHz | 64 MHz |
   |---|---|---|
-  | 1 MHz, no frame scan | $51-$D3 (120 values), full | $4D-$CE |
-  | 64 MHz, no frame scan | $60-$80 (33 values) | $5C-$7C |
-  | 64 MHz, production scan + module | $60-$80 | $5C-$7B |
+  | 2026-10-11 run1, Manual / CPU Speed 64 (no scan; scan + module) | $51-$D3 (120 values) / $4D-$CE | $60-$80 (33 values) / $5C-$7C: compressed |
+  | 2026-10-12 rerun of run1's exact code (`rerun1-console.log`) | $51-$D3 (112) / $4D-$CE (117) | POTY $4D-$CE (121) (B/y); POTX $51-$D3 (112) with the scan + module (C/x): full |
+  | 2026-10-12 M1, "C64U Turbo Registers", `$D031` = 0..15, two passes | all 16 indices: POTX width 131 / POTY width 130, full | |
+  | 2026-10-12 M7 (a) and (c): Manual / CPU Speed 64, no `$D031` write | | $51-$D3 (128, 130 values): full |
+  | 2026-10-12 M7 (b) and (d): Turbo Registers, `$D031` = 15 | | $51-$D3 (129, 128 values): full |
+  | 2026-10-12 M7 (e): Manual 64, `$D031` = 15 written anyway | | $51-$D3 (124 values): full |
+  | 2026-10-12 M7 (f): Turbo Registers, CPU Speed config 64, `$D031` = 15 | | $51-$D2 (126 values): full |
 
-  - At the 64 MHz turbo the SID pot readings compress to about a quarter of their range. This holds with the real 8580s, with UltiSID, and with Paddle Override on or off.
-  - The 1351 decode (mod 128) then sees each wrap as a reverse move, so the Workbench pointer stays in a small box.
-  - The buttons are fine: right = PB0, left = PB4, also at 64 MHz.
-  - Planned fix (CONTRACTS "Input", known limit): drop the CPU to 1 MHz through $D031 (Turbo Control = "C64U Turbo Registers") around each pot read.
+  - **Conclusion:** the 2026-10-11 compression came from a transient device state, not from our code and not from the turbo mode. That day the C64U also ran on firmware defaults for a while and was hard power cycled (next bullet). No `$D031` workaround is needed, so the planned sampler is dropped (CONTRACTS "Input").
+  - In the rerun, window B/x (64 MHz, x) read 2 values. The user did not move the mouse in it, so it is invalid; `run_mturbo`'s rule marks it NO MOTION by itself.
+  - The buttons are unchanged: right = PB0, left = PB4, at 1 and 64 MHz.
+  - **Pot reads are served from the core at CPU speed** (M5, phi2 ticks per read via CIA1, the empty loop subtracted). A `$D419` read is not held to the phi2 bus, but a CIA read or a cartridge I/O read is:
+
+    | Turbo Control (and `$D031` index) | RAM | `$D419` | `$D41A` | `$D012` | `$DC01` | `$DE00` |
+    |---|---|---|---|---|---|---|
+    | Off | 4.30 | 4.29 | 4.29 | 4.30 | 4.30 | 4.30 |
+    | Manual 64 | 0.064 | 0.080 | 0.080 | 0.080 | 1.045 | 1.040 |
+    | Turbo Registers, index 0 | 4.29 | 4.30 | 4.30 | 4.29 | 4.30 | 4.29 |
+    | Turbo Registers, index 15 | 0.064 | 0.085 | 0.080 | 0.080 | 1.040 | 1.045 |
+
+    - A RAM read is 4 cycles; the 4.30 ticks at 1 MHz include the badline DMA.
+    - Through indices 0-12 a `$D419` read costs exactly what a RAM read does; at 13-15 it costs 15-30 % more (about 1 extra turbo cycle).
+    - Delivered rate (RAM at index 0 / RAM at index i): 1.00, 2.00, 3.02, 4.08, 6.25, 8.45, 10.27, 12.80, 14.94, 17.07, 21.34, 25.60, 34.14, 42.63, 50.13, 61.98 for indices 0-15.
+    - `$D031` acts at once in the register mode (15 → 0 within ~14 ticks, 0 → 15 after ~20 ticks) and is ignored with Off and Manual.
+  - **A still 1351 reads the same at every speed:** $CA / $AB (±1) under Off, Manual 64 and Turbo Registers indices 0 and 15, and after a drop to 1 MHz with any wait k = 0..3072 phi2 (M3-still).
+  - Evidence: the w15-mdiag worktree's `build/evidence/w15-mdiag/`: `unattended.log` (M4, M5, M3-still), `attended.log` (M1, M3-moving), `m7.log`, `rerun1-console.log`, each with its `*-summary.json` and the `u64-*/config_before.json` / `config_after.json` pairs (every hold restored IDENTICAL).
+  - Run commands (from the repo root, after `make runtime`):
+    - `U64_HOST=10.53.21.158 python3 -m tests.run_mturbo --prg build/runner.prg --backend u64 --unattended-only` runs M4, M5 and M3-still with the mouse untouched (~3 min).
+    - `... --backend u64 --only m7 [--m7-windows abcdef]` runs M4 plus M7, config path vs register path, with the mouse moving left-right (~3 min attended).
+    - `... --backend u64 [--skip-unattended]` runs M1 and M3-moving (~9 min attended).
+    - `python3 -m tests.run_mturbo --prg build/runner.prg` is the VICE dry run.
+    - `python3 -m tests.run_mturbo --from-log <a --mouse-diag log>` gives the per-window ranges and the COMPRESSED / full range / NO MOTION flag.
+  - **If it recurs:**
+    1. Before anything else, capture `/v1/info` and the FULL config, all categories. `u64_hold` writes both into `config_before.json`. Compare them with the 2026-10-12 `config_before.json` files, looking especially at the SID sockets, SID addressing, Paddle Override and Turbo Control.
+    2. Then run `run_mturbo --only m7`.
+    3. Only then power cycle.
 - **Firmware defaults instead of flash.** For part of the day the C64U ran on firmware defaults, not its saved settings: SID sockets Disabled ("None", 470 pF) although 8580s are fitted, network services Disabled, TimeZone Western Europe, Paddle Override Enabled. A power cycle loaded the flash settings again. The harness does not write those categories (c64-test-harness-c2; harness issue #530 proposes a check).
   - u64_hold restores only the categories it snapshots, so a hold passes such a state through unchanged. Before SID or input work, check that the SID Sockets read Enabled/8580.
 - **Don't open the Ultimate menu while a hold runs.** Opening the C64U's firmware menu during a hold wedged it: REST timed out, the hold's config restore failed, and only a hard power cycle recovered it.
