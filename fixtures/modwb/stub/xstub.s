@@ -45,6 +45,9 @@ CIAA_TODLO      equ     $bfe801
 CIAA_PRA        equ     $bfe001
 ANCHOR          equ     $2dc040         ; the app anchor (bit 7's foreign one)
 FOREIGN         equ     $0a0000         ; ... and its pointer
+CIAA_TBLO       equ     $bfe601         ; W16-E
+CIAA_TBHI       equ     $bfe701         ; W16-E
+CIAA_CRB        equ     $bfef01         ; W16-E
 CIAB_ICR        equ     $bfdd00
 CIAB_TBLO       equ     $bfd600
 CIAB_TBHI       equ     $bfd700
@@ -67,6 +70,9 @@ XP_FNAME        equ     20              ; 32 b the only name Open serves
 XP_TOOL         equ     52              ; 32 b the tool's name (WBArg 0)
 XP_ARG1         equ     84              ; 32 b the project's name (mode 2)
 XP_CLI          equ     116             ; 32 b the shell's argument line (mode 1)
+XP_ATB          equ     148             ; b W16-E: nonzero: CIA-A TB runs free before the call
+                                        ;   (latch $FFFF, continuous, enabled, no resource
+                                        ;   owner: as AROS, build/evidence/w16-e2e diag3/4)
 
 ; stub -> host
 XS              equ     $000600
@@ -113,6 +119,8 @@ XS_TOD1         equ     129             ; b ... and after the wait: a TOD latch 
 XS_LMBEN        equ     130             ; b the left button was down at the last Enable (the
                                         ; OS would see a click the launcher's exit made)
 XS_EASYARG      equ     132             ; l EasyRequestArgs' first argument (a3's first long)
+XS_ACRB0        equ     136             ; b W16-E: CIA-A CRB before the call ...
+XS_ACRB1        equ     137             ; b ... and after
 
 XLOG            equ     $005000         ; log entries, 24 bytes each
 XLOG_END        equ     $010000
@@ -255,6 +263,14 @@ start:  move.w  #$2700,sr
         move.b  #$02,maskb
         move.l  #os_tb,ownb+4
         move.b  CIAB_CRB,XS+XS_CRB0
+        tst.b   XP+XP_ATB               ; W16-E
+        beq     .natb                   ; W16-E
+        move.b  #$ff,CIAA_TBLO          ; W16-E: AROS's free-running counter
+        move.b  #$ff,CIAA_TBHI          ; W16-E
+        move.b  #$11,CIAA_CRB           ; W16-E: continuous, start, load
+        move.b  #$82,CIAA_ICR           ; W16-E: enabled, no owner
+        or.b    #$02,maska              ; W16-E
+.natb:  move.b  CIAA_CRB,XS+XS_ACRB0    ; W16-E
         move.w  #$e028,INTENA(a5)       ; INTEN EXTER VERTB PORTS
         lea     $64.w,a0                ; the OS's autovectors, for the host's check
         lea     XS+XS_SVEC,a1
@@ -335,6 +351,7 @@ post_trap:
 .on:    dbra    d1,.o
         move.b  d0,XS+XS_ICROWN         ; (bit 3 = owna[0] ... bit 0 = ownb[1])
         move.b  CIAB_CRB,XS+XS_CRB1
+        move.b  CIAA_CRB,XS+XS_ACRB1    ; W16-E
         move.l  sp,XS+XS_SSP
         move.b  #4,XS+XS_PHASE
         dc.w    $afff

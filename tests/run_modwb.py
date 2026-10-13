@@ -61,7 +61,7 @@ STUB_AT = 0x010000
 STUB_VARS = int(os.environ.get("MODWB_VARS", "0"), 16)
 SSP0 = 0x003000
 XP, XS, XLOG = 0x000500, 0x000600, 0x005000
-XP_LEN, XS_LEN = 0x100, 0x88
+XP_LEN, XS_LEN = 0x100, 0x8A          # W16-E: XS_ACRB0/1 at 136/137
 HEAP = 0x100000
 COPLIST = 0x027800
 OS_VIEW = 0x00EE0000
@@ -131,6 +131,7 @@ REVIEW_MUTANTS = {
     "anchorany": ["MW_MUT_ANCHORANY"],      # the anchor without a valid profile block
     "anchorfirst": ["MW_MUT_ANCHORFIRST"],  # 'MWBA' written before the pointer
     "noint": ["MW_MUT_NOINT"],              # INTENA not restored
+    "E_noatb": ["MW_MUT_NOATB"],            # W16-E: CIA-A TB left stopped (AROS runs it free)
 }
 # killed by the model only: the write order (VICE sees the end state and
 # polls), or a model case (an injected stall, a model E rate)
@@ -287,7 +288,8 @@ class Case:
                  tick_e: int = 0, model_only: bool = False, stall: tuple | None = None,
                  expect_lost: bool = False, hold: int = 6, pre_anchor: bytes | None = None,
                  epc: tuple = (1, 10), grid: bool = False, inject: str = "",
-                 builds: tuple = ("product", "trace"), jitter: bool = False):
+                 builds: tuple = ("product", "trace"), jitter: bool = False,
+                 atb: bool = False):
         self.name, self.song, self.mode, self.ld = name, song, mode, ld
         self.refuse, self.cli, self.arg1 = refuse, cli, arg1
         self.tool = "ModPlayer"
@@ -308,6 +310,7 @@ class Case:
         # the latch write; "turn": a frame turn inside sw_now), the jitter bound
         self.epc, self.grid, self.inject, self.jitter = epc, grid, inject, jitter
         self.builds = builds
+        self.atb = atb                  # W16-E: CIA-A TB runs free before the call (AROS)
         self.anchored = (prof is not None and profile_ok(prof)   # the anchor rules
                          and not (pre_anchor and pre_anchor_busy(pre_anchor)))
         self.wait = 5
@@ -323,6 +326,7 @@ class Case:
                          self.wait, XFILE, len(self.raw))
         for off, s in ((20, self.fname), (52, self.tool), (84, self.arg1), (116, self.cli)):
             p[off:off + len(s)] = s.encode()
+        p[148] = int(self.atb)          # W16-E: XP_ATB
         return bytes(p)
 
     def chunks(self, exe: bytes, stub: bytes) -> list[tuple[int, bytes]]:
@@ -393,6 +397,8 @@ def cases() -> list[Case]:
              expect=(ST_FAILED, (None,), ERR_TRACE), builds=("trace",)),
         # no audio.device: plays anyway
         Case("noaudio", "restart", refuse=0x10, prof=PROF_NORT),
+        # W16-E: CIA-A TB runs free before the call (AROS, no resource owner): back as found
+        Case("atb_free", "restart", ld="B", prof=PROF_NORT, atb=True),
         # backing out before any takeover
         Case("claim_refused", "restart", refuse=0x04, prof=PROF_NORT, expect=(ST_FAILED, (None,), 6)),
         Case("not_mk", "restart", raw=bytes(bad_mk), prof=PROF_NORT, expect=(ST_FAILED, (None,), 5)),
@@ -503,11 +509,14 @@ def check(c: Case, rd, hw: dict) -> list[str]:
     if hw["cop1lc"] != COPLIST:
         f.append(f"{c.name}: COP1LC ${hw['cop1lc']:06X}, want copinit ${COPLIST:06X}")
     maska, maskb = xs[28], xs[29]
-    if (maska, maskb) != (PRE_MASKA, PRE_MASKB):
+    pre_a = PRE_MASKA | (0x02 if c.atb else 0)   # W16-E: TB enabled before the call
+    if (maska, maskb) != (pre_a, PRE_MASKB):
         f.append(f"{c.name}: ICR resource masks ${maska:02X}/${maskb:02X}")
-    if (hw["maska_hw"], hw["maskb_hw"]) != (PRE_MASKA, PRE_MASKB):
+    if (hw["maska_hw"], hw["maskb_hw"]) != (pre_a, PRE_MASKB):
         f.append(f"{c.name}: CIA ICR enable masks ${hw['maska_hw']:02X}/"
-                 f"${hw['maskb_hw']:02X}, want ${PRE_MASKA:02X}/${PRE_MASKB:02X}")
+                 f"${hw['maskb_hw']:02X}, want ${pre_a:02X}/${PRE_MASKB:02X}")
+    if c.atb and xs[137] != xs[136]:    # W16-E
+        f.append(f"{c.name}: CIA-A CRB ${xs[137]:02X} after, ${xs[136]:02X} before (TB ran free)")
     vbl, ta, wto = struct.unpack_from(">H", xs, 30)[0], struct.unpack_from(">H", xs, 32)[0], xs[34]
     if wto or vbl != c.wait:
         f.append(f"{c.name}: after the return {vbl} VERTBs of {c.wait} (a wait timed out: {wto})")

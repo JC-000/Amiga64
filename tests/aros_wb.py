@@ -1058,6 +1058,8 @@ def run(a, rom, raw: bytes) -> tuple[list[str], dict]:
                 fails += leg_demo_boot(m, rom, disk, s, r, a.vol, a.timeout, t_run, a.hold_s)
             elif leg == "modwb":        # W16-D
                 from tests import aros_modwb as MW                                   # W16-D
+                if AUDIO[0] and not m.vice:                     # W16-E: the stream's WAVs
+                    MW.STREAM_DIR[0] = a.out                    # W16-E
                 fails += MW.leg_modwb(m, rom, disk, s, r, a.vol, a.timeout, t_run,  # W16-D
                                       a.modwb_mutant, a.modwb_exit)                  # W16-D
             elif leg == "cost":
