@@ -2186,7 +2186,7 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
   - Any later CODE growth shifts RODATA again. That is a layout rule for the
     supervisor (e.g. page-align RODATA in `runtime/c64.cfg`).
 
-| guest memory | REU chip RAM, slow RAM + `$DC0000-$DEFFFF`, ROM banks | stays (REU-resident) / file spans 2-5 | stays / LOAD_REU | the guest's RAM. AROS WRITES `$DC0000-$DEFFFF` (unmapped in the profile; not zero after m3 on both Ultimates), so the slow-RAM span runs to `$DEFFFF`. `$200000-$BEFFFF` (W13-W: `$2DC000-$BEFFFF`; the staged disk below it is in span 2) and `$E80000-$F7FFFF` read zero after m3 (`aros_resume` m3 leg, Ultimate) and are not filed: a resume needs them zero, as the boot does (`host/machine.ZERO_SPANS`) |
+| guest memory | REU chip RAM, slow RAM + `$DC0000-$DEFFFF`, ROM banks | stays (REU-resident) / file spans 2-5 | stays / LOAD_REU | the guest's RAM. AROS WRITES `$DC0000-$DEFFFF` (unmapped in the profile; not zero after m3 on both Ultimates), so the slow-RAM span runs to `$DEFFFF`. `$200000-$BEFFFF` (W13-W: `$2DC000-$BEFFFF`; the staged disk below it is in span 2; W16-P: except `prof` `$2DC000-$2DC0FF` in a Workbench session with `--audio`, host data that is non-zero by design, not filed, and rewritten by the launcher before every resume launch) and `$E80000-$F7FFFF` read zero after m3 (`aros_resume` m3 leg, Ultimate) and are not filed: a resume needs them zero, as the boot does (`host/machine.ZERO_SPANS`) |
 | W13-W disk image | REU `$200000-$2DBFFF` (`TD_ADF`) | file span 2 (the chip span runs to `$2DBFFF`, `SNAP_VER` 2) / stays (REU-resident) | LOAD_REU / stays | the staged DF0 disk and its overlay travel with the snapshot; zero without a disk |
 | W13-W drive and device state (`td_*`) | `td.s` BSS | image | restored | drive lines, the patched slot and its original target; the CIA-A pins live in `cia_st` (image) |
 
@@ -2379,14 +2379,15 @@ VICE legs `latch`, `blocks`, `irq`, `reload`, `lencache`, `pervol`, `park`,
   across adds 1 cycle per taken branch. MAIN is at its limit: run_pf's
   `trace` variant keeps 4 B before its BSS page, and
   `host/tests/test_paula_layout.py` fails if RODATA leaves `$8D00`.
-- **Where it lives (player profile only).** Segment A `$CA00-$CCFF`
+- **Where it lives (the player profile; W16-P: the Workbench profile too, below).** Segment A `$CA00-$CCFF`
   (entries `+0` write, `+7` the slot-6 callback, `+10` init; config and
   counters at `+13`), segment B `$0400-$07FF` (the text screen and its
   sprite-pointer tail, unused in machine mode: the VIC is on bank 3), state
   page `$CD00-$CDFF`. **Known limits:** segment A and the state page are
   mutually exclusive with `aros_resume`'s stub (`$CB00`/`$CC00`) and with
   run_irq's and run_mach's driver blocks (`$CA00-$CCFF`), which belong to
-  other sessions; coexisting with resume is backlog. Segment B is player
+  other sessions; W16-P: in a Workbench session aud is staged after the
+  resume stub's last use ("The Workbench profile" below). Segment B is player
   profile only: machine mode never uses the HLE console screen, so it is
   mutually exclusive with HLE console sessions and with `aros_resume`'s
   READY. wait (which happens before staging); it is staged only after any
@@ -2403,6 +2404,141 @@ VICE legs `latch`, `blocks`, `irq`, `reload`, `lencache`, `pervol`, `park`,
   `cfg_r16`, `+15` u8 `cfg_hw`, `+16` u24 `cfg_zero`); `mach_cbv[6]` :=
   `AUD_ORG+7`; call `AUD_ORG+10` (init); `aud_mon` := the ID byte 0.
   Disarm: `aud_mon` := 0, `mach_cbv[6]` := 0.
+- **The Workbench profile (W16-P; WAVE16 M0 rulings (1)-(4)).** `tests/aros_wb.py
+  --audio` (helpers `aud_stage`, `aud_arm`, leg `aud`):
+  - **Placement:** unchanged (A `$CA00-$CCFF`, state page `$CD00-$CDFF`,
+    B `$0400-$07FF`). Machine mode never writes the text screen (only
+    hle.s/hle_con.s do; the VIC is on bank 3). In a Workbench session A
+    shares `buf_result` with aros_resume's REU stub (`$CC00`, data `$CB00`:
+    fresh_load's scrub, `declare_rid`, `Snap.reu_read/write`), which only
+    runs while the guest does not. **Rule: aud is staged and init'ed last**,
+    right before `m.start` or the `snap_resume` launch. Leg `cost` (its stub
+    at `$CC80`), `--watch` (`$CDC0`) and `--resume-mutant` (another PRG's
+    labels) refuse `--audio`. GuestPeek (VICE e2e reads while the guest
+    runs) parks at `$CCF0` and fetches into `$CD00`: it saves that page and
+    the park bytes and writes both back before the 6510 runs on (leg `aud`:
+    `$CA00-$CDFF` unchanged across 20 peeks, counters aside; mutant
+    `peeknorest`).
+  - **The KERNAL cursor blink:** B is the text screen. After VICE's
+    `fresh_load` (READY., then `goto $080D`: the resume path) BLNSW (`$CC`)
+    is 0, and the KERNAL IRQ blinks the cursor at `$04F0` (bit 7) until
+    `mach_run`'s `sei`. The ID check cannot see that (B's code is not
+    checksummed), so `aud_stage` sets `$CC` := 1 before staging B. Leg `aud`
+    reads B 12 times over 1.2 s between staging and the resume launch
+    (mutant `blink`: B changed in 3 of 12 reads; probe
+    `build/evidence/w16-p/vice/blink_probe.py`).
+  - **Boot:** after `arm_spr`/`arm_inpm` and every runner stub: the profile
+    block (below), A + B (read back), the config (`cfg_r16` for the boot's
+    s, `cfg_hw` 1 only when the hold mapped and proved the sampler, `cfg_zero`
+    `$DF4000`), init, `mach_cbv[6]` := A+7, then `aud_mon` := the ID byte 0.
+    The guest runs armed from its first instruction (mutants `stagefirst`,
+    `nocbv`).
+  - **Resume:** `aud_mon` (DATA) is 0 after the fresh load and the state page
+    is not in the image. Before the launch (after `aros_fill` and
+    `declare_rid`): the block, A + B, config, init. After the guest runs:
+    `mach_sl` must equal the session's s (else the staged r16 is wrong:
+    refused; `mach_sl` is exported for this, label only, the PRG unchanged;
+    leg `aud` checks it equals the boot's s), then
+    `mach_cbv[6]`, then `aud_mon` (mutant `noresarm`).
+    **Known limit:** a snapshot taken while a channel plays resumes with
+    that channel silent and posting no AUDx until the guest's next DMA start
+    (the channel state is not in the image); the Workbench demo snapshot (no
+    audio) is unaffected. **Not shown (rev16-p L5):** that a Paula write
+    reaches the module after a resume: at the idle Workbench AROS writes no
+    audio register (`st_nw` 0 after every resume), so the re-arm is shown
+    statically (`aud_mon`, `mach_cbv[6]`, A/B intact); W16-X's program is the
+    dynamic proof. **Resume without `--audio` (rev16-p L6):** a snapshot
+    taken with aud armed carries `mach_cbv[6]` = `$CA07` (and maybe slot 6
+    armed); resumed without `--audio` nothing is staged there. The restore
+    and the continued run are one `snap_resume` call, so the host cannot
+    write between them; instead, before the launch, `_resume` writes `rts`
+    at `$CA07` (and `aud_mon` := 0, as after any fresh load), so such a
+    callback is a no-op, and once the guest runs it clears `mach_cbv[6]`
+    (high byte first). Leg `audres` (VICE): slot 6 pending ~30 frames ahead
+    at the suspend, `$CA00-$CA0F` as unknown RAM (a self-jump at `$CA07`;
+    zeros were not enough: the BRKs fell into the stale A the boot left in
+    RAM), the guest must run
+    45 frames past the resume and `mach_cbv[6]` read 0 (mutant `noguard`:
+    neither the rts nor the clear). The deadline falls after the host's
+    clear, so the leg shows the clear; the rts covers only the window
+    between the launch and the clear, which the leg does not hit.
+    `$CA07` is free in non-audio sessions (the resume stub uses `$CB00`
+    and `$CC00`). Leg `aud` disarms before its suspend, as the demo snapshot
+    is taken.
+  - **The hold (Ultimates):** `Map Ultimate Audio $DF20-DFFF` := Enabled
+    inside the hold (restored by it), the runner reloaded, then the
+    **differential sampler proof**, measured on the **U64E only** [MEASURED
+    HW, U64E fw 3.15, `build/evidence/w16-p/hw16`; the C64U is not measured
+    yet: its hold is pending, so `--audio` on the C64U may stop INFRA until
+    then]: the 6510's copy of `$DF20-$DFFF` reads
+    `$00 $10` in all 112 pairs with the item Enabled; Disabled, the window
+    reads changing bus data (`$DF21` = `$00`; two reads differ), so `$DF21`
+    alone is not the proof (on VICE the window is the REC's mirror). Without
+    the proof the session stops (INFRA). **Silence at the end:** the
+    session's closing `set_speed(1)` + reboot stops a voice that is still
+    playing on the **U64E** (hw16 `rbsil`, by the UDP audio stream: a
+    hardware-looped tone, 4394 rms, gone within ~0.3 s of the reboot
+    request; 34 rms after, noise, no 259 Hz line); no init call is needed
+    (none is possible while `mach_run` runs). The C64U (no stream: WiFi) is
+    to be checked instrumentally (hw16 `rbwin`: the window idle, playing and
+    after the reboot).
+  - **Time at s = 3** (both Ultimates): E = 1022727 / 8 = 127841 Hz,
+    `cfg_r16` 2362, a guest frame 111 ms real (VERTB 9.0 Hz). `PARK_E` stays
+    7094 E (55-111 ms real between parked looks: ~8x fewer per real second
+    than at s = 0); a late acknowledge is reposted within one guest frame
+    (111 ms real); the seam's lateness bound 4096 >> 3 = 512 E = 4 ms real.
+    VICE (s = 9): `cfg_r16` 37 (1.3% rounding: the dry backend only).
+    **Not measured:** the C64U's phi2 at 64 MHz (assumed NTSC 1022727).
+- **The profile block and the app anchor (W16-P; rc machine.inc `prof
+  $2DC000-$2DC0FF`).** A guest program cannot measure real time, so the host
+  tells it. Guest `$2DC000-$2DC03F`, right after the staged ADF: plain REU
+  memory outside chip and slow RAM (AROS never allocates it; no MemHeader
+  may cover it: leg `w`'s guest check), written by the host only while the
+  guest is stopped (boot: before `m.start`; resume: before the launch; the
+  snapshot file spans end at `$2DBFFF`), never torn. Zero in a session
+  without it. Big-endian:
+
+  | off | type | field |
+  |---|---|---|
+  | +0 | u32 | magic `'A64P'` |
+  | +4 | u16 | version 1 |
+  | +6 | u16 | size 64 |
+  | +8 | u32 | `e_hz_q8`: guest E ticks per real second x 256 (s = 3 NTSC: 32727264) |
+  | +12 | u32 | `tick_e`: round(E Hz / 50), the 125-BPM tick (s = 3: 2557); CIA period = tick_e x 125 / BPM |
+  | +16 | u32 | `frame_e` 14188 (E per guest frame) |
+  | +20 | u32 | `phi2_hz` (1022727 NTSC) |
+  | +24 | u8 | s |
+  | +25 | u8 | host: 0 VICE, 1 U64E, 2 C64U |
+  | +26 | u8 | flags: bit 0 aud armed, bit 1 the sampler is live (audible), bit 2 real time is meaningful (an Ultimate) |
+  | +27 | u8 | 0 |
+  | +28 | u16 | `cfg_r16` in force |
+  | +30 | u16 | CPU MHz (informative) |
+  | +32..+59 | | 0 |
+  | +60 | u32 | `~`(32-bit sum of the longs +0..+56) |
+
+  A guest takes it only when the magic, version 1, the size and the check
+  match; otherwise Amiga timing (tick_e 14188, VBL). Leg `aud` checks the
+  config and the block it reads back (GuestPeek) against values computed
+  from s and phi2 alone, not through `profile_block` (mutants `r16cfg`,
+  `blks0`), and zeroes `prof` before the resume's staging, as the Ultimate's
+  file resume leaves it, so the rewrite is proven (mutant `noresblk`). **The app anchor**
+  `$2DC040-$2DC04F` (supervisor, binding for W16-X/W16-D): written by the
+  guest program, only read by the host: +0 `'MWBA'`, +4 a pointer to the
+  app's state struct (mod_view etc.), +8 the guest's sequence/flags long,
+  +12 reserved. `$2DC050-$2DC0FF` reserved. **Anchor rules** (rev16-p M4):
+  1. the program writes the anchor only when the profile block is valid
+     (otherwise `$2DC040` may be anything: a real Amiga's memory);
+  2. publish +4, +8, +12 first and `'MWBA'` last; withdraw (on exit, before
+     the struct is freed) by clearing `'MWBA'` first: the host may read
+     between any two guest writes, so the magic gates the rest;
+  3. the pointer is never 0, is even, and the whole struct lies in chip RAM
+     (`$000000-$1FFFFF`) or slow RAM (`$C00000-$DBFFFF`);
+  4. the snapshot file spans end at `$2DBFFF`: a file resume loses the
+     anchor (the launcher rewrites only the block), so an app that relies on
+     it publishes it again after a resume.
+  Host side: `host/profile_block.py` (`build`, `parse`, `parse_anchor(raw,
+  size)`: a pointer that is 0, odd, or whose *size*-byte struct leaves its
+  RAM span is not to be followed), pytest `host/tests/test_profile_block.py`.
 - **Model (Amiga HRM, audio).** AUDxLC/AUDxLEN are latches (LC bits 20-1,
   so samples anywhere in 2 MB of chip RAM, `latch` plays one at `$180000`).
   DMA start (DMAEN and AUDxEN both set) copies them into the playing block

@@ -40,7 +40,8 @@ TD_ADF        = $200000 ; W13-W: ADF byte 0 (block n at TD_ADF + 512 n)
 .ifndef TD_ADF_END
 TD_ADF_END    = $2DBFFF ; W13-W: last ADF byte (inclusive; 901120 bytes)
 .endif
-; @region free $2DC000-$BEFFFF unmapped on the machine; zero-filled; AROS probes it and finds nothing (Akiko at $B80002 reads 0) ; W13-W: was $200000-
+; @region prof $2DC000-$2DC0FF W16-P (supervisor-approved): the profile block $2DC000-$2DC03F (host-written while the guest is stopped, guest-read: E rate, tick_e, s, flags; host/profile_block.py) and the app anchor $2DC040-$2DC04F (guest-written 'MWBA', host-read); $2DC050-$2DC0FF reserved; zero without a WB session that writes it
+; @region free $2DC100-$BEFFFF unmapped on the machine; zero-filled; AROS probes it and finds nothing (Akiko at $B80002 reads 0) ; W13-W: was $200000- ; W16-P: was $2DC000-
 ; @region io $BF0000-$BFFFFF CIA bank: trapped to chip.s/cia.s by the memory API, the REU under it unused
 
 ; @region aros $C00000-$DBFFFF slow RAM, 1.75 MB (AROS sizes it to $DC0000; SysBase lands here)
