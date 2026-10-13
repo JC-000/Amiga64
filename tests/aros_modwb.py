@@ -308,6 +308,10 @@ class Music:                            # W16-E
 
 def build_standin(out_dir: str, defines: tuple = ()) -> bytes:
     """tests/modwb/standin.s as an AmigaOS hunk executable."""
+    from host import prebuilt                                   # W17-B
+    name = {(): "standin", ("STANDIN_NOPROF",): "standin_noprof"}.get(tuple(defines))   # W17-B
+    if prebuilt.use((VASM,), name, "" if name else f"the stand-in {' '.join(defines)}"):   # W17-B
+        return prebuilt.module(name)                            # W17-B
     os.makedirs(out_dir, exist_ok=True)
     tag = "-".join(d.split("=")[0].lower() for d in defines) or "standin"
     out = os.path.join(out_dir, f"modwb_{tag}")

@@ -1,0 +1,240 @@
+
+Files:
+  modwb.s:  CODE 0(bdc), DATA 0(4), mwchip 0(5c), BSS 0(1168) hex
+  mwdata.s:  BSS 1168(c8) hex
+  replay.s:  CODE bdc(14d4), DATA 4(8a0), BSS 1230(44c) hex
+  ui.s:  CODE 20b0(1f2c), uibuf 0(cb80) hex
+  mwend.s:  CODE 3fdc(4), DATA 8a4(4), mwchip 5c(4) hex
+
+
+Section mapping (numbers in hex):
+------------------------------
+  00000000 CODE  (size 3fe0)
+           00000000 - 00000bdc modwb.s(CODE)
+           00000bdc - 000020b0 replay.s(CODE)
+           000020b0 - 00003fdc ui.s(CODE)
+           00003fdc - 00003fe0 mwend.s(CODE)
+------------------------------
+  00000000 DATA  (size 8a8)
+           00000000 - 00000004 modwb.s(DATA)
+           00000004 - 000008a4 replay.s(DATA)
+           000008a4 - 000008a8 mwend.s(DATA)
+------------------------------
+  00000000 mwchip  (size 60)
+           00000000 - 0000005c modwb.s(mwchip)
+           0000005c - 00000060 mwend.s(mwchip)
+------------------------------
+  00000000 BSS  (size 167c, allocated 0)
+           00000000 - 00001168 modwb.s(BSS)
+           00001168 - 00001230 mwdata.s(BSS)
+           00001230 - 0000167c replay.s(BSS)
+------------------------------
+  00000000 uibuf  (size cb80, allocated 0)
+           00000000 - 0000cb80 ui.s(uibuf)
+
+
+Symbols of CODE:
+  0x00000000 start: local reloc, size 0
+  0x00000088 anchor_init: local reloc, size 0
+  0x00000116 anchor_busy: local reloc, size 0
+  0x0000015a anchor_end: local reloc, size 0
+  0x0000017c prof_check: local reloc, size 0
+  0x000001b4 set_state: local reloc, size 0
+  0x000001e2 run: local reloc, size 0
+  0x00000348 load_mod: local reloc, size 0
+  0x000004e0 params: local reloc, size 0
+  0x00000570 claim: local reloc, size 0
+  0x00000624 dummy: local reloc, size 0
+  0x00000628 audio_alloc: local reloc, size 0
+  0x00000694 takeover: local reloc, size 0
+  0x00000710 restore: local reloc, size 0
+  0x000007dc play: local reloc, size 0
+  0x00000886 lmb_wait: local reloc, size 0
+  0x000008a6 release: local reloc, size 0
+  0x00000994 report: local reloc, size 0
+  0x000009ec errtab: local reloc, size 0
+  0x000009fe e1: local reloc, size 0
+  0x00000a1d e2: local reloc, size 0
+  0x00000a3b e3: local reloc, size 0
+  0x00000a75 e4: local reloc, size 0
+  0x00000a93 e5: local reloc, size 0
+  0x00000abc e6: local reloc, size 0
+  0x00000ae4 e7: local reloc, size 0
+  0x00000b0c e8: local reloc, size 0
+  0x00000b2f e9: local reloc, size 0
+  0x00000b55 title: local reloc, size 0
+  0x00000b68 okgad: local reloc, size 0
+  0x00000b6b dosname: local reloc, size 0
+  0x00000b77 gfxname: local reloc, size 0
+  0x00000b88 intname: local reloc, size 0
+  0x00000b9a ciaaname: local reloc, size 0
+  0x00000ba8 ciabname: local reloc, size 0
+  0x00000bb6 audname: local reloc, size 0
+  0x00000bc3 defname: local reloc, size 0
+  0x00000bd1 dotmod: local reloc, size 0
+  0x00000bd6 intname_s: local reloc, size 0
+  0x00000bdc pw: local reloc, size 0
+  0x00000be2 div32: local reloc, size 0
+  0x00000bfe _mod_init: global reloc, size 0
+  0x00000e3e _mod_start: global reloc, size 0
+  0x00000e9e _mod_wait_frame: global reloc, size 0
+  0x00000ee2 _mod_publish: global reloc, size 0
+  0x00000f1c l3_vbl: global reloc, size 0
+  0x00000f64 l6_ciab: global reloc, size 0
+  0x00000fb0 run_loop: local reloc, size 0
+  0x00001018 tick_loop: local reloc, size 0
+  0x00001076 read_tb: local reloc, size 0
+  0x000010b0 sw_count: local reloc, size 0
+  0x000010d4 sw_one: local reloc, size 0
+  0x0000110e sw_since: local reloc, size 0
+  0x0000113e sw_latch: local reloc, size 0
+  0x000011b0 sw_start: local reloc, size 0
+  0x000011cc sw_wlatch: local reloc, size 0
+  0x000011de sw_amb: local reloc, size 0
+  0x00001270 sw_owed: local reloc, size 0
+  0x00001292 ta_cnt: local reloc, size 0
+  0x000012ae stage_wait: local reloc, size 0
+  0x000012f2 sw_now: local reloc, size 0
+  0x00001344 l2_ciaa: global reloc, size 0
+  0x0000138e stage_arm: local reloc, size 0
+  0x000013ba stage_step: local reloc, size 0
+  0x000013ea stage_rep: local reloc, size 0
+  0x0000141e stage_flush: local reloc, size 0
+  0x00001438 timer_update: local reloc, size 0
+  0x000014ba finish: local reloc, size 0
+  0x0000150a do_tick: local reloc, size 0
+  0x00001610 ptab_lookup: local reloc, size 0
+  0x00001620 note_on: local reloc, size 0
+  0x000016a4 row_start: local reloc, size 0
+  0x00001af8 wave: local reloc, size 0
+  0x00001b3c porta: local reloc, size 0
+  0x00001b74 effects: local reloc, size 0
+  0x00001e18 clampout: local reloc, size 0
+  0x00001e48 emit: local reloc, size 0
+  0x00001fe6 build_view: local reloc, size 0
+  0x000020b0 _ui_init: global reloc, size 0
+  0x00002250 _ui_frame: global reloc, size 0
+  0x000022ae kick: local reloc, size 0
+  0x000022e8 bwait: local reloc, size 0
+  0x000022f4 capture: local reloc, size 0
+  0x00002356 header: local reloc, size 0
+  0x00002434 num2: local reloc, size 0
+  0x00002446 dec2f: local reloc, size 0
+  0x00002454 bpm: local reloc, size 0
+  0x000024ac time: local reloc, size 0
+  0x000024f2 flags: local reloc, size 0
+  0x0000256c chan: local reloc, size 0
+  0x000026ea tline: local reloc, size 0
+  0x00002782 fmt: local reloc, size 0
+  0x00002816 pt: local reloc, size 0
+  0x0000282c dd: local reloc, size 0
+  0x0000284e dd4: local reloc, size 0
+  0x0000286e glinv3: local reloc, size 0
+  0x0000288e fill: local reloc, size 0
+  0x00002896 pen1: local reloc, size 0
+  0x000028b6 pen2: local reloc, size 0
+  0x000028d8 pen3: local reloc, size 0
+  0x0000291c vu4: local reloc, size 0
+  0x00002936 vu5: local reloc, size 0
+  0x00002968 vu6: local reloc, size 0
+  0x0000299a vutab: local reloc, size 0
+  0x000029da trowtab: local reloc, size 0
+  0x000029ea ui_pal: local reloc, size 0
+  0x000029fa ui_static: local reloc, size 0
+  0x00002a04 u_000011s: local reloc, size 0
+  0x00002a08 u_000011e: local reloc, size 0
+  0x00002a12 u_000012s: local reloc, size 0
+  0x00002a15 u_000012e: local reloc, size 0
+  0x00002a20 u_000013s: local reloc, size 0
+  0x00002a21 u_000013e: local reloc, size 0
+  0x00002a2c u_000014s: local reloc, size 0
+  0x00002a2f u_000014e: local reloc, size 0
+  0x00002a3a u_000015s: local reloc, size 0
+  0x00002a3d u_000015e: local reloc, size 0
+  0x00002a48 u_000016s: local reloc, size 0
+  0x00002a4c u_000016e: local reloc, size 0
+  0x00002a56 u_000017s: local reloc, size 0
+  0x00002a57 u_000017e: local reloc, size 0
+  0x00002a62 u_000018s: local reloc, size 0
+  0x00002a65 u_000018e: local reloc, size 0
+  0x00002a70 u_000019s: local reloc, size 0
+  0x00002a73 u_000019e: local reloc, size 0
+  0x00002a7e u_000020s: local reloc, size 0
+  0x00002a81 u_000020e: local reloc, size 0
+  0x00002a8c u_000021s: local reloc, size 0
+  0x00002a9e u_000021e: local reloc, size 0
+  0x00002aa8 u_000022s: local reloc, size 0
+  0x00002aaa u_000022e: local reloc, size 0
+  0x00002ab4 u_000023s: local reloc, size 0
+  0x00002ab5 u_000023e: local reloc, size 0
+  0x00002ac0 u_000024s: local reloc, size 0
+  0x00002ac1 u_000024e: local reloc, size 0
+  0x00002acc u_000025s: local reloc, size 0
+  0x00002acd u_000025e: local reloc, size 0
+  0x00002ad8 u_000026s: local reloc, size 0
+  0x00002ad9 u_000026e: local reloc, size 0
+  0x00002ae4 u_000027s: local reloc, size 0
+  0x00002ae5 u_000027e: local reloc, size 0
+  0x00002aea txt_title: local reloc, size 0
+  0x00002afc txt_vbl: local reloc, size 0
+  0x00002aff txt_cia: local reloc, size 0
+  0x00002b02 txt_loop: local reloc, size 0
+  0x00002b06 txt_sp4: local reloc, size 0
+  0x00002b0a txt_dash: local reloc, size 0
+  0x00002b0e ui_font: local reloc, size 0
+  0x00003b0e ui_dec2: local reloc, size 0
+  0x00003bd6 ui_notes: local reloc, size 0
+  0x00003c45 ui_hex: local reloc, size 0
+  0x00003c56 ui_vupat: local reloc, size 0
+  0x00003c68 ui_st: local reloc, size 0
+
+Symbols of DATA:
+  0x00000000 allocmap: local reloc, size 0
+  0x00000004 ptab: local reloc, size 0
+  0x00000484 sine: local reloc, size 0
+  0x000004a4 notetab: local reloc, size 0
+
+Symbols of BSS:
+  0x00000000 sysbase: local reloc, size 0
+  0x00000004 intbase: local reloc, size 0
+  0x00000008 gfxbase: local reloc, size 0
+  0x0000000c dosbase: local reloc, size 0
+  0x00000010 ciaabase: local reloc, size 0
+  0x00000014 ciabbase: local reloc, size 0
+  0x00000018 wbmsg: local reloc, size 0
+  0x0000001c cliarg: local reloc, size 0
+  0x00000020 clilen: local reloc, size 0
+  0x00000024 aseq: local reloc, size 0
+  0x00000026 name: local reloc, size 0
+  0x0000002a fh: local reloc, size 0
+  0x0000002e olddir: local reloc, size 0
+  0x00000032 aport: local reloc, size 0
+  0x00000036 oldssp: local reloc, size 0
+  0x0000003a oldsp: local reloc, size 0
+  0x0000003e cdset: local reloc, size 0
+  0x0000003f ownblit: local reloc, size 0
+  0x00000040 profok: local reloc, size 0
+  0x00000041 anch: local reloc, size 0
+  0x00000042 busy: local reloc, size 0
+  0x00000043 audopen: local reloc, size 0
+  0x00000044 lmbup: local reloc, size 0
+  0x00000045 easyargs: local reloc, size 0
+  0x00000049 ints: local reloc, size 0
+  0x000000a4 ioa: local reloc, size 0
+  0x000000e8 easy: local reloc, size 0
+  0x000000fc namebuf: local reloc, size 0
+  0x00000168 stack: local reloc, size 0
+  0x00001168 stack_end: local reloc, size 0
+  0x00001168 VIEW: global reloc, size 0
+  0x000011b0 PARAM: global reloc, size 0
+  0x000011f0 STATUS: global reloc, size 0
+  0x00001230 G: local reloc, size 0
+  0x000012b0 chans: local reloc, size 0
+  0x00001388 insts: local reloc, size 0
+  0x00001632 shadow: local reloc, size 0
+  0x0000167a _mod_done: global reloc, size 0
+
+Symbols of uibuf:
+  0x00000000 UI_COP: global reloc, size 0
+  0x00000100 UI_KICK: local reloc, size 0
+  0x00001000 UI_PL: local reloc, size 0

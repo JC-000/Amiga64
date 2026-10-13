@@ -1,0 +1,867 @@
+Modules list:
+-------------
+core.o:
+    CODE              Offs=000000  Size=000E38  Align=00080  Fill=0000
+    RODATA            Offs=000000  Size=000013  Align=00001  Fill=0000
+    BSS               Offs=000000  Size=00001D  Align=00001  Fill=0000
+    ZEROPAGE          Offs=000000  Size=000008  Align=00001  Fill=0000
+    LOADADDR          Offs=000000  Size=000002  Align=00001  Fill=0000
+    STARTUP           Offs=000000  Size=000036  Align=00001  Fill=0000
+    CWCODE            Offs=000000  Size=0000CD  Align=00001  Fill=0000
+c2v.o:
+    CODE              Offs=000E38  Size=000700  Align=00001  Fill=0000
+dosio_ram.o:
+    CODE              Offs=001538  Size=0004D1  Align=00001  Fill=0000
+    RODATA            Offs=000013  Size=000008  Align=00001  Fill=0000
+    BSS               Offs=00001D  Size=0000A4  Align=00001  Fill=0000
+dosio_uci.o:
+    CODE              Offs=001A09  Size=000486  Align=00001  Fill=0000
+    RODATA            Offs=00001B  Size=000003  Align=00001  Fill=0000
+    BSS               Offs=0000C1  Size=0000BF  Align=00001  Fill=0000
+g1_move.o:
+    CODE              Offs=001E8F  Size=000144  Align=00001  Fill=0000
+    RODATA            Offs=00001E  Size=000004  Align=00001  Fill=0000
+g2_arith.o:
+    CODE              Offs=001FD3  Size=00034B  Align=00001  Fill=0000
+    BSS               Offs=000180  Size=000005  Align=00001  Fill=0000
+g3_logic.o:
+    CODE              Offs=00231E  Size=000382  Align=00001  Fill=0000
+    RODATA            Offs=000022  Size=00001D  Align=00001  Fill=0000
+    BSS               Offs=000185  Size=000008  Align=00001  Fill=0000
+g4_shift.o:
+    CODE              Offs=0026A0  Size=00021C  Align=00001  Fill=0000
+    RODATA            Offs=00003F  Size=000016  Align=00001  Fill=0000
+g5_flow.o:
+    CODE              Offs=0028BC  Size=000730  Align=00001  Fill=0000
+    RODATA            Offs=000055  Size=000020  Align=00001  Fill=0000
+    BSS               Offs=00018D  Size=00000B  Align=00001  Fill=0000
+g6_muldiv.o:
+    CODE              Offs=002FEC  Size=000655  Align=00001  Fill=0000
+    DATA              Offs=000000  Size=00001F  Align=00001  Fill=0000
+hle_con.o:
+    CODE              Offs=003641  Size=00037D  Align=00001  Fill=0000
+    RODATA            Offs=000075  Size=000090  Align=00001  Fill=0000
+    BSS               Offs=000198  Size=0001C4  Align=00001  Fill=0000
+hle_dos.o:
+    CODE              Offs=0039BE  Size=00098B  Align=00001  Fill=0000
+    RODATA            Offs=000105  Size=000048  Align=00001  Fill=0000
+    BSS               Offs=00035C  Size=0001CF  Align=00001  Fill=0000
+hle_mem.o:
+    CODE              Offs=004349  Size=000E23  Align=00001  Fill=0000
+    BSS               Offs=00052B  Size=000040  Align=00001  Fill=0000
+hle.o:
+    CODE              Offs=00516C  Size=00074C  Align=00001  Fill=0000
+    RODATA            Offs=00014D  Size=000036  Align=00001  Fill=0000
+    BSS               Offs=00056B  Size=00001E  Align=00001  Fill=0000
+run_program.o:
+    CODE              Offs=0058C0  Size=000125  Align=00040  Fill=0008
+runner.o:
+    CODE              Offs=0059E5  Size=0000CE  Align=00001  Fill=0000
+chip.o:
+    CODE              Offs=005AB3  Size=0003ED  Align=00001  Fill=0000
+    BSS               Offs=000589  Size=000710  Align=00001  Fill=0000
+    DATA              Offs=00001F  Size=000001  Align=00001  Fill=0000
+cia.o:
+    CODE              Offs=005EA0  Size=000B87  Align=00001  Fill=0000
+    BSS               Offs=000C99  Size=00007D  Align=00001  Fill=0000
+cop.o:
+    CODE              Offs=006A27  Size=00034D  Align=00001  Fill=0000
+    RODATA            Offs=000183  Size=000006  Align=00001  Fill=0000
+    BSS               Offs=000D16  Size=0000F2  Align=00001  Fill=0000
+blt.o:
+    CODE              Offs=006D74  Size=000049  Align=00001  Fill=0000
+    BSS               Offs=000E08  Size=000078  Align=00001  Fill=0000
+    BCODE             Offs=000000  Size=000778  Align=00001  Fill=0000
+disp.o:
+    CODE              Offs=006DBD  Size=000B00  Align=00001  Fill=0000
+    BSS               Offs=000E80  Size=000100  Align=00001  Fill=0000
+    BCODE             Offs=000778  Size=000069  Align=00001  Fill=0000
+mach.o:
+    CODE              Offs=0078BD  Size=00076E  Align=00001  Fill=0000
+    RODATA            Offs=000189  Size=00003E  Align=00001  Fill=0000
+    BSS               Offs=000F80  Size=00007C  Align=00001  Fill=0000
+    DATA              Offs=000020  Size=000001  Align=00001  Fill=0000
+inp.o:
+    CODE              Offs=00802B  Size=00010A  Align=00001  Fill=0000
+    BSS               Offs=000FFC  Size=00001C  Align=00001  Fill=0000
+    LOWCODE           Offs=000000  Size=000025  Align=00001  Fill=0000
+td.o:
+    CODE              Offs=008135  Size=000032  Align=00001  Fill=0000
+    BSS               Offs=001018  Size=000020  Align=00001  Fill=0000
+snap.o:
+    CODE              Offs=008167  Size=00005E  Align=00001  Fill=0000
+    BSS               Offs=001038  Size=000004  Align=00001  Fill=0000
+    DATA              Offs=000021  Size=000008  Align=00001  Fill=0000
+    SBSS              Offs=000000  Size=00000D  Align=00001  Fill=0000
+    SCODE             Offs=000000  Size=000386  Align=00001  Fill=0000
+ureu.o:
+    BSS               Offs=00103C  Size=00000C  Align=00001  Fill=0000
+    SBSS              Offs=00000D  Size=000001  Align=00001  Fill=0000
+    LOWCODE           Offs=000025  Size=000079  Align=00001  Fill=0000
+    SCODE             Offs=000386  Size=000155  Align=00001  Fill=0000
+dispatch.o:
+    DISPATCH          Offs=000000  Size=000200  Align=00001  Fill=0000
+
+
+Segment list:
+-------------
+Name                   Start     End    Size  Align
+----------------------------------------------------
+ZEROPAGE              000080  000087  000008  00001
+LOADADDR              0007FF  000800  000002  00001
+STARTUP               000801  000836  000036  00001
+DATA                  000837  00085F  000029  00001
+LOWCODE               000860  0008FD  00009E  00001
+DISPATCH              000900  000AFF  000200  00001
+CODE                  000B00  008CC4  0081C5  00080
+RODATA                008D00  008EC6  0001C7  00001
+BSS                   008F00  009F47  001048  00001
+BCODE                 00A000  00A7E0  0007E1  00001
+CWCODE                00A800  00A8CC  0000CD  00001
+SCODE                 00B100  00B5DA  0004DB  00001
+SBSS                  00B5DB  00B5E8  00000E  00001
+
+
+Exports list by name:
+---------------------
+HALT_STOP                 000004 REZ    UREU_FRD                  000001 REZ    
+UREU_FWR                  00000A REZ    UREU_LOAD                 000021 REZ    
+UREU_SAVE                 000022 REZ    __BSS_RUN__               008F00 RLA    
+__BSS_SIZE__              001048 REA    __CWCODE_RUN__            00A800 RLA    
+__CWCODE_SIZE__           0000CD REA    __DISPATCH_RUN__          000900 RLA    
+__ZP_LAST__               000088 RLA    alu_add                   001260 RLA    
+alu_addx                  00134B RLA    alu_and                   00144D RLA    
+alu_cmp                   001300 RLA    alu_eor                   001500 RLA    
+alu_ext                   001592 RLA    alu_neg                   001400 RLA    
+alu_not                   001549 RLA    alu_or                    001496 RLA    
+alu_sub                   0012AB RLA    alu_subx                  00139D RLA    
+blt_dmaconr               0078A0 RLA    blt_w                     007874 RLA    
+c2v_hfill                 001A50 RLA    c2v_hiress                001B8A RLA    
+c2v_init                  001938 RLA    c2v_lookn                 001AD8 RLA    
+c2v_mc2s                  001DB9 RLA    c2v_ofin                  001EB9 RLA    
+c2v_ones                  001EC2 RLA    c2v_setmc2                00198A RLA    
+c2v_v_cnt                 00BF6C REA    c2v_v_col                 00BF5C REA    
+c_wrw                     006834 RLA    chip_a                    009B8F RLA    
+chip_blitirq              00693F RLA    chip_r16                  0065C2 RLA    
+chip_r32                  0065EE RLA    chip_r8                   0065B3 RLA    
+chip_shd                  009489 RLA    chip_split                0066BB RLA    
+chip_vh                   009B93 RLA    chip_vl                   009B92 RLA    
+chip_w16                  00664B RLA    chip_w32                  006677 RLA    
+chip_w8                   00663C RLA    cia_read                  0069A0 RLA    
+cia_reset                 0073FE RLA    cia_st                    009B99 RLA    
+cia_write                 0069BE RLA    code_invall               001904 RLA    
+code_invpg                0018AD RLA    cop_dhook                 009C8B RLA    
+cop_sh                    009C17 RLA    cop_w0                    007527 RLA    
+cop_w1                    0075E0 RLA    disp_init                 0078BD RLA    
+disp_ozero                00A7C5 RLA    dispatch_hi               000A00 RLA    
+dispatch_lo               000900 RLA    dispatch_next             000B88 RLA    
+dosio_anyopen             00488D RLA    dosio_arg                 0093FC RLA    
+dosio_buf                 0092B7 RLA    dosio_curfid              009279 RLA    
+dosio_dc64                009401 RLA    dosio_delcheck            0047CE RLA    
+dosio_dlen                009406 RLA    dosio_dma                 004D10 RLA    
+dosio_dreu                009403 RLA    dosio_err                 009400 RLA    
+dosio_len                 0093FA RLA    dosio_lockcheck           00485D RLA    
+dosio_mode                0093F8 RLA    dosio_name                0093B7 RLA    
+dosio_nlen                0093F7 RLA    dosio_ram_close           002038 RLA    
+dosio_ram_delete          00243C RLA    dosio_ram_init            002038 RLA    
+dosio_ram_open            002153 RLA    dosio_ram_rdchunk         0024D4 RLA    
+dosio_ram_seek            002038 RLA    dosio_ram_setsize         002499 RLA    
+dosio_ram_size            00248F RLA    dosio_ram_wcheck          0024E6 RLA    
+dosio_ram_wrchunk         0024DE RLA    dosio_slot                0093F9 RLA    
+dosio_stash_guest         004DEA RLA    dosio_uci_close           00282F RLA    
+dosio_uci_delete          002939 RLA    dosio_uci_detect          002663 RLA    
+dosio_uci_init            002670 RLA    dosio_uci_max             008FEF RLA    
+dosio_uci_open            00269C RLA    dosio_uci_rdchunk         0028B2 RLA    
+dosio_uci_rn              008FF1 RLA    dosio_uci_seek            002886 RLA    
+dosio_uci_setsize         002869 RLA    dosio_uci_size            00284C RLA    
+dosio_uci_st              008FF3 RLA    dosio_uci_wcheck          002884 RLA    
+dosio_uci_wrchunk         0028FC RLA    ea_calc                   000F93 RLA    
+ea_load                   00117B RLA    ea_store                  001200 RLA    
+emu_addrerr               00182B RLA    emu_halt                  001672 RLA    
+emu_reset                 000B00 RLA    emu_rst_hook              001830 RLA    
+emu_run                   000B39 RLA    emu_step                  000B32 RLA    
+emu_stop                  001826 RLA    exc_group1                00176E RLA    
+exc_group2                00177A RLA    fam_0                     002E21 RLA    
+fam_4                     0033BC RLA    fam_5                     002B4A RLA    
+fam_8                     002FE7 RLA    fam_add                   002BD2 RLA    
+fam_b                     002D33 RLA    fam_bcc                   0038E7 RLA    
+fam_c                     00302E RLA    fam_move                  00298F RLA    
+fam_moveq                 002A9D RLA    fam_shift                 0031A0 RLA    
+fam_sub                   002BCB RLA    fetch_word                000BB6 RLA    
+hle_aline                 005C6C RLA    hle_alloc                 004E5B RLA    
+hle_cnt                   00946F RLA    hle_col                   009474 RLA    
+hle_con_load              00624F RLA    hle_con_read              0041AF RLA    
+hle_con_save              006291 RLA    hle_cur                   009472 RLA    
+hle_dos_dispatch          0044BE RLA    hle_dos_ensure            004562 RLA    
+hle_dos_ioerr             009260 RLA    hle_dos_read              0049F2 RLA    
+hle_dos_write             004AAE RLA    hle_flg                   00947A RLA    
+hle_free                  005579 RLA    hle_old                   00947B RLA    
+hle_pool_alloc            004E49 RLA    hle_pool_delete           005B0C RLA    
+hle_ptr                   00946B RLA    hle_putc                  0062B7 RLA    
+hle_ret                   006380 RLA    hle_sz                    009476 RLA    
+inp_frame                 008B2B RLA    inp_mon                   009F0E RLA    
+inp_pot                   008C1C RLA    inp_view                  009EFF RLA    
+m_scmd                    008F1B RLA    mach_am                   009ED6 RLA    
+mach_arm                  0086CE RLA    mach_at                   009EA0 RLA    
+mach_beam                 0088EA RLA    mach_bh                   009E9B RLA    
+mach_bv                   009E99 RLA    mach_cbv                  009EC4 RLA    
+mach_disarm               008700 RLA    mach_dl                   009EA4 RLA    
+mach_et                   009E9C RLA    mach_etime                008699 RLA    
+mach_fhook                009EF6 RLA    mach_hold                 009ED4 RLA    
+mach_ichk                 008B12 RLA    mach_in                   009EDC RLA    
+mach_nmi                  0089E7 RLA    mach_now                  009E8D RLA    
+mach_on                   009E80 RLA    mach_post                 008711 RLA    
+mach_rdc                  008891 RLA    mach_run                  00847F RLA    
+main                      0064E5 RLA    mem_read16                000D00 RLA    
+mem_read32                000D7C RLA    mem_read8                 000C8B RLA    
+mem_rec_dirty             000C86 RLA    mem_write16               000E5F RLA    
+mem_write32               000F00 RLA    mem_write8                000E00 RLA    
+op_abcd                   003F63 RLA    op_aline                  00167F RLA    
+op_dbcc                   00396C RLA    op_divs                   003BBF RLA    
+op_divu                   003BBF RLA    op_eor                    003124 RLA    
+op_exg                    0039C6 RLA    op_fline                  001693 RLA    
+op_illegal                001698 RLA    op_movem                  003D62 RLA    
+op_muls                   003AEC RLA    op_mulu                   003AEC RLA    
+op_nbcd                   003FE3 RLA    op_sbcd                   003F63 RLA    
+op_scc                    003143 RLA    spr_vec                   009E77 RLA    
+sr_write                  001747 RLA    td_call                   008C35 RLA    
+uci_begin                 002558 RLA    uci_exec                  002589 RLA    
+uci_ok                    002633 RLA    uci_put                   002581 RLA    
+ureu_bank                 000885 RLA    ureu_close                00B4F6 RLA    
+ureu_open                 00B4BA RLA    ureu_ra                   009F3C RLA    
+ureu_rl                   009F3F RLA    ureu_xfer                 00B531 RLA    
+
+
+
+Exports list by value:
+----------------------
+UREU_FRD                  000001 REZ    HALT_STOP                 000004 REZ    
+UREU_FWR                  00000A REZ    UREU_LOAD                 000021 REZ    
+UREU_SAVE                 000022 REZ    __ZP_LAST__               000088 RLA    
+__CWCODE_SIZE__           0000CD REA    ureu_bank                 000885 RLA    
+dispatch_lo               000900 RLA    __DISPATCH_RUN__          000900 RLA    
+dispatch_hi               000A00 RLA    emu_reset                 000B00 RLA    
+emu_step                  000B32 RLA    emu_run                   000B39 RLA    
+dispatch_next             000B88 RLA    fetch_word                000BB6 RLA    
+mem_rec_dirty             000C86 RLA    mem_read8                 000C8B RLA    
+mem_read16                000D00 RLA    mem_read32                000D7C RLA    
+mem_write8                000E00 RLA    mem_write16               000E5F RLA    
+mem_write32               000F00 RLA    ea_calc                   000F93 RLA    
+__BSS_SIZE__              001048 REA    ea_load                   00117B RLA    
+ea_store                  001200 RLA    alu_add                   001260 RLA    
+alu_sub                   0012AB RLA    alu_cmp                   001300 RLA    
+alu_addx                  00134B RLA    alu_subx                  00139D RLA    
+alu_neg                   001400 RLA    alu_and                   00144D RLA    
+alu_or                    001496 RLA    alu_eor                   001500 RLA    
+alu_not                   001549 RLA    alu_ext                   001592 RLA    
+emu_halt                  001672 RLA    op_aline                  00167F RLA    
+op_fline                  001693 RLA    op_illegal                001698 RLA    
+sr_write                  001747 RLA    exc_group1                00176E RLA    
+exc_group2                00177A RLA    emu_stop                  001826 RLA    
+emu_addrerr               00182B RLA    emu_rst_hook              001830 RLA    
+code_invpg                0018AD RLA    code_invall               001904 RLA    
+c2v_init                  001938 RLA    c2v_setmc2                00198A RLA    
+c2v_hfill                 001A50 RLA    c2v_lookn                 001AD8 RLA    
+c2v_hiress                001B8A RLA    c2v_mc2s                  001DB9 RLA    
+c2v_ofin                  001EB9 RLA    c2v_ones                  001EC2 RLA    
+dosio_ram_close           002038 RLA    dosio_ram_seek            002038 RLA    
+dosio_ram_init            002038 RLA    dosio_ram_open            002153 RLA    
+dosio_ram_delete          00243C RLA    dosio_ram_size            00248F RLA    
+dosio_ram_setsize         002499 RLA    dosio_ram_rdchunk         0024D4 RLA    
+dosio_ram_wrchunk         0024DE RLA    dosio_ram_wcheck          0024E6 RLA    
+uci_begin                 002558 RLA    uci_put                   002581 RLA    
+uci_exec                  002589 RLA    uci_ok                    002633 RLA    
+dosio_uci_detect          002663 RLA    dosio_uci_init            002670 RLA    
+dosio_uci_open            00269C RLA    dosio_uci_close           00282F RLA    
+dosio_uci_size            00284C RLA    dosio_uci_setsize         002869 RLA    
+dosio_uci_wcheck          002884 RLA    dosio_uci_seek            002886 RLA    
+dosio_uci_rdchunk         0028B2 RLA    dosio_uci_wrchunk         0028FC RLA    
+dosio_uci_delete          002939 RLA    fam_move                  00298F RLA    
+fam_moveq                 002A9D RLA    fam_5                     002B4A RLA    
+fam_sub                   002BCB RLA    fam_add                   002BD2 RLA    
+fam_b                     002D33 RLA    fam_0                     002E21 RLA    
+fam_8                     002FE7 RLA    fam_c                     00302E RLA    
+op_eor                    003124 RLA    op_scc                    003143 RLA    
+fam_shift                 0031A0 RLA    fam_4                     0033BC RLA    
+fam_bcc                   0038E7 RLA    op_dbcc                   00396C RLA    
+op_exg                    0039C6 RLA    op_muls                   003AEC RLA    
+op_mulu                   003AEC RLA    op_divu                   003BBF RLA    
+op_divs                   003BBF RLA    op_movem                  003D62 RLA    
+op_abcd                   003F63 RLA    op_sbcd                   003F63 RLA    
+op_nbcd                   003FE3 RLA    hle_con_read              0041AF RLA    
+hle_dos_dispatch          0044BE RLA    hle_dos_ensure            004562 RLA    
+dosio_delcheck            0047CE RLA    dosio_lockcheck           00485D RLA    
+dosio_anyopen             00488D RLA    hle_dos_read              0049F2 RLA    
+hle_dos_write             004AAE RLA    dosio_dma                 004D10 RLA    
+dosio_stash_guest         004DEA RLA    hle_pool_alloc            004E49 RLA    
+hle_alloc                 004E5B RLA    hle_free                  005579 RLA    
+hle_pool_delete           005B0C RLA    hle_aline                 005C6C RLA    
+hle_con_load              00624F RLA    hle_con_save              006291 RLA    
+hle_putc                  0062B7 RLA    hle_ret                   006380 RLA    
+main                      0064E5 RLA    chip_r8                   0065B3 RLA    
+chip_r16                  0065C2 RLA    chip_r32                  0065EE RLA    
+chip_w8                   00663C RLA    chip_w16                  00664B RLA    
+chip_w32                  006677 RLA    chip_split                0066BB RLA    
+c_wrw                     006834 RLA    chip_blitirq              00693F RLA    
+cia_read                  0069A0 RLA    cia_write                 0069BE RLA    
+cia_reset                 0073FE RLA    cop_w0                    007527 RLA    
+cop_w1                    0075E0 RLA    blt_w                     007874 RLA    
+blt_dmaconr               0078A0 RLA    disp_init                 0078BD RLA    
+mach_run                  00847F RLA    mach_etime                008699 RLA    
+mach_arm                  0086CE RLA    mach_disarm               008700 RLA    
+mach_post                 008711 RLA    mach_rdc                  008891 RLA    
+mach_beam                 0088EA RLA    mach_nmi                  0089E7 RLA    
+mach_ichk                 008B12 RLA    inp_frame                 008B2B RLA    
+inp_pot                   008C1C RLA    td_call                   008C35 RLA    
+__BSS_RUN__               008F00 RLA    m_scmd                    008F1B RLA    
+dosio_uci_max             008FEF RLA    dosio_uci_rn              008FF1 RLA    
+dosio_uci_st              008FF3 RLA    hle_dos_ioerr             009260 RLA    
+dosio_curfid              009279 RLA    dosio_buf                 0092B7 RLA    
+dosio_name                0093B7 RLA    dosio_nlen                0093F7 RLA    
+dosio_mode                0093F8 RLA    dosio_slot                0093F9 RLA    
+dosio_len                 0093FA RLA    dosio_arg                 0093FC RLA    
+dosio_err                 009400 RLA    dosio_dc64                009401 RLA    
+dosio_dreu                009403 RLA    dosio_dlen                009406 RLA    
+hle_ptr                   00946B RLA    hle_cnt                   00946F RLA    
+hle_cur                   009472 RLA    hle_col                   009474 RLA    
+hle_sz                    009476 RLA    hle_flg                   00947A RLA    
+hle_old                   00947B RLA    chip_shd                  009489 RLA    
+chip_a                    009B8F RLA    chip_vl                   009B92 RLA    
+chip_vh                   009B93 RLA    cia_st                    009B99 RLA    
+cop_sh                    009C17 RLA    cop_dhook                 009C8B RLA    
+spr_vec                   009E77 RLA    mach_on                   009E80 RLA    
+mach_now                  009E8D RLA    mach_bv                   009E99 RLA    
+mach_bh                   009E9B RLA    mach_et                   009E9C RLA    
+mach_at                   009EA0 RLA    mach_dl                   009EA4 RLA    
+mach_cbv                  009EC4 RLA    mach_hold                 009ED4 RLA    
+mach_am                   009ED6 RLA    mach_in                   009EDC RLA    
+mach_fhook                009EF6 RLA    inp_view                  009EFF RLA    
+inp_mon                   009F0E RLA    ureu_ra                   009F3C RLA    
+ureu_rl                   009F3F RLA    disp_ozero                00A7C5 RLA    
+__CWCODE_RUN__            00A800 RLA    ureu_open                 00B4BA RLA    
+ureu_close                00B4F6 RLA    ureu_xfer                 00B531 RLA    
+c2v_v_col                 00BF5C REA    c2v_v_cnt                 00BF6C REA    
+
+
+
+Imports list:
+-------------
+HALT_STOP (core.o):
+    mach.o                    runtime/ops/mach.s(74)
+UREU_FRD (ureu.o):
+    snap.o                    runtime/ops/snap.s(59)
+UREU_FWR (ureu.o):
+    snap.o                    runtime/ops/snap.s(59)
+UREU_LOAD (ureu.o):
+    snap.o                    runtime/ops/snap.s(59)
+UREU_SAVE (ureu.o):
+    snap.o                    runtime/ops/snap.s(59)
+__BSS_RUN__ ([linker generated]):
+    snap.o                    runtime/ops/snap.s(60)
+    core.o                    runtime/core.s(86)
+__BSS_SIZE__ ([linker generated]):
+    core.o                    runtime/core.s(86)
+__CWCODE_RUN__ ([linker generated]):
+    core.o                    runtime/core.s(2394)
+__CWCODE_SIZE__ ([linker generated]):
+    core.o                    runtime/core.s(2394)
+__DISPATCH_RUN__ ([linker generated]):
+    core.o                    runtime/core.s(124)
+__ZP_LAST__ ([linker generated]):
+    core.o                    runtime/core.s(2040)
+alu_add (core.o):
+    g3_logic.o                runtime/ops/g3_logic.s(32)
+    g2_arith.o                runtime/ops/g2_arith.s(20)
+alu_addx (core.o):
+    g2_arith.o                runtime/ops/g2_arith.s(20)
+alu_and (core.o):
+    g3_logic.o                runtime/ops/g3_logic.s(32)
+alu_cmp (core.o):
+    g3_logic.o                runtime/ops/g3_logic.s(32)
+    g2_arith.o                runtime/ops/g2_arith.s(20)
+alu_eor (core.o):
+    g3_logic.o                runtime/ops/g3_logic.s(32)
+alu_ext (core.o):
+    g5_flow.o                 runtime/ops/g5_flow.s(29)
+alu_neg (core.o):
+    g5_flow.o                 runtime/ops/g5_flow.s(29)
+alu_not (core.o):
+    g5_flow.o                 runtime/ops/g5_flow.s(29)
+alu_or (core.o):
+    g5_flow.o                 runtime/ops/g5_flow.s(29)
+    g3_logic.o                runtime/ops/g3_logic.s(32)
+alu_sub (core.o):
+    g3_logic.o                runtime/ops/g3_logic.s(32)
+    g2_arith.o                runtime/ops/g2_arith.s(20)
+alu_subx (core.o):
+    g5_flow.o                 runtime/ops/g5_flow.s(29)
+    g2_arith.o                runtime/ops/g2_arith.s(20)
+blt_dmaconr (blt.o):
+    chip.o                    runtime/ops/chip.s(84)
+blt_w (blt.o):
+    chip.o                    runtime/ops/chip.s(84)
+c2v_hfill (c2v.o):
+    disp.o                    runtime/ops/disp.s(84)
+c2v_hiress (c2v.o):
+    disp.o                    runtime/ops/disp.s(83)
+c2v_init (c2v.o):
+    disp.o                    runtime/ops/disp.s(83)
+c2v_lookn (c2v.o):
+    disp.o                    runtime/ops/disp.s(84)
+c2v_mc2s (c2v.o):
+    disp.o                    runtime/ops/disp.s(83)
+c2v_ofin (c2v.o):
+    disp.o                    runtime/ops/disp.s(88)
+c2v_ones (c2v.o):
+    disp.o                    runtime/ops/disp.s(88)
+c2v_setmc2 (c2v.o):
+    disp.o                    runtime/ops/disp.s(84)
+c2v_v_cnt (c2v.o):
+    disp.o                    runtime/ops/disp.s(85)
+c2v_v_col (c2v.o):
+    disp.o                    runtime/ops/disp.s(85)
+c_wrw (chip.o):
+    cop.o                     runtime/ops/cop.s(83)
+chip_a (chip.o):
+    cop.o                     runtime/ops/cop.s(83)
+chip_blitirq (chip.o):
+    blt.o                     runtime/ops/blt.s(69)
+chip_r16 (chip.o):
+    core.o                    runtime/core.s(128)
+chip_r32 (chip.o):
+    core.o                    runtime/core.s(128)
+chip_r8 (chip.o):
+    core.o                    runtime/core.s(128)
+chip_shd (chip.o):
+    inp.o                     runtime/ops/inp.s(61)
+    mach.o                    runtime/ops/mach.s(64)
+    blt.o                     runtime/ops/blt.s(69)
+    cop.o                     runtime/ops/cop.s(83)
+chip_split (chip.o):
+    core.o                    runtime/core.s(129)
+chip_vh (chip.o):
+    inp.o                     runtime/ops/inp.s(61)
+    blt.o                     runtime/ops/blt.s(69)
+    cop.o                     runtime/ops/cop.s(83)
+chip_vl (chip.o):
+    blt.o                     runtime/ops/blt.s(69)
+    cop.o                     runtime/ops/cop.s(83)
+chip_w16 (chip.o):
+    core.o                    runtime/core.s(129)
+chip_w32 (chip.o):
+    core.o                    runtime/core.s(129)
+chip_w8 (chip.o):
+    core.o                    runtime/core.s(129)
+cia_read (cia.o):
+    chip.o                    runtime/ops/chip.s(80)
+cia_reset (cia.o):
+    chip.o                    runtime/ops/chip.s(80)
+cia_st (cia.o):
+    inp.o                     runtime/ops/inp.s(61)
+cia_write (cia.o):
+    chip.o                    runtime/ops/chip.s(80)
+code_invall (core.o):
+    ureu.o                    runtime/ops/ureu.s(52)
+    snap.o                    runtime/ops/snap.s(53)
+code_invpg (core.o):
+    blt.o                     runtime/ops/blt.s(72)
+cop_dhook (cop.o):
+    disp.o                    runtime/ops/disp.s(97)
+cop_sh (cop.o):
+    blt.o                     runtime/ops/blt.s(70)
+cop_w0 (cop.o):
+    chip.o                    runtime/ops/chip.s(82)
+cop_w1 (cop.o):
+    chip.o                    runtime/ops/chip.s(82)
+disp_init (disp.o):
+    snap.o                    runtime/ops/snap.s(52)
+disp_ozero (disp.o):
+    c2v.o                     runtime/ops/c2v.s(100)
+dispatch_hi (dispatch.o):
+    core.o                    runtime/core.s(123)
+dispatch_lo (dispatch.o):
+    core.o                    runtime/core.s(123)
+dispatch_next (core.o):
+    hle.o                     runtime/ops/hle.s(46)
+    hle_dos.o                 runtime/ops/hle_dos.s(52)
+    g6_muldiv.o               runtime/ops/g6_muldiv.s(42)
+    g5_flow.o                 runtime/ops/g5_flow.s(31)
+    g4_shift.o                runtime/ops/g4_shift.s(36)
+    g3_logic.o                runtime/ops/g3_logic.s(30)
+    g2_arith.o                runtime/ops/g2_arith.s(21)
+    g1_move.o                 runtime/ops/g1_move.s(31)
+dosio_anyopen (hle_dos.o):
+    dosio_ram.o               runtime/ops/dosio_ram.s(45)
+dosio_arg (hle_dos.o):
+    dosio_uci.o               runtime/ops/dosio_uci.s(61)
+    dosio_ram.o               runtime/ops/dosio_ram.s(43)
+dosio_buf (hle_dos.o):
+    ureu.o                    runtime/ops/ureu.s(51)
+    snap.o                    runtime/ops/snap.s(56)
+    dosio_uci.o               runtime/ops/dosio_uci.s(60)
+    dosio_ram.o               runtime/ops/dosio_ram.s(42)
+dosio_curfid (hle_dos.o):
+    dosio_uci.o               runtime/ops/dosio_uci.s(62)
+dosio_dc64 (hle_dos.o):
+    dosio_ram.o               runtime/ops/dosio_ram.s(44)
+dosio_delcheck (hle_dos.o):
+    dosio_uci.o               runtime/ops/dosio_uci.s(63)
+    dosio_ram.o               runtime/ops/dosio_ram.s(45)
+dosio_dlen (hle_dos.o):
+    dosio_ram.o               runtime/ops/dosio_ram.s(44)
+dosio_dma (hle_dos.o):
+    dosio_ram.o               runtime/ops/dosio_ram.s(44)
+dosio_dreu (hle_dos.o):
+    dosio_ram.o               runtime/ops/dosio_ram.s(44)
+dosio_err (hle_dos.o):
+    dosio_uci.o               runtime/ops/dosio_uci.s(61)
+    dosio_ram.o               runtime/ops/dosio_ram.s(43)
+dosio_len (hle_dos.o):
+    dosio_uci.o               runtime/ops/dosio_uci.s(61)
+    dosio_ram.o               runtime/ops/dosio_ram.s(43)
+dosio_lockcheck (hle_dos.o):
+    dosio_uci.o               runtime/ops/dosio_uci.s(62)
+    dosio_ram.o               runtime/ops/dosio_ram.s(45)
+dosio_mode (hle_dos.o):
+    dosio_uci.o               runtime/ops/dosio_uci.s(60)
+    dosio_ram.o               runtime/ops/dosio_ram.s(42)
+dosio_name (hle_dos.o):
+    ureu.o                    runtime/ops/ureu.s(51)
+    dosio_uci.o               runtime/ops/dosio_uci.s(60)
+    dosio_ram.o               runtime/ops/dosio_ram.s(42)
+dosio_nlen (hle_dos.o):
+    ureu.o                    runtime/ops/ureu.s(51)
+    dosio_uci.o               runtime/ops/dosio_uci.s(60)
+    dosio_ram.o               runtime/ops/dosio_ram.s(42)
+dosio_ram_close (dosio_ram.o):
+    hle_dos.o                 runtime/ops/hle_dos.s(53)
+dosio_ram_delete (dosio_ram.o):
+    hle_dos.o                 runtime/ops/hle_dos.s(55)
+dosio_ram_init (dosio_ram.o):
+    hle_dos.o                 runtime/ops/hle_dos.s(53)
+dosio_ram_open (dosio_ram.o):
+    hle_dos.o                 runtime/ops/hle_dos.s(53)
+dosio_ram_rdchunk (dosio_ram.o):
+    hle_dos.o                 runtime/ops/hle_dos.s(54)
+dosio_ram_seek (dosio_ram.o):
+    hle_dos.o                 runtime/ops/hle_dos.s(54)
+dosio_ram_setsize (dosio_ram.o):
+    hle_dos.o                 runtime/ops/hle_dos.s(55)
+dosio_ram_size (dosio_ram.o):
+    hle_dos.o                 runtime/ops/hle_dos.s(53)
+dosio_ram_wcheck (dosio_ram.o):
+    hle_dos.o                 runtime/ops/hle_dos.s(55)
+dosio_ram_wrchunk (dosio_ram.o):
+    hle_dos.o                 runtime/ops/hle_dos.s(54)
+dosio_slot (hle_dos.o):
+    dosio_uci.o               runtime/ops/dosio_uci.s(60)
+    dosio_ram.o               runtime/ops/dosio_ram.s(42)
+dosio_stash_guest (hle_dos.o):
+    dosio_ram.o               runtime/ops/dosio_ram.s(44)
+dosio_uci_close (dosio_uci.o):
+    hle_dos.o                 runtime/ops/hle_dos.s(56)
+dosio_uci_delete (dosio_uci.o):
+    hle_dos.o                 runtime/ops/hle_dos.s(58)
+dosio_uci_detect (dosio_uci.o):
+    hle_dos.o                 runtime/ops/hle_dos.s(56)
+dosio_uci_init (dosio_uci.o):
+    ureu.o                    runtime/ops/ureu.s(49)
+    hle_dos.o                 runtime/ops/hle_dos.s(56)
+dosio_uci_max (dosio_uci.o):
+    ureu.o                    runtime/ops/ureu.s(50)
+dosio_uci_open (dosio_uci.o):
+    hle_dos.o                 runtime/ops/hle_dos.s(56)
+dosio_uci_rdchunk (dosio_uci.o):
+    hle_dos.o                 runtime/ops/hle_dos.s(57)
+dosio_uci_rn (dosio_uci.o):
+    ureu.o                    runtime/ops/ureu.s(50)
+dosio_uci_seek (dosio_uci.o):
+    hle_dos.o                 runtime/ops/hle_dos.s(57)
+dosio_uci_setsize (dosio_uci.o):
+    hle_dos.o                 runtime/ops/hle_dos.s(58)
+dosio_uci_size (dosio_uci.o):
+    hle_dos.o                 runtime/ops/hle_dos.s(57)
+dosio_uci_st (dosio_uci.o):
+    ureu.o                    runtime/ops/ureu.s(50)
+dosio_uci_wcheck (dosio_uci.o):
+    hle_dos.o                 runtime/ops/hle_dos.s(58)
+dosio_uci_wrchunk (dosio_uci.o):
+    hle_dos.o                 runtime/ops/hle_dos.s(57)
+ea_calc (core.o):
+    g6_muldiv.o               runtime/ops/g6_muldiv.s(42)
+    g5_flow.o                 runtime/ops/g5_flow.s(28)
+    g4_shift.o                runtime/ops/g4_shift.s(36)
+    g3_logic.o                runtime/ops/g3_logic.s(31)
+    g2_arith.o                runtime/ops/g2_arith.s(19)
+    g1_move.o                 runtime/ops/g1_move.s(30)
+ea_load (core.o):
+    g6_muldiv.o               runtime/ops/g6_muldiv.s(42)
+    g5_flow.o                 runtime/ops/g5_flow.s(28)
+    g4_shift.o                runtime/ops/g4_shift.s(36)
+    g3_logic.o                runtime/ops/g3_logic.s(31)
+    g2_arith.o                runtime/ops/g2_arith.s(19)
+    g1_move.o                 runtime/ops/g1_move.s(30)
+ea_store (core.o):
+    g6_muldiv.o               runtime/ops/g6_muldiv.s(42)
+    g5_flow.o                 runtime/ops/g5_flow.s(28)
+    g4_shift.o                runtime/ops/g4_shift.s(36)
+    g3_logic.o                runtime/ops/g3_logic.s(31)
+    g2_arith.o                runtime/ops/g2_arith.s(19)
+    g1_move.o                 runtime/ops/g1_move.s(30)
+emu_addrerr (core.o):
+    g5_flow.o                 runtime/ops/g5_flow.s(33)
+emu_halt (core.o):
+    hle.o                     runtime/ops/hle.s(46)
+    hle_dos.o                 runtime/ops/hle_dos.s(52)
+    g6_muldiv.o               runtime/ops/g6_muldiv.s(42)
+    g5_flow.o                 runtime/ops/g5_flow.s(31)
+    g3_logic.o                runtime/ops/g3_logic.s(33)
+emu_reset (core.o):
+    snap.o                    runtime/ops/snap.s(52)
+    runner.o                  tests/runner/runner.s(37)
+    run_program.o             tests/runner/run_program.s(40)
+emu_rst_hook (core.o):
+    g5_flow.o                 runtime/ops/g5_flow.s(33)
+emu_run (core.o):
+    mach.o                    runtime/ops/mach.s(64)
+emu_step (core.o):
+    mach.o                    runtime/ops/mach.s(64)
+    runner.o                  tests/runner/runner.s(37)
+    run_program.o             tests/runner/run_program.s(40)
+emu_stop (core.o):
+    g5_flow.o                 runtime/ops/g5_flow.s(33)
+exc_group1 (core.o):
+    g5_flow.o                 runtime/ops/g5_flow.s(32)
+exc_group2 (core.o):
+    mach.o                    runtime/ops/mach.s(73)
+    g5_flow.o                 runtime/ops/g5_flow.s(32)
+fam_0 (g3_logic.o):
+    dispatch.o                build/prebuilt-src/gen/dispatch.s(7)
+fam_4 (g5_flow.o):
+    dispatch.o                build/prebuilt-src/gen/dispatch.s(8)
+fam_5 (g2_arith.o):
+    dispatch.o                build/prebuilt-src/gen/dispatch.s(9)
+fam_8 (g3_logic.o):
+    dispatch.o                build/prebuilt-src/gen/dispatch.s(10)
+fam_add (g2_arith.o):
+    dispatch.o                build/prebuilt-src/gen/dispatch.s(11)
+fam_b (g2_arith.o):
+    dispatch.o                build/prebuilt-src/gen/dispatch.s(12)
+fam_bcc (g5_flow.o):
+    dispatch.o                build/prebuilt-src/gen/dispatch.s(13)
+fam_c (g3_logic.o):
+    dispatch.o                build/prebuilt-src/gen/dispatch.s(14)
+fam_move (g1_move.o):
+    dispatch.o                build/prebuilt-src/gen/dispatch.s(15)
+fam_moveq (g1_move.o):
+    dispatch.o                build/prebuilt-src/gen/dispatch.s(16)
+fam_shift (g4_shift.o):
+    dispatch.o                build/prebuilt-src/gen/dispatch.s(17)
+fam_sub (g2_arith.o):
+    dispatch.o                build/prebuilt-src/gen/dispatch.s(18)
+fetch_word (core.o):
+    g6_muldiv.o               runtime/ops/g6_muldiv.s(42)
+    g5_flow.o                 runtime/ops/g5_flow.s(31)
+    g3_logic.o                runtime/ops/g3_logic.s(30)
+hle_aline (hle.o):
+    core.o                    runtime/core.s(127)
+hle_alloc (hle_mem.o):
+    hle.o                     runtime/ops/hle.s(50)
+hle_cnt (hle.o):
+    hle_mem.o                 runtime/ops/hle_mem.s(46)
+hle_col (hle.o):
+    hle_con.o                 runtime/ops/hle_con.s(46)
+hle_con_load (hle.o):
+    hle_con.o                 runtime/ops/hle_con.s(46)
+hle_con_read (hle_con.o):
+    hle.o                     runtime/ops/hle.s(52)
+hle_con_save (hle.o):
+    hle_con.o                 runtime/ops/hle_con.s(46)
+hle_cur (hle.o):
+    hle_con.o                 runtime/ops/hle_con.s(46)
+hle_dos_dispatch (hle_dos.o):
+    hle.o                     runtime/ops/hle.s(47)
+hle_dos_ensure (hle_dos.o):
+    hle.o                     runtime/ops/hle.s(49)
+hle_dos_ioerr (hle_dos.o):
+    hle.o                     runtime/ops/hle.s(49)
+hle_dos_read (hle_dos.o):
+    hle.o                     runtime/ops/hle.s(48)
+hle_dos_write (hle_dos.o):
+    hle.o                     runtime/ops/hle.s(48)
+hle_flg (hle.o):
+    hle_mem.o                 runtime/ops/hle_mem.s(46)
+hle_free (hle_mem.o):
+    hle.o                     runtime/ops/hle.s(50)
+hle_old (hle.o):
+    hle_mem.o                 runtime/ops/hle_mem.s(46)
+hle_pool_alloc (hle_mem.o):
+    hle.o                     runtime/ops/hle.s(51)
+hle_pool_delete (hle_mem.o):
+    hle.o                     runtime/ops/hle.s(51)
+hle_ptr (hle.o):
+    hle_mem.o                 runtime/ops/hle_mem.s(46)
+hle_putc (hle.o):
+    hle_con.o                 runtime/ops/hle_con.s(46)
+hle_ret (hle.o):
+    hle_con.o                 runtime/ops/hle_con.s(45)
+hle_sz (hle.o):
+    hle_mem.o                 runtime/ops/hle_mem.s(46)
+inp_frame (inp.o):
+    mach.o                    runtime/ops/mach.s(75)
+inp_mon (inp.o):
+    snap.o                    runtime/ops/snap.s(55)
+inp_pot (inp.o):
+    chip.o                    runtime/ops/chip.s(85)
+inp_view (inp.o):
+    disp.o                    runtime/ops/disp.s(95)
+m_scmd (core.o):
+    chip.o                    runtime/ops/chip.s(78)
+mach_am (mach.o):
+    cia.o                     runtime/ops/cia.s(57)
+mach_arm (mach.o):
+    inp.o                     runtime/ops/inp.s(62)
+    cia.o                     runtime/ops/cia.s(56)
+mach_at (mach.o):
+    inp.o                     runtime/ops/inp.s(62)
+    cia.o                     runtime/ops/cia.s(56)
+mach_beam (mach.o):
+    chip.o                    runtime/ops/chip.s(79)
+mach_bh (mach.o):
+    chip.o                    runtime/ops/chip.s(79)
+mach_bv (mach.o):
+    chip.o                    runtime/ops/chip.s(79)
+mach_cbv (mach.o):
+    cia.o                     runtime/ops/cia.s(57)
+mach_disarm (mach.o):
+    cia.o                     runtime/ops/cia.s(56)
+mach_dl (mach.o):
+    cia.o                     runtime/ops/cia.s(57)
+mach_et (mach.o):
+    inp.o                     runtime/ops/inp.s(62)
+    disp.o                    runtime/ops/disp.s(87)
+    cia.o                     runtime/ops/cia.s(56)
+mach_etime (mach.o):
+    inp.o                     runtime/ops/inp.s(62)
+    disp.o                    runtime/ops/disp.s(87)
+    cia.o                     runtime/ops/cia.s(56)
+mach_fhook (mach.o):
+    snap.o                    runtime/ops/snap.s(51)
+    cop.o                     runtime/ops/cop.s(84)
+mach_hold (mach.o):
+    cia.o                     runtime/ops/cia.s(57)
+    chip.o                    runtime/ops/chip.s(81)
+mach_ichk (mach.o):
+    chip.o                    runtime/ops/chip.s(81)
+mach_in (mach.o):
+    disp.o                    runtime/ops/disp.s(87)
+mach_nmi (mach.o):
+    disp.o                    runtime/ops/disp.s(86)
+    c2v.o                     runtime/ops/c2v.s(99)
+mach_now (mach.o):
+    snap.o                    runtime/ops/snap.s(51)
+mach_on (mach.o):
+    cia.o                     runtime/ops/cia.s(56)
+    chip.o                    runtime/ops/chip.s(79)
+mach_post (mach.o):
+    cia.o                     runtime/ops/cia.s(57)
+mach_rdc (mach.o):
+    snap.o                    runtime/ops/snap.s(51)
+mach_run (mach.o):
+    snap.o                    runtime/ops/snap.s(51)
+main (runner.o):
+    core.o                    runtime/core.s(126)
+mem_read16 (core.o):
+    g6_muldiv.o               runtime/ops/g6_muldiv.s(43)
+    g5_flow.o                 runtime/ops/g5_flow.s(30)
+mem_read32 (core.o):
+    cop.o                     runtime/ops/cop.s(82)
+    hle.o                     runtime/ops/hle.s(45)
+    hle_mem.o                 runtime/ops/hle_mem.s(45)
+    hle_dos.o                 runtime/ops/hle_dos.s(51)
+    g6_muldiv.o               runtime/ops/g6_muldiv.s(43)
+    g5_flow.o                 runtime/ops/g5_flow.s(30)
+mem_read8 (core.o):
+    runner.o                  tests/runner/runner.s(37)
+    hle.o                     runtime/ops/hle.s(45)
+    hle_dos.o                 runtime/ops/hle_dos.s(51)
+mem_rec_dirty (core.o):
+    snap.o                    runtime/ops/snap.s(52)
+    disp.o                    runtime/ops/disp.s(87)
+    blt.o                     runtime/ops/blt.s(71)
+    run_program.o             tests/runner/run_program.s(40)
+    hle_dos.o                 runtime/ops/hle_dos.s(51)
+    c2v.o                     runtime/ops/c2v.s(99)
+mem_write16 (core.o):
+    g6_muldiv.o               runtime/ops/g6_muldiv.s(43)
+mem_write32 (core.o):
+    hle.o                     runtime/ops/hle.s(45)
+    hle_mem.o                 runtime/ops/hle_mem.s(45)
+    hle_dos.o                 runtime/ops/hle_dos.s(51)
+    g6_muldiv.o               runtime/ops/g6_muldiv.s(43)
+    g5_flow.o                 runtime/ops/g5_flow.s(30)
+mem_write8 (core.o):
+    runner.o                  tests/runner/runner.s(37)
+    run_program.o             tests/runner/run_program.s(40)
+    hle_dos.o                 runtime/ops/hle_dos.s(51)
+    hle_con.o                 runtime/ops/hle_con.s(45)
+op_abcd (g6_muldiv.o):
+    g3_logic.o                runtime/ops/g3_logic.s(35)
+op_aline (core.o):
+    dispatch.o                build/prebuilt-src/gen/dispatch.s(19)
+op_dbcc (g5_flow.o):
+    g2_arith.o                runtime/ops/g2_arith.s(22)
+op_divs (g6_muldiv.o):
+    g3_logic.o                runtime/ops/g3_logic.s(34)
+op_divu (g6_muldiv.o):
+    g3_logic.o                runtime/ops/g3_logic.s(34)
+op_eor (g3_logic.o):
+    g2_arith.o                runtime/ops/g2_arith.s(22)
+op_exg (g5_flow.o):
+    g3_logic.o                runtime/ops/g3_logic.s(36)
+op_fline (core.o):
+    dispatch.o                build/prebuilt-src/gen/dispatch.s(20)
+op_illegal (core.o):
+    g5_flow.o                 runtime/ops/g5_flow.s(31)
+    g4_shift.o                runtime/ops/g4_shift.s(36)
+    g3_logic.o                runtime/ops/g3_logic.s(33)
+    g1_move.o                 runtime/ops/g1_move.s(31)
+op_movem (g6_muldiv.o):
+    g5_flow.o                 runtime/ops/g5_flow.s(34)
+op_muls (g6_muldiv.o):
+    g3_logic.o                runtime/ops/g3_logic.s(35)
+op_mulu (g6_muldiv.o):
+    g3_logic.o                runtime/ops/g3_logic.s(35)
+op_nbcd (g6_muldiv.o):
+    g5_flow.o                 runtime/ops/g5_flow.s(34)
+op_sbcd (g6_muldiv.o):
+    g3_logic.o                runtime/ops/g3_logic.s(34)
+op_scc (g3_logic.o):
+    g2_arith.o                runtime/ops/g2_arith.s(22)
+spr_vec (disp.o):
+    snap.o                    runtime/ops/snap.s(54)
+sr_write (core.o):
+    g5_flow.o                 runtime/ops/g5_flow.s(32)
+td_call (td.o):
+    cia.o                     runtime/ops/cia.s(55)
+uci_begin (dosio_uci.o):
+    ureu.o                    runtime/ops/ureu.s(49)
+uci_exec (dosio_uci.o):
+    ureu.o                    runtime/ops/ureu.s(49)
+uci_ok (dosio_uci.o):
+    ureu.o                    runtime/ops/ureu.s(49)
+uci_put (dosio_uci.o):
+    ureu.o                    runtime/ops/ureu.s(49)
+ureu_bank (ureu.o):
+    snap.o                    runtime/ops/snap.s(57)
+ureu_close (ureu.o):
+    snap.o                    runtime/ops/snap.s(57)
+ureu_open (ureu.o):
+    snap.o                    runtime/ops/snap.s(57)
+ureu_ra (ureu.o):
+    snap.o                    runtime/ops/snap.s(58)
+ureu_rl (ureu.o):
+    snap.o                    runtime/ops/snap.s(58)
+ureu_xfer (ureu.o):
+    snap.o                    runtime/ops/snap.s(57)
+

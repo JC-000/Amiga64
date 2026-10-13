@@ -402,9 +402,15 @@ def build_spr(out_dir: str, labels, defines: tuple = ()) -> tuple[bytes, dict]:
     test-only mutants (SPR_MUT_*).  W13-W's module loader calls this."""
     import subprocess
     from c64_test_harness import Labels
+    from host import prebuilt                                   # W17-B
     from tests.harness_util import lookup_label
-    if isinstance(labels, str):
+    if isinstance(labels, str):                                 # W17-B: a path can be checked
+        if prebuilt.use(("ca65", "ld65"), "spr", " ".join(defines) and f"spr {' '.join(defines)}",
+                        labels):                                # W17-B
+            return prebuilt.module("spr", labels), prebuilt.labels("spr")   # W17-B
         labels = Labels.from_file(labels)
+    else:                                                       # W17-B: run_spr's own legs
+        prebuilt.use(("ca65", "ld65"), None, "spr against a loaded label set")   # W17-B
     defs = []
     for n in SPR_SYMS:
         defs += ["-D", f"{n}=${lookup_label(labels, n):04X}"]
