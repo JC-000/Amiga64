@@ -15,6 +15,14 @@
 ; The tempo comes from W16-P's profile block ($2DC000, host-written); the
 ; app anchor at $2DC040 ('MWBA', the state pointer, seq/state) is the one
 ; way tests find the player (addendum).  Both live outside every MemHeader.
+; A second instance finds the first one's anchor and backs out (ERR_BUSY).
+;
+; Known limits: the takeover eats the OS's CIA interrupt flags (CIA-A TA
+; and SP: keyboard, timer.device; CIA-B TB) that come up while it runs:
+; l2/l6 read the ICRs, so a one-shot timer request or a key the OS had
+; pending ACROSS the takeover is not re-posted at the restore (continuous
+; timers resume; leg A's `Wait 5` after the return passed).  A left button
+; held longer than LMB_WAIT frames after the exit reaches the Workbench.
 ;
 ; AmigaOS facts: os.i (public documentation, cited in
 ; build/evidence/w16-x/PROGRESS.md).  Mutants (tests/run_modwb.py):
@@ -27,6 +35,7 @@ PROF_AT         equ     $2dc000         ; W16-P's profile block (64 B)
 ANCHOR_AT       equ     $2dc040         ; the app anchor (16 B)
 MOD_MAX         equ     $100000         ; the largest MOD loaded (1 MB)
 GRACE           equ     4               ; frame calls before LMB counts
+LMB_WAIT        equ     50              ; frames the restore waits for the button's release
 STACK_SIZE      equ     4096
 MW_MAXF         equ     8000            ; MOD_TRACE builds: P_MAXF
 
@@ -79,6 +88,8 @@ ERR_READ        equ     4               ; a short read
 ERR_MK          equ     5               ; not an M.K. MOD
 ERR_CLAIM       equ     6               ; a CIA timer belongs to someone else
 ERR_INIT        equ     7               ; mod_init refused it (after the takeover)
+ERR_BUSY        equ     8               ; another instance holds the anchor
+ERR_TRACE       equ     9               ; MOD_TRACE builds: the trace RAM is not free
 
         section CODE,code
 
@@ -132,7 +143,10 @@ start:  movem.l d2-d7/a2-a6,-(sp)
 ; anchor_init: the state struct, the profile block's validity, and the
 ; app anchor (CONTRACTS "Audio (Paula)", the anchor rules): published only
 ; when the profile block is valid; +4/+8/+12 first, 'MWBA' last.  The
-; struct is in a chip hunk (rule 3: chip or slow RAM; even).
+; struct is in a chip hunk (rule 3: chip or slow RAM; even).  Under Forbid:
+; an anchor another instance published (its 'MWBS' struct) is left alone
+; and this one backs out (ERR_BUSY, rev16-x MEDIUM-2); a stale one (no
+; struct behind it) is withdrawn first, then replaced.  a6 = SysBase.
 anchor_init:
         lea     mwst,a0                 ; cleared here: a hunk's tail beyond its
         moveq   #A_SIZE/2-1,d0          ; stored bytes need not be zero
@@ -152,24 +166,64 @@ anchor_init:
         endc
         move.b  d0,profok
         beq.s   .r
+        CALL    Forbid
         lea     ANCHOR_AT,a1
+        ifnd    MW_MUT_ANCHORCLOBBER
+        bsr.s   anchor_busy
+        bne.s   .busy
+        endc
+        clr.l   (a1)                    ; (a stale one: withdrawn first)
         ifd     MW_MUT_ANCHORFIRST
         move.l  #'MWBA',(a1)            ; (mutant: the magic first)
         endc
-        move.l  a0,4(a1)
+        move.l  #mwst,4(a1)
         clr.l   8(a1)
         clr.l   12(a1)
         move.l  #'MWBA',(a1)            ; last
+        st      anch
+        bra.s   .p
+.busy:  st      busy
+.p:     CALL    Permit
 .r:     rts
+
+; anchor_busy: a1 = the anchor.  ne: another instance's ('MWBA', its
+; pointer even, in chip or slow RAM, to an 'MWBS' struct that is not ours).
+; d0/a0 used.
+anchor_busy:
+        cmp.l   #'MWBA',(a1)
+        bne.s   .no
+        move.l  4(a1),d0
+        cmp.l   #mwst,d0
+        beq.s   .no
+        btst    #0,d0
+        bne.s   .no
+        cmp.l   #$200000-A_SIZE,d0
+        bls.s   .ck
+        cmp.l   #$c00000,d0
+        blo.s   .no
+        cmp.l   #$dc0000-A_SIZE,d0
+        bhi.s   .no
+.ck:    move.l  d0,a0
+        cmp.l   #'MWBS',(a0)
+        bne.s   .no
+        moveq   #1,d0
+        rts
+.no:    moveq   #0,d0
+        rts
 
 ; anchor_end: withdraw the anchor ('MWBA' cleared first, before release
 ; frees the MOD and the claims; the struct itself lives until the hunks are
-; unloaded after the return).  Nothing writes the anchor afterwards.
+; unloaded after the return), and only while it still points to our struct.
+; Nothing writes the anchor afterwards.
 anchor_end:
-        tst.b   profok
+        tst.b   anch
         beq.s   .r
+        ifnd    MW_MUT_ANCHORENDANY
+        cmp.l   #mwst,ANCHOR_AT+4
+        bne.s   .n
+        endc
         clr.l   ANCHOR_AT
-        clr.b   profok
+.n:     clr.b   anch
 .r:     rts
 
 ; prof_check: d0.b = nonzero when W16-P's profile block is valid ('A64P',
@@ -198,7 +252,7 @@ prof_check:
 set_state:
         move.b  d0,mwst+A_STATE
         addq.w  #1,aseq
-        tst.b   profok
+        tst.b   anch
         beq.s   .r
         move.l  d1,-(sp)
         move.w  aseq,d1
@@ -237,6 +291,20 @@ run:    move.l  sysbase,a6
         CALL    OpenResource
         move.l  d0,ciabbase
         beq     .lib
+        moveq   #ERR_BUSY,d0
+        tst.b   busy
+        bne     .r
+        ifd     MOD_TRACE               ; the trace RAM (mod.i TR_W .. TR_TEND):
+        move.l  sysbase,a6              ; ours, or no start (it is slow RAM
+        move.l  #TR_TEND-TR_W,d0        ; under AmigaOS: LoadSeg's)
+        lea     TR_W,a1
+        CALL    AllocAbs
+        move.l  d0,trbuf
+        bne.s   .tr
+        moveq   #ERR_TRACE,d0
+        rts
+.tr:
+        endc
         bsr     load_mod
         tst.l   d0
         bne     .r
@@ -285,7 +353,6 @@ run:    move.l  sysbase,a6
         endc
         moveq   #ST_RESTORED,d0
         bsr     set_state
-        bsr     lmb_release
         move.l  gfxbase,a6
         move.l  mwst+A_OLDVIEW,a1
         CALL    LoadView
@@ -332,10 +399,11 @@ load_mod:
         move.l  d0,olddir
         st      cdset
         bra.s   .open
-.cli:   move.l  cliarg,a0               ; a shell: the first word, if any
-        move.l  clilen,d0
+.cli:   move.l  cliarg,a0               ; a shell: the first word, if any, or
+        move.l  clilen,d0               ; the first "quoted name" (spaces kept)
         lea     namebuf,a1
         moveq   #0,d1
+        moveq   #0,d3                   ; d3 = '"' inside quotes
 .sk:    subq.l  #1,d0
         bmi.s   .nd
         move.b  (a0)+,d2
@@ -343,11 +411,18 @@ load_mod:
         beq.s   .sk
         cmp.b   #9,d2
         beq.s   .sk
-.cp:    cmp.b   #' ',d2
-        bls.s   .nd
         cmp.b   #'"',d2
-        beq.s   .nx
-        cmp.w   #107,d1
+        bne.s   .cp
+        moveq   #'"',d3
+        bra.s   .nx
+.cp:    cmp.b   d3,d2                   ; the closing quote
+        beq.s   .nd
+        cmp.b   #' ',d2                 ; a control character ends it, and a
+        blo.s   .nd                     ; space outside quotes
+        bne.s   .ch
+        tst.b   d3
+        beq.s   .nd
+.ch:    cmp.w   #107,d1
         bhs.s   .nd
         move.b  d2,(a1)+
         addq.w  #1,d1
@@ -579,6 +654,9 @@ restore:
         ifd     MW_MUT_TBCRB
         clr.b   CIAB_CRB
         endc
+        ifnd    MW_MUT_NOLMBWAIT
+        bsr     lmb_wait                ; silent now; the OS after the release
+        endc
 .bw:    btst    #6,DMACONR(a5)          ; the blitter idle
         bne.s   .bw
         move.w  #$7fff,DMACON(a5)
@@ -607,7 +685,8 @@ restore:
         cmp.l   #$200000,d0
         bhs.s   .nc
         move.l  d0,COP1LC(a5)
-        move.w  d0,COPJMP1(a5)
+        move.w  d0,COPJMP1(a5)          ; (benign without: COP1LC is also taken
+                                        ; at the next vertical blank, rev16-x R6)
 .nc:
         endc
         move.w  mwst+A_SDMA,d0
@@ -664,14 +743,19 @@ play:   jsr     _mod_init
         move.b  #WHY_END,mwst+A_WHY
 .x:     jmp     _mod_publish
 
-; lmb_release: wait (task level, OS running) until the left button is up,
-; at most 100 frames, so the Workbench sees no stray click
-lmb_release:
-        move.l  gfxbase,a6
-        moveq   #99,d2
-.w:     btst    #6,CIAA_PRA
+; lmb_wait: the left button up before the OS runs again (rev16-x HIGH-1).
+; input.device last saw it up (a takeover exit needs a release before the
+; press), so a press it saw at Enable would be a click on the Workbench,
+; most likely on our own icon.  At most LMB_WAIT frames (CIA-A TOD: it
+; counts frames with every interrupt off); a button held longer is seen.
+; d0/d2 used.
+lmb_wait:
+        moveq   #LMB_WAIT-1,d2
+.w:     move.b  CIAA_TODLO,d0
+.f:     btst    #6,CIAA_PRA
         bne.s   .r
-        CALL    WaitTOF
+        cmp.b   CIAA_TODLO,d0
+        beq.s   .f
         dbra    d2,.w
 .r:     rts
 
@@ -721,7 +805,17 @@ release:
         move.l  d0,a1
         move.l  mwst+A_MODLEN,d0
         CALL    FreeMem
-.nm:    tst.b   cdset
+.nm:
+        ifd     MOD_TRACE
+        move.l  trbuf,d0
+        beq.s   .nt
+        move.l  sysbase,a6
+        move.l  d0,a1
+        move.l  #TR_TEND-TR_W,d0
+        CALL    FreeMem
+.nt:
+        endc
+        tst.b   cdset
         beq.s   .nd
         move.l  dosbase,a6
         move.l  olddir,d1
@@ -758,18 +852,22 @@ report: move.l  intbase,d0
         move.l  #okgad,es_GadgetFormat(a1)
         sub.l   a0,a0
         sub.l   a2,a2
-        sub.l   a3,a3
+        lea     easyargs,a3             ; %s: the file's name
+        move.l  name,(a3)
         CALL    EasyRequestArgs
 .r:     rts
 
 errtab: dc.w    e1-errtab,e2-errtab,e3-errtab,e4-errtab,e5-errtab,e6-errtab,e7-errtab
+        dc.w    e8-errtab,e9-errtab
 e1:     dc.b    "A system library did not open.",0
-e2:     dc.b    "The MOD file did not open (ModPlayer.mod).",0
-e3:     dc.b    "The MOD is too small or too big, or chip RAM is short.",0
-e4:     dc.b    "The MOD could not be read.",0
-e5:     dc.b    "The file is not a 4-channel M.K. MOD.",0
+e2:     dc.b    "The MOD file did not open:",10,"%s",0
+e3:     dc.b    "The MOD is too small or too big, or chip RAM is short:",10,"%s",0
+e4:     dc.b    "The MOD could not be read:",10,"%s",0
+e5:     dc.b    "The file is not a 4-channel M.K. MOD:",10,"%s",0
 e6:     dc.b    "A CIA timer the player needs is in use.",0
-e7:     dc.b    "The player could not parse this MOD.",0
+e7:     dc.b    "The player could not parse this MOD:",10,"%s",0
+e8:     dc.b    "The MOD player is already running.",0
+e9:     dc.b    "Trace build: the trace RAM is in use.",0
 title:  dc.b    "Amiga64 MOD player",0
 okgad:  dc.b    "OK",0
 dosname:        dc.b    "dos.library",0
@@ -812,8 +910,15 @@ oldsp:          ds.l    1
 cdset:          ds.b    1
 ownblit:        ds.b    1
 profok:         ds.b    1
+anch:           ds.b    1               ; we published the anchor
+busy:           ds.b    1               ; another instance's anchor: back out
 audopen:        ds.b    1
 lmbup:          ds.b    1
+        ifd     MOD_TRACE
+        cnop    0,4
+trbuf:          ds.l    1
+        endc
+easyargs:       ds.l    1
 ints:           ds.b    4*IS_SIZE
         cnop    0,4
 ioa:            ds.b    IOA_SIZE

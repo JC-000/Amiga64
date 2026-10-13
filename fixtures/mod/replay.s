@@ -150,9 +150,12 @@ G_UE            equ     110             ; w the last underflow: E into its frame
 G_UTOD          equ     112             ; l and its CIA-A TOD (frame)
 G_UCUR          equ     116             ; l E of the countdown running (latch + 1)
 G_UNXT          equ     120             ; l E after the next reload (the latch written)
-G_UTA           equ     124             ; w CIA-B TA's counter at the last full count
-G_SIZE          equ     126
+G_UTA           equ     124             ; w (unused since fix round 1)
+G_UDUE          equ     126             ; b nonzero: L6 saw an underflow since the last full count
+G_SIZE          equ     128
 FRAME_E         equ     14188           ; E per frame (VERTB, CIA-A TOD)
+SW_MARGIN       equ     384             ; E: the latch is written only this far from an underflow
+SW_GUARD        equ     128             ; E: the grid's late start (sw_start) at most
         else
 G_SIZE          equ     108
         endc
@@ -568,11 +571,16 @@ l3_vbl: move.w  #$0020,CUSTOM+INTREQ   ; the nested (busy) path: 3 instructions
 .rte:   rte
 
 l6_ciab:
+        ifd     MOD_HUNK
         ifd     MOD_MUT_FLAGCOUNT       ; W16-X mutant: the flag count (one ICR
         btst    #0,CIAB_ICR             ; flag can stand for two underflows)
         beq.s   .nu
         addq.w  #1,G+G_SWU
 .nu:
+        else
+        tst.b   CIAB_ICR                ; acknowledge (releases the hold)
+        st      G+G_UDUE                ; W16-X: the next look counts in full
+        endc
         else
         tst.b   CIAB_ICR                ; acknowledge (releases the hold)
         endc
@@ -703,8 +711,12 @@ read_tb:
 .sw:
         else
         move.l  d0,-(sp)
-        bsr     sw_count
-        move.l  (sp)+,d0
+        ifnd    MOD_MUT_ALWAYSFULL      ; (W16-X cost variant: every look in full)
+        tst.b   G+G_UDUE                ; the full count only when L6 saw an
+        beq.s   .cur                    ; underflow since the last one (one not
+        endc                            ; yet taken: its L6 sets G_UDUE, and
+.full:  bsr     sw_count                ; run_loop's re-check then sees it)
+.cur:   move.l  (sp)+,d0
         endc
         moveq   #0,d1
         move.w  G+G_SWU,d1
@@ -730,9 +742,37 @@ read_tb:
 ; whole periods (latch + 1, the reload rule: a latch written while running
 ; applies after the next underflow), so nothing drifts.  d0-d3 used.
 sw_count:
-        bsr     ta_cnt                  ; (before the time: an underflow between
-        move.w  d1,G+G_UTA              ; the two reads is counted, sw_owed then
-        bsr     sw_now                  ; only errs towards "owed")
+        clr.b   G+G_UDUE                ; (an L6 from here on: a further full count)
+        bsr     sw_since
+.lp:    move.l  G+G_UCUR,d3
+        cmp.l   d3,d2
+        blt.s   .x
+        sub.l   d3,d2
+        move.l  G+G_UNXT,d0             ; the reload took the latch
+        bsr     sw_one
+        bra.s   .lp
+.x:     rts
+
+; sw_one: count the underflow that ends the countdown G_UCUR; the next
+; countdown is d0.l E.  d0 used.
+sw_one: addq.w  #1,G+G_SWU
+        move.l  d0,-(sp)
+        moveq   #0,d0
+        move.w  G+G_UE,d0
+        add.l   G+G_UCUR,d0             ; the last underflow + one period
+.n:     cmp.l   #FRAME_E,d0
+        blo.s   .s
+        sub.l   #FRAME_E,d0
+        addq.l  #1,G+G_UTOD
+        bra.s   .n
+.s:     move.w  d0,G+G_UE
+        move.l  (sp)+,G+G_UCUR
+        rts
+
+; sw_since: d2.l = E from the last counted underflow to now (sw_now; the
+; TOD difference 24-bit, clamped at $FFFF frames).  d0-d3 used.
+sw_since:
+        bsr     sw_now
         sub.l   G+G_UTOD,d2
         and.l   #$ffffff,d2             ; frames since the last underflow
         cmp.l   #$ffff,d2
@@ -742,39 +782,65 @@ sw_count:
         add.l   d3,d2
         moveq   #0,d0
         move.w  G+G_UE,d0
-        sub.l   d0,d2                   ; E since the last underflow
-.lp:    move.l  G+G_UCUR,d3
-        cmp.l   d3,d2
-        blt.s   .x
-        sub.l   d3,d2
-        addq.w  #1,G+G_SWU
-        moveq   #0,d0
-        move.w  G+G_UE,d0
-        add.l   d3,d0                   ; the last underflow + one period
-.n:     cmp.l   #FRAME_E,d0
-        blo.s   .s
-        sub.l   #FRAME_E,d0
-        addq.l  #1,G+G_UTOD
-        bra.s   .n
-.s:     move.w  d0,G+G_UE
-        move.l  G+G_UNXT,G+G_UCUR       ; the reload took the latch
-        bra.s   .lp
-.x:     rts
+        sub.l   d0,d2
+        rts
 
-; sw_latch: timer_update's latch d2.l (period / n - 1) about to be written;
-; d6 = 0: the timer is about to start.  Running: the count up to now first
-; (the underflows before this write reloaded the old latch).  d2, d6 kept.
+; sw_latch: timer_update's latch d2.l (period / n - 1); d6 = 0: the timer
+; is about to start (the latch only), else it runs.  A running timer reloads
+; the latch at each underflow, so an underflow between the count and the
+; write would take the OLD period once more (rev16-x MEDIUM-1).  So the
+; write is made at a known point: the count is brought up to date, the time
+; read (Ta), and the latch written only while the next underflow is at least
+; SW_MARGIN E away (else the count waits for it: < SW_MARGIN E); the time
+; read after the write (Tb) still SW_GUARD E before the next underflow
+; proves the order (the new period applies after that underflow).  Else a
+; guest stall fell between Ta and Tb: sw_amb asks TA's counter.  Ta .. Tb at
+; IPL 7.  d2, d6 kept.
 sw_latch:
-        move.l  d2,-(sp)
-        ifnd    MOD_MUT_FLAGCOUNT       ; (the mutant counts by the flag only)
+        movem.l d2/d4-d5,-(sp)
+        move.l  d2,d5                   ; d5 = the latch
+        move.l  d2,d4
+        addq.l  #1,d4                   ; d4 = its period
+        ifnd    MOD_MUT_FLAGCOUNT       ; (the mutant: written at once, no count)
         tst.w   d6
-        beq.s   .s
-        bsr     sw_count
+        bne.s   .run
         endc
-.s:     move.l  (sp),d0
-        addq.l  #1,d0
-        move.l  d0,G+G_UNXT
-        move.l  (sp)+,d2
+        move.l  d4,G+G_UNXT             ; stopped: the start loads it
+        bsr.s   sw_wlatch
+        bra.s   .x
+.run:   move.w  sr,-(sp)
+.cnt:   move.w  (sp),sr                 ; (the caller's IPL while counting)
+        ifd     MOD_MUT_R_LATCHRACE     ; (mutant: fix-1's old path, the count
+        bsr     sw_count                ; and then the write at once)
+        bsr.s   sw_wlatch
+        else
+        ifd     MOD_MUT_R_NOLATCHCOUNT  ; (rev16-x R4: the write alone)
+        bsr.s   sw_wlatch
+        else
+        bsr     sw_count                ; the next underflow: G_UCUR after the last
+        or.w    #$0700,sr
+        bsr     sw_since                ; Ta
+        move.l  G+G_UCUR,d0
+        sub.l   d2,d0                   ; E to the next underflow
+        move.l  G+G_UCUR,d1
+        lsr.l   #1,d1                   ; (a short period: half of it)
+        cmp.l   #SW_MARGIN,d1
+        bls.s   .m
+        move.l  #SW_MARGIN,d1
+.m:     cmp.l   d1,d0
+        ble.s   .cnt                    ; close (or past): count it first
+        bsr.s   sw_wlatch
+        bsr     sw_since                ; Tb
+        add.l   #SW_GUARD,d2
+        cmp.l   G+G_UCUR,d2
+        bge.s   .amb
+        endc
+        endc
+        move.l  d4,G+G_UNXT             ; the write came first
+        bra.s   .d
+.amb:   bsr     sw_amb
+.d:     move.w  (sp)+,sr
+.x:     movem.l (sp)+,d2/d4-d5
         rts
 
 ; sw_start: the countdown starts now (read after the CRA write: a few E late
@@ -786,24 +852,100 @@ sw_start:
         move.w  d3,G+G_UE
         rts
 
+; sw_wlatch: CIA-B TA's latch := d5.w
+sw_wlatch:
+        move.b  d5,CIAB_TALO
+        move.w  d5,d0
+        lsr.w   #8,d0
+        move.b  d0,CIAB_TAHI            ; running: the latch only
+        rts
+
+; sw_amb: the latch (period d4.l) was written between Ta and Tb, and the
+; next underflow (G_UCUR after the last) may lie on either side of the
+; write: a guest stall.  Hypothesis k = 0, 1, ...: the first k underflows
+; reloaded the old latch (G_UNXT), the rest the new one.  TA's counter now
+; says when the next underflow comes (now + counter + 1); the hypothesis
+; whose grid puts an underflow there wins (k <= 3; an underflow inside the
+; one instruction between the TALO and TAHI writes, a mixed latch, is not
+; modelled).  The k old underflows are counted here.  d0-d3, d5 used.
+sw_amb:
+        movem.l d6-d7/a0,-(sp)
+        bsr     ta_cnt
+        move.w  d1,d5
+        bsr     sw_since                ; d2 = now
+        moveq   #0,d0
+        move.w  d5,d0
+        add.l   d2,d0
+        addq.l  #1,d0
+        move.l  d0,a0                   ; a0 = the next underflow by the counter
+        moveq   #-1,d7                  ; d7 = the best error (unsigned)
+        moveq   #0,d6                   ; d6 = the best k
+        moveq   #0,d5                   ; d5 = k
+.k:     move.l  G+G_UCUR,d3             ; d3 = g (the underflows of hypothesis k)
+        moveq   #0,d1                   ; d1 = reloads so far
+        cmp.l   d2,d3
+        bgt.s   .e                      ; (k > 0 needs the first one in the past)
+.g:     cmp.w   d5,d1
+        bhs.s   .gn
+        add.l   G+G_UNXT,d3             ; an old reload
+        bra.s   .gs
+.gn:    add.l   d4,d3                   ; a new one
+.gs:    addq.w  #1,d1
+        cmp.w   #1024,d1
+        bhs.s   .e
+        cmp.l   d2,d3
+        ble.s   .g
+.e:     sub.l   a0,d3                   ; |g - the counter's|
+        bpl.s   .ab
+        neg.l   d3
+.ab:    cmp.l   d7,d3
+        bhs.s   .nb
+        move.l  d3,d7
+        move.w  d5,d6
+.nb:    move.l  G+G_UCUR,d3             ; a further k only if its k-th old
+        move.w  d5,d1                   ; underflow is in the past
+        bra.s   .pe
+.pa:    add.l   G+G_UNXT,d3
+.pe:    dbra    d1,.pa
+        cmp.l   d2,d3
+        bgt.s   .c
+        addq.w  #1,d5
+        cmp.w   #3,d5
+        bls.s   .k
+.c:     move.w  d6,d5                   ; count the k old ones
+        beq.s   .n
+        subq.w  #1,d5
+.o:     move.l  G+G_UNXT,d0
+        bsr     sw_one
+        dbra    d5,.o
+.n:     move.l  d4,G+G_UNXT
+        movem.l (sp)+,d6-d7/a0
+        rts
+
 ; sw_owed: d1.b = G_TBLAST's low byte when no tick is owed, else not (the
 ; callers' `cmp.b G_TBLAST+1(a6),d1` of TB's count).  Cheap, for emit's and
 ; run_loop's checks inside the retrigger gap: owed = counted but not yet
-; turned into ticks, or CIA-B TA reloaded since the last full count (its
-; counter above the one sw_count saw).  A reload it cannot see (a stall of a
-; whole period, a smaller latch) leaves the tick to the next look: late,
-; never lost (sw_count counts from time).  d2 used.
+; turned into ticks, or L6 saw an underflow since the last full count.  An
+; underflow L6 has not taken yet (IPL 7 in run_loop's re-check) is taken
+; right after: its L6 then runs the loop again.  Late by that, never lost
+; (sw_count counts from time).
 sw_owed:
+        ifd     MOD_MUT_R_OWEDNEVER     ; (rev16-x R8: never owed)
+        move.w  G+G_TBLAST,d1
+        rts
+        endc
+        ifd     MOD_MUT_OWEDFULL        ; (the silence gate's red: a full count
+        movem.l d0-d3,-(sp)             ; in the gap, twice per retrigger)
+        bsr     sw_count
+        movem.l (sp)+,d0-d3
+        endc
         move.w  G+G_SWU,d1
         not.w   d1
         cmp.w   G+G_TBLAST,d1
         bne.s   .r                      ; counted, not yet ticked
-        bsr.s   ta_cnt
-        cmp.w   G+G_UTA,d1
-        bhi.s   .w
         move.w  G+G_TBLAST,d1
-        rts
-.w:     move.w  G+G_TBLAST,d1
+        tst.b   G+G_UDUE
+        beq.s   .r
         addq.w  #1,d1
 .r:     rts
 
@@ -819,16 +961,20 @@ ta_cnt:
         rts
 
 ; sw_now: d2.l = CIA-A TOD, d3.l = the beam's E into that frame (< FRAME_E),
-; consistent: TOD read around the beam; when a frame turned between, the
-; new TOD and a fresh beam (the beam holds its last value until the frame
-; is serviced, CONTRACTS "Beam").  TODHI .. TODLO always: the latch is
+; consistent: TOD, the beam, then TODLO again; when a frame turned between,
+; the new TOD and a fresh beam (the beam holds its last value until the
+; frame is serviced, CONTRACTS "Beam").  TODHI .. TODLO always: the latch is
 ; released.  d0 used.
 sw_now: bsr.s   .tod
         move.l  d0,d2
         move.l  CUSTOM+VPOSR,d3         ; V8 : V7-0 H (one beam for both words)
-        bsr.s   .tod
-        cmp.l   d0,d2
+        cmp.b   CIAA_TODLO,d2           ; (TODLO alone: no latch; it moves with
+        ifd     MOD_MUT_R_NOREREAD      ; every frame) rev16-x R3: no re-read
+        bra.s   .ok
+        else
         beq.s   .ok
+        endc
+        bsr.s   .tod
         move.l  d0,d2
         move.l  CUSTOM+VPOSR,d3
 .ok:    moveq   #0,d0
@@ -874,6 +1020,9 @@ l2_ciaa:
 stage_arm:
         ifd     MOD_HUNK                ; W16-X: the delay from the profile's E rate
         move.w  PARAM+P_STAGEE,d0
+        ifd     MOD_MUT_R_STAGEE        ; (rev16-x R7: P_STAGEE ignored)
+        moveq   #0,d0
+        endc
         bne.s   .e
         move.w  #STAGE_E,d0
 .e:     move.b  d0,CIAA_TBLO
@@ -972,12 +1121,13 @@ timer_update:
         move.w  d1,d3
         bsr     div32
         subq.l  #1,d2                   ; latch = period / n - 1
-        ifd     MOD_HUNK                ; W16-X: the software count's latch
-        bsr     sw_latch
-        endc
+        ifd     MOD_HUNK                ; W16-X: written by sw_latch, at a known
+        bsr     sw_latch                ; point of the software grid
+        else
         move.b  d2,CIAB_TALO
         lsr.w   #8,d2
         move.b  d2,CIAB_TAHI            ; running: the latch only
+        endc
         tst.w   d6
         bne.s   .r
         ifd     MOD_HUNK                ; W16-X: the software count from 0

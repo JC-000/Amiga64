@@ -42,6 +42,9 @@ CIAA_TALO       equ     $bfe401
 CIAA_TAHI       equ     $bfe501
 CIAA_CRA        equ     $bfee01
 CIAA_TODLO      equ     $bfe801
+CIAA_PRA        equ     $bfe001
+ANCHOR          equ     $2dc040         ; the app anchor (bit 7's foreign one)
+FOREIGN         equ     $0a0000         ; ... and its pointer
 CIAB_ICR        equ     $bfdd00
 CIAB_TBLO       equ     $bfd600
 CIAB_TBHI       equ     $bfd700
@@ -54,7 +57,9 @@ XP_ENTRY        equ     4               ; l the launcher's entry (its first code
 XP_MODE         equ     8               ; b 0 Workbench, 1 shell, 2 Workbench with a project (arg 1)
 XP_REFUSE       equ     9               ; b bits 0-3 AddICRVector ciaa TA/TB, ciab TA/TB
                                         ;   (ciaa TA is always the OS's); bit 4 audio.device;
-                                        ;   bit 5 intuition.library
+                                        ;   bit 5 intuition.library; bit 6 AllocAbs (the trace
+                                        ;   RAM in use); bit 7: RethinkDisplay publishes a
+                                        ;   foreign anchor (another writer, after the restore)
 XP_WAIT         equ     10              ; w frames counted after the return
 XP_FILE         equ     12              ; l the file's address
 XP_FLEN         equ     16              ; l its length
@@ -105,6 +110,9 @@ XS_CRB1         equ     127             ; b ... and after
 XS_TOD0         equ     128             ; b CIA-A TODLO read alone right after the return ...
 XS_TOD1         equ     129             ; b ... and after the wait: a TOD latch the launcher
                                         ; left held makes the first one stale
+XS_LMBEN        equ     130             ; b the left button was down at the last Enable (the
+                                        ; OS would see a click the launcher's exit made)
+XS_EASYARG      equ     132             ; l EasyRequestArgs' first argument (a3's first long)
 
 XLOG            equ     $005000         ; log entries, 24 bytes each
 XLOG_END        equ     $010000
@@ -428,7 +436,11 @@ x_enable:
         LOG     LIB_EXEC,-126
         subq.b  #1,idnest
         bne     .r
-        move.w  #$c000,CUSTOM+INTENA
+        sf      XS+XS_LMBEN
+        btst    #6,CIAA_PRA             ; /FIR0 low: the button down
+        bne     .u
+        st      XS+XS_LMBEN
+.u:     move.w  #$c000,CUSTOM+INTENA
 .r:     rts
 x_forbid:
         LOG     LIB_EXEC,-132
@@ -456,6 +468,32 @@ x_allocmem:                             ; d0 size, d1 requirements
 x_freemem:                              ; a1 memory, d0 size
         LOG     LIB_EXEC,-210
         bra     free
+x_allocabs:                             ; d0 size, a1 location: only inside the
+        LOG     LIB_EXEC,-204           ; stub's "slow RAM" $C00000-$DC0000 (the
+        movem.l d1/a0,-(sp)             ; trace), recorded like AllocMem's
+        btst    #6,XP+XP_REFUSE
+        bne     .no
+        cmp.l   #$c00000,a1
+        blo     .no
+        move.l  a1,d1
+        add.l   d0,d1
+        cmp.l   #$dc0000,d1
+        bhi     .no
+        lea     atab,a0
+        moveq   #31,d1
+.s:     tst.l   (a0)
+        beq     .f
+        addq.l  #8,a0
+        dbra    d1,.s
+        bra     .no
+.f:     move.l  a1,(a0)+
+        move.l  d0,(a0)
+        addq.b  #1,nallocs
+        move.l  a1,d0
+        bra     .x
+.no:    moveq   #0,d0
+.x:     movem.l (sp)+,d1/a0
+        rts
 x_findtask:
         LOG     LIB_EXEC,-294
         move.l  #TASK,d0
@@ -746,9 +784,19 @@ i_beep: LOG     LIB_INT,-96
         rts
 i_rethink:
         LOG     LIB_INT,-390
-        rts
+        btst    #7,XP+XP_REFUSE
+        beq     .r
+        move.l  #FOREIGN,ANCHOR+4       ; another writer's anchor (a stale or a
+        clr.l   ANCHOR+8                ; second instance's), published after
+        clr.l   ANCHOR+12               ; our restore
+        move.l  #'MWBA',ANCHOR
+.r:     rts
 i_easy: LOG     LIB_INT,-588
         move.l  12(a1),XS+XS_EASY       ; es_TextFormat
+        cmp.w   #0,a3
+        beq     .na
+        move.l  (a3),XS+XS_EASYARG
+.na:
         moveq   #1,d0
         rts
 
@@ -865,6 +913,8 @@ libtab: dc.l    SYSBASE
         dc.l    x_userstate
         dc.w    -198
         dc.l    x_allocmem
+        dc.w    -204
+        dc.l    x_allocabs
         dc.w    -210
         dc.l    x_freemem
         dc.w    -294

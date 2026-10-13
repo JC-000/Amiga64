@@ -72,7 +72,7 @@ LIB_BASES = {0x021000: "exec", 0x022000: "dos", 0x023000: "gfx", 0x024000: "intu
              0x025000: "ciaa", 0x025800: "ciab"}
 LVO_NAME = {("exec", -120): "Disable", ("exec", -126): "Enable", ("exec", -132): "Forbid",
             ("exec", -138): "Permit", ("exec", -150): "SuperState",
-            ("exec", -156): "UserState", ("exec", -198): "AllocMem",
+            ("exec", -156): "UserState", ("exec", -198): "AllocMem", ("exec", -204): "AllocAbs",
             ("exec", -210): "FreeMem", ("exec", -294): "FindTask", ("exec", -372): "GetMsg",
             ("exec", -378): "ReplyMsg", ("exec", -384): "WaitPort",
             ("exec", -414): "CloseLibrary", ("exec", -444): "OpenDevice",
@@ -96,6 +96,9 @@ ST = {"magic": 0, "ver": 4, "state": 6, "why": 7, "err": 8, "minit": 9, "claim":
 ST_SIZE = 92
 ST_DONE, ST_FAILED = 3, 4
 WHY = {1: "lmb", 2: "end", 3: "loop", 4: "init"}
+ERR_BUSY, ERR_TRACE = 8, 9
+FOREIGN = 0x0A0000                    # another instance's state struct (stub/host)
+REF_TRACE, REF_FOREIGN = 0x40, 0x80   # XP_REFUSE: AllocAbs refused; a foreign anchor late
 
 # the two load maps (code, data, bss, chip bss): A low, B high
 MAPS = {"A": (0x030000, 0x038000, 0x03A000, 0x090000),
@@ -109,17 +112,36 @@ MUTANTS = {
     "novec": ["MW_MUT_NOVEC"],              # the autovectors not restored
     "noicr": ["MW_MUT_NOICR"],              # the CIA ICR enable masks not restored
     "nocop": ["MW_MUT_NOCOP"],              # COP1LC left on the UI's list
-    "noint": ["MW_MUT_NOINT"],              # INTENA not restored
     "nogate": ["MW_MUT_NOGATE"],            # a held button exits at once
     "noreply": ["MW_MUT_NOREPLY"],          # the WBStartup never replied
     "tbcrb": ["MW_MUT_TBCRB"],              # the restore stops AROS's CIA-B timer B
-    "anchorany": ["MW_MUT_ANCHORANY"],      # the anchor without a valid profile block
-    "anchorfirst": ["MW_MUT_ANCHORFIRST"],  # 'MWBA' written before the pointer
+    "anchorclobber": ["MW_MUT_ANCHORCLOBBER"],  # a second instance overwrites the anchor
+    "anchorendany": ["MW_MUT_ANCHORENDANY"],    # the withdraw clears another's anchor
+    "latchrace": ["MOD_MUT_R_LATCHRACE"],   # fix-1's old latch write (count, then write)
     "flagcount": ["MOD_MUT_FLAGCOUNT"],     # the replay counts TA underflows by ICR flag
 }
-# killed by the model's write-order log only (VICE sees the end state and
-# polls; a few instructions' window is not observable there)
-MODEL_ONLY_MUTANTS = {"anchorfirst"}
+# rev16-x's review mutants (its mut/, re-targeted as switches), and the
+# package's earlier ones moved out of the 10 (supervisor, fix round 1)
+REVIEW_MUTANTS = {
+    "R1_nolmbwait": ["MW_MUT_NOLMBWAIT"],   # the restore does not wait for the release
+    "R3_noreread": ["MOD_MUT_R_NOREREAD"],  # sw_now without the frame-turn re-read
+    "R4_nolatchcount": ["MOD_MUT_R_NOLATCHCOUNT"],  # sw_latch writes without a count
+    "R7_stageeignored": ["MOD_MUT_R_STAGEE"],   # stage_arm ignores P_STAGEE
+    "R8_owednever": ["MOD_MUT_R_OWEDNEVER"],    # sw_owed never says "owed"
+    "anchorany": ["MW_MUT_ANCHORANY"],      # the anchor without a valid profile block
+    "anchorfirst": ["MW_MUT_ANCHORFIRST"],  # 'MWBA' written before the pointer
+    "noint": ["MW_MUT_NOINT"],              # INTENA not restored
+}
+# killed by the model only: the write order (VICE sees the end state and
+# polls), or a model case (an injected stall, a model E rate)
+MODEL_ONLY_MUTANTS = {"anchorfirst", "latchrace", "R3_noreread", "R4_nolatchcount",
+                      "R7_stageeignored", "R8_owednever"}
+
+# bounds of the model's timing checks (fix round 1)
+JITTER_E = 600            # a tick's lateness above its floor, no stall injected
+STAGE_SLACK_E = 150       # stage delay: P_STAGEE + the level-2 entry
+GRID_LATE_E = 128         # the software grid's constant lateness (replay.s SW_GUARD)
+SILENCE_MAX_INSTR = 200   # retrigger silence: a DMACON clear to its set (product)
 
 log = RM.log
 
@@ -215,6 +237,40 @@ def profile_ok(b: bytes) -> bool:
 # a valid block without real time (VICE-like): the anchor, the Amiga's timing
 PROF_NORT = profile_block(40, flags=0x01, s=9)
 
+# another instance's state struct (published by its anchor), and anchors
+FOREIGN_ST = b"MWBS" + struct.pack(">HBB", 1, 1, 0) + bytes(ST_SIZE - 8)
+ANCHOR_BUSY = b"MWBA" + struct.pack(">III", FOREIGN, 0x00010100, 0)
+ANCHOR_STALE = b"MWBA" + struct.pack(">III", FOREIGN + 0x100, 0x00010200, 0)
+
+
+def pre_anchor_busy(an: bytes) -> bool:
+    """The launcher's rule (modwb.s anchor_busy), for the staged anchors."""
+    return an[:4] == b"MWBA" and struct.unpack_from(">I", an, 4)[0] == FOREIGN
+
+
+def fxx_song() -> bytes:
+    """rev16-x's probe/grid.py song: an Fxx on every row (8 tempos), speed 1,
+    so CIA-B TA's latch is written on every tick: the latch-write race."""
+    bpms = [0x7D, 0x50, 0xC8, 0x96, 0xFF, 0x40, 0xA0, 0x60]
+    pats = []
+    for p in range(4):
+        rows = {r: ["C-2 01 F%02X" % bpms[(r + p) % len(bpms)]] for r in range(64)}
+        rows[0] = rows[0] + ["--- .. F02"]
+        pats.append(modgen.pattern(rows))
+    return modgen.Song("fxx", pats, [0, 1, 2, 3]).build()
+
+
+def trig_song() -> bytes:
+    """255 BPM, speed 1, a note on every row in 2 channels: every tick
+    retriggers, so an underflow often falls inside a trigger tick, and the
+    tick it owes is run at once only through sw_owed (emit, run_loop);
+    without that each such tick waits a period and, at this load, the
+    backlog makes the tempo drift (rev16-x R8; measured: the model at
+    tick_e 2557 keeps up with sw_owed, drifts 6292 E without)."""
+    rows = {r: ["C-2 01 000", "E-2 01 000"] for r in range(64)}
+    rows[0] = ["C-2 01 FFF", "E-2 01 F01"]
+    return modgen.Song("trig", [modgen.pattern(rows)], [0, 0]).build()
+
 
 # --------------------------------------------------------------------------
 # Cases
@@ -229,7 +285,9 @@ class Case:
                  raw: bytes | None = None, prof: bytes | None = None, lmb: tuple | None = None,
                  expect: tuple = (ST_DONE, ("end", "loop"), 0), trace: bool = False,
                  tick_e: int = 0, model_only: bool = False, stall: tuple | None = None,
-                 expect_lost: bool = False):
+                 expect_lost: bool = False, hold: int = 6, pre_anchor: bytes | None = None,
+                 epc: tuple = (1, 10), grid: bool = False, inject: str = "",
+                 builds: tuple = ("product", "trace"), jitter: bool = False):
         self.name, self.song, self.mode, self.ld = name, song, mode, ld
         self.refuse, self.cli, self.arg1 = refuse, cli, arg1
         self.tool = "ModPlayer"
@@ -239,7 +297,19 @@ class Case:
         self.prof, self.lmb, self.expect, self.trace = prof, lmb, expect, trace
         self.tick_e, self.model_only = tick_e, model_only
         self.stall, self.expect_lost = stall, expect_lost    # (every N frames, E): model
-        self.anchored = prof is not None and profile_ok(prof)   # the anchor rules
+        # the left button stays down `hold` host frames after the exit (the
+        # restore must wait for its release: rev16-x HIGH-1)
+        self.hold = hold
+        # the anchor before the start: another instance's (its struct at
+        # FOREIGN) or a stale one; None = zero (rev16-x MEDIUM-2)
+        self.pre_anchor = pre_anchor
+        # model only: the E rate (E per CPU cycle), the software grid against
+        # CIA-B TA's real underflows, an injected stall ("old"/"new": around
+        # the latch write; "turn": a frame turn inside sw_now), the jitter bound
+        self.epc, self.grid, self.inject, self.jitter = epc, grid, inject, jitter
+        self.builds = builds
+        self.anchored = (prof is not None and profile_ok(prof)   # the anchor rules
+                         and not (pre_anchor and pre_anchor_busy(pre_anchor)))
         self.wait = 5
         self.ref = None
         if trace:
@@ -265,7 +335,8 @@ class Case:
                (XS, bytes(XS_LEN)), (STUB_AT, stub), (XFILE, self.raw)]
         out += [(a, bytes([CANARY_BYTE]) * n) for a, n in CANARIES]
         out += [(PROF, self.prof or bytes(64))]
-        out += [(ANCHOR, bytes(16))]
+        out += [(ANCHOR, self.pre_anchor or bytes(16))]
+        out += [(FOREIGN, FOREIGN_ST)]
         return out + hk
 
 
@@ -288,7 +359,7 @@ def cases() -> list[Case]:
         # UI's conversion stalls ~11000 E, so tick_e 12960; on the model the
         # stall is injected (time runs on, the guest does not)
         Case("rt_s3", "tempo", ld="B", trace=True, tick_e=12960,
-             prof=profile_block(12960, s=3)),
+             prof=profile_block(12960, s=3), jitter=True),
         Case("stall24", "tempo", trace=True, tick_e=2557, prof=profile_block(2557, s=3),
              stall=(24, 2170), model_only=True),
         Case("stall1", "tempo", ld="B", trace=True, tick_e=2557, prof=profile_block(2557, s=3),
@@ -297,13 +368,29 @@ def cases() -> list[Case]:
         Case("prof_novrt", "restart", prof=profile_block(40, flags=0x01, s=9)),
         # a profile with a bad check: ignored
         Case("prof_bad", "restart", ld="B", prof=profile_block(2557, s=3, bad_check=True)),
-        # LMB: pressed at launcher frame 20 (the button was up), released 6 later
-        Case("lmb", "demo", prof=PROF_NORT, lmb=((0, False), (20, True), (26, False)),
+        # LMB: pressed at launcher frame 20 (the button was up), released 6
+        # frames after the exit: the OS must not see it down at Enable
+        Case("lmb", "demo", prof=PROF_NORT, lmb=((0, False), (20, True)),
              expect=(ST_DONE, ("lmb",), 0)),
         # LMB held from the start (the launching click), released, pressed again
         Case("lmb_held", "demo", ld="B", prof=PROF_NORT,
-             lmb=((0, True), (12, False), (30, True), (36, False)),
+             lmb=((0, True), (12, False), (30, True)),
              expect=(ST_DONE, ("lmb",), 0)),
+        # a long press: still down 30 frames after the exit (under LMB_WAIT 50)
+        Case("lmb_long", "demo", prof=PROF_NORT, lmb=((0, False), (16, True)), hold=30,
+             expect=(ST_DONE, ("lmb",), 0)),
+        # a second instance: another's anchor is published; back out, untouched
+        Case("busy", "restart", prof=PROF_NORT, pre_anchor=ANCHOR_BUSY,
+             expect=(ST_FAILED, (None,), ERR_BUSY)),
+        # a stale anchor (no struct behind it): replaced, then withdrawn
+        Case("stale", "restart", ld="B", prof=PROF_NORT, pre_anchor=ANCHOR_STALE),
+        # another writer's anchor appears after our restore: not withdrawn by us
+        Case("foreign_late", "restart", prof=PROF_NORT, refuse=REF_FOREIGN),
+        # a quoted shell name with a space; the trace build: its RAM refused
+        Case("cli_space", "restart", mode=1, cli='"My Tune.mod" x\n', fname="My Tune.mod",
+             prof=PROF_NORT),
+        Case("trace_busy", "restart", prof=PROF_NORT, refuse=REF_TRACE,
+             expect=(ST_FAILED, (None,), ERR_TRACE), builds=("trace",)),
         # no audio.device: plays anyway
         Case("noaudio", "restart", refuse=0x10, prof=PROF_NORT),
         # backing out before any takeover
@@ -312,6 +399,32 @@ def cases() -> list[Case]:
         Case("no_file", "restart", fname="Other.mod", expect=(ST_FAILED, (None,), 2)),
         # mod_init refuses it after the takeover: restored, then reported
         Case("init_err", "restart", raw=bytes(no_len), prof=PROF_NORT, expect=(ST_FAILED, ("init",), 7)),
+        # the software grid against CIA-B TA across latch writes (rev16-x
+        # MEDIUM-1: probe/grid.py's cases): an Fxx on every tick at s = 3's
+        # tick_e, at the E rates of an Ultimate (2/15, 4/15 E per cycle), and
+        # with a 2170 E stall every frame
+        Case("fxx_215", "fxx", raw=fxx_song(), tick_e=2557, prof=profile_block(2557, s=3),
+             epc=(2, 15), grid=True, model_only=True),
+        Case("fxx_415", "fxx", raw=fxx_song(), ld="B", tick_e=2557,
+             prof=profile_block(2557, s=3), epc=(4, 15), grid=True, model_only=True),
+        Case("fxx_stall1", "fxx", raw=fxx_song(), tick_e=2557, prof=profile_block(2557, s=3),
+             stall=(1, 2170), grid=True, model_only=True),
+        # a stall forced across every latch write, the next underflow passing
+        # before the write ("old") or after it ("new"): sw_amb decides
+        Case("fxx_old", "fxx", raw=fxx_song(), tick_e=2557, prof=profile_block(2557, s=3),
+             inject="old", grid=True, model_only=True),
+        Case("fxx_new", "fxx", raw=fxx_song(), ld="B", tick_e=2557,
+             prof=profile_block(2557, s=3), inject="new", grid=True, model_only=True),
+        # a frame turn forced between sw_now's first TOD read and the beam
+        # (the time must not go a frame back): ticks stay on time
+        Case("turn", "tempo", trace=True, tick_e=2557, prof=profile_block(2557, s=3),
+             inject="turn", jitter=True, model_only=True),
+        # 255 BPM at s = 3's tick_e, no stall: ticks on time (a tick owed in
+        # the retrigger gap is run at once: sw_owed)
+        Case("rt_2557", "tempo", ld="B", trace=True, tick_e=2557,
+             prof=profile_block(2557, s=3), jitter=True, model_only=True),
+        Case("rt_trig", "trig", raw=trig_song(), trace=True, tick_e=2557,
+             prof=profile_block(2557, s=3), jitter=True, model_only=True),
     ]
 
 
@@ -374,7 +487,7 @@ def check(c: Case, rd, hw: dict) -> list[str]:
                  f"(want {want_state} {want_why} {want_err})")
     if ret != (20 if want_err else 0):
         f.append(f"{c.name}: the launcher returned {ret}")
-    taken = want_err not in (2, 5, 6)
+    taken = want_err not in (2, 5, 6, ERR_BUSY, ERR_TRACE)
     # the hardware and the OS state after the return
     i2, d2 = struct.unpack_from(">HH", xs, 24)
     i1, d1 = struct.unpack_from(">HH", xs, 20)
@@ -420,6 +533,9 @@ def check(c: Case, rd, hw: dict) -> list[str]:
     for k, v in bal.items():
         if v:
             f.append(f"{c.name}: {k} {v} after the return")
+    if xs[130]:
+        f.append(f"{c.name}: the left button was down at Enable (the Workbench would "
+                 "see a click)")
     if c.mode in (0, 2):
         if xs[39] != 1 or xs[40] < 1:
             f.append(f"{c.name}: ReplyMsg {xs[39]}x (Forbid nest {xs[40]})")
@@ -431,13 +547,21 @@ def check(c: Case, rd, hw: dict) -> list[str]:
     if cur != 0x100:
         f.append(f"{c.name}: the current dir ${cur:X} after (want the start's $100)")
     opened = xs[64:96].split(b"\0")[0].decode("latin-1")
-    if opened != c.fname and want_err != 2:
+    if opened != c.fname and want_err not in (2, ERR_BUSY, ERR_TRACE):
         f.append(f"{c.name}: opened {opened!r}, want {c.fname!r}")
+    if want_err in (2, 5):                  # the requester names the file asked for
+        fmt = rd(struct.unpack_from(">I", xs, 60)[0], 80).split(b"\0")[0]
+        arg = rd(struct.unpack_from(">I", xs, 132)[0], 32).split(b"\0")[0].decode("latin-1")
+        if b"%s" not in fmt or arg != opened:
+            f.append(f"{c.name}: the requester says {fmt!r} with {arg!r} (opened {opened!r})")
     # the call order
+    ob = first(calls, "OwnBlitter")
+    after = lambda name, k=ob: next((i for i in range(max(k, 0), len(calls))   # noqa: E731
+                                     if calls[i][0] == name), -1)
     if taken:
-        seq = [first(calls, "OwnBlitter"), first(calls, "LoadView", lambda x: x[4] == 0),
-               first(calls, "Forbid"), first(calls, "Disable"), first(calls, "SuperState"),
-               first(calls, "UserState"), first(calls, "Enable"), first(calls, "Permit"),
+        seq = [ob, first(calls, "LoadView", lambda x: x[4] == 0),
+               after("Forbid"), after("Disable"), first(calls, "SuperState"),
+               first(calls, "UserState"), after("Enable"), after("Permit"),
                first(calls, "LoadView", lambda x: x[4] == OS_VIEW),
                first(calls, "RethinkDisplay"), first(calls, "DisownBlitter")]
         if -1 in seq or seq != sorted(seq):
@@ -452,8 +576,10 @@ def check(c: Case, rd, hw: dict) -> list[str]:
         if claim != b"\x01\x00\x00\x01":
             f.append(f"{c.name}: claims {claim.hex()} (ciaa TA, ciab TB are the OS's)")
     else:
+        # (the anchor's Forbid/Permit pair, first; the WB reply's Forbid, last)
+        k0 = (first(calls, "Permit") + 1) if c.prof and profile_ok(c.prof) else 0
         for n in ("Forbid", "Disable", "SuperState", "LoadView", "OwnBlitter"):
-            if n in names[:-2]:
+            if n in names[k0:-2]:
                 f.append(f"{c.name}: backed out, but called {n}")
         if not struct.unpack_from(">I", xs, 60)[0]:
             f.append(f"{c.name}: backed out without a requester")
@@ -496,6 +622,9 @@ def check(c: Case, rd, hw: dict) -> list[str]:
         if lost:
             f.append(f"{c.name}: {lost} CIA-B TA underflow(s) lost (software count; "
                      f"tick, rise E, period E: {where[:6]}; worst stall {worst} E)")
+        if c.jitter and hw.get("jitter", True) and worst > JITTER_E:
+            f.append(f"{c.name}: a tick {worst} E late above its floor (bound {JITTER_E}: "
+                     "no stall but the injected ones; a tick owed and not run?)")
         if DUMP[0]:
             want = c.ref.ticks
             a = 0 if c.ref.flags & RM.PF_REALTIME else 0
@@ -526,6 +655,25 @@ def check_anchor(c: Case, an: bytes, st: bytes, wlog: list | None) -> list[str]:
     never moves; the magic cleared before the stub's first FreeMem."""
     f: list[str] = []
     n = c.name
+    if c.pre_anchor and pre_anchor_busy(c.pre_anchor):
+        # another instance's anchor: never touched (nor its struct)
+        if an != c.pre_anchor:
+            f.append(f"{n}: another instance's anchor changed: {an.hex()}")
+        if wlog:
+            f.append(f"{n}: {len(wlog)} writes to another instance's anchor")
+        return f
+    foreign = ANCHOR_BUSY[:8] + bytes(8)
+    if c.refuse & REF_FOREIGN:
+        # another writer published after our restore: ours was gone, theirs stays
+        if an != foreign:
+            f.append(f"{n}: the late foreign anchor is {an.hex()} after the return "
+                     f"(want {foreign.hex()}: withdrawn by the wrong owner?)")
+        if not wlog:
+            return f
+        # the order check up to their write, as if ours was withdrawn there
+        wlog = wlog[:next((k for k, w in enumerate(wlog) if w[1] == foreign), len(wlog))]
+        an = bytes(4) + wlog[-1][1][4:]
+        wlog = wlog + [(wlog[-1][0], an)]
     if not c.anchored:
         if any(an):
             f.append(f"{n}: the anchor written without a valid profile block: {an.hex()}")
@@ -546,12 +694,14 @@ def check_anchor(c: Case, an: bytes, st: bytes, wlog: list | None) -> list[str]:
     if wlog is None:
         return f
     # the write order (model): [(index of the stub call log at the time, 16 bytes)]
-    prev = bytes(16)
+    prev = c.pre_anchor or bytes(16)
     pub = wd = None
     for k, (ncalls, b) in enumerate(wlog):
         mag, was = b[:4], prev[:4]
         if mag != was:
-            if mag == b"MWBA" and pub is None:
+            if pub is None and wd is None and c.pre_anchor and mag == bytes(4):
+                pass                        # the stale anchor withdrawn first
+            elif mag == b"MWBA" and pub is None:
                 pub = k
                 if b[4:8] != struct.pack(">I", c.st_at) or b[8:16] != bytes(8):
                     f.append(f"{n}: 'MWBA' published before +4/+8/+12: {b.hex()}")
@@ -604,15 +754,20 @@ def lost_ticks(ref, recs: bytes, n: int) -> tuple[int, list, int, int]:
     return lost, where, worst, u_min
 
 
-def lmb_down(c: Case, rd) -> bool:
-    """The left button by the case's schedule of launcher frames (A_FRAMES);
-    up once the launcher has restored (state >= 2).  The struct is read at
-    its load address (the case's map), not through the anchor."""
+def lmb_down(c: Case, rd, clock: float) -> bool:
+    """The left button by the case's schedule of launcher frames (A_FRAMES)
+    until the launcher's exit (why = LMB); then still down for c.hold host
+    frames (clock: the host's frame count) and up: never forced up by the
+    restore (the launcher must wait for the release before Enable: the
+    stub records the button at Enable).  The struct is read at its load
+    address (the case's map), not through the anchor."""
     st = rd(c.st_at, ST_SIZE)
     if st[:4] != b"MWBS":
         return c.lmb[0][1]
-    if st[ST["state"]] >= 2:
-        return False
+    if WHY.get(st[ST["why"]]) == "lmb":
+        if getattr(c, "exit_at", None) is None:
+            c.exit_at = clock
+        return clock - c.exit_at < c.hold
     fr = struct.unpack_from(">I", st, ST["frames"])[0]
     down = False
     for t, d in c.lmb:
@@ -625,36 +780,135 @@ def lmb_down(c: Case, rd) -> bool:
 # Leg "model"
 # --------------------------------------------------------------------------
 
-class Model(RM.Model):
-    """run_mod's model (Musashi, chipset_ref's CIAs and Paula, E = CPU/10,
-    VERTB per 14188 E) with the stub's chunks; the left button is CIA-A
-    PRA pin 6, driven from the launcher's frame count."""
+def map_syms(out: str) -> dict[str, tuple[str, int]]:
+    """vlink's map: symbol -> (section, offset), the launcher's link."""
+    syms, sec = {}, None
+    with open(os.path.join(out, "modwb.map")) as fh:
+        for line in fh:
+            if line.startswith("Symbols of "):
+                sec = line.split()[2].rstrip(":")
+                continue
+            p = line.split()
+            if sec and len(p) >= 2 and p[0].startswith("0x") and p[1].endswith(":"):
+                syms.setdefault(p[1][:-1], (sec, int(p[0], 16)))
+    return syms
 
-    def __init__(self, c: Case, chunks, mw_code_len: int):
+
+def resolve(exe: bytes, ld: str, syms: dict, names) -> dict[str, int]:
+    """Absolute addresses at the case's load map (CODE: the first code hunk;
+    BSS: the non-chip BSS hunk)."""
+    segs = hunk.parse(exe).segments
+    addrs = loadseg(exe, MAPS[ld])[1]
+    base = {"CODE": addrs[0],
+            "BSS": next(a for s, a in zip(segs, addrs) if s.kind == "bss" and s.memory_flags != 1)}
+    return {n: base[syms[n][0]] + syms[n][1] for n in names if n in syms}
+
+
+SYM_NAMES = ("G", "sw_one", "sw_wlatch", "sw_now", "sw_amb", "do_tick", "stage_step",
+             "finish")
+TURN_E = 300              # "turn": a frame boundary this close is forced inside sw_now
+
+
+class Model(RM.Model):
+    """run_mod's model (Musashi, chipset_ref's CIAs and Paula, E = CPU/10 or
+    the case's rate, VERTB per 14188 E) with the stub's chunks; the left
+    button is CIA-A PRA pin 6, driven from the launcher's frame count.
+    Fix round 1: CIA-B TA's real underflows against the software grid
+    (c.grid), stalls injected at a PC (c.inject), the DMA stage delay (E
+    from the stage one-shot's start to the DMACON set) and the retrigger
+    silence (instructions from a tick's DMACON clear to its set)."""
+
+    def __init__(self, c: Case, chunks, mw_code_len: int, sy: dict | None = None):
         class Src:
-            e_per_cyc = (1, 10)
+            e_per_cyc = c.epc
 
             def chunks(self, _img):
                 return chunks
-        super().__init__(b"", {}, Src())
-        self.case = c
+        sy = sy or {}
+        super().__init__(b"", {k: sy[k] for k in ("do_tick", "stage_step", "finish")
+                               if k in sy}, Src())
+        self.case, self.sy = c, sy
         self.mw_lo, self.mw_hi = c.entry, c.entry + mw_code_len
-        self.anchor_last, self.anchor_log = bytes(16), []
+        self.anchor_last, self.anchor_log = c.pre_anchor or bytes(16), []
         for a, d in chunks:                 # run_mod's trapped UI area holds its own copy
             for k in range(len(d)):
                 if 0x040000 <= a + k < 0x080000:
                     self.uiarea[a + k - 0x040000] = d[k]
+        self.hw_under: list[int] = []       # CIA-B TA's underflows (E), continuous mode
+        self.sw_under: list[int] = []       # the software grid's (G_UTOD x FRAME_E + G_UE)
+        self._one = None
+        self.arms: list[int] = []           # E of each stage one-shot start (CIA-A TBHI)
+        self.sets: list[int] = []           # E of each audio DMACON set
+        self.silence: list[tuple[int, int]] = []   # a tick's clear -> its set: (all
+        self.hi = 0                         # instructions, those at IPL >= 2)
+        self._sclr = None
+        self.injected = 0
+        self.irq_kicks = 0
+        self.amb = 0                        # sw_amb entries
+        if c.grid:
+            cia, orig = self.cs.ciab, self.cs.ciab.eclock
+
+            def ecl(n, cia=cia, orig=orig, m=self):
+                if cia.cra & 1 and not cia.cra & 0x28 and n > cia.ta:
+                    t = m.e + cia.ta + 1
+                    while t <= m.e + n:
+                        m.hw_under.append(t)
+                        t += cia.ta_latch + 1
+                orig(n)
+            cia.eclock = ecl
 
     def on_instr(self, pc):
-        if self.mw_lo <= pc < self.mw_hi:  # the launcher's own code: the anchor's
+        p = pc & 0xFFFFFF
+        if self.mw_lo <= p < self.mw_hi:    # the launcher's own code: the anchor's
             b = bytes(self.mem.r_block(ANCHOR, 16))     # changes, in write order
             if b != self.anchor_last:
                 self.anchor_last = b
                 ncalls = (self.mem.r32(XS + 44) - XLOG) // LOG_ENT
                 self.anchor_log.append((ncalls, b))
-        if not self.halted and self.mem.r16(pc & 0xFFFFFF) == 0xAFFF:
+        if (self.cpu.r_sr() >> 8) & 7 >= 2:
+            self.hi += 1
+        sy, inj = self.sy, self.case.inject
+        if self.case.grid:
+            if p == sy.get("sw_one"):
+                self._one = (self.mem.r32(self.cpu.r_sp()), self.cpu.r_sp() + 4)
+            elif self._one and p == self._one[0] and self.cpu.r_sp() == self._one[1]:
+                g = sy["G"]
+                self.sw_under.append(self.mem.r32(g + 112) * RM.FRAME_E + self.mem.r16(g + 110))
+                self._one = None
+            if p == sy.get("sw_amb"):
+                self.amb += 1
+        if inj and self.cs.ciab.cra & 1:
+            at = {"old": sy.get("sw_wlatch"), "new": sy.get("sw_wlatch", -99) + 16}.get(inj)
+            if p == at:                     # the next underflow passes in a stall
+                self.advance(self.cs.ciab.ta + 1 + 40)      # before/after the write
+                self.injected += 1
+        if inj == "turn" and p == sy.get("sw_now", -99) + 4:   # the first beam read
+            left = RM.FRAME_E - self.e % RM.FRAME_E
+            if left <= TURN_E:
+                self.advance(left + 2)
+                self.injected += 1
+        if not self.halted and self.mem.r16(p) == 0xAFFF:
             self.xs_snap = self.read(XS, XS_LEN)    # Musashi then takes the A-line
         super().on_instr(pc)                        # trap: the stub's fault stub
+
+    def a_w8(self, a, v):
+        if a & 0xFFFFFF == 0xBFE701:        # CIA-A TBHI: the stage one-shot starts
+            self.arms.append(self.e)
+        super().a_w8(a, v)
+
+    def c_w16(self, a, v):
+        r = a & 0x1FE
+        if r == 0x096 and v & 0xF and not (self.ui_range[0] <= self.cur_pc < self.ui_range[1]):
+            if v & 0x8000:
+                self.sets.append(self.e)
+                if self._sclr and v & self._sclr[1]:
+                    self.silence.append((self.icount - self._sclr[0], self.hi - self._sclr[2]))
+                    self._sclr = None
+            elif self._dt is not None and self._sclr is None:
+                self._sclr = (self.icount, v & 0xF, self.hi)
+        if self.cur_pc == self.sy.get("finish"):
+            self._sclr = None
+        super().c_w16(a, v)
 
     def read_halted(self, a: int, n: int) -> bytes:
         b = bytearray(self.read(a, n))
@@ -668,7 +922,7 @@ class Model(RM.Model):
     def frame_hook(self):
         if not self.case.lmb:
             return
-        down = lmb_down(self.case, self.read)
+        down = lmb_down(self.case, self.read, self.frames)
         pins = self.cs.ciaa.pra_in
         self.cs.ciaa.pra_in = (pins & ~0x40) | (0 if down else 0x40)
 
@@ -691,8 +945,16 @@ class Model(RM.Model):
         rem = 0
         every, stall_e = self.case.stall or (0, 0)
         while not self.halted and self.e < max_e:
+            ic = self.icount
             res = self.mach.execute(self.SLICE)
             ran = res.cycles if res.cycles > 0 else self.SLICE
+            if self.icount == ic and self.ipl > (self.cpu.r_sr() >> 8) & 7:
+                # Musashi stopped (STOP) with a level above the mask asserted
+                # and not taken (seen once, fxx_stall1 product): a 68000 takes
+                # it, so the level is re-asserted (counted, logged)
+                self.cpu.set_irq(0)
+                self.cpu.set_irq(self.ipl)
+                self.irq_kicks += 1
             n, rem = divmod(rem + ran * self.epc[0], self.epc[1])
             self.advance(n)
             if self.frames != fr:
@@ -702,39 +964,118 @@ class Model(RM.Model):
                     self.advance(stall_e)       # a c2v conversion: the guest stalled,
                     fr = self.frames            # time (the CIAs, the frames) runs on
 
+    def timing_checks(self, c: Case, product: bool) -> list[str]:
+        """The grid; the stage delay (the product build: in a trace build the
+        trace's cost makes ticks flush their stages)."""
+        f = []
+        if c.grid:
+            sw, hw = self.sw_under, self.hw_under
+            offs = [s - h for s, h in zip(sw, hw)]
+            c.grid_res = (len(sw), len(hw), sorted(set(offs))[:6], self.amb, self.injected)
+            if len(sw) < 100 or not 0 <= len(hw) - len(sw) <= 1:
+                f.append(f"{c.name}: the software grid counted {len(sw)} underflows, CIA-B TA "
+                         f"had {len(hw)}")
+            if offs and (len(set(offs)) != 1 or not 0 <= offs[0] <= GRID_LATE_E):
+                k = next((i for i in range(1, len(offs)) if offs[i] != offs[0]), 0)
+                f.append(f"{c.name}: the software grid left CIA-B TA's at underflow {k}: "
+                         f"offsets (sw - hw E) {offs[max(0, k - 1):k + 3]} (want one value "
+                         f"in 0..{GRID_LATE_E})")
+            if c.inject in ("old", "new") and (self.injected < 100 or self.amb < self.injected):
+                f.append(f"{c.name}: {self.injected} stalls injected, sw_amb ran {self.amb}x")
+        want_se = (c.tick_e * 300 + 20455 // 2) // 20455 if c.tick_e else 0
+        # (the model's own E rate, no stall around the latch writes: the
+        # level-2 entry's E then depend on the rate and the stall)
+        if (product and want_se and want_se + STAGE_SLACK_E < 300 and c.epc == (1, 10)
+                and not c.inject):
+            d = []
+            for k, a in enumerate(self.arms):
+                nxt = self.arms[k + 1] if k + 1 < len(self.arms) else 1 << 62
+                s = next((x for x in self.sets if a <= x < nxt), None)
+                if s is not None:
+                    d.append(s - a)
+            med = sorted(d)[len(d) // 2] if d else None
+            c.stage_res = (len(d), med)
+            if med is None or med > want_se + STAGE_SLACK_E:
+                f.append(f"{c.name}: the stage delay is {med} E (median of {len(d)}), want "
+                         f"P_STAGEE {want_se} + at most {STAGE_SLACK_E}")
+        return f
+
 
 def leg_model(defs: list[str], red: bool = False, only: list[str] | None = None) -> list[str]:
-    out = os.path.join(ROOT, "build", "modwb-model" + ("-" + "-".join(defs) if defs else "")
-                       + ("-red" if red else ""))
-    exe_tr = build(["MOD_TRACE", *defs], out + "-tr", red)
-    stub = build_stub(out)
+    """Every case on the product build and on the MOD_TRACE build (the
+    replay checked against mod_ref and the tick timing: trace builds)."""
     fails: list[str] = []
-    for c in cases():
-        if only and c.name not in only:
-            continue
-        t0 = time.monotonic()
-        ch = c.chunks(exe_tr, stub)
-        m = Model(c, ch, launcher_code_len(out + "-tr"))
-        m.run(max_e=c.max_frames * RM.FRAME_E)
-        rd = m.read_halted
-        regs = m.cs.regs
-        hw = {"cop1lc": ((regs[0x80 >> 1] << 16) | regs[0x82 >> 1]) & 0xFFFFFE,
-              "maska_hw": m.cs.ciaa.icr_mask, "maskb_hw": m.cs.ciab.icr_mask,
-              "extra": [f"${a:06X} (W15-U's fixed area) written at PC ${pc:06X}"
-                        for a, pc in m.uiarea_bad],
-              "anchor_log": m.anchor_log}
-        f = [] if m.halted else [f"{c.name}: no HALT within {c.max_frames} frames"]
-        if m.halted:
-            f += check(c, rd, hw)
-        log(f"model {c.name}: {m.frames} frames, {m.icount} instructions, lost/worst stall/"
-            f"period {getattr(c, 'lost', '-')}, "
-            f"{time.monotonic() - t0:.1f}s: {'ok' if not f else 'FAIL'}")
-        for x in f[:8]:
-            print("    " + x)
-        fails += f
-        if f and STOP_FIRST[0]:
-            break
+    stub = None
+    for kind in ("product", "trace"):
+        out = os.path.join(ROOT, "build", "modwb-model-" + kind + ("-" + "-".join(defs) if defs
+                                                                    else "") + ("-red" if red else ""))
+        exe = build((["MOD_TRACE"] if kind == "trace" else []) + defs, out, red)
+        stub = stub or build_stub(out)
+        syms = map_syms(out)
+        for c in cases():
+            if (only and c.name not in only) or kind not in c.builds:
+                continue
+            if kind == "product":
+                c.ref = None
+            t0 = time.monotonic()
+            ch = c.chunks(exe, stub)
+            m = Model(c, ch, launcher_code_len(out), resolve(exe, c.ld, syms, SYM_NAMES))
+            m.run(max_e=c.max_frames * RM.FRAME_E)
+            rd = m.read_halted
+            regs = m.cs.regs
+            hw = {"cop1lc": ((regs[0x80 >> 1] << 16) | regs[0x82 >> 1]) & 0xFFFFFE,
+                  "maska_hw": m.cs.ciaa.icr_mask, "maskb_hw": m.cs.ciab.icr_mask,
+                  "extra": [f"${a:06X} (W15-U's fixed area) written at PC ${pc:06X}"
+                            for a, pc in m.uiarea_bad],
+                  "anchor_log": m.anchor_log}
+            f = [] if m.halted else [f"{c.name}: no HALT within {c.max_frames} frames"]
+            if m.halted:
+                f += check(c, rd, hw)
+                f += m.timing_checks(c, kind == "product")
+            f = [f"[{kind}] {x}" for x in f]
+            log(f"model[{kind}] {c.name}: {m.frames} frames, {m.icount} instructions, "
+                f"lost/worst stall/period {getattr(c, 'lost', '-')}, grid "
+                f"{getattr(c, 'grid_res', '-')}, stage {getattr(c, 'stage_res', '-')}, "
+                f"{'irq re-asserted %dx, ' % m.irq_kicks if m.irq_kicks else ''}"
+                f"{time.monotonic() - t0:.1f}s: {'ok' if not f else 'FAIL'}")
+            for x in f[:8]:
+                print("    " + x)
+            fails += f
+            if f and STOP_FIRST[0]:
+                return fails
     return fails
+
+
+def silence_gate(defs: list[str]) -> list[str]:
+    """The retrigger silence (rev16-x LOW-MEDIUM-5), product build, model
+    speed, at tick_e 20455 and 2557: from each DMACON clear a tick writes to
+    the DMACON set of the same channel(s), the instructions run at IPL >= 2
+    (the handlers, and W15's IPL-raised publish/wait in the foreground: what
+    holds the level-2 stage back).  All instructions are logged too: at
+    20455 they include the UI's foreground work during the 300 E stage,
+    which the stage's interrupt does not wait for.  Red: MOD_MUT_OWEDFULL
+    (a full count in the gap)."""
+    from tests import run_player
+    out = os.path.join(ROOT, "build", "modwb-silence" + ("-" + "-".join(defs) if defs else ""))
+    exe = build(list(defs), out)
+    stub = build_stub(out)
+    syms = map_syms(out)
+    songs = {"probe": run_player.probe_song(), "basic": modgen.songs()["basic"],
+             "tempo": modgen.songs()["tempo"], "retrig": modgen.songs()["retrig"]}
+    f, res = [], {}
+    for te in (20455, 2557):
+        for n, raw in songs.items():
+            c = Case(f"sil_{n}_{te}", n, raw=raw, tick_e=te, prof=profile_block(te, s=3))
+            m = Model(c, c.chunks(exe, stub), launcher_code_len(out),
+                      resolve(exe, c.ld, syms, SYM_NAMES))
+            m.run(max_e=c.max_frames * RM.FRAME_E)
+            hi = max((x[1] for x in m.silence), default=0)
+            res[c.name] = (len(m.silence), hi, max((x[0] for x in m.silence), default=0))
+            if not m.silence or hi > SILENCE_MAX_INSTR:
+                f.append(f"{c.name}: retrigger silence {hi} instructions at IPL >= 2 over "
+                         f"{len(m.silence)} retriggers (bound {SILENCE_MAX_INSTR})")
+    log(f"retrigger silence (product; n, max IPL>=2, max all): {res}")
+    return f
 
 
 # --------------------------------------------------------------------------
@@ -754,11 +1095,12 @@ def leg_vice(prg: str, defs: list[str], s: int, red: bool = False,
     signal.signal(signal.SIGTERM, on_term)
     out = os.path.join(ROOT, "build", "modwb-vice" + ("-" + "-".join(defs) if defs else "")
                        + ("-red" if red else ""))
-    exe_tr = build(["MOD_TRACE", *defs], out + "-tr", red)
+    exes = {"product": build(list(defs), out + "-pr", red),
+            "trace": build(["MOD_TRACE", *defs], out + "-tr", red)}
     stub = build_stub(out)
     fails: list[str] = []
 
-    def run_case(m, c: Case) -> list[str]:
+    def run_case(m, c: Case, kind: str) -> list[str]:
         sess = Session(target=m.tg, labels=m.labels, timeout=300.0)
         g = Guest(SimpleNamespace(target=m.tg, timeout=600.0), m.labels)
         cia = m.lab("cia_st")
@@ -766,7 +1108,9 @@ def leg_vice(prg: str, defs: list[str], s: int, red: bool = False,
         m.load_driver()
         m.w(AB.P, bytes([0, RM.CHIP_FILL_BANKS]))
         m.call("aros_fill")
-        ch = c.chunks(exe_tr, stub)
+        if kind == "product":
+            c.ref = None
+        ch = c.chunks(exes[kind], stub)
         sess.stage([Chunk(a, d) for a, d in ch])
         m.load_driver()
         m.start(s)
@@ -790,7 +1134,7 @@ def leg_vice(prg: str, defs: list[str], s: int, red: bool = False,
                 an = peek.read(ANCHOR, 16)          # published while it plays
                 if an[:4] == b"MWBA" and struct.unpack_from(">I", an, 4)[0] == c.st_at:
                     seen_pub = True
-                down = lmb_down(c, peek.read)
+                down = lmb_down(c, peek.read, (time.monotonic() - t0) / VICE_FRAME_S)
                 if down != down_now:
                     m.w(m.lab("inp_joy"), b"\x10" if down else b"\x00")
                     down_now = down
@@ -808,11 +1152,14 @@ def leg_vice(prg: str, defs: list[str], s: int, red: bool = False,
               # VICE s = 6 with W15-U's UI: every trail refresh's conversion
               # stalls the guest ~11000 E (caught up: run_mod's late bound is
               # 3 frames); the underflows are counted from time (MOD_HUNK)
-              "timing": True}
+              "timing": True,
+              # (no jitter bound: the conversions stall the guest by more)
+              "jitter": False}
         f += check(c, g.read, hw)
         if peek and c.anchored and not seen_pub:
             f.append(f"{c.name}: the anchor never seen published while playing")
-        log(f"vice {c.name} (s = {s}): {time.monotonic() - t0:.0f}s, lost/worst stall/"
+        f = [f"[{kind}] {x}" for x in f]
+        log(f"vice[{kind}] {c.name} (s = {s}): {time.monotonic() - t0:.0f}s, lost/worst stall/"
             f"period {getattr(c, 'lost', '-')}: "
             f"{'ok' if not f else 'FAIL'}")
         for x in f[:8]:
@@ -821,14 +1168,16 @@ def leg_vice(prg: str, defs: list[str], s: int, red: bool = False,
 
     # one emulator session per case: a second run in the same session
     # misbehaves (finding F1, build/evidence/w16-x/PROGRESS.md)
-    allc = {x.name: x for x in cases()}
-    todo = [c for c in ([allc[n] for n in only] if only else list(allc.values()))
-            if not c.model_only]
+    todo = []
+    for kind in ("product", "trace"):
+        allc = {x.name: x for x in cases()}      # (fresh: the LMB schedule's state)
+        todo += [(c, kind) for c in ([allc[n] for n in only] if only else list(allc.values()))
+                 if not c.model_only and kind in c.builds]
     if ONE_SESSION[0]:                  # F1's reproduction: every case in one session
-        AB.vice_session(prg, lambda m: [fails.extend(run_case(m, c)) for c in todo])
+        AB.vice_session(prg, lambda m: [fails.extend(run_case(m, c, k)) for c, k in todo])
         return fails
-    for c in todo:
-        f = AB.vice_session(prg, lambda m, c=c: run_case(m, c))
+    for c, kind in todo:
+        f = AB.vice_session(prg, lambda m, c=c, kind=kind: run_case(m, c, kind))
         fails.extend(f)
         if f and STOP_FIRST[0]:
             break
@@ -836,6 +1185,7 @@ def leg_vice(prg: str, defs: list[str], s: int, red: bool = False,
 
 
 
+VICE_FRAME_S = 0.06                     # a guest frame at s = 6 (measured)
 STOP_FIRST = [False]
 ONE_SESSION = [False]
 DUMP = [os.environ.get("MODWB_DUMP") == "1"]
@@ -848,8 +1198,12 @@ def main(argv=None) -> int:
     ap.add_argument("--prg")
     ap.add_argument("--s", type=int, default=6)
     ap.add_argument("--mutants", action="store_true")
+    ap.add_argument("--review-mutants", action="store_true",
+                    help="rev16-x's mutants and the package's retired ones")
     ap.add_argument("--only", default="", help="mutants (with --mutants) or cases")
     ap.add_argument("--red", action="store_true")
+    ap.add_argument("--silence-red", action="store_true",
+                    help="the retrigger silence gate on MOD_MUT_OWEDFULL (must fail)")
     ap.add_argument("--one-session", action="store_true",
                     help="VICE: every case in one emulator session (reproduces finding F1)")
     a = ap.parse_args(argv)
@@ -863,10 +1217,10 @@ def main(argv=None) -> int:
             raise SystemExit("--prg is required for --leg vice")
         return leg_vice(a.prg, defs, a.s, red, cs)
 
-    if a.mutants:
+    if a.mutants or a.review_mutants:
         STOP_FIRST[0] = True
         bad = []
-        for name, defs in MUTANTS.items():
+        for name, defs in (REVIEW_MUTANTS if a.review_mutants else MUTANTS).items():
             if only and name not in only:
                 continue
             if a.leg == "vice" and name in MODEL_ONLY_MUTANTS:
@@ -879,12 +1233,18 @@ def main(argv=None) -> int:
         print(f"run_modwb {a.leg} mutants: "
               f"{'PASS (all killed)' if not bad else 'FAIL: survived ' + ','.join(bad)}")
         return 1 if bad else 0
+    if a.silence_red:
+        f = silence_gate(["MOD_MUT_OWEDFULL"])
+        print(f"run_modwb silence red: {'FAIL as expected' if f else 'PASSED (no teeth!)'}")
+        return 0 if f else 1
     if a.red:
         STOP_FIRST[0] = True
         f = leg([], red=True, cs=only or None)
         print(f"run_modwb {a.leg} red: {'FAIL as expected' if f else 'PASSED (no teeth!)'}")
         return 0 if f else 1
     f = leg([], cs=only or None)
+    if a.leg == "model" and not only:
+        f += silence_gate([])
     print(f"run_modwb {a.leg}: {'PASS' if not f else f'FAIL ({len(f)})'}")
     return 1 if f else 0
 

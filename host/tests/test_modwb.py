@@ -37,7 +37,7 @@ need_vbcc = pytest.mark.skipif(not os.path.exists(os.path.join(VBCC, "vlink")),
 OS_TABLE = {
     "_LVOSupervisor": -30, "_LVODisable": -120, "_LVOEnable": -126, "_LVOForbid": -132,
     "_LVOPermit": -138, "_LVOSuperState": -150, "_LVOUserState": -156,
-    "_LVOAllocMem": -198, "_LVOFreeMem": -210, "_LVOFindTask": -294, "_LVOGetMsg": -372,
+    "_LVOAllocMem": -198, "_LVOAllocAbs": -204, "_LVOFreeMem": -210, "_LVOFindTask": -294, "_LVOGetMsg": -372,
     "_LVOReplyMsg": -378, "_LVOWaitPort": -384, "_LVOCloseLibrary": -414,
     "_LVOOpenDevice": -444, "_LVOCloseDevice": -450, "_LVOOpenResource": -498,
     "_LVOOpenLibrary": -552, "_LVOCreateMsgPort": -666, "_LVODeleteMsgPort": -672,

@@ -18,6 +18,7 @@ _LVOPermit              equ     -138
 _LVOSuperState          equ     -150
 _LVOUserState           equ     -156
 _LVOAllocMem            equ     -198
+_LVOAllocAbs            equ     -204
 _LVOFreeMem             equ     -210
 _LVOFindTask            equ     -294
 _LVOGetMsg              equ     -372
