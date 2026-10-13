@@ -239,8 +239,10 @@ mach_frames = $96       ; W8-L mach: u32 LE guest frames (VERTBs) since mach_ini
 .endif
 
 ; W13-I inp: scratch of inp_frame (runtime/ops/inp.s), live only inside one
-; call; not machine state (a snapshot need not carry it).
-; @region inp $9A-$9B joystick/keyboard scan scratch (inp_frame only)
+; call; not machine state (a snapshot need not carry it).  The input module
+; (tests/aros/inpm.s) uses inp_u in its 1351 sample (W16-I); the sampler slot
+; and the frame hook run synchronously from mach's event pass.
+; @region inp $9A-$9B joystick/keyboard scan scratch (inp_frame and the input module)
 .ifndef inp_t
 inp_t       = $9A       ; W13-I inp: idle rows, then step - 1
 .endif

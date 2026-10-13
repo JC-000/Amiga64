@@ -1964,14 +1964,69 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
     Per axis, v = pot & `$7E`, d = (v − old) mod 128 as a signed 7-bit
     value / 2 (−32..31); the Y delta is negated (the 1351's Y counts up,
     the Amiga's down).
-    - **The per-frame clamp** (rev14-mouse HIGH-1). AROS reads JOY0DAT once
-      a guest frame as a signed 8-bit delta, and about 14 samples land in
-      one frame at s = 3. So the counts added since the last frame hook
-      (`inp_macc`, s8 per axis) saturate at ±127, and only the clamped part
-      is added. 14 samples of +31 deliver +127 (`host/tests/test_inp.py`,
-      leg `mouse`), not a wrap (+217 had moved the pointer −19 px).
-      - The stick's ≤ 32 per frame comes on top, so a full-speed stick and
-        mouse together can still exceed 127.
+    - **The idle hysteresis** (W16-I; supervisor ruling 2026-10-12). At
+      rest a 1351 can alternate between two adjacent values (the user's, on
+      the C64U at 64 MHz: POTX `$C9/$CA`, POTY `$AB/$AC`, one count apart),
+      which the plain decode passes on as ±1 every sample: the pointer
+      wiggles. The decode is taken against a reference, `inp_mold` bits
+      1-6, and `inp_mold` bit 7 holds the direction of the last move passed
+      on (1 = negative, in the pot's sense, before the Y negation):
+      - d = 0: nothing;
+      - |d| = 1 **against** that direction: held, nothing added, the
+        reference kept (the idle jitter);
+      - otherwise: passed on, reference := v, bit 7 := d < 0.
+      The reference sample stores v with bit 7 = 0. The model is
+      `host/inp_ref.m1351_hyst`.
+      - At rest, a two-value jitter passes at most one count after the
+        pointer stops, then nothing (leg `mhyst` "jitter", the user's
+        exact pairs, after a + move, a − move and a fresh reference).
+      - Slow moves keep every count: one count a sample in one direction
+        passes 1:1; a reversal's first count is held until the next count
+        in the new direction, which then passes as 2 (leg `mhyst` "slow":
+        +1 × 32 then −1 × 32 return exactly). A lone one-count reversal
+        stays held (one count of backlash, half a lores pixel).
+      - The band is 1 count (the measured pair). After a held sample the
+        reference can be one count stale, toward the last direction's
+        opposite side, so a single sample one count beyond the decode's
+        −32..31 edge on that side aliases, in both directions:
+        - last move −, a +1 held, then +31: the offset from the
+          reference is +32, which passes as −32;
+        - last move +, a −1 held, then −32: the offset is −33, which
+          passes as +31.
+        This is the same edge as the plain decode's +32 ≡ −32, a known
+        limit (supervisor, fix 1: a step of 31-32 counts a sample, ≈ 3.7k
+        counts/s, is the sampler's Nyquist edge, where any 1351 decoder
+        aliases; `host/tests/test_inp.py` `test_hyst_stale_alias_*`, leg
+        `mhyst` "alias").
+    - **The per-window travel budget** (rev14-mouse HIGH-1; W16-I: 63, the
+      round-2 margin; fix 1: travel, rev16-i M-1). AROS reads JOY0DAT once
+      a guest frame as a signed 8-bit delta, in its VBL handler, after the
+      frame hook that posted the VERTB; about 14 samples land in one frame
+      at s = 3. So the travel since the last frame hook (`inp_macc`, u8
+      per axis: the sum of |counts| added) saturates at `MCLAMP` = 63, and
+      only the part of a sample's d within it is added. One AROS delta
+      spans at most the end of one window and the start of the next:
+      ≤ 63 + 63 = 126 for any stream, reversals included, never a wrap.
+      - At ±127 a late read saw 127 + 31 = 158, a backward jerk (W14).
+      - A signed ±63 sum (W16-I before fix 1) bounds the window's net, not
+        what follows a read: a reversal inside a window with a late read
+        reached 189 (rev16-i's repro: hook; −32, −31; read; +31 × 5; hook;
+        +31 × 2; read gave +188, an s8 −68). The travel budget gives +62.
+      - Tests: 14 samples of +31 deliver +63; two saturated windows read
+        early then late deliver 126; the repro; random streams with the
+        sign flipping inside windows and late reads stay ≤ 126
+        (`host/tests/test_inp.py`, legs `mouse` and `mhyst` "straddle",
+        "reversal", "rstream"; qmutant `csigned`, the signed sum, dies).
+      - A back-and-forth inside one window spends the budget both ways:
+        a wiggle of more than 63 counts of travel in one guest frame is
+        cut there (the reference still follows the 1351, so nothing is
+        lost but the cut part).
+      - The mouse moves at most 63 counts (~31 lores px) per guest frame,
+        ≈ 570 counts/s at s = 3; only a very fast flick reaches it.
+      - Limits: an AROS VBL that is skipped (three windows) can still wrap,
+        and the stick's ≤ 32 per frame comes on top. Resetting the budget
+        on the guest's JOY0DAT read (exact, ~16 B of MAIN in `c_rdw`) was
+        not taken (supervisor).
     - The scale is 1:1, one 1351 count per Amiga count.
     - The first sample after `inp_mok` = 0 only sets the reference. The
       module also clears `inp_mok` when `inp_mport` or `inp_src` changed
@@ -1980,9 +2035,10 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
     mouse right → POTINP DATLY (`inp_pot`).
   - **The input module** (`tests/aros/inpm.s`; the supervisor's ranges,
     asserted).
-    - **Segments:** A at `$C980-$C9FE` (89 of 127 B: entry, ID, the B check,
-      `look`) and B at `$CF00-$CFEF` (219 of 240 B: the decode, the clamp,
-      the queue).
+    - **Segments:** A at `$C980-$C9FE` (120 of 127 B: entry, ID, the B
+      check, `look`, and the frame's end `fira`: /FIR0 and `inp_macc` := 0,
+      moved from B in W16-I) and B at `$CF00-$CFEF` (226 of 240 B: the
+      decode with the hysteresis, the clamp, the queue).
     - **$CF00-$CFEF in machine mode** is otherwise unused: mboot uses `$CE00`
       and `$CFFF`, the Ultimate dispatcher `$CE00-$CEFF`, `run_irq`'s drv
       `$CFF0`, and `run_super_vectors`' `$CF00-$CF9F` only in its own HLE
@@ -2035,12 +2091,17 @@ CIA1 side). Tests: `tests/run_inp.py` (+ `fixtures/inp/inp_log.s`),
     - the frame hook: 327 (the real scan) / 198 (override, idle) without
       the module; +228 / +204 with it armed. The re-arm, when sampling is
       on, adds +383.
-    - a sample: 743 with the module (decode, clamp, queue look, re-arm),
-      400 without (the guard and the re-arm only).
+    - a sample: 743 with the W14 module (decode, clamp, queue look,
+      re-arm) on every path, 400 without (the guard and the re-arm only).
+      W16-I (leg `cost`, same session as the W14 module's 743): at rest
+      626, held jitter 664, moving 766, saturated 771; the frame call +3
+      (the `jmp fira`). Fix 1 (the travel budget; leg `cost`, same
+      session as the round-0 module): moving 791, saturated 793; at rest
+      and held unchanged.
     - Per second these scale with the rates: samples at ≈ 120 Hz real time
       on the Ultimate (any s), frames at 69.44 or 72.08 / 2^s Hz (PAL or
-      NTSC φ2; 8.7 / 9.0 at s = 3). That is ≈ 89k + 5.3k cycles/s, ≈ 0.15 %
-      of 64 MHz. On a 1 MHz VICE at s = 9 a 16-E-tick period would mean
+      NTSC φ2; 8.7 / 9.0 at s = 3). With the mouse moving (793 a sample)
+      that is ≈ 95k + 5.3k cycles/s, ≈ 0.16 % of 64 MHz. On a 1 MHz VICE at s = 9 a 16-E-tick period would mean
       ~890 samples a frame, so the scripted pots are sampled every 2048 E
       ticks there.
   - **Ramp:** not time-scaled (the limit above). The stick's ramp is
