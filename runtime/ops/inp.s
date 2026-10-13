@@ -82,7 +82,7 @@ inp_mport: .res 1       ; W14-M host: mouse port, 0 = port 1 (stick on 2), 1 = p
 inp_mper: .res 4        ; W14-M host: 1351 sample period, E ticks, u32 (0 = no sampling)
 inp_mpot: .res 2        ; W14-M POTY, POTX: override input (inp_src != 0), else the last SID read
 inp_mb:   .res 1        ; W14-M mouse port lines, 1 = closed (bit 4 left, bit 0 right)
-inp_mold: .res 2        ; W14-M last POTY, POTX (bits 1-6)
+inp_mold: .res 2        ; W14-M ref POTY, POTX (bits 1-6); W16-I: bit 7 = last direction
 inp_mok:  .res 1        ; W14-M nonzero once inp_mold holds a sample
 inp_mon:  .res 1        ; W14-M host: the M2 module's ID byte 0 (0 = none)
 inp_ml:   .res 1        ; W14-M M2 override: mouse lines (inp_src != 0, module armed)
