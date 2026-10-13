@@ -12,8 +12,10 @@ MOD     := ../mod
 VDEFS   := -DUI_HUNK=1 $(foreach d,$(DEFS),-D$(d)=1)
 ASM     := $(BIN)/vasmm68k_mot -quiet -m68000 -Fhunk $(VDEFS)
 # RED=1 (leg S's red build): the replay without MOD_HUNK, i.e. at the W15
-# fixed addresses $000400/$000480/$0004C0
-RHUNK   := $(if $(RED),,-DMOD_HUNK=1)
+# fixed addresses $000400/$000480/$0004C0.  MW_NO_ATB (W16-E3): the replay
+# never touches CIA-A timer B (AROS's, unowned); its DMA stages busy-wait on
+# CIA-B TA.  Only this build sets it: the W15 builds stay byte-identical.
+RHUNK   := $(if $(RED),,-DMOD_HUNK=1 -DMW_NO_ATB=1)
 
 OBJS    := $(OUT)/modwb.o $(OUT)/mwdata.o $(OUT)/replay.o $(OUT)/ui.o $(OUT)/mwend.o
 

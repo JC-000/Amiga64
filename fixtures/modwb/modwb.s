@@ -2,8 +2,8 @@
 ; (W16-X, docs/WAVE16_BRIEF.md and its addendum).
 ;
 ; A hunk executable started from Workbench (an icon) or a shell.  It loads a
-; MOD into chip RAM, claims what the replay uses through the OS (the three
-; CIA timers by ciaa/ciab.resource, the four audio channels by audio.device,
+; MOD into chip RAM, claims what the replay uses through the OS (CIA-B
+; timer A by ciab.resource, the four audio channels by audio.device,
 ; the blitter), takes the machine over (display off by LoadView(0), Forbid,
 ; Disable, supervisor mode, its own stack, every DMA and interrupt off, its
 ; own level 2/3/6 autovectors), runs fixtures/mod/replay.s (MOD_HUNK) and
@@ -23,6 +23,13 @@
 ; pending ACROSS the takeover is not re-posted at the restore (continuous
 ; timers resume; leg A's `Wait 5` after the return passed).  A left button
 ; held longer than LMB_WAIT frames after the exit reaches the Workbench.
+;
+; CIA-A timer B is never claimed or touched (W16-E3): AROS runs it as a
+; free-running counter with no ciaa.resource owner, and claiming it (even
+; restored as found) made later launches from the same Workbench session
+; fail intermittently (build/evidence/w16-e3: 3 of 11 launches with it,
+; 0 of 14 without).  The replay's DMA stages busy-wait on CIA-B TA's
+; counter instead (replay.s MW_NO_ATB, set by the Makefile).
 ;
 ; AmigaOS facts: os.i (public documentation, cited in
 ; build/evidence/w16-x/PROGRESS.md).  Mutants (tests/run_modwb.py):
@@ -524,17 +531,13 @@ params: lea     PARAM,a1
         rts
 
 ; ---------------------------------------------------------------------------
-; claim: the replay's CIA timers (ciaa TB: the DMA stages; ciab TA: the
-; tick) by AddICRVector.  ciaa TA and ciab TB are only asked and, if free,
-; released at once (recorded: AROS owns both, R1).  d0 = 0 or ERR_CLAIM
-; (whatever was kept is released by release)
+; claim: the replay's CIA timer (ciab TA: the tick) by AddICRVector.
+; ciaa TA and ciab TB are only asked and, if free, released at once
+; (recorded: AROS owns both, R1).  ciaa TB is never asked ($FF, W16-E3:
+; AROS uses it without the resource).  d0 = 0 or ERR_CLAIM (whatever was
+; kept is released by release)
 ; ---------------------------------------------------------------------------
-claim:  move.l  ciaabase,a6             ; W16-E: CIA-A TB as found, before the claim
-        moveq   #0,d0                   ; W16-E: (AROS runs it free with no resource
-        CALL    AbleICR                 ; W16-E:  owner: AddICRVector says free;
-        move.b  d0,atbmsk               ; W16-E:  build/evidence/w16-e2e diag3/4)
-        move.b  CIAA_CRB,atbcrb         ; W16-E
-        lea     ints,a0
+claim:  lea     ints,a0
         moveq   #3,d1
 .i:     move.b  #NT_INTERRUPT,LN_TYPE(a0)
         move.l  #intname_s,LN_NAME(a0)
@@ -542,7 +545,15 @@ claim:  move.l  ciaabase,a6             ; W16-E: CIA-A TB as found, before the c
         lea     IS_SIZE(a0),a0
         dbra    d1,.i
         moveq   #0,d4                   ; d4 = the claim index 0-3
-.c:     move.l  ciaabase,a6
+.c:
+        ifnd    MW_MUT_ATBCLAIM         ; (mutant: ciaa TB asked and kept again)
+        cmp.w   #1,d4                   ; W16-E3: ciaa TB never asked
+        bne.s   .nx                     ; W16-E3
+        st      mwst+A_CLAIM+1          ; W16-E3: $FF, released by nobody
+        bra.s   .n                      ; W16-E3
+.nx:                                    ; W16-E3
+        endc
+        move.l  ciaabase,a6
         cmp.w   #2,d4
         blo.s   .a
         move.l  ciabbase,a6
@@ -576,8 +587,10 @@ claim:  move.l  ciaabase,a6             ; W16-E: CIA-A TB as found, before the c
         blo.s   .c
         lea     mwst+A_CLAIM,a0
         moveq   #0,d0
+        ifd     MW_MUT_ATBCLAIM
         move.b  1(a0),d0
-        or.b    2(a0),d0
+        endc
+        or.b    2(a0),d0                ; ciab TA (ciaa TB: never asked, W16-E3)
         beq.s   .r
         moveq   #ERR_CLAIM,d0
 .r:     rts
@@ -654,18 +667,10 @@ restore:
         move.w  d0,AUD0LC+8+$10(a5)
         move.w  d0,AUD0LC+8+$20(a5)
         move.w  d0,AUD0LC+8+$30(a5)
-        move.b  #$08,CIAA_CRB           ; our timers stopped (ciab TB is AROS's:
-        clr.b   CIAB_CRA                ; never touched)
-        ifnd    MW_MUT_NOATB
-        btst    #0,atbcrb               ; W16-E: CIA-A TB found running: as found.
-        beq.s   .tbs                    ; W16-E: the latch cannot be read; $FFFF is
-        clr.b   CIAA_CRB                ; W16-E:  assumed (a free-running counter:
-        move.b  #$ff,CIAA_TBLO          ; W16-E:  measured on every AROS boot, U64E
-        move.b  #$ff,CIAA_TBHI          ; W16-E:  and C64U); continuous and stopped
-        move.b  atbcrb,d0               ; W16-E:  while the latch is written
-        or.b    #$10,d0                 ; W16-E: LOAD
-        move.b  d0,CIAA_CRB             ; W16-E
-.tbs:                                   ; W16-E
+        clr.b   CIAB_CRA                ; our timer stopped (ciab TB is AROS's and
+                                        ; ciaa TB too, W16-E3: never touched)
+        ifd     MW_MUT_ATBCRB           ; (mutant: the old restore, CIA-A TB stopped)
+        move.b  #$08,CIAA_CRB
         endc
         ifd     MW_MUT_TBCRB
         clr.b   CIAB_CRB
@@ -811,17 +816,6 @@ release:
 .cn:    addq.w  #1,d4
         cmp.w   #3,d4
         blo.s   .ci
-        ifnd    MW_MUT_NOATB
-        lea     mwst+A_CLAIM,a0         ; W16-E: ciaa TB kept (removed above) and its
-        tst.b   1(a0)                   ; W16-E:  interrupt enabled before the claim:
-        bne.s   .nab                    ; W16-E:  enabled again (RemICRVector cleared it)
-        btst    #CIAICRB_TB,atbmsk      ; W16-E
-        beq.s   .nab                    ; W16-E
-        move.l  ciaabase,a6             ; W16-E
-        move.w  #$82,d0                 ; W16-E: set TB
-        CALL    AbleICR                 ; W16-E
-.nab:                                   ; W16-E
-        endc
         move.l  fh,d1
         beq.s   .nf
         move.l  dosbase,a6
@@ -941,8 +935,6 @@ anch:           ds.b    1               ; we published the anchor
 busy:           ds.b    1               ; another instance's anchor: back out
 audopen:        ds.b    1
 lmbup:          ds.b    1
-atbcrb:         ds.b    1               ; W16-E: CIA-A CRB before the claim
-atbmsk:         ds.b    1               ; W16-E: CIA-A ICR enable mask before the claim
         ifd     MOD_TRACE
         cnop    0,4
 trbuf:          ds.l    1

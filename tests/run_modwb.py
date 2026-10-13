@@ -131,7 +131,8 @@ REVIEW_MUTANTS = {
     "anchorany": ["MW_MUT_ANCHORANY"],      # the anchor without a valid profile block
     "anchorfirst": ["MW_MUT_ANCHORFIRST"],  # 'MWBA' written before the pointer
     "noint": ["MW_MUT_NOINT"],              # INTENA not restored
-    "E_noatb": ["MW_MUT_NOATB"],            # W16-E: CIA-A TB left stopped (AROS runs it free)
+    "E3_atbcrb": ["MW_MUT_ATBCRB"],         # W16-E3: the restore stops CIA-A TB (the old code)
+    "E3_atbclaim": ["MW_MUT_ATBCLAIM"],     # W16-E3: ciaa TB claimed (AddICRVector) again
 }
 # killed by the model only: the write order (VICE sees the end state and
 # polls), or a model case (an injected stall, a model E rate)
@@ -143,6 +144,8 @@ JITTER_E = 600            # a tick's lateness above its floor, no stall injected
 STAGE_SLACK_E = 150       # stage delay: P_STAGEE + the level-2 entry
 GRID_LATE_E = 128         # the software grid's constant lateness (replay.s SW_GUARD)
 SILENCE_MAX_INSTR = 200   # retrigger silence: a DMACON clear to its set (product)
+SILENCE_EXEMPT = {20455: "s = 0 (Amiga-rate tick_e): modwb never runs there; the bound "   # W16-E3
+                         "applies at the Workbench profile, tick_e 2557, s = 3 (ruling)"}
 
 log = RM.log
 
@@ -515,8 +518,9 @@ def check(c: Case, rd, hw: dict) -> list[str]:
     if (hw["maska_hw"], hw["maskb_hw"]) != (pre_a, PRE_MASKB):
         f.append(f"{c.name}: CIA ICR enable masks ${hw['maska_hw']:02X}/"
                  f"${hw['maskb_hw']:02X}, want ${pre_a:02X}/${PRE_MASKB:02X}")
-    if c.atb and xs[137] != xs[136]:    # W16-E
-        f.append(f"{c.name}: CIA-A CRB ${xs[137]:02X} after, ${xs[136]:02X} before (TB ran free)")
+    if xs[137] != xs[136]:              # W16-E; W16-E3: every case (CIA-A TB never touched)
+        f.append(f"{c.name}: CIA-A CRB ${xs[137]:02X} after, ${xs[136]:02X} before "
+                 "(CIA-A TB is AROS's, never touched)")
     vbl, ta, wto = struct.unpack_from(">H", xs, 30)[0], struct.unpack_from(">H", xs, 32)[0], xs[34]
     if wto or vbl != c.wait:
         f.append(f"{c.name}: after the return {vbl} VERTBs of {c.wait} (a wait timed out: {wto})")
@@ -582,7 +586,7 @@ def check(c: Case, rd, hw: dict) -> list[str]:
         if not adds or max(adds) > seq[2] or [r for r in rems if seq[2] < r < seq[7]]:
             f.append(f"{c.name}: the ICR claims are not outside the takeover")
         claim = st[ST["claim"]:ST["claim"] + 4]
-        if claim != b"\x01\x00\x00\x01":
+        if claim != b"\x01\xff\x00\x01":     # W16-E3: ciaa TB never asked ($FF)
             f.append(f"{c.name}: claims {claim.hex()} (ciaa TA, ciab TB are the OS's)")
     else:
         # (the anchor's Forbid/Permit pair, first; the WB reply's Forbid, last)
@@ -592,7 +596,7 @@ def check(c: Case, rd, hw: dict) -> list[str]:
                 f.append(f"{c.name}: backed out, but called {n}")
         if not struct.unpack_from(">I", xs, 60)[0]:
             f.append(f"{c.name}: backed out without a requester")
-    if want_err == 6 and st[ST["claim"]:ST["claim"] + 4] != b"\x01\x00\x01\x01":
+    if want_err == 6 and st[ST["claim"]:ST["claim"] + 4] != b"\x01\xff\x01\x01":   # W16-E3
         f.append(f"{c.name}: claims {st[ST['claim']:ST['claim'] + 4].hex()} (ciab TA refused)")
     # the profile block
     te, se = struct.unpack_from(">HH", st, ST["ticke"])
@@ -814,7 +818,7 @@ def resolve(exe: bytes, ld: str, syms: dict, names) -> dict[str, int]:
 
 
 SYM_NAMES = ("G", "sw_one", "sw_wlatch", "sw_now", "sw_amb", "do_tick", "stage_step",
-             "finish")
+             "finish", "stage_arm")      # W16-E3: stage_arm
 TURN_E = 300              # "turn": a frame boundary this close is forced inside sw_now
 
 
@@ -846,7 +850,7 @@ class Model(RM.Model):
         self.hw_under: list[int] = []       # CIA-B TA's underflows (E), continuous mode
         self.sw_under: list[int] = []       # the software grid's (G_UTOD x FRAME_E + G_UE)
         self._one = None
-        self.arms: list[int] = []           # E of each stage one-shot start (CIA-A TBHI)
+        self.arms: list[int] = []           # E of each stage_arm entry (W16-E3)
         self.sets: list[int] = []           # E of each audio DMACON set
         self.silence: list[tuple[int, int]] = []   # a tick's clear -> its set: (all
         self.hi = 0                         # instructions, those at IPL >= 2)
@@ -886,6 +890,8 @@ class Model(RM.Model):
                 self._one = None
             if p == sy.get("sw_amb"):
                 self.amb += 1
+        if p == sy.get("stage_arm"):         # W16-E3: no one-shot; the stages'
+            self.arms.append(self.e)         # busy-wait starts here
         if inj and self.cs.ciab.cra & 1:
             at = {"old": sy.get("sw_wlatch"), "new": sy.get("sw_wlatch", -99) + 16}.get(inj)
             if p == at:                     # the next underflow passes in a stall
@@ -899,11 +905,6 @@ class Model(RM.Model):
         if not self.halted and self.mem.r16(p) == 0xAFFF:
             self.xs_snap = self.read(XS, XS_LEN)    # Musashi then takes the A-line
         super().on_instr(pc)                        # trap: the stub's fault stub
-
-    def a_w8(self, a, v):
-        if a & 0xFFFFFF == 0xBFE701:        # CIA-A TBHI: the stage one-shot starts
-            self.arms.append(self.e)
-        super().a_w8(a, v)
 
     def c_w16(self, a, v):
         r = a & 0x1FE
@@ -1063,7 +1064,10 @@ def silence_gate(defs: list[str]) -> list[str]:
     holds the level-2 stage back).  All instructions are logged too: at
     20455 they include the UI's foreground work during the 300 E stage,
     which the stage's interrupt does not wait for.  Red: MOD_MUT_OWEDFULL
-    (a full count in the gap)."""
+    (a full count in the gap).
+    W16-E3: the stages busy-wait at IPL 2 (no CIA-A TB), so the bound is
+    asserted at the Workbench profile only (tick_e 2557, s = 3); 20455 is
+    measured and logged, exempt with SILENCE_EXEMPT's reason."""
     from tests import run_player
     out = os.path.join(ROOT, "build", "modwb-silence" + ("-" + "-".join(defs) if defs else ""))
     exe = build(list(defs), out)
@@ -1080,7 +1084,11 @@ def silence_gate(defs: list[str]) -> list[str]:
             m.run(max_e=c.max_frames * RM.FRAME_E)
             hi = max((x[1] for x in m.silence), default=0)
             res[c.name] = (len(m.silence), hi, max((x[0] for x in m.silence), default=0))
-            if not m.silence or hi > SILENCE_MAX_INSTR:
+            if not m.silence:
+                f.append(f"{c.name}: no retrigger seen")
+            elif te in SILENCE_EXEMPT:                                  # W16-E3
+                log(f"  {c.name}: {hi} instructions at IPL >= 2: EXEMPT ({SILENCE_EXEMPT[te]})")
+            elif hi > SILENCE_MAX_INSTR:
                 f.append(f"{c.name}: retrigger silence {hi} instructions at IPL >= 2 over "
                          f"{len(m.silence)} retriggers (bound {SILENCE_MAX_INSTR})")
     log(f"retrigger silence (product; n, max IPL>=2, max all): {res}")

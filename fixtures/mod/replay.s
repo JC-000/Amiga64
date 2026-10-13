@@ -493,8 +493,10 @@ _mod_start:
         add.w   #$10,d0
         dbra    d7,.v
         move.b  #$7f,CIAA_ICR
+        ifnd    MW_NO_ATB               ; W16-E3: CIA-A TB never touched (the
         move.b  #$08,CIAA_CRB           ; timer B one-shot, stopped
         move.b  #$82,CIAA_ICR           ; mask: TB
+        endc                            ; W16-E3:  stages busy-wait, stage_arm)
         move.b  #$7f,CIAB_ICR
         clr.b   CIAB_CRA
         ifnd    MOD_HUNK                ; (W16-X: CIA-B TB is not ours)
@@ -960,6 +962,40 @@ ta_cnt:
         move.b  d2,d1
         rts
 
+        ifd     MW_NO_ATB               ; W16-E3
+; stage_wait (W16-E3, the modwb build: no CIA-A TB): busy-wait P_STAGEE E
+; (0: STAGE_E) on CIA-B TA's counter, which runs from mod_start on
+; (PF_REALTIME).  A reload (the counter went up) adds G_UNXT, the period
+; after a reload.  At most $7FFF polls (a stopped TA).  d0-d2 used.
+stage_wait:
+        movem.l d3-d5,-(sp)
+        moveq   #0,d4
+        move.w  PARAM+P_STAGEE,d4
+        ifd     MOD_MUT_R_STAGEE        ; (rev16-x R7: P_STAGEE ignored)
+        moveq   #0,d4
+        endc
+        bne.s   .e
+        move.w  #STAGE_E,d4
+.e:     bsr     ta_cnt
+        move.w  d1,d3                   ; d3 = the last counter
+        move.w  #$7fff,d5
+.l:     bsr     ta_cnt
+        moveq   #0,d0
+        move.w  d3,d0
+        cmp.w   d3,d1
+        bls.s   .d                      ; down (or the same): d3 - d1
+        add.l   G+G_UNXT,d0             ; reloaded: d3 + period - d1
+.d:     moveq   #0,d2
+        move.w  d1,d2
+        sub.l   d2,d0
+        move.w  d1,d3
+        sub.l   d0,d4
+        ble.s   .x
+        dbra    d5,.l
+.x:     movem.l (sp)+,d3-d5
+        rts
+        endc                            ; W16-E3
+
 ; sw_now: d2.l = CIA-A TOD, d3.l = the beam's E into that frame (< FRAME_E),
 ; consistent: TOD, the beam, then TODLO again; when a frame turned between,
 ; the new TOD and a fresh beam (the beam holds its last value until the
@@ -1018,6 +1054,12 @@ l2_ciaa:
 ; The DMA stages
 ; ===========================================================================
 stage_arm:
+        ifd     MW_NO_ATB               ; W16-E3: both stages now, each after a
+        bsr     stage_wait              ; W16-E3:  busy-wait of P_STAGEE E on
+        bsr     stage_step              ; W16-E3:  CIA-B TA's counter (stage 1:
+        bsr     stage_wait              ; W16-E3:  DMACON set; stage 2: the
+        bra     stage_step              ; W16-E3:  repeat LC/LEN)
+        endc                            ; W16-E3
         ifd     MOD_HUNK                ; W16-X: the delay from the profile's E rate
         move.w  PARAM+P_STAGEE,d0
         ifd     MOD_MUT_R_STAGEE        ; (rev16-x R7: P_STAGEE ignored)
@@ -1076,8 +1118,10 @@ stage_rep:
 
 ; run every pending stage now (a new tick, or the end)
 stage_flush:
+        ifnd    MW_NO_ATB               ; W16-E3: no one-shot to stop
         move.b  #$08,CIAA_CRB           ; stop the one-shot
         move.b  CIAA_ICR,d0             ; drop its flag
+        endc                            ; W16-E3
         move.w  #$0008,INTREQ(a5)
         addq.w  #1,STATUS+S_FLUSH
 .l:     tst.b   G_STAGE(a6)
@@ -1170,7 +1214,9 @@ finish:
         clr.b   CIAB_CRB
         endc
         move.b  #$7f,CIAB_ICR
+        ifnd    MW_NO_ATB               ; W16-E3
         move.b  #$08,CIAA_CRB
+        endc                            ; W16-E3
         move.b  #$7f,CIAA_ICR
         move.w  #INT_MINE,INTENA(a5)    ; CLR only W15-M's sources
         bclr    #0,shadow+34            ; flags bit 0: no longer playing (L6)
