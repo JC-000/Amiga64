@@ -629,6 +629,14 @@ def session(prg: str, backend: str, out: str, mhz: int, fn):
             reboot(tg.transport.client)
 
 
+def check_modwb_mutant(prg, mutant) -> None:              # W16-D fix round 3, F3
+    """norestore, keepanchor and noprof are stand-in build defines: with
+    --modwb-prg they would not apply, and the red would run green."""
+    if prg and mutant in ("norestore", "keepanchor", "noprof"):
+        raise SystemExit(f"--modwb-mutant {mutant} is a stand-in build define: "
+                         f"it cannot run with --modwb-prg")
+
+
 def make_disk(a, raw: bytes) -> Disk:                     # W16-D
     """The staged disk: the user's ADF with the script overlay; with
     --disk modwb also the player, its icon and a MOD (tests/aros_modwb)."""   # W16-D
@@ -1903,6 +1911,7 @@ def main(argv=None) -> int:
     if a.watch and ("e2e" in a.legs or "modwb" in a.legs):   # W16-D: modwb peeks too
         # WATCH_AT/WATCH_N lie in GuestPeek's PEEK_BUF page
         raise SystemExit("--watch cannot run with leg e2e (both use $CD00-$CDFF)")
+    check_modwb_mutant(a.modwb_prg, a.modwb_mutant)          # W16-D fix round 3, F3
     TD_DEFINES[:] = a.td_define
     TD_MUTANT[0] = a.td_mutant
     E2E_FROZEN[0] = a.e2e_frozen

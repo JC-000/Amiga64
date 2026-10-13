@@ -327,6 +327,35 @@ def expected_box(dw: dict, disk: "ModDisk") -> tuple | None:
     return x - mx, y - my, x + img.width + mx, y + img.height + my
 
 
+class DispUnstable(RuntimeError):
+    """disp_st did not read the same twice (or never valid) in DISP_TRIES reads."""
+
+
+DISP_TRIES = 6
+
+
+def stable_disp(read256, tries: int = DISP_TRIES) -> dict:
+    """disp_st ($B800) read until two consecutive reads agree on everything
+    but gen, the colours and dirty, with valid = COP_VALID (fix round 3,
+    F1: the fields are written per copper move, so a host halt inside a
+    copper run that writes BPLCON0 twice can see it half done; fix2/
+    red-noinfo read BPU 0 once in about 45 looks).  The colours are left
+    out because the stand-in alternates COLOR00 every frame.  A steady
+    BPU 0 is taken as it is: norestore's $0200 is real."""
+    from host import c2v_ref as R
+    seen, prev = [], None
+    for _ in range(tries):
+        b = read256()
+        st = R.unpack_disp_st(b)
+        seen.append(f"${st['bplcon0']:04X}/{st['valid']:02X}")
+        key = b[1:39] + b[103:104]       # dmacon .. ddfstop, valid
+        if st["valid"] == R.COP_VALID and key == prev:
+            return st
+        prev = key
+    raise DispUnstable(f"disp_st: no two equal valid reads in {tries} "
+                       f"(BPLCON0/valid seen {seen})")
+
+
 def _plane_rows(read, st: dict, y0: int, y1: int) -> list[list[int]]:
     """Planes 0..n-1 of the screen, rows y0..y1-1, each row a 640-bit int
     (a reader with prefetch() gets every page of them in one go)."""
@@ -363,6 +392,8 @@ def find_player_icon(read, st: dict, win: dict, region: tuple | None = None) -> 
         return None
     rows = _plane_rows(read, st, y0, y1 + 1)
     n = len(rows)
+    if n < 2:                           # fix round 3, F1: the image has 2 planes; with
+        return None                     # none, all() over no plane matched anywhere
     pats = []
     for inv in (0, mask):
         pats.append((bool(inv), [[(base[p][r] if p < 2 else 0) ^ inv for r in range(ih)]
@@ -533,29 +564,36 @@ def frozen_look(m, rom, fn, rep: dict, what: str):
     return out
 
 
+def td_reads(m) -> int:
+    """td's served-read counter (td_nrd, 16 bits)."""
+    return struct.unpack("<H", m.b("td_nrd", 2))[0]
+
+
 def settle_td(m, e, quiet: int = TD_QUIET, limit: int = TD_SETTLE_MAX, first: int = 0,
-              due=no_deadline) -> dict:
+              due=no_deadline, n0: int | None = None) -> dict:
     """LIVE: wait until td has served no read for *quiet* guest frames (at
     most *limit*): Workbook has read what it was going to read (fix round
     1, H1: before the first frozen look, a C64-side counter that costs
     nothing to read).  *first* > 0 (after a user action): first wait up to
     *first* frames for the first read, then for the plateau (fix round 2,
     R2-3: u64e5 saw no read in the 128 frames after the disk double-click,
-    so "quiet" had measured nothing)."""
-    def nrd() -> int:
-        return struct.unpack("<H", m.b("td_nrd", 2))[0]
+    so "quiet" had measured nothing).  *n0*: td_reads() sampled before
+    the action (fix round 3, F5: reads that start during the double-click
+    count)."""
     f0 = m.frames()
-    n0 = last = nrd()
+    last = td_reads(m)
+    if n0 is None:
+        n0 = last
     while first and last == n0 and m.frames() - f0 < first:
         due("the td settle (first read)")
         e.frames_wait(10)
-        last = nrd()
+        last = td_reads(m)
     first_f = m.frames() - f0 if last != n0 else None
     f1 = last_f = m.frames()
     while m.frames() - last_f < quiet and m.frames() - f1 < limit:
         due("the td settle")
         e.frames_wait(10)
-        n = nrd()
+        n = td_reads(m)
         if n != last:
             last, last_f = n, m.frames()
     out = {"frames": m.frames() - f0, "reads": (last - n0) & 0xFFFF,
@@ -585,7 +623,6 @@ def leg_modwb(m, rom, disk: ModDisk, s: int, rep: dict, vol, timeout: float,
 
 def _leg(m, rom, disk: ModDisk, s: int, rep: dict, vol, timeout: float,
          t_start: float, mutant: str | None, exit_mode: str) -> list[str]:
-    from host import c2v_ref as R
     from tests import aros_resume as RS
     sn = RS.Snap(m, m.prg, RS.rom_id(rom))
     due = Deadline(t_start, timeout)
@@ -621,7 +658,7 @@ def _leg(m, rom, disk: ModDisk, s: int, rep: dict, vol, timeout: float,
     hash_now.pics = pics
 
     def disp() -> dict:
-        return R.unpack_disp_st(m.r(0xB800, 256))
+        return stable_disp(lambda: m.r(0xB800, 256))
     mask = MF.title_mask_rows(disp(), title_lines)
     rep["picture_mask_rows"] = mask
 
@@ -678,9 +715,10 @@ def _leg(m, rom, disk: ModDisk, s: int, rep: dict, vol, timeout: float,
     od["goto"] = nav
     if not nav["ok"]:
         return fails + [f"open disk: the pointer did not reach the volume icon ({nav})"]
+    nrd0 = td_reads(m)                  # F5: before the double-click
     dclick()
     want_title = O.Adf(disk.image).bname(O.Adf(disk.image).block(O.ROOT)) + ":"
-    od["settle_open"] = settle_td(m, e, first=TD_FIRST_MAX, due=due)   # the root drawer read
+    od["settle_open"] = settle_td(m, e, first=TD_FIRST_MAX, due=due, n0=nrd0)   # the root drawer read
     f1, t1, wins, tries = m.frames(), time.monotonic(), [], 0
     while True:
         wins = look(windows, "disk window")
@@ -741,7 +779,8 @@ def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, d
         v0 = look(lambda rd: icon_view(rd, st, dw, region), "icon")
         tries += 1
         log(f"  icon look {tries}: {v0['icon_how'] or 'not yet'} "
-            f"({time.monotonic() - tl:.1f} s, live frame +{m.frames() - f0})")
+            f"({time.monotonic() - tl:.1f} s, live frame +{m.frames() - f0}, "
+            f"BPLCON0 ${st['bplcon0']:04X})")
         if v0["icon"] or m.frames() - f0 > limit or time.monotonic() - t0 > WALL_NET_S:
             break
         gap_wait(LIVE_GAP if frozen else LIVE_STEP)
@@ -787,6 +826,9 @@ def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, d
     tk.update(cop1lc=f"${cop1lc():06X}", frames=m.frames() - f2,
               wall_s=round(time.monotonic() - t2, 1))
     if cop1lc() == cop0:
+        if mutant == "wrongicon":       # fix round 3, F2: evidence that Prefs opened
+            tk["windows_after"] = [w["title"] for w in look(windows, "windows after")]
+            log(f"  wrongicon: windows after the double-click {tk['windows_after']}")
         return [f"takeover: COP1LC stayed ${cop0:06X} ({tk})"]
     # the converter starts a conversion at most once per DISP_N = 24 guest
     # frames (CONTRACTS "Display refresh"), so the new picture may come
@@ -902,7 +944,11 @@ def display_back(st0: dict, st2: dict) -> bool:      # W16-E
 def picture_hash(raw: dict, mask: list[int], vice: bool) -> str:
     """The C64 picture's hash with the character rows *mask* (model_frames.
     title_mask_rows: the screen title bar) zeroed; the Ultimate's variant
-    leaves the matrix and disp_mck out (model_frames.mask_hashes)."""
+    leaves the matrix and disp_mck out (model_frames.mask_hashes).
+    Known limit (fix round 3, F4): on the Ultimate the matrix colours are
+    seen only through disp_mck, which masking drops, so a pen or
+    matrix-only difference is invisible there; the bitmap, colour RAM and
+    VIC registers are compared."""
     return MF.mask_hashes(raw, mask)["vice" if vice else "u64"]
 
 
@@ -993,11 +1039,14 @@ def display_diag(m, disp) -> dict:
     BPLCON0 $100, COLOR00 $180, COP1LC $080), the converter's state
     (disp_st BPLCON0) and its conversion count."""
     shd = m.r(m.lab("chip_shd"), 0x184)
-    st = disp()
+    try:
+        dbc = f"${disp()['bplcon0']:04X}"
+    except DispUnstable as ex:          # diagnosis only: report, do not fail the leg
+        dbc = str(ex)
     return {"shd_bplcon0": f"${shd[0x100] << 8 | shd[0x101]:04X}",
             "shd_color00": f"${shd[0x180] << 8 | shd[0x181]:04X}",
             "shd_cop1lc": f"${int.from_bytes(shd[0x80:0x84], 'big'):06X}",
-            "disp_bplcon0": f"${st['bplcon0']:04X}",
+            "disp_bplcon0": dbc,
             "nconv": struct.unpack("<H", m.r(m.lab("disp_nconv"), 2))[0]}
 
 

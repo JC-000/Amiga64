@@ -71,6 +71,47 @@ def test_find_player_icon_only_inside_the_window():
     assert MW.find_player_icon(mem.read, st, WIN) is None
 
 
+@pytest.mark.parametrize("bplcon0", [0x0200, 0x8200, 0x9200])   # BPU 0 lores/hires, BPU 1
+def test_find_player_icon_needs_both_icon_planes(bplcon0):
+    """fix round 3, F1 (fix2/red-noinfo): a disp_st with BPU 0 matched at
+    the window's corner with no plane read (all() of nothing)."""
+    mem = Mem()
+    st = dict(screen(mem, 100, 30), bplcon0=bplcon0)
+    assert MW.find_player_icon(mem.read, st, WIN) is None
+    assert MW.find_player_icon(mem.read, st, WIN, (90, 20, 160, 60)) is None
+
+
+def _disp_block(bplcon0: int, valid: int = 0xA5, color0: int = 0) -> bytes:
+    from host import c2v_ref as R
+    return R.pack_disp_st({"dmacon": 0x0300, "bplcon0": bplcon0, "bplpt": [PL0, PL1, 0, 0, 0, 0],
+                           "color": [color0] + [0] * 31, "valid": valid}).ljust(256, b"\0")
+
+
+def test_stable_disp_rereads_a_torn_block():
+    """F1: a host read inside a copper run can see BPLCON0 half written;
+    re-read until two reads agree (the colours may flicker: the stand-in
+    alternates COLOR00 every frame)."""
+    reads = iter([_disp_block(0x0200), _disp_block(0xA200, color0=1),
+                  _disp_block(0xA200, color0=2), _disp_block(0x0200)])
+    st = MW.stable_disp(lambda: next(reads))
+    assert st["bplcon0"] == 0xA200 and st["bplpt"][:2] == [PL0, PL1]
+
+
+def test_stable_disp_keeps_a_steady_bpu0_display():
+    """norestore's st2 really is $0200: steady, so it is taken as it is."""
+    st = MW.stable_disp(lambda: _disp_block(0x0200))
+    assert st["bplcon0"] == 0x0200
+
+
+@pytest.mark.parametrize("blocks", [
+    [_disp_block(0x0200), _disp_block(0xA200)] * 4,          # never two alike
+    [_disp_block(0xA200, valid=0)] * 8])                     # cop_reset never ran
+def test_stable_disp_fails_clearly(blocks):
+    it = iter(blocks)
+    with pytest.raises(MW.DispUnstable, match="disp_st"):
+        MW.stable_disp(lambda: next(it))
+
+
 def _exec(mem: Mem, task_name: str) -> None:
     sb = 0x1000
     mem.l(4, sb)
@@ -363,6 +404,40 @@ def test_settle_td_after_an_action_waits_for_the_first_read():
     m.b = lambda name, n=1: b"\0\0"
     out = MW.settle_td(m, FakeE(m), quiet=120, limit=1500, first=600)
     assert out["first_read_frame"] is None and out["frames"] <= 600 + 130
+
+
+def test_settle_td_counts_the_reads_from_before_the_action():
+    """fix round 3, F5: n0 is sampled before the double-click, so reads
+    that start during dclick()'s 8 frames count as the first read."""
+    class M:
+        f = 0
+
+        def frames(self):
+            return self.f
+
+        def b(self, name, n=1):
+            return struct.pack("<H", 3 if self.f >= 5 else 0)   # 3 reads at frames 5-7
+    m = M()
+    n0 = MW.td_reads(m)
+    m.f = 8                                                      # dclick()
+    out = MW.settle_td(m, FakeE(m), quiet=120, limit=1500, first=600, n0=n0)
+    assert out["reads"] == 3 and out["first_read_frame"] == 0 and out["frames"] <= 130
+    m.f = 8                                                      # sampled after: missed
+    out = MW.settle_td(m, FakeE(m), quiet=120, limit=1500, first=600)
+    assert out["reads"] == 0 and out["first_read_frame"] is None
+
+
+@pytest.mark.parametrize("mutant", ["norestore", "keepanchor", "noprof"])
+def test_stand_in_mutants_refuse_a_real_player(mutant):
+    """fix round 3, F3: these mutants are stand-in build defines; with
+    --modwb-prg they would not apply and the "red" would run green."""
+    from tests import aros_wb as WB
+    with pytest.raises(SystemExit, match="stand-in"):
+        WB.main(["--prg", "x.prg", "--legs", "modwb", "--disk", "modwb",
+                 "--modwb-prg", "player", "--modwb-mutant", mutant])
+    WB.check_modwb_mutant(None, mutant)                          # the stand-in: fine
+    for other in ("noinfo", "noclick", "wrongicon", "stuckpic", None):
+        WB.check_modwb_mutant("player", other)
 
 
 @pytest.mark.parametrize("forced,hashes,ok", [
