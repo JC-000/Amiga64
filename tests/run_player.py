@@ -115,6 +115,10 @@ def build_pboot(labels_path: str, out_dir: str) -> tuple[bytes, dict]:
 # The rig (VICE or an Ultimate; one prepared target)
 # --------------------------------------------------------------------------
 
+class RigIntegrityError(RuntimeError):
+    """pboot or the module's segments do not match the build (rig rule (b))."""
+
+
 class Rig:
     def __init__(self, target, labels, prg: str):
         from tests.harness_util import lookup_label
@@ -137,13 +141,30 @@ class Rig:
         write_bytes(self.t, addr, data)
 
     def r(self, addr: int, n: int) -> bytes:
-        from c64_test_harness import read_bytes
         if addr < 0x0800 and addr + n > 0x0400:
             raise RuntimeError(f"read of ${addr:04X}+{n}: the module's segment B")
+        return self._read(addr, n)
+
+    def _read(self, addr: int, n: int) -> bytes:
+        from c64_test_harness import read_bytes
         b = read_bytes(self.t, addr, n)
         if self.vice:
             self.t.resume()
         return b
+
+    def check_segments(self) -> None:
+        """Rig rule (b): pboot, the module's segment A and segment B read
+        back equal to the build before every play (the 6510 idles in the
+        runner then); the only read of B."""
+        for name, addr, want in (("pboot", PB_ORG, self.pb), ("segment A", 0xCA00, self.a),
+                                 ("segment B", 0x0400, self.b)):
+            got = self._read(addr, len(want))
+            if got != want:
+                bad = [i for i in range(len(want)) if got[i] != want[i]]
+                raise RigIntegrityError(
+                    f"{name} at ${addr:04X} differs from the build in {len(bad)} of "
+                    f"{len(want)} bytes, first ${addr + bad[0]:04X}: "
+                    f"${got[bad[0]]:02X} (want ${want[bad[0]]:02X})")
 
     def call(self, addr: int, timeout: float = 300.0) -> None:
         from tests.harness_util import call_runner
@@ -244,6 +265,8 @@ def play(rig: Rig, c: RM.Case, img: bytes, syms: dict, s: int, r16: int, hw: int
          capture: bool, out: str, deadline_s: float,
          pal: bool = False) -> tuple[dict, dict | None]:
     rig.stage(c, img)
+    rig.check_segments()
+    log(f"{c.name}: pboot, segment A, segment B equal the build")
     before = rig.counters()
     cap = au = None
     if capture:
@@ -694,6 +717,41 @@ def session(rig: Rig, out: str, a, fails: list[str], rep: dict) -> None:
         lr["fails"] = f
         rep["plays"][c.name] = lr
         fails += f
+    if a.product_probe and not a.attended:
+        product_probe(rig, out, a, fails, rep, ui, phi_run, s, r16, hw, vstd == "PAL")
+
+
+def product_probe(rig: Rig, out: str, a, fails: list[str], rep: dict, ui: str,
+                  phi_run: int, s: int, r16: int, hw: int, pal: bool) -> None:
+    """W15-RT: the probe from the PRODUCT build (no MOD_TRACE), the build
+    that ships: no trace, so no content check; the halt, the UI and the
+    audio stream only (the retrigger gaps: note_end_analysis.py offline,
+    aligned on the nominal tick times)."""
+    img, _ = RM.build([], os.path.join(ROOT, "build", "player"), ui_src=ui)
+    tick_e = round(phi_run / 50) >> s
+    c = RM.Case("probe_product", probe_song(), RM.PF_STOPEND | RM.PF_REALTIME,
+                tick_e=tick_e, timing=False, s=s)
+    log(f"probe_product: product build, {len(img)} bytes, {len(c.ticks)} ticks")
+    res, au = play(rig, c, img, {}, s, r16, hw, capture=not rig.vice and not a.no_audio,
+                   out=out, deadline_s=60 + 3 * len(c.ticks) / 50 * (1 if s == 0 else 2 ** s),
+                   pal=pal)
+    f = [x for x in res["fails"] if "mach_run returned" in x]   # no trace: content unchecked
+    if res["nconv"] <= 0:
+        f.append("probe_product: the UI never converted (disp_nconv unchanged)")
+    lr = {k: v for k, v in res.items() if k not in ("recs", "status", "fails")}
+    if au is not None:
+        lr["audio"] = {k: au[k] for k in ("rate", "packets", "dropped", "filled", "resyncs",
+                                          "discarded", "intact", "wav")}
+        log(f"probe_product: audio {au['packets']} packets, dropped {au['dropped']}, "
+            f"resyncs {au['resyncs']}, discarded {au['discarded']}")
+        if not au["intact"]:
+            f.append("probe_product: the audio time base is not intact (resync/discard)")
+    log(f"probe_product: wall {res['wall']:.1f} s, frames {res['frames']}, UI conversions "
+        f"{res['nconv']}, deliveries {res['nirq']}, module {res['aud']}: "
+        f"{'ok' if not f else 'FAIL'}")
+    lr["fails"] = f
+    rep["plays"][c.name] = lr
+    fails += f
 
 
 def main(argv=None) -> int:
@@ -713,6 +771,8 @@ def main(argv=None) -> int:
     ap.add_argument("--song", default="demo")
     ap.add_argument("--no-audio", action="store_true")
     ap.add_argument("--only", help="only these plays (probe, demo)")
+    ap.add_argument("--product-probe", action="store_true",
+                    help="also play the probe from the product build (W15-RT)")
     ap.add_argument("--out", default=os.path.join(EVID, "run"))
     a = ap.parse_args(argv)
     os.makedirs(a.out, exist_ok=True)
