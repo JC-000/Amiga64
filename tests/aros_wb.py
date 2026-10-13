@@ -266,6 +266,108 @@ def arm_spr(m) -> None:
     (snap.s comes up disarmed)."""
     from tests import run_spr as SP
     SP.arm(m.w, m.lab)
+
+
+# W16-P: Paula (tests/paula/aud.s) in the Workbench profile, --audio
+# (CONTRACTS "Audio (Paula)", WAVE16 M0 rulings (1), (2), (4)).  Segment A
+# $CA00-$CCFF and the state page share buf_result with aros_resume's stub
+# ($CB00/$CC00) and leg cost's ($CC80): those run only while the guest does
+# not, so aud is staged and init'ed LAST, right before m.start or the
+# snap_resume launch.  aud_mon (DATA) is 0 after any fresh load, so a resume
+# comes up disarmed and the launcher re-arms (as spr/inpm).
+AUDIO: list = [False]           # W16-P --audio
+AUD_HW: list = [False]          # W16-P: the hold mapped the sampler (cfg_hw = 1)
+AUD_S: list = [None]            # W16-P: the session's s (a resume's snapshot must match)
+AUD_MUTANT: list = [None]       # W16-P --aud-mutant (red): see AUD_MUTANTS
+AUD_BWATCH: list = [False]      # W16-P: leg aud watches B between staging and the launch
+AUD_ZEROPROF: list = [False]    # W16-P: leg aud zeroes prof before the resume's staging
+POISON_A: list = [False]        # W16-P: leg audres fills $CA00-$CA0F with BRKs before the guard
+AUD_MUTANTS = ("peeknorest",    # GuestPeek does not put PEEK_BUF back
+               "stagefirst",    # aud staged before the boot's REU stub use (declare_rid)
+               "noresarm",      # no re-arm after a resume
+               "nocbv",         # aud_arm leaves mach_cbv[6] alone
+               "badcheck",      # the profile block's check off by one
+               "blink",         # the KERNAL cursor blink left on over segment B
+               "r16cfg",        # (rev16-p) cfg_r16 for s = 0 whatever the session's s
+               "blks0",         # (rev16-p) the profile block built for s = 0
+               "noresblk",      # (rev16-p) the resume does not rewrite the block
+               "noguard")       # (rev16-p L6) neither the rts at $CA07 nor the mach_cbv[6]
+                                # clear on a resume without --audio
+DISP_ZERO = 0xDF4000            # W16-P: cfg_zero (W13-D disp_zero)
+BLNSW = 0x00CC                  # W16-P: KERNAL cursor blink switch (non-zero: no blink)
+
+
+def aud_stage(m, s: int, rep: dict, resume: bool = False) -> None:   # W16-P
+    """The profile block first (host/profile_block.py, guest $2DC000,
+    through aros_resume's REU stub at $CC00: inside segment A, so before
+    A is staged), then A + B (read back), the config and init (a runner
+    call: the guest must not be running)."""
+    from host import paula_ref as PR                    # W16-P
+    from host import profile_block as PB                # W16-P
+    from tests import aros_resume as RS                 # W16-P
+    from tests import run_paula as RP                   # W16-P
+    from tests.harness_util import call_runner          # W16-P
+    a, b, _lab = m.aud                                  # W16-P
+    m.w(m.lab("aud_mon"), b"\0")                        # W16-P: disarmed while staged
+    host = PB.HOST_VICE if m.vice else m.host_kind      # W16-P
+    flags = PB.F_AUD | (PB.F_LIVE if AUD_HW[0] else 0) | (0 if m.vice else PB.F_RT)
+    blk = PB.build(0 if AUD_MUTANT[0] == "blks0" else s,   # W16-P (red: blks0)
+                   host, flags, 1 if m.vice else m.mhz)
+    if AUD_MUTANT[0] == "badcheck":                     # W16-P: red
+        blk = blk[:63] + bytes([blk[63] ^ 1])
+    sn = RS.Snap(m, m.prg, bytes(32))                   # W16-P
+    if not (resume and AUD_MUTANT[0] == "noresblk"):    # W16-P (red: noresblk)
+        sn.reu_write(PB.PROF_ADDR, blk)                 # W16-P
+        if sn.reu_read(PB.PROF_ADDR, PB.PROF_SIZE) != blk:   # W16-P
+            raise RuntimeError("profile block: REU readback mismatch")
+    if AUD_MUTANT[0] != "blink":                        # W16-P: red
+        m.w(BLNSW, b"\1")               # W16-P: B is the text screen: after VICE's fresh_load
+    m.w(RP.AUD_A, a)                    # (READY., then goto) the KERNAL IRQ blinks the cursor
+    m.w(RP.AUD_B, b)                    # into it until mach_run's sei ($04F0 bit 7, blink_probe)
+    if m.r(RP.AUD_A, len(a)) != a or m.r(RP.AUD_B, len(b)) != b:   # W16-P
+        raise RuntimeError("aud: the module did not read back as staged")
+    r16 = PB.r16(PR.NTSC_PHI2, 0 if AUD_MUTANT[0] == "r16cfg" else s)   # W16-P: M0 (3)
+    m.w(RP.AUD_A + 13, struct.pack("<HB", r16, int(AUD_HW[0]))      # W16-P
+        + DISP_ZERO.to_bytes(3, "little"))
+    call_runner(m.tg, RP.AUD_A + 10, 30.0)              # W16-P: init
+    rep["aud"] = {"id": a[3:7].hex(), "r16": r16, "cfg_hw": int(AUD_HW[0]),   # W16-P
+                  "profile": PB.parse(blk)}
+
+
+def aud_bwatch(m, n: int = 12, gap: float = 0.1) -> list[str]:   # W16-P
+    """Segment B read *n* times over n x *gap* s while the runner idles
+    (the KERNAL IRQ runs): the cursor blinks every 20 jiffies, so a blink
+    left on shows in some read whatever its parity at the launch."""
+    from tests import run_paula as RP
+    b = m.aud[1]
+    bad = []
+    for k in range(n):
+        got = m.r(RP.AUD_B, len(b))     # (VICE: Machine.r resumes the 6510)
+        d = [f"${RP.AUD_B + i:04X}" for i in range(len(b)) if got[i] != b[i]]
+        if d:
+            bad.append(f"read {k}: {d[:4]}")
+        time.sleep(gap)
+    return bad
+
+
+def mach_sl(m) -> int:                                  # W16-P
+    """The E-clock shift in force (CONTRACTS A3: a resumed machine's is the
+    image's; exported for this, supervisor)."""
+    return m.b("mach_sl")[0]
+
+
+def aud_arm(m) -> None:                                 # W16-P
+    """mach_cbv[6] := A+7, then aud_mon := the ID byte 0 (last).  Boot:
+    before m.start; resume: after the guest runs (the restore overwrote
+    mach_cbv with the image's)."""
+    from tests import run_paula as RP                   # W16-P
+    a = m.aud[0]                                        # W16-P
+    cb = RP.AUD_A + 7                                   # W16-P
+    if AUD_MUTANT[0] != "nocbv":                        # W16-P: red
+        m.w(m.lab("mach_cbv") + 12, bytes([cb & 0xFF, cb >> 8]))
+    m.w(m.lab("aud_mon"), a[3:4])                       # W16-P
+
+
 STUCK: list = [0]               # --stuck (demo legs)
 TD_DEFINES: list = []           # --td-define (evidence builds: TD_ZPJUNK=$A5)
 
@@ -279,6 +381,11 @@ class WbMachine(AB.Machine):
         lp = os.path.splitext(self.prg)[0] + ".lbl"
         mdir = os.path.join(os.path.dirname(self.prg), "aros-wb-mod")
         self.mods = [(n, org, fn(lp, mdir)) for n, fn, org, _end in MODULES]
+        self.aud = None                                 # W16-P: (a, b, labels) with --audio
+        if AUDIO[0]:                                    # W16-P: the product module (no log)
+            from tests import run_paula as RP           # W16-P
+            self.aud = RP.build_aud(lp, os.path.join(os.path.dirname(self.prg), "aros-wb-aud"))
+        self.host_kind, self.mhz = None, 1              # W16-P: set by session() (Ultimate)
 
     def load_driver(self) -> None:
         """mboot + td_arm, then every machine-mode module (also the path a
@@ -418,6 +525,9 @@ def boot_workbench(m: WbMachine, rom, disk: Disk, s: int, rep: dict,
     rep["stage"] = m.stage(rom)
     rep["disk"] = stage_disk(m, disk, vol)
     log(f"  staged: ROM {rep['stage']}, disk {rep['disk']}")
+    if m.aud and AUD_MUTANT[0] == "stagefirst":        # W16-P: red (the stub then runs over A)
+        aud_stage(m, s, rep)
+        aud_arm(m)
     if after_stage:
         after_stage()
     arm_spr(m)                          # supervisor (W13-D merge): the pointer module
@@ -429,6 +539,9 @@ def boot_workbench(m: WbMachine, rom, disk: Disk, s: int, rep: dict,
     if WATCH[0]:
         m.w(WATCH_AT, WATCH_STUB)
         m.w(WATCH_N, bytes(4))
+    if m.aud and AUD_MUTANT[0] != "stagefirst":   # W16-P: last, right before the start (M0 (1))
+        aud_stage(m, s, rep)
+        aud_arm(m)
     m.start(s)
     t_boot = time.monotonic()
     rep["boot_start_s"] = round(t_boot - t_start, 1)
@@ -535,10 +648,208 @@ def guest_check(m: WbMachine, sn, rep: dict, slot: int) -> list[str]:
         mh.append((cstr(l(n + 10)), f"${lo:06X}-${hi:06X}"))
         if lo <= machine.TD_ADF_END and hi > machine.TD_ADF:
             fails.append(f"guest: MemHeader {mh[-1]} overlaps the disk")
+        if lo <= PROF_END and hi > PROF_LO:                       # W16-P: the prof region
+            fails.append(f"guest: MemHeader {mh[-1]} overlaps the profile block region")
     out["memheaders"] = mh
     rep["guest"] = out
     log(f"  guest at the Workbench: {out}")
     return fails
+
+
+PROF_LO, PROF_END = 0x2DC000, 0x2DC0FF    # W16-P: rc machine.inc prof (host/profile_block)
+
+
+def aud_expect(m, s: int) -> dict:                      # W16-P (rev16-p M1)
+    """What the config and the profile block must hold at shift *s*,
+    computed here from phi2 and s alone (NOT through host/profile_block or
+    host/paula_ref): E = phi2 / 2^s; r16 = E per PAL colour clock x 65536;
+    tick_e = E / 50; e_hz_q8 = E x 256."""
+    phi2, cck = 1022727, 3546895                        # NTSC phi2 (HARDWARE W8-H), PAL CCK
+    e = phi2 / (1 << s)
+    r16 = int(e * 65536 / cck + 0.5)
+    hw = int(AUD_HW[0])
+    return {"cfg": {"r16": r16, "hw": hw, "zero": "$DF4000"},
+            "block": {"e_hz_q8": int(phi2 * 256 / (1 << s) + 0.5), "tick_e": int(e / 50 + 0.5),
+                      "frame_e": 14188, "phi2_hz": phi2, "s": s,
+                      "host": 0 if m.vice else (1 if m.host_kind == 1 else 2),
+                      "flags": 1 | (2 if hw else 0) | (0 if m.vice else 4),
+                      "r16": r16, "mhz": 1 if m.vice else m.mhz}}
+
+
+def aud_intact(m, rep: dict, tag: str) -> list[str]:     # W16-P
+    """aud armed and staged as built: aud_mon = ID byte 0, mach_cbv[6] =
+    A+7, A's code (header, entries, code; not the config, counters or the
+    scratch at its end) and all of B as staged; the config as written."""
+    from tests import run_paula as RP                   # W16-P
+    a, b, lab = m.aud
+    f: list[str] = []
+    r = rep.setdefault(tag, {})
+    got_a, got_b = m.r(RP.AUD_A, len(a)), m.r(RP.AUD_B, len(b))
+    sc = lab["tA"] - RP.AUD_A                           # the scratch block ends A
+    bad = [i for i in list(range(13)) + list(range(31, sc)) if got_a[i] != a[i]]
+    if bad:
+        f.append(f"aud {tag}: segment A differs at {len(bad)} byte(s), first +${bad[0]:03X}")
+    if got_b != b:
+        d = [(f"${RP.AUD_B + i:04X}", f"${b[i]:02X}->${got_b[i]:02X}")
+             for i in range(len(b)) if got_b[i] != b[i]]
+        r["b_diff"] = d[:16]
+        f.append(f"aud {tag}: segment B differs at {len(d)} byte(s): {d[:4]}")
+    cfg = struct.unpack_from("<HB", got_a, 13)
+    r["cfg"] = {"r16": cfg[0], "hw": cfg[1], "zero": f"${int.from_bytes(got_a[16:19], 'little'):06X}"}
+    r["st_nw"], r["st_nfire"] = struct.unpack_from("<HH", got_a, 19)
+    want = aud_expect(m, AUD_S[0])["cfg"]               # rev16-p M1: independent
+    if r["cfg"] != want:
+        f.append(f"aud {tag}: config {r['cfg']}, want {want} (s = {AUD_S[0]})")
+    mon = m.b("aud_mon")[0]
+    cbv = struct.unpack("<H", m.r(m.lab("mach_cbv") + 12, 2))[0]
+    r["aud_mon"], r["cbv6"] = f"${mon:02X}", f"${cbv:04X}"
+    if mon != a[3]:
+        f.append(f"aud {tag}: aud_mon ${mon:02X}, not the ID byte ${a[3]:02X} (disarmed)")
+    if cbv != RP.AUD_A + 7:
+        f.append(f"aud {tag}: mach_cbv[6] ${cbv:04X}, not ${RP.AUD_A + 7:04X}")
+    log(f"  aud {tag}: {r}")
+    return f
+
+
+def aud_peek(m, rep: dict, tag: str, n: int = 20) -> list[str]:   # W16-P
+    """VICE, the guest running: *n* GuestPeek parks read the profile block
+    and the app anchor; aud's $CA00-$CDFF (the counters aside) must be the
+    same bytes after them (M0 ruling (1): the peek puts its page back), the
+    block must parse as staged and the anchor must be absent (no app)."""
+    from host import profile_block as PB                # W16-P
+    from tests import run_paula as RP                   # W16-P
+    f: list[str] = []
+    r = rep.setdefault(tag, {})
+    keep = [i for i in range(0x400) if not 19 <= i < 31]   # the counters may move
+    before = m.r(RP.AUD_A, 0x400)
+    g = GuestPeek(m)
+    for _ in range(n):
+        g.fresh()
+        raw = g.read(PB.PROF_ADDR, PB.PROF_SIZE + PB.ANCHOR_SIZE)
+    after = m.r(RP.AUD_A, 0x400)
+    bad = [i for i in keep if before[i] != after[i]]
+    r["peek_changed"] = len(bad)
+    if bad:
+        f.append(f"aud {tag}: {len(bad)} byte(s) of $CA00-$CDFF changed across {n} peeks "
+                 f"(first ${RP.AUD_A + bad[0]:04X})")
+    p = PB.parse(raw[:PB.PROF_SIZE])
+    r["profile"] = p
+    want = aud_expect(m, AUD_S[0])["block"]             # rev16-p M1: independent of PB.build
+    if p != want:
+        f.append(f"aud {tag}: the profile block reads {raw[:PB.PROF_SIZE].hex()} "
+                 f"(parsed {p}), want {want}")
+    if PB.parse_anchor(raw[PB.PROF_SIZE:]) is not None or any(raw[PB.PROF_SIZE:]):
+        f.append(f"aud {tag}: the app anchor is not zero: {raw[PB.PROF_SIZE:].hex()}")
+    log(f"  aud {tag}: peeks {n}, aud bytes changed {len(bad)}, profile {p}")
+    return f
+
+
+def leg_aud(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol, timeout: float,
+            t_start: float) -> list[str]:                   # W16-P
+    """W16-P: Paula in the Workbench profile.  Boot with aud armed (the
+    serial text = the model's, as every boot), then at the Workbench: aud
+    intact and armed, the profile block and the anchor (VICE: by GuestPeek,
+    also its put-back); then disarm (as the demo's snapshot, taken without
+    audio), suspend REU-resident, resume: re-staged and re-armed."""
+    if not m.aud:
+        return ["aud: needs --audio"]
+    from tests import aros_resume as RS
+    rid = RS.rom_id(rom)
+    sn = RS.Snap(m, m.prg, rid)
+    f = boot_workbench(m, rom, disk, s, rep, vol, timeout, t_start=t_start,
+                       after_stage=sn.declare_rid, want_screen=False)
+    if f:
+        return f
+    f += aud_intact(m, rep, "boot")
+    if mach_sl(m) != s:                 # W16-P: the shift the boot latched
+        f.append(f"aud: mach_sl reads {mach_sl(m)}, the boot's s is {s}")
+    if m.vice:
+        f += aud_peek(m, rep, "boot_peek")
+    m.w(m.lab("aud_mon"), b"\0")                        # disarmed, then the slot's callback
+    m.w(m.lab("mach_cbv") + 12, bytes(2))
+    r = rep.setdefault("resume", {})
+    _suspend(m, sn, None, r)
+    AUD_BWATCH[0] = AUD_ZEROPROF[0] = True
+    try:
+        _resume(m, m.prg, rid, None, r)
+    finally:
+        AUD_BWATCH[0] = AUD_ZEROPROF[0] = False
+    if r.get("bwatch"):
+        f.append(f"aud: segment B changed while the runner idled before the resume: {r['bwatch'][:3]}")
+    fr0 = m.frames()
+    t1 = time.monotonic()
+    while time.monotonic() - t1 < 60 and m.frames() <= fr0 + 2:
+        time.sleep(0.25)
+    if m.frames() <= fr0 + 2:
+        return f + [f"aud: the resumed guest does not run ({r})"]
+    f += aud_intact(m, rep, "resumed")
+    if m.vice:
+        f += aud_peek(m, rep, "resumed_peek")
+    return f
+
+
+def leg_audres(m: WbMachine, rom, disk: Disk, s: int, rep: dict, vol, timeout: float,
+               t_start: float) -> list[str]:                # W16-P (rev16-p L6)
+    """A snapshot taken with aud armed AND slot 6 pending, resumed WITHOUT
+    --audio, with $CA00-$CA0F as unknown RAM (a self-jump at $CA07: with
+    zeros the BRKs fell through into the stale A the boot left in RAM, and
+    the unguarded run survived): the guard (an rts at $CA07) must make the
+    slot's callback a no-op, the guest must run on past the deadline, and
+    mach_cbv[6] must be cleared.  VICE (the slot is armed with the 6510
+    halted by the monitor).  The deadline (~30 frames) falls after the
+    host's clear, so the clear is what this shows; the rts guards only the
+    window between the launch and the clear (not hit here).  Mutant
+    noguard (neither) must hang in the self-jump."""
+    if not m.aud or not m.vice:
+        return ["audres: needs --audio and VICE"]
+    from tests import aros_resume as RS
+    rid = RS.rom_id(rom)
+    sn = RS.Snap(m, m.prg, rid)
+    f = boot_workbench(m, rom, disk, s, rep, vol, timeout, t_start=t_start,
+                       after_stage=sn.declare_rid, want_screen=False)
+    if f:
+        return f
+    fe = 14188
+    t = m.t                             # slot 6 pending ~30 guest frames ahead, written
+    et = struct.unpack("<I", bytes(t.read_memory(m.lab("mach_et"), 4)))[0]   # while halted
+    dl = (et + 30 * fe) & 0xFFFFFFFF
+    t.write_memory(m.lab("mach_dl") + 24, struct.pack("<I", dl))
+    am = t.read_memory(m.lab("mach_am"), 1)[0]
+    t.write_memory(m.lab("mach_am"), bytes([am | 0x40]))
+    t.resume()
+    m.w(m.lab("aud_mon"), b"\0")        # the router off (as aud_mon is after any fresh load)
+    r = rep.setdefault("resume", {})
+    _suspend(m, sn, None, r)
+    pre = {"am": m.b("mach_am")[0], "cbv6": struct.unpack("<H", m.r(m.lab("mach_cbv") + 12, 2))[0],
+           "dl6": struct.unpack("<I", m.r(m.lab("mach_dl") + 24, 4))[0], "et": et}
+    r["frozen"] = {k: (f"${v:X}" if k != "am" else f"${v:02X}") for k, v in pre.items()}
+    if not pre["am"] & 0x40 or pre["cbv6"] != 0xCA07:
+        return [f"{AB.INFRA}audres: slot 6 not pending at the suspend ({r['frozen']})"]
+    aud, m.aud = m.aud, None            # resume WITHOUT --audio
+    POISON_A[0] = True
+    try:
+        _resume(m, m.prg, rid, None, r)
+    finally:
+        POISON_A[0] = False
+        m.aud = aud
+    fr0 = m.frames()
+    t1 = time.monotonic()
+    while time.monotonic() - t1 < 240 and m.frames() < fr0 + 45:
+        if m.r(AB.R, 1)[0] == 0xFF:
+            res = m.r(AB.R, 16)
+            return f + [f"audres: mach_run returned (st_halt {res[1]}, reason {res[2]})"]
+        time.sleep(0.5)
+    fr1 = m.frames()
+    time.sleep(3.0)
+    fr2 = m.frames()
+    cb = struct.unpack("<H", m.r(m.lab("mach_cbv") + 12, 2))[0]
+    r["after"] = {"frames": [fr0, fr1, fr2], "cbv6": f"${cb:04X}", "am": f"${m.b('mach_am')[0]:02X}"}
+    log(f"  audres: {r}")
+    if fr1 < fr0 + 45 or fr2 <= fr1:
+        f.append(f"audres: the guest stopped after the resume (frames {fr0} -> {fr1} -> {fr2})")
+    if cb:
+        f.append(f"audres: mach_cbv[6] ${cb:04X} after the resume (not cleared)")
+    return f
 
 
 def leg_screen(m: WbMachine, mf, why: str, rep: dict, t_start: float,
@@ -623,10 +934,43 @@ def session(prg: str, backend: str, out: str, mhz: int, fn):
         log(f"Ultimate {os.environ.get('U64_HOST')}: {mhz} MHz, rebooted")
         prepare_target(tg, prg)
         try:
-            return fn(WbMachine(tg, labels, prg))
-        finally:
-            tg.transport.set_speed(1)
+            if AUDIO[0]:                # W16-P: map the sampler inside the hold (restored by it)
+                map_sampler(tg, prg)    # (inside the try: an INFRA still reboots, rev16-p L4)
+            m = WbMachine(tg, labels, prg)
+            m.mhz = tg.transport.get_speed() or mhz   # W16-P: the speed in force (rev16-p L8)
+            m.host_kind = host_kind(hold["info"])   # W16-P
+            return fn(m)
+        finally:                        # W16-P: this reboot stops every sampler voice
+            tg.transport.set_speed(1)   # (measured, build/evidence/w16-p/hw16 rbsil)
             reboot(tg.transport.client)
+
+
+def host_kind(info) -> int:                              # W16-P
+    """The profile block's host byte from the hold's device info."""
+    from host import profile_block as PB                # W16-P
+    return PB.HOST_U64E if "64 Elite" in str(info) else PB.HOST_C64U   # W16-P
+
+
+def map_sampler(tg, prg: str) -> None:                  # W16-P
+    """"Map Ultimate Audio $DF20-DFFF" Enabled, the runner reloaded, and
+    the differential proof (M0 ruling (3), build/evidence/w16-p/hw16): the
+    6510's copy of $DF20-$DFFF must read $00 $10 in every pair (the
+    sampler; unmapped, the window reads changing bus data, $DF21 $00)."""
+    from tests.paula import hw16                        # W16-P
+    from tests.run_vectors import prepare_target        # W16-P
+    client = tg.transport.client
+    where = [c for c in client.list_configs()           # W16-P
+             if hw16.MAP_ITEM in client.get_config_category(c).get(c, {})]
+    if not where:                                       # W16-P
+        raise RuntimeError(f"INFRA: no {hw16.MAP_ITEM!r} on this device")
+    client.set_config_item(where[0], hw16.MAP_ITEM, "Enabled")   # W16-P
+    time.sleep(1.0)
+    prepare_target(tg, prg)                             # W16-P
+    win = hw16.read_window_t(tg)                        # W16-P
+    if not hw16.is_sampler(win):                        # W16-P
+        raise RuntimeError(f"INFRA: the sampler window does not read $00 $10: {win[:16].hex()}")
+    AUD_HW[0] = True                                    # W16-P: cfg_hw = 1
+    log("  W16-P: sampler mapped and proven ($DF20-$DFFF = $00 $10 x 112)")
 
 
 def run(a, rom, raw: bytes) -> tuple[list[str], dict]:
@@ -637,6 +981,7 @@ def run(a, rom, raw: bytes) -> tuple[list[str], dict]:
     rep["blocks"] = disk.blocks
     s = a.s if a.s is not None else (AB.BOOT_S_VICE if a.backend == "vice" else AB.BOOT_S_U64)
     rep["mach_s"] = s
+    AUD_S[0] = s                        # W16-P
     t0 = time.monotonic()
 
     def body(m: WbMachine) -> list[str]:
@@ -686,6 +1031,10 @@ def run(a, rom, raw: bytes) -> tuple[list[str], dict]:
             elif leg == "cost":
                 fails += (leg_cost(m, r) if a.legs[0] == "cost" else
                           ["cost: run it first in the session (--legs cost,...): see leg_cost"])
+            elif leg == "aud":                                  # W16-P
+                fails += leg_aud(m, rom, disk, s, r, a.vol, a.timeout, t_run)
+            elif leg == "audres":                               # W16-P (rev16-p L6)
+                fails += leg_audres(m, rom, disk, s, r, a.vol, a.timeout, t_run)
             elif leg == "nohle":
                 fails += leg_nohle(m, rom, disk, s, r, a.vol, a.timeout)
             else:
@@ -761,11 +1110,38 @@ def _resume(m: WbMachine, prg: str, rid: bytes, path: str | None, rep: dict):
         m.w(m.lab("dosio_nlen"), bytes([len(name)]))
     sn = RS.Snap(m, prg, rid)
     sn.declare_rid()
+    if not m.aud:                       # W16-P (rev16-p L6): a snapshot taken with aud armed
+        if POISON_A[0]:                 # keeps mach_cbv[6] = $CA07 (and maybe slot 6 armed);
+            m.w(0xCA00, bytes(7) + b"\x4C\x07\xCA" + bytes(6))   # (leg audres: unknown RAM,
+                                        # a self-jump at $CA07; BRKs fell into the stale A)
+        m.w(m.lab("aud_mon"), b"\0")    # without --audio nothing is staged there: an rts
+        if AUD_MUTANT[0] != "noguard":  # at $CA07 makes that callback a no-op (the restore
+            m.w(0xCA07, b"\x60")        # and the run are one call: no host write between)
+    if m.aud:                           # W16-P: staged last, before the launch (after
+        if AUD_ZEROPROF[0]:             # W16-P leg aud: the prof region zeroed, as the
+            from host import profile_block as PB    # Ultimate's file resume leaves it
+            RS.Snap(m, prg, bytes(32)).reu_write(PB.PROF_REGION[0], bytes(256))   # (aros_fill)
+        aud_stage(m, AUD_S[0], rep, resume=True)   # aros_fill and declare_rid: their stub is in A)
+        if AUD_BWATCH[0]:               # W16-P leg aud: B stays put while the runner idles
+            rep["bwatch"] = aud_bwatch(m)
     rep["t_launch"] = time.monotonic()        # = aros_resume m3file's t2: snap_resume launched
     v, dt = sn.resume(F.RQ_FILE if path else 0, timeout=300.0)
     rep["resume_st"], rep["resume_s"] = f"${v:02X}", round(dt, 2)
     if v != F.ST_RES:
         raise RuntimeError(f"resume refused: ${v:02X} ({F.ST_ERR.get(v)})")
+    if not m.aud:                       # W16-P (rev16-p L6): then clear its callback
+        cb = struct.unpack("<H", m.r(m.lab("mach_cbv") + 12, 2))[0]
+        rep["cbv6_at_resume"] = f"${cb:04X}"
+        if cb and AUD_MUTANT[0] != "noguard":   # high byte first: "high byte 0 = none"
+            m.w(m.lab("mach_cbv") + 13, b"\0")
+            m.w(m.lab("mach_cbv") + 12, b"\0")
+            log(f"  resume without --audio: mach_cbv[6] was ${cb:04X} (an aud snapshot): cleared")
+    if m.aud:                           # W16-P: re-arm once the guest runs (cbv[6], aud_mon)
+        sl = mach_sl(m)                 # W16-P: the image's shift (CONTRACTS A3)
+        if sl != AUD_S[0]:              # W16-P: r16 and the block assumed AUD_S
+            raise RuntimeError(f"aud: the snapshot runs at s = {sl}, staged for s = {AUD_S[0]}")
+        if AUD_MUTANT[0] != "noresarm":                 # W16-P: red
+            aud_arm(m)
     return sn, dt
 
 
@@ -901,6 +1277,8 @@ def resume_workbench(m: WbMachine, rom, path: str | None, rep: dict,
 # --------------------------------------------------------------------------
 
 PEEK_BUF, PEEK_PARK = 0xCD00, 0xCCF0   # buf_result, unused in machine mode (park outside the 256-byte buffer)
+# W16-P: with --audio both lie in aud (state page, segment A scratch): the
+# peek saves them and writes them back before the 6510 runs on.
 J_UP, J_DOWN, J_LEFT, J_RIGHT, J_FIRE = 1, 2, 4, 8, 16     # inp_joy (CONTRACTS "Input")
 K_F1, K_CBM = 0x10, 0x20                                   # inp_key
 
@@ -916,6 +1294,7 @@ class GuestPeek:
 
     def __init__(self, m: WbMachine):
         self.m, self.t, self.cache = m, m.t, {}
+        self.audit = None               # W16-P: a list -> per park, aud's bytes unchanged?
 
     def fresh(self) -> None:
         self.cache.clear()
@@ -936,8 +1315,11 @@ class GuestPeek:
         io_in = port[0] & 4 and port[0] & 3
         if not io_in:
             t.write_memory(0x0001, b"\x35", override=ov)
+        if self.audit is not None:      # W16-P: $CA00-$CDFF as the 6510 left it
+            pre = bytes(t.read_memory(0xCA00, 0x400))
         rec = t.read_memory(0xDF02, 9)
         park = t.read_memory(PEEK_PARK, 3)
+        buf = t.read_memory(PEEK_BUF, 256)      # W16-P: aud's state page (M0 ruling (1))
         t.write_memory(PEEK_PARK, bytes([0x4C, PEEK_PARK & 0xFF, PEEK_PARK >> 8]), override=ov)
         t.set_registers({"PC": PEEK_PARK, "FL": regs["FL"] | 0x04})
         out = {}
@@ -959,9 +1341,13 @@ class GuestPeek:
             t.write_memory(0xDF02, rec[:7], override=ov)
             t.write_memory(0xDF0A, rec[8:9], override=ov)
             t.write_memory(PEEK_PARK, park, override=ov)
+            if AUD_MUTANT[0] != "peeknorest":               # W16-P: red
+                t.write_memory(PEEK_BUF, buf, override=ov)  # W16-P: put the page back
             t.set_registers({"PC": regs["PC"], "FL": regs["FL"]})
             if not io_in:
                 t.write_memory(0x0001, port, override=ov)
+            if self.audit is not None:  # W16-P: the same bytes before the 6510 runs on
+                self.audit.append(pre == bytes(t.read_memory(0xCA00, 0x400)))
             rc = getattr(t, "_resume_confirmed", None)      # a REC stall across a
             if callable(rc):                                # vsync leaves spare monitor
                 rc(window=0.05)                             # traps (harness #516)
@@ -1851,10 +2237,21 @@ def main(argv=None) -> int:
                     help="red: build the td module as host/tests/test_td.MUTANTS[NAME]")
     ap.add_argument("--watch", action="store_true",
                     help="a counter build (scratch mkwatch.sh): fail if the guest touches TD_ADF")
+    ap.add_argument("--audio", action="store_true",               # W16-P
+                    help="W16-P: Paula (tests/paula/aud.s) armed at the boot and after a "
+                         "resume; the Ultimates map the sampler in the hold (cfg_hw 1); the "
+                         "profile block at guest $2DC000")
+    ap.add_argument("--aud-mutant", default=None, choices=AUD_MUTANTS,   # W16-P
+                    help="W16-P red: leg aud with this defect (must fail)")
     ap.add_argument("--tag", default=None, help="report name (default: backend-script)")
     a = ap.parse_args(argv)
     a.legs = [x for x in a.legs.split(",") if x]
     WATCH[0] = a.watch
+    AUDIO[0] = a.audio                  # W16-P
+    AUD_MUTANT[0] = a.aud_mutant        # W16-P
+    if a.audio and (a.watch or "cost" in a.legs or a.resume_mutant):   # W16-P: M0 (1)
+        raise SystemExit("--audio cannot run with --watch, leg cost or --resume-mutant "
+                         "(their stubs/labels share aud's $CA00-$CDFF or the PRG)")
     STUCK[0] = a.stuck
     if a.watch and "e2e" in a.legs:     # WATCH_AT/WATCH_N lie in GuestPeek's PEEK_BUF page
         raise SystemExit("--watch cannot run with leg e2e (both use $CD00-$CDFF)")
