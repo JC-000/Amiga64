@@ -341,19 +341,106 @@ def test_settle_td_waits_for_a_quiet_read_count():
     assert not out["quiet"] and out["frames"] <= 110
 
 
-@pytest.mark.parametrize("vice,hashes,ok", [
+def test_settle_td_after_an_action_waits_for_the_first_read():
+    """R2-3: reads start 200 frames after the action; quiet is measured
+    from the first read, not from the action."""
+    class M:
+        f = 0
+
+        def frames(self):
+            return self.f
+
+        def b(self, name, n=1):
+            return struct.pack("<H", 0 if self.f < 200 else min((self.f - 200) // 20 + 1, 5))
+    m = M()
+    out = MW.settle_td(m, FakeE(m), quiet=120, limit=1500)          # the old way: nothing seen
+    assert out["quiet"] and out["reads"] == 0
+    m.f = 0
+    out = MW.settle_td(m, FakeE(m), quiet=120, limit=1500, first=600)
+    assert out["quiet"] and out["reads"] == 5 and 200 <= out["first_read_frame"] <= 210
+    assert out["frames"] >= 280 + 120
+    m.f = 0                                                          # no read at all: bounded
+    m.b = lambda name, n=1: b"\0\0"
+    out = MW.settle_td(m, FakeE(m), quiet=120, limit=1500, first=600)
+    assert out["first_read_frame"] is None and out["frames"] <= 600 + 130
+
+
+@pytest.mark.parametrize("forced,hashes,ok", [
     (True, ["H0"], True), (True, ["H1"], False),
-    (False, ["W", "W", "W"], True), (False, ["H1", "W", "W"], False),
-    (False, ["W", "X", "Y"], False)])
-def test_return_picture(monkeypatch, vice, hashes, ok):
+    (False, ["H0", "H0"], True), (False, ["H1", "W", "H0", "H0"], True),
+    (False, ["H1"] * 11, False),
+    (False, ["W"] * 11, False),                 # R2-1: stuckpic's frozen look picture
+    (False, ["W", "H0", "W", "H0", "W", "H0", "W", "H0", "W", "H0", "W"], False)])
+def test_return_picture(monkeypatch, forced, hashes, ok):
     from tests import aros_wb as WB
     monkeypatch.setattr(WB, "force_conv", lambda m, timeout: None)
     it = iter(hashes)
 
     class M:
         f = 0
+
+        def frames(self):
+            return self.f
     m = M()
-    m.vice = vice
     rt: dict = {}
-    fails = MW.return_picture(m, FakeE(m), lambda: next(it) * 10, "H0" * 10, "H1" * 10, rt)
+    fails = MW.return_picture(m, FakeE(m), lambda: next(it) * 10, "H0" * 10, "H1" * 10, rt,
+                              forced)
     assert (not fails) == ok, (fails, rt)
+    if not forced:
+        assert rt["hash_frames"] <= MW.RETURN_PIC_FRAMES + 48
+
+
+def test_the_deadline_stops_every_wait(monkeypatch):
+    """R2-2: t_start + --timeout; settle_td and return_picture consult it at
+    each step, so a failing run reports instead of holding the device."""
+    now = [1000.0]
+    monkeypatch.setattr(MW.time, "monotonic", lambda: now[0])
+    due = MW.Deadline(t_start=100.0, timeout=950.0)
+    assert due.left() == 50.0
+    due("ok")
+    now[0] = 1051.0
+    with pytest.raises(MW.LegDeadline, match="--timeout 950 s.*the td settle"):
+        due("the td settle")
+
+    class M:
+        f = 0
+
+        def frames(self):
+            return self.f
+
+        def b(self, name, n=1):
+            return struct.pack("<H", self.f // 10)       # td never quiet
+    m = M()
+    with pytest.raises(MW.LegDeadline):
+        MW.settle_td(m, FakeE(m), first=600, due=due)
+    with pytest.raises(MW.LegDeadline):
+        MW.return_picture(m, FakeE(m), lambda: "W" * 20, "H0" * 10, "H1" * 10, {}, False, due)
+
+
+def test_the_forced_pictures_convert_twice(monkeypatch):
+    """vice-live run 2: one forced conversion can be the in-flight one."""
+    from tests import aros_wb as WB
+    calls = []
+    monkeypatch.setattr(WB, "force_conv", lambda m, timeout: calls.append(1))
+    MW.settled_conv(object())
+    assert len(calls) == 2
+    calls.clear()
+    MW.return_picture(object(), None, lambda: "H0" * 10, "H0" * 10, "H1" * 10, {}, True)
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("vice", [True, False])
+def test_the_picture_hash_masks_only_the_title_bar(vice):
+    """diag-vice-live: h0 and the return differed only in the title bar
+    (C64 rows 6-15, the free-memory text); a change below it still counts."""
+    mask = MW.MF.title_mask_rows({}, 15)
+    assert mask == [0, 1]
+    raw = {"bitmap": bytes(8000), "screen": bytes(1000) if vice else None,
+           "colram": bytes(1000), "vic": {a: 0 for a in MW.MF.VIC_MASK}, "mck": 0x1234}
+    h0 = MW.picture_hash(raw, mask, vice)
+    title = dict(raw, bitmap=bytes(6 * 40) + b"\xff" * 320 + bytes(8000 - 560))   # rows 0-1
+    assert MW.picture_hash(title, mask, vice) == h0
+    body = dict(raw, bitmap=bytes(2 * 320) + b"\x01" + bytes(8000 - 641))         # row 2
+    assert MW.picture_hash(body, mask, vice) != h0
+    pen = dict(raw, colram=bytes(80) + b"\x05" + bytes(919))                        # row 2's pens
+    assert MW.picture_hash(pen, mask, vice) != h0

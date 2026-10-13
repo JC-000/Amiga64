@@ -34,15 +34,22 @@ Steps (scripted input throughout, inp_src = 1, the 1351 on the override):
   8. return: the app anchor is withdrawn, COP1LC is the Workbench's or
      GfxBase->gb_copinit, the display's bitplane pointers and BPLCON0 are
      the Workbench's again, the window list and layer count are as before
-     the launch, no ModPlayer task; and the C64 picture (fix round 1, M1):
-     VICE converts by force and must give the picture of step 4 (forced
-     too); the Ultimate's must differ from the takeover picture and hold;
+     the launch, no ModPlayer task; and the C64 picture (fix round 1, M1;
+     round 2, R2-1: read live, before the return's frozen look): VICE live
+     converts by force and must give the picture of step 4 (forced on every
+     path, twice: settled_conv);
+     the Ultimate (and VICE --e2e-frozen) must come back to step 4's
+     picture and hold it; every picture hash masks the screen title bar's
+     character rows (its free-memory text changes with the player's
+     allocations: diag-vice-live), so the takeover's "the picture
+     changed" is a change below the title bar;
   steps 4-8 run twice: the second launch shows the Workbench answers and
   the first run's resources came back.
 
 Every wait is bounded in LIVE guest frames (fix round 1, H1: u64e4 spent
 5 min of wall time in five frozen looks and gave the guest 172 frames);
-the wall clock is only a safety net (WALL_NET_S).  On the frozen path the
+the wall clock bounds the whole leg (fix round 2, R2-2: t_start + --timeout,
+checked at every wait and look; WALL_NET_S per wait).  On the frozen path the
 guest runs LIVE_GAP frames between two looks, and a look reads its pages
 in bulk (FrozenReader).
 
@@ -63,6 +70,7 @@ from __future__ import annotations
 import os
 import struct
 import subprocess
+import sys
 import time
 
 from host import adf_files as F
@@ -72,6 +80,8 @@ from tests import aros_boot as AB
 from tests import aros_wb as WB
 
 ROOT = WB.ROOT
+sys.path.insert(0, os.path.join(ROOT, "tests", "aros"))
+import model_frames as MF  # noqa: E402
 EVID = os.path.join(ROOT, "build", "evidence", "w16-d")
 VASM = os.path.expanduser("~/.local/opt/vbcc/bin/vasmm68k_mot")
 STANDIN_SRC = os.path.join(ROOT, "tests", "modwb", "standin.s")   # 68k: outside rescheck's 6502 globs
@@ -89,6 +99,7 @@ PHASE = {0: "loading", 1: "running", 2: "restored", 3: "done", 4: "failed"}
 WHY = {0: None, 1: "lmb", 2: "song end", 3: "looped", 4: "mod_init refused"}
 # fix round 1 (H1): every wait in LIVE guest frames; the wall clock is a net
 TD_QUIET, TD_SETTLE_MAX = 120, 1500     # td served no read for TD_QUIET frames: reading is over
+TD_FIRST_MAX = 600                      # after a user action: the first read comes within this
 LIVE_GAP = 300                          # the frozen path: live frames between two looks
 LIVE_STEP = 30                          # VICE live: a look costs nothing
 VOL_WAIT_FRAMES = 1500                  # the volume icons drawn
@@ -96,9 +107,35 @@ OPEN_WAIT_FRAMES = 2000                 # the disk window open
 ICON_WAIT_FRAMES = (900, 2400)          # the drawer filled (live, frozen); ~350 frames on VICE
 TAKEOVER_FRAMES = 1500                  # COP1LC leaves the Workbench's
 EXIT_FRAMES = (900, 15000)              # back after the click / the song's end
+RETURN_PIC_FRAMES = 480                 # the Ultimate's return picture: h0, held, within this
 WALL_NET_S = 900.0                      # per wait: sized for the U64E hold, never the bound
 ICON_MARGIN = (16, 8)                   # the stored position's box: +- x, y screen pixels
 log = AB.log
+
+
+class LegDeadline(RuntimeError):
+    """The leg ran past t_start + --timeout (fix round 2, R2-2)."""
+
+
+class Deadline:
+    """t_start + --timeout, the leg's whole budget (fix round 2, R2-2: a
+    failing Ultimate run must not hold the device past the approved hold):
+    call it at every wait and look; left() bounds a wait."""
+
+    def __init__(self, t_start: float, timeout: float):
+        self.at, self.timeout = t_start + timeout, timeout
+
+    def left(self) -> float:
+        return self.at - time.monotonic()
+
+    def __call__(self, what: str) -> None:
+        if self.left() < 0:
+            raise LegDeadline(f"the leg's deadline (--timeout {self.timeout:.0f} s from the "
+                              f"run start) passed at {what}")
+
+
+def no_deadline(what: str) -> None:
+    pass
 
 
 # --------------------------------------------------------------------------
@@ -496,22 +533,35 @@ def frozen_look(m, rom, fn, rep: dict, what: str):
     return out
 
 
-def settle_td(m, e, quiet: int = TD_QUIET, limit: int = TD_SETTLE_MAX) -> dict:
+def settle_td(m, e, quiet: int = TD_QUIET, limit: int = TD_SETTLE_MAX, first: int = 0,
+              due=no_deadline) -> dict:
     """LIVE: wait until td has served no read for *quiet* guest frames (at
     most *limit*): Workbook has read what it was going to read (fix round
     1, H1: before the first frozen look, a C64-side counter that costs
-    nothing to read)."""
+    nothing to read).  *first* > 0 (after a user action): first wait up to
+    *first* frames for the first read, then for the plateau (fix round 2,
+    R2-3: u64e5 saw no read in the 128 frames after the disk double-click,
+    so "quiet" had measured nothing)."""
     def nrd() -> int:
         return struct.unpack("<H", m.b("td_nrd", 2))[0]
-    f0 = last_f = m.frames()
+    f0 = m.frames()
     n0 = last = nrd()
-    while m.frames() - last_f < quiet and m.frames() - f0 < limit:
+    while first and last == n0 and m.frames() - f0 < first:
+        due("the td settle (first read)")
+        e.frames_wait(10)
+        last = nrd()
+    first_f = m.frames() - f0 if last != n0 else None
+    f1 = last_f = m.frames()
+    while m.frames() - last_f < quiet and m.frames() - f1 < limit:
+        due("the td settle")
         e.frames_wait(10)
         n = nrd()
         if n != last:
             last, last_f = n, m.frames()
     out = {"frames": m.frames() - f0, "reads": (last - n0) & 0xFFFF,
            "quiet": m.frames() - last_f >= quiet}
+    if first:
+        out["first_read_frame"] = first_f
     log(f"  td settle: {out}")
     return out
 
@@ -538,6 +588,7 @@ def _leg(m, rom, disk: ModDisk, s: int, rep: dict, vol, timeout: float,
     from host import c2v_ref as R
     from tests import aros_resume as RS
     sn = RS.Snap(m, m.prg, RS.rom_id(rom))
+    due = Deadline(t_start, timeout)
 
     def stage_hook():
         sn.declare_rid()
@@ -556,15 +607,28 @@ def _leg(m, rom, disk: ModDisk, s: int, rep: dict, vol, timeout: float,
     mf, _ = WB.model_wb(disk.script)
     title_lines = (mf or {}).get("title_lines", 15)
 
+    pics: dict = {}                     # VICE: hash -> raw picture (the PNGs of a failed return)
     def hash_now() -> str:
-        return AB.c64_hash(m)[0] if m.vice else RS.fast_hash(m)
+        """The C64 picture with the screen title bar's character rows
+        masked (fix round 2: its free-memory text changes when the player
+        allocates and frees; diag-vice-live: h0 and the return differed
+        only there, C64 rows 6-15)."""
+        raw = c64_raw(m)
+        h = picture_hash(raw, mask, m.vice)
+        if m.vice:
+            pics.setdefault(h, raw)
+        return h
+    hash_now.pics = pics
 
     def disp() -> dict:
         return R.unpack_disp_st(m.r(0xB800, 256))
+    mask = MF.title_mask_rows(disp(), title_lines)
+    rep["picture_mask_rows"] = mask
 
     def look(fn, what: str):
         """fn(read) on the guest: live on VICE, frozen (in bulk) on the
         Ultimate and with --e2e-frozen."""
+        due(f"the {what} look")
         if g:
             return fn(LiveReader(g))
         return frozen_look(m, rom, fn, rep.setdefault("frozen", {}), what)
@@ -584,13 +648,18 @@ def _leg(m, rom, disk: ModDisk, s: int, rep: dict, vol, timeout: float,
     gap = LIVE_GAP if frozen else LIVE_STEP
 
     def gap_wait(k: int) -> None:       # the guest's own time between two looks
-        e.frames_wait(k, timeout=max(120.0, k * 2.0))
+        due("a gap between looks")
+        try:
+            e.frames_wait(k, timeout=min(max(120.0, k * 2.0), max(1.0, due.left())))
+        except RuntimeError:
+            due("a gap between looks")
+            raise
 
     # -- 3. open the disk ---------------------------------------------------------
     od = rep.setdefault("open_disk", {})
     # the volume icons may still be drawing right after the boot (u64e run
     # 1: one cluster, RAM Disk's, 30 s after w3): td quiet first, then look
-    od["settle"] = settle_td(m, e)
+    od["settle"] = settle_td(m, e, due=due)
     f0, t0 = m.frames(), time.monotonic()
     while True:
         st = disp()
@@ -611,7 +680,7 @@ def _leg(m, rom, disk: ModDisk, s: int, rep: dict, vol, timeout: float,
         return fails + [f"open disk: the pointer did not reach the volume icon ({nav})"]
     dclick()
     want_title = O.Adf(disk.image).bname(O.Adf(disk.image).block(O.ROOT)) + ":"
-    od["settle_open"] = settle_td(m, e)     # the root drawer and its .info files read
+    od["settle_open"] = settle_td(m, e, first=TD_FIRST_MAX, due=due)   # the root drawer read
     f1, t1, wins, tries = m.frames(), time.monotonic(), [], 0
     while True:
         wins = look(windows, "disk window")
@@ -633,7 +702,7 @@ def _leg(m, rom, disk: ModDisk, s: int, rep: dict, vol, timeout: float,
     for n in (1, 2):
         rep.setdefault("runs", []).append({})
         f = launch_cycle(m, e, disk, rep["runs"][-1], look, disp, cop1lc, hash_now, dclick,
-                         dw, frozen, gap_wait, mutant if n == 1 else None, exit_mode)
+                         dw, frozen, gap_wait, due, mutant if n == 1 else None, exit_mode)
         fails += [f"run {n}: {x}" for x in f]
         if f:
             break
@@ -650,7 +719,8 @@ def _leg(m, rom, disk: ModDisk, s: int, rep: dict, vol, timeout: float,
 
 
 def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, dclick,
-                 dw: dict, frozen: bool, gap_wait, mutant: str | None, exit_mode: str) -> list[str]:
+                 dw: dict, frozen: bool, gap_wait, due, mutant: str | None,
+                 exit_mode: str) -> list[str]:
     """Steps 4-8 once: the icon, the double-click, the takeover, the exit
     and the return (see the module doc)."""
     fails: list[str] = []
@@ -660,7 +730,7 @@ def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, d
     # C64 picture is no measure of it (CPU-drawn pixels convert late,
     # CONTRACTS "Display refresh"; red/noclick 1st try): td quiet, then look
     # until the icon is there, the guest running LIVE between the looks
-    la["settle"] = settle_td(m, e)
+    la["settle"] = settle_td(m, e, due=due)
     region = expected_box(dw, disk)
     la["region"] = region
     limit = ICON_WAIT_FRAMES[frozen]
@@ -694,8 +764,11 @@ def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, d
     log(f"  player icon {v0['icon']} by {v0['icon_how']} (stored {la.get('icon_stored')}, "
         f"offset {la.get('icon_offset')})")
     target = prefs_target(v0, dw, disk) if mutant == "wrongicon" else v0["icon"]
-    if m.vice:                          # M1: the reference picture, converted by force
-        WB.force_conv(m, timeout=60.0)  # (CPU-drawn pixels get no epoch of their own)
+    forced = m.vice and not frozen      # M1's VICE rule; --e2e-frozen takes the Ultimate's (R2-1)
+    settled_conv(m, la.setdefault("conv_trace", []), hash_now if m.vice else None)  # M1: the
+                                        # reference picture, converted by force on
+                                        # every path (CPU-drawn pixels get no epoch of their own;
+                                        # vice-frozen run 2: a live h0 was stale)
     cop0, h0, st0 = cop1lc(), hash_now(), disp()
     la.update(cop1lc_before=f"${cop0:06X}", hash_before=h0[:12], diag=display_diag(m, disp))
     nav = e.mgoto(target["cx"] // 2, target["cy"])
@@ -709,6 +782,7 @@ def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, d
     f2, t2 = m.frames(), time.monotonic()
     while cop1lc() == cop0 and m.frames() - f2 < TAKEOVER_FRAMES and \
             time.monotonic() - t2 < WALL_NET_S:
+        due("the takeover")
         e.frames_wait(5)
     tk.update(cop1lc=f"${cop1lc():06X}", frames=m.frames() - f2,
               wall_s=round(time.monotonic() - t2, 1))
@@ -719,6 +793,7 @@ def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, d
     # that much later (vice2 run 2: a fixed 10-frame wait saw the old one)
     f0, h1 = m.frames(), h0
     while m.frames() - f0 < 120 and h1 == h0:
+        due("the takeover picture")
         e.frames_wait(5)
         h1 = hash_now()
     tk["picture_frames"] = m.frames() - f0
@@ -729,6 +804,7 @@ def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, d
         va = look(app_state, "app")
     f0 = m.frames()
     while m.frames() - f0 < 64:
+        due("the takeover")
         e.frames_wait(4)
         cops.append(cop1lc())
         cols.append(display_diag(m, disp)["shd_color00"])
@@ -768,6 +844,7 @@ def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, d
     limit = EXIT_FRAMES[exit_mode != "click"]
     while cop1lc() != cop0 and cop1lc() != (v0["copinit"] or -1) and \
             m.frames() - f3 < limit and time.monotonic() - t3 < WALL_NET_S * 2:
+        due("the exit")
         e.frames_wait(5)
     ex.update(frames=m.frames() - f3, wall_s=round(time.monotonic() - t3, 1),
               cop1lc=f"${cop1lc():06X}")
@@ -776,12 +853,22 @@ def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, d
     rt = rep.setdefault("return", {})
     e.frames_wait(30)
     st2 = disp()
+    # the picture first (fix round 2, R2-1): live C64 reads, the user's
+    # view, not what a frozen look's fresh load and resume leave behind
+    pic = return_picture(m, e, hash_now, h0, h1, rt, forced, due)
     v2 = look(lambda rd: guest_view(rd, st2, None), "return")
     rt.update(cop1lc=f"${cop1lc():06X}", copinit=v2["copinit"] and f"${v2['copinit']:06X}",
               app=v2["app"], windows=[w["title"] for w in v2["windows"]],
               layers=v2["screen"]["layers"], tasks=v2["tasks"],
               bplpt=[f"${p:06X}" for p in st2["bplpt"]], bplcon0=f"${st2['bplcon0']:04X}")
-    fails += return_picture(m, e, hash_now, h0, h1, rt)
+    fails += pic
+    if pic and m.vice:                  # diagnosis: what the C64 showed
+        rt["png"] = {}
+        for k, h in (("h0", h0), ("h1", h1), *((f"seen{i}", x) for i, x in enumerate(hash_now.pics))):
+            if h in hash_now.pics and h[:12] not in rt["png"].values():
+                png = os.path.join(EVID, "diag", f"{time.strftime('%H%M%S')}_{k}_{h[:12]}.png")
+                os.makedirs(os.path.dirname(png), exist_ok=True)
+                rt["png"][png] = AB.m3_png(png, hash_now.pics[h], None) or h[:12]
     log(f"  return: {rt}")
     if cop1lc() not in (cop0, v2["copinit"]):
         fails.append(f"return: COP1LC ${cop1lc():06X} is neither the Workbench's ${cop0:06X} "
@@ -801,14 +888,71 @@ def launch_cycle(m, e, disk: ModDisk, rep: dict, look, disp, cop1lc, hash_now, d
     return fails
 
 
-def return_picture(m, e, hash_now, h0: str, h1: str, rt: dict) -> list[str]:
-    """M1: the picture the user sees after the return.  VICE: a forced
-    conversion gives exactly the picture before the launch (forced too).
-    The Ultimate (its hash leaves the matrix out, aros_boot.c64_hash): not
-    the takeover's, and the same over two DISP_N periods."""
+def picture_hash(raw: dict, mask: list[int], vice: bool) -> str:
+    """The C64 picture's hash with the character rows *mask* (model_frames.
+    title_mask_rows: the screen title bar) zeroed; the Ultimate's variant
+    leaves the matrix and disp_mck out (model_frames.mask_hashes)."""
+    return MF.mask_hashes(raw, mask)["vice" if vice else "u64"]
+
+
+def c64_raw(m) -> dict:
+    """aros_boot.c64_hash's raw reads (bitmap, screen, colram, vic, mck),
+    the Ultimate's in GETs of <= 1024 bytes as aros_resume.fast_hash does."""
     if m.vice:
+        return AB.c64_hash(m)[1]
+    import c64_test_harness as H
+    real = H.read_bytes
+
+    def fast(t, addr, n):
+        out = bytearray()
+        while len(out) < n:
+            k = min(1024, n - len(out))
+            b = t.read_memory(addr + len(out), k)
+            if len(b) != k:
+                return real(t, addr, n)
+            out += b
+        return bytes(out)
+    H.read_bytes = fast
+    try:
+        return AB.c64_hash(m)[1]
+    finally:
+        H.read_bytes = real
+
+
+def settled_conv(m, trace: list | None = None, hash_now=None) -> None:
+    """Two forced conversions in a row: a conversion already under way at
+    the first epoch bump (decided on the old state) can end the first
+    wait; the second is decided after it (fix round 2, vice-live run 2:
+    the stand-in's in-flight blue frame passed for the forced Workbench).
+    *trace*: the converter's state before and after each (diagnosis)."""
+    def st(what: str) -> None:
+        if trace is not None and getattr(m, "vice", False):
+            d = m.r(0xB800, 106)
+            trace.append({"at": what, "frame": m.frames(),
+                          "nconv": struct.unpack("<H", m.r(m.lab("disp_nconv"), 2))[0],
+                          "epoch": d[105], "gen": d[0], "dirty": d[104],
+                          "bplcon0": f"${d[3] | d[4] << 8:04X}",
+                          "color00": f"${d[39] | d[40] << 8:04X}",
+                          "hash": hash_now()[:12] if hash_now else None})
+    st("before")
+    for i in range(2):
+        WB.force_conv(m, timeout=60.0)
+        st(f"after force {i + 1}")
+
+
+def return_picture(m, e, hash_now, h0: str, h1: str, rt: dict, forced: bool,
+                   due=no_deadline) -> list[str]:
+    """M1: the picture the user sees after the return, read LIVE before the
+    return's frozen look (fix round 2, R2-1).  *forced* (VICE live): a
+    forced conversion gives exactly the picture before the launch (forced
+    too, both settled_conv).  Otherwise (the Ultimate; VICE --e2e-frozen,
+    the same rule; h0 forced, the return not): the
+    hash, read every 48 live frames for at most RETURN_PIC_FRAMES, must be
+    the pre-launch h0 twice in a row (u64e5: back to h0 exactly in both
+    cycles; "not the takeover's" alone passed a stuck converter, R2-1)."""
+    if forced:
         try:
-            WB.force_conv(m, timeout=60.0)
+            settled_conv(m, rt.setdefault("conv_trace", []), hash_now)
             rt["forced"] = True
         except RuntimeError as ex:      # red stuckpic: nothing converts
             rt["forced"] = f"none: {ex}"
@@ -818,16 +962,19 @@ def return_picture(m, e, hash_now, h0: str, h1: str, rt: dict) -> list[str]:
             return [f"return: the C64 picture {h2[:12]} is not the Workbench's {h0[:12]} "
                     f"(the takeover's: {h1[:12]}; forced conversion: {rt['forced']})"]
         return []
-    hs = [hash_now()]
-    for _ in range(2):
+    f0, hs = m.frames(), [hash_now()]
+    while hs[-2:] != [h0, h0] and m.frames() - f0 < RETURN_PIC_FRAMES:
+        due("the return picture")
         e.frames_wait(48)
         hs.append(hash_now())
     rt["hash"] = [h[:12] for h in hs]
-    if h1 in hs:
-        return [f"return: the C64 picture is still the takeover's {h1[:12]} ({rt['hash']})"]
-    if hs[-1] != hs[-2]:
-        return [f"return: the C64 picture does not hold ({rt['hash']})"]
-    return []
+    rt["hash_frames"] = m.frames() - f0
+    if hs[-2:] == [h0, h0]:
+        return []
+    still = " (still the takeover's)" if hs[-1] == h1 else ""
+    return [f"return: the C64 picture {hs[-1][:12]}{still} is not the Workbench's {h0[:12]} "
+            f"held over 48 frames within {RETURN_PIC_FRAMES} live frames (the takeover's: "
+            f"{h1[:12]}; seen {rt['hash']})"]
 
 
 def display_diag(m, disp) -> dict:
