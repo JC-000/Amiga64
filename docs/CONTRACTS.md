@@ -2,11 +2,13 @@
 
 Fixed interfaces for parallel work packages. **Changing anything here requires supervisor sign-off** — every agent builds against this document. 0-based, hex addresses unless noted.
 
+> **Since Wave 17 (the last wave)** there is no supervisor: "sign-off" and "ruling" below record decisions made during development. A contract change is now a pull request that changes this file, the code and its tests together ([docs/CARRYING_FORWARD.md](CARRYING_FORWARD.md#how-to-contribute)).
+
 ## Toolchain
 
 - Assembler: **ca65** (cc65 V2.18+), linker **ld65**. All runtime sources in ca65 syntax (`.proc`, `.segment`, `.import`/`.export`), extension `.s`.
 - Host: Python 3.11+, stdlib + pytest only. Package root `host/`, tests in `host/tests/`.
-- Emulation: VICE `x64sc`, REU enabled, 16 MB (`-reu -reusize 16384`). Test orchestration via c64-test-harness (`~/Documents/c64-test-harness`; load the `c64-test` skill for usage).
+- Emulation: VICE `x64sc`, REU enabled, 16 MB (`-reu -reusize 16384`). Test orchestration via [c64-test-harness](https://github.com/JC-000/c64-test-harness) (usage: its own documentation).
 - Generated files land in `build/` (git-ignored). Never commit generated code.
 
 ## Guest model
@@ -1577,8 +1579,8 @@ Tests: `host/tests/test_snap_ureu.py` (byte-level, the UCI model of
 `test_hle_dos_uci.py` with `$21`/`$22` added test-side), the hardware probe
 (`docs/HARDWARE.md`, W12-T).
 
-- **Firmware facts** (1541ultimate `software/filemanager`, read at
-  `~/Documents/1541u-315preview` @871ad034; dos.h/dos.cc relayed identical
+- **Firmware facts** (1541ultimate `software/filemanager`, read in a
+  checkout of the 3.15 preview line @871ad034; dos.h/dos.cc relayed identical
   in the C64U 1.1.0 build): `dos.h:29-30` `DOS_CMD_LOAD_REU = $21`,
   `DOS_CMD_SAVE_REU = $22`; `dos.cc:254-319`: `[t][cmd][addr u32 LE][len
   u32 LE]`, addr masked to 24 bits, len to 25; no open file → `85,NO FILE

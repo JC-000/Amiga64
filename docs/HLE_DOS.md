@@ -287,8 +287,8 @@ Each directory entry (64 bytes) has this layout:
 
 ## ULTDOS backend: UCI mapping (HARDWARE-UNVALIDATED)
 
-**Sources followed.** Firmware is `~/Documents/1541ultimate` at `880de4dd`.
-Hardware-tested 6502 is `~/Documents/c64-https` at `1b9b49e`.
+**Sources followed.** Firmware is the 1541ultimate source at `880de4dd`.
+Hardware-tested 6502 is the c64-https project at `1b9b49e`.
 
 - **Registers**: `fpga/io/command_interface/vhdl_source/command_protocol.vhd`.
   - Status bits: lines 54-61.
@@ -397,8 +397,8 @@ Model-vs-silicon notes (none affected results):
   `get_error_string`). Its fixed DOS messages keep the prefix:
   `84,NO FILE TO CLOSE`, `85,NO FILE OPEN`, `82,FILE NOT FOUND`
   (`dos.cc` lines 16-30). No DOS-target error has both forms, in
-  `~/Documents/1541ultimate` @ bce4535e (the device's build) or in
-  `~/Documents/1541u-315preview`. The driver treats any non-`00` status as
+  the 1541ultimate source @ bce4535e (the device's build) or in
+  the 3.15 preview line. The driver treats any non-`00` status as
   failure, so the mapping held.
 - W5-T (wave 5) aligned the Python model in `host/tests/test_hle_dos_uci.py`
   with fw 3.15. The model already used the unprefixed FatFS texts. It now

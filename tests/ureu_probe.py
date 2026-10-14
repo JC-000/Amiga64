@@ -463,7 +463,7 @@ def run(p: Probe, root: str, rep: dict) -> list[str]:
     return fails
 
 
-ADF_LOCAL = os.path.expanduser("~/Documents/Amiga Disk Images/amiga-os-310-workbench.adf")
+ADF_LOCAL = os.environ.get("AMIGA64_TEST_ADF") or os.path.expanduser("~/Amiga/amiga-os-310-workbench.adf")
 DEV_VOL = "/USB1"                       # --vol (U64E default; the C64U: /SD)
 DEV_DIR = f"{DEV_VOL}/amiga64"
 ADF_NAME = "amiga-os-310-workbench.adf"

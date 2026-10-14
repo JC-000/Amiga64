@@ -137,7 +137,9 @@ it is documented in detail.
 
 Wave 17 was the project's last planned wave. These items are still open
 when it ends; each line says what is known and where the evidence is.
-Anyone carrying the project forward can start here.
+Anyone carrying the project forward can start here, and then read
+[docs/CARRYING_FORWARD.md](../CARRYING_FORWARD.md), which also lists
+every larger piece of work that was planned but not built.
 Paths of the form `<name>/build/evidence/...` are local run logs that
 are not in the repository (see the note under "Documentation" in the
 [README](../../README.md#documentation)).

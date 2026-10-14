@@ -1,11 +1,8 @@
 # Quickstart: Workbench on your Ultimate
 
 This gets AROS and your own Workbench 3.1 disk running on a C64 Ultimate
-or an Ultimate 64 Elite, driven from a Mac or Linux computer on the same
+or an Ultimate 64 Elite, driven from a Mac (or a Linux computer) on the same
 network. Most of the first run's time is the boot.
-
-> The repository is private until it is published; the install line
-> below is the one to use then.
 
 ## What you need
 
@@ -14,7 +11,7 @@ network. Most of the first run's time is the boot.
 | Device | a **C64 Ultimate** or an **Ultimate 64 Elite** | tested: U64E firmware 3.15, C64U firmware 1.1.0, both NTSC ([DEVICES.md](DEVICES.md)) |
 | Storage on the device | a USB stick (U64E, `/USB1`) or an SD card (C64U, `/SD`) | about 1 MB for the disk image, about 6 MB more for a saved session |
 | Network | the device and your computer on one network | the U64E was tested wired; the C64U on WiFi and on ethernet |
-| Computer | macOS or Linux, **Python 3.11 or newer**, **git**, and access to github.com | `pip` fetches amiga64 and its c64-test-harness dependency from GitHub with git; Windows is not supported yet |
+| Computer | macOS (tested) or Linux (expected to work, untested), **Python 3.11 or newer**, **git**, and access to github.com | `pip` fetches amiga64 and its c64-test-harness dependency (v0.13.1) from GitHub with git; Windows is not supported |
 | Workbench | your own **Workbench 3.1 ADF** (an 880 KB floppy image) | not included and never uploaded anywhere but your own device ([DISKS_AND_FILES.md](DISKS_AND_FILES.md)) |
 | Input | a joystick in port 2, and/or a Commodore 1351 mouse | the 1351 must be switched on for the session, see step 5 ([DEVICES.md](DEVICES.md)) |
 | Sound | the C64's audio output connected | the music player uses the Ultimate's sampler |

@@ -41,10 +41,35 @@ golden vectors (4 VICE instances), the hand vectors, `run_program`,
 leak check, `perf_cycles`, and the REC mutant matrix. Its exit status is
 the number of failed steps.
 
-The recorded host suite at the end of Wave 16 was **2110 passed, 11
-skipped**, run as `python3 -m pytest -q host/tests tests`
-(`w16-e2e2/build/evidence/w16-e4/PROGRESS.md` "FIX ROUND 2"); `make
-host-test` runs a bare `pytest -q` with the `pyproject.toml` test path.
+The host suite at the end of Wave 17 (the final state) is **2321 passed,
+16 skipped**, run in a clean checkout as
+`python3 -m pytest host/tests -q -p no:cacheprovider`; `make host-test`
+runs a bare `pytest -q`, whose `pyproject.toml` test path is `host/tests`.
+Run it from a clean tree: a stale `build/` left by an older build can
+fail tests that read it (seen with `host/tests/test_paula_layout.py`).
+
+Opt-in host tests, skipped unless their variable is `1`:
+
+| Variable | Turns on |
+|---|---|
+| `AMIGA64_VICE_TESTS` | `amiga64 run --backend vice --minutes 0` from a read-only installed tree (several minutes; needs `x64sc`, `prebuilt/`, and a Workbench 3.1 ADF, see `AMIGA64_TEST_ADF` below) |
+| `AMIGA64_NET_TESTS` | the clean-venv install test resolves the pinned harness tag from GitHub instead of copying in the local harness |
+| `AMIGA64_CHIP_ORACLE` | the live FS-UAE leg of the chipset reference (needs FS-UAE and vasm) |
+| `AMIGA64_AROS_ORACLE` | the AROS oracle's FS-UAE leg and the `tools/aros/fetch.sh` fail-closed checks |
+
+`AMIGA64_TEST_ADF` names your Workbench 3.1 ADF for the tests that need
+one (default `~/Amiga/amiga-os-310-workbench.adf`); those tests skip when
+it is not there.
+
+`AMIGA64_PREBUILT` picks where the C64-side binaries come from: `1`
+always loads `prebuilt/`, `0` always builds from source, unset builds
+when the toolchain is there and loads `prebuilt/` otherwise
+(`host/prebuilt.py`). `make prebuilt` rebuilds `prebuilt/` and its
+`MANIFEST`; `make prebuilt-check` rebuilds into a temporary directory
+and fails on any difference. `host/tests/test_prebuilt.py` verifies the
+manifest on every run and rebuilds byte for byte when the installed
+toolchain matches the one `MANIFEST` records (cc65 2.18, vasm 2.0f,
+vlink 0.18a); otherwise that one test skips.
 
 ## Golden vectors
 
@@ -82,8 +107,8 @@ lock wait and staging.
 
 ## Rules for device legs
 
-These rules are binding for every agent and every tool (every wave brief,
-"Operating rules"):
+These rules held for every tool and every contributor throughout
+development (every wave brief, "Operating rules"), and they still apply:
 
 - **Only through the harness**: the DeviceLock and `u64_hold`
   (`tests/bench/u64_session.py`), which snapshots the full device

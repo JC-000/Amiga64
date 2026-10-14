@@ -84,7 +84,7 @@ worked around with a 1 s settle). Deliver a minimal standalone repro (no
 Amiga64 runtime needed if possible), how often it happens over N ≥ 200
 trials with and without the settle, the harness and VICE versions, a
 root-cause hypothesis backed by the harness source
-(`~/Documents/c64-test-harness`, read-only), and a draft upstream issue as
+(https://github.com/JC-000/c64-test-harness, read-only), and a draft upstream issue as
 `build/evidence/w6-quirk/ISSUE.md`. **Do not file it, push or comment
 anywhere**: the supervisor asks the user first. VICE only; no U64E.
 

@@ -2,8 +2,8 @@
 
 Every fixed address this project claims — zero page, C64 system RAM/I-O,
 guest (REU) space — is declared in exactly ONE place and machine-checked.
-The scheme adapts the c64-lib-contract idiom (`~/Documents/c64-lib-contract`,
-SPEC §2/§3) to a single-repo multi-module codebase.
+The scheme adapts the c64-lib-contract idiom (its SPEC §2/§3) to a
+single-repo multi-module codebase.
 
 ## The three declaration files (single source of truth)
 

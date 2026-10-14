@@ -6,7 +6,7 @@ in the 6502 emulator of host/tests/test_hle_dos_uci.py against its UCI
 model, whose DOS targets are extended here (test-side only) with
 DOS_CMD_LOAD_REU $21 / DOS_CMD_SAVE_REU $22 exactly as the firmware
 implements them: 1541ultimate software/filemanager/dos.cc:254-319 at
-~/Documents/1541u-315preview (@871ad034, the U64E 3.15 line; the brief
+a 1541ultimate 3.15-preview checkout (@871ad034, the U64E 3.15 line; the brief
 relays dos.h/dos.cc as identical in the C64U 1.1.0 build):
 
   - payload message[2..5] addr u32 LE, [6..9] len u32 LE; addr &= $FFFFFF,

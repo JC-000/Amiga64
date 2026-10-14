@@ -118,7 +118,7 @@ lands, W10-V tests against a host-filled block (a shim in its own
 
 ## C4 — W10-H: the U64 sampler (Ultimate Audio)
 
-The firmware (`~/Documents/1541ultimate`: `software/io/audio/sampler.h`,
+The firmware (a 1541ultimate firmware checkout, github.com/GideonZ/1541ultimate: `software/io/audio/sampler.h`,
 `fpga/io/sampler/`) has an 8-voice sample player mapped at C64
 `$DF20–$DFFF` when config "Map Ultimate Audio $DF20-DFFF" is enabled
 (default off). Per voice: control (enable/repeat/IRQ/8- or 16-bit), volume,

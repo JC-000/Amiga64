@@ -7,8 +7,8 @@ Amiga64 is a 68000 interpreter and an Amiga chipset emulation written in
 6502 assembly. It boots the open-source AROS Kickstart replacement (bundled)
 and your own Workbench 3.1 floppy image to the Workbench screen, with the
 pointer on a joystick or a 1351 mouse and Paula's sound on the Ultimate's
-built-in sampler. A host program on your Mac or Linux computer sets up each
-session over the network.
+built-in sampler. A host program on your Mac (or Linux computer) sets up
+each session over the network.
 
 It is a proof that this is possible, not a fast or complete Amiga: the
 emulated 68000 runs at about 1 MHz equivalent at best against the A500's
@@ -16,12 +16,21 @@ emulated 68000 runs at about 1 MHz equivalent at best against the A500's
 takes about 2-4 minutes to boot (`amiga64 run`: about 135 s on a C64U,
 about 180 s on a U64E).
 
+The project was built in a series of development waves, the last of them
+Wave 17, and is complete as a proof of possibility: version 0.17.0 is its
+final planned release, and it is now open for anyone to carry forward.
+Start with
+**[docs/CARRYING_FORWARD.md](docs/CARRYING_FORWARD.md)**: a map of the
+code, how to build and test it, the ground rules, and everything that was
+planned but not built.
+
 ## Try it
 
 You need a C64 Ultimate or an Ultimate 64 Elite on your network with a USB
-stick (U64E) or SD card (C64U), Python 3.11+ and git on macOS or Linux
-with access to github.com (pip installs amiga64 and its c64-test-harness
-dependency from GitHub), and your own Workbench 3.1 ADF.
+stick (U64E) or SD card (C64U), Python 3.11+ and git on macOS (Linux is
+expected to work but was never tested) with access to github.com (pip
+installs amiga64 and its c64-test-harness dependency from GitHub), and
+your own Workbench 3.1 ADF.
 
 ```sh
 pip install "git+https://github.com/JC-000/Amiga64@v0.17.0"
@@ -31,9 +40,12 @@ amiga64 run
 ```
 
 `doctor` asks for your device's address the first time (in a terminal)
-and saves it. Then double-click the Workbench disk (Workbench3.1), find **ModPlayer**
-just to the right of the Expansion drawer, double-click it, and listen. (The repository is private until it is published; the install
-line is the one to use then.) The full walkthrough is [docs/guide/QUICKSTART.md](docs/guide/QUICKSTART.md).
+and saves it. Then double-click the Workbench disk (Workbench3.1), find
+**ModPlayer** just to the right of the Expansion drawer, double-click it,
+and listen.
+Workbench may redraw the disk window a few times while it fills, and a
+double-click during a redraw is lost: double-click between redraws. The
+full walkthrough is [docs/guide/QUICKSTART.md](docs/guide/QUICKSTART.md).
 
 ## Documentation
 
@@ -42,9 +54,10 @@ line is the one to use then.) The full walkthrough is [docs/guide/QUICKSTART.md]
 | using it | [QUICKSTART](docs/guide/QUICKSTART.md), [DEVICES](docs/guide/DEVICES.md), [DISKS_AND_FILES](docs/guide/DISKS_AND_FILES.md), [TROUBLESHOOTING](docs/guide/TROUBLESHOOTING.md) |
 | how it works | [docs/emulation/OVERVIEW.md](docs/emulation/OVERVIEW.md), then [CPU](docs/emulation/CPU.md), [MEMORY](docs/emulation/MEMORY.md), [CHIPSET](docs/emulation/CHIPSET.md), [PAULA](docs/emulation/PAULA.md), [CIA_AND_TIMING](docs/emulation/CIA_AND_TIMING.md), [INPUT](docs/emulation/INPUT.md), [STORAGE](docs/emulation/STORAGE.md), [HLE](docs/emulation/HLE.md) |
 | what does not work, and what is still open | [docs/emulation/LIMITS.md](docs/emulation/LIMITS.md), its [Open items](docs/emulation/LIMITS.md#open-items-carrying-it-forward) |
+| **carrying it forward** | **[docs/CARRYING_FORWARD.md](docs/CARRYING_FORWARD.md)**: the code map, building and testing, the ground rules, what was planned but not built, how to contribute |
 | developing it | [docs/emulation/TESTING.md](docs/emulation/TESTING.md), [docs/CONTRACTS.md](docs/CONTRACTS.md) (the binding interfaces), [docs/RESOURCES.md](docs/RESOURCES.md) (address claims) |
 | measurements | [docs/HARDWARE.md](docs/HARDWARE.md) (real devices), [docs/C2V.md](docs/C2V.md), [docs/WB_BOOT.md](docs/WB_BOOT.md), [docs/ORACLE.md](docs/ORACLE.md) |
-| history | the `docs/WAVE*_BRIEF.md` files (one per development wave); older design documents are marked "Historical" |
+| history | the `docs/WAVE*_BRIEF.md` files: one brief per development wave, binding for that wave's work and kept unchanged as a record (their worktrees, agents, device addresses and plans belong to the development setup, not to you); older design documents are marked "Historical" |
 
 Some docs cite evidence as `<name>/build/evidence/...` (for example
 `w17-k/build/evidence/w17-k/PROGRESS.md`). Those are the development
@@ -65,8 +78,12 @@ from, not as a file you can open. Evidence you can rerun lives in
 | Workbench | done: the user's Workbench 3.1 disk boots to the Workbench in about 130 s on a C64U at 64 MHz (Wave 13); suspend and resume through a file |
 | Input | done: joystick and 1351 mouse as the Amiga mouse; F1 for a 1:1 view (Waves 13-16) |
 | Audio | done: Paula's four channels on the Ultimate sampler, a clean-room MOD player with a readable UI (Wave 15), launched from a Workbench icon (Wave 16) |
-| Release kit | Wave 17: the `amiga64` command, prebuilt binaries, the bundled AROS ROM, these docs |
-| M4: ahead-of-time translator | not started |
+| Release kit | done: the `amiga64` command, prebuilt binaries, the bundled AROS ROM, these docs (Wave 17, v0.17.0) |
+| M4: ahead-of-time translator | not built: designed only ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) S2, M4); see [CARRYING_FORWARD](docs/CARRYING_FORWARD.md#what-was-planned-but-not-built) |
+
+Wave 17 was the last wave. What is still open is listed, with its
+evidence, in [CARRYING_FORWARD](docs/CARRYING_FORWARD.md#what-was-planned-but-not-built)
+and in LIMITS [Open items](docs/emulation/LIMITS.md#open-items-carrying-it-forward).
 
 ## How it works, briefly
 
@@ -91,24 +108,28 @@ from, not as a file you can open. Evidence you can rerun lives in
 
 ## Development
 
-Toolchain for building from source: Python 3.11+, cc65 (`ca65`/`ld65`),
-VICE `x64sc` with a 16 MB REU for the tests, vbcc/vasm for the guest
-programs (`tools/vbcc/install.sh`, installed outside the repository), and
-[c64-test-harness](https://github.com/JC-000/c64-test-harness) for driving
-VICE or a device. Users of the prebuilt release need none of the build
-tools.
+Toolchain for building from source: Python 3.11+, cc65 2.18 (`ca65`/`ld65`),
+VICE `x64sc` with a 16 MB REU for the tests, vbcc 0.9h with vasm 2.0f and
+vlink 0.18a for the guest programs (`tools/vbcc/install.sh`, installed
+outside the repository), and
+[c64-test-harness](https://github.com/JC-000/c64-test-harness) v0.13.1 for
+driving VICE or a device. Users of the prebuilt release need none of the
+build tools.
 
 ```sh
-make host-test                          # pytest
+make host-test                          # pytest (host/tests)
 make runtime                            # build/runner.prg (+ .lbl, .map)
 make vice-test                          # golden + hand vectors in VICE
 make rescheck                           # address-claim checker
+make prebuilt-check                     # prebuilt/ still matches the sources
 sh tests/rec_gate.sh build build/gate   # the full VICE gate
 ```
 
-Every change is tested red-first and reviewed by an independent agent; the
+Every change was tested red-first and attacked by an independent reviewer
+before it merged, and contributions are expected to keep that up. The
 device rules (only through the harness's device lock, every setting
-restored) are in [TESTING](docs/emulation/TESTING.md).
+restored) are in [TESTING](docs/emulation/TESTING.md); the full workflow
+is in [CARRYING_FORWARD](docs/CARRYING_FORWARD.md#building-and-testing).
 
 ## Licence and third-party material
 
@@ -134,4 +155,5 @@ restored) are in [TESTING](docs/emulation/TESTING.md).
   source or NDK material is in the repository; AROS is used only as the
   unmodified binary ROM above.
 
-Windows hosts are not supported yet.
+Hosts: macOS was used for all development and testing. Linux is expected
+to work but is untested; Windows is not supported.
