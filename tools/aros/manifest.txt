@@ -1,6 +1,7 @@
 # tools/aros/manifest.txt — the pinned AROS m68k build used by the reference
 # oracle (tests/aros_oracle.py, docs/ORACLE.md).  Read by tools/aros/fetch.sh
-# and by the oracle; nothing listed here is ever committed.
+# and by the oracle.  The amiga-m68k ROM banks listed here are also bundled,
+# unmodified, under third_party/aros/ (W17-K); the archives are never committed.
 #
 # archive|<exact URL>|<sha256 of the downloaded archive>
 #   The cache directory is ~/.cache/amiga64/aros/<that sha256>/.

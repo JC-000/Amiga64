@@ -32,3 +32,6 @@ dist/
 .serena/
 .gitignore.backup*
 .claude/worktrees/
+.claude/settings.json
+.claude/settings.local.json
+build-mut-*/

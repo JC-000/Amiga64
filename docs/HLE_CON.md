@@ -735,9 +735,9 @@ Tell the operator before the first session:
   Answer as you like: it is logged and does not count.
 
 ```sh
-cd /Users/someone/Documents/Amiga64/.claude/worktrees/w6-kbd  # or the merged tree
+cd <your checkout>
 export U64_HOST=10.43.23.81
-PRG=/Users/someone/Documents/Amiga64/build/w6-int/runner.prg
+PRG=build/w6-int/runner.prg
 D=build/evidence/kbd-ab-$(date +%Y%m%d-%H%M%S)   # new per A/B (review9 F1)
 AB() {  # AB <pair> <runs> <poll>
   python3 -m tests.kbd_echo --prg $PRG --backend u64 --runs "$2" \
