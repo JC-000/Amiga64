@@ -1,0 +1,40 @@
+AROS m68k ROM banks bundled with Amiga64 (third_party/aros/)
+=============================================================
+
+What these files are
+  aros-rom.bin and aros-ext.bin are the Amiga (m68k) Kickstart-replacement
+  ROM banks of AROS, the AROS Research Operating System.  They are the
+  Executable form of AROS code, redistributed UNMODIFIED, byte for byte as
+  shipped by the AROS project.  Amiga64 contains no AROS source code and no
+  modification of it.
+
+  Build:     AROS nightly2 20260921, amiga-m68k boot ISO
+  Archive:   https://downloads.sourceforge.net/project/aros/nightly2/20260921/Binaries/AROS-20260921-amiga-m68k-boot-iso.zip
+  SHA-256:   981817b3421a6ed245d0e259712bb876fd2e279930e4e5d2b4d55e1de7744b31 (the archive)
+  Members:   aros-amiga-m68k.iso!boot/amiga/aros-rom.bin, aros-ext.bin; the
+             archive's LICENSE and ACKNOWLEDGEMENTS (copied here unchanged)
+  The SHA-256 of every file here is pinned in tools/aros/manifest.txt, and
+  the amiga64 tool refuses a file that does not match.
+
+Licence
+  These files are licensed under the AROS Public License, Version 1.1
+  (APL 1.1), whose full text is in LICENSE in this directory.  They are NOT
+  covered by Amiga64's MIT licence (see the repository's LICENSE and NOTICE).
+  ACKNOWLEDGEMENTS holds the third-party notices that ship with AROS.
+
+Source code (APL 1.1 section 3.6)
+  The Source Code version of this Covered Code is available under the terms
+  of the APL 1.1 from the AROS project.  The exact build is the AROS nightly
+  of 2026-09-21 ("nightly2 20260921"), amiga-m68k target, whose binary
+  archive has the SHA-256
+    981817b3421a6ed245d0e259712bb876fd2e279930e4e5d2b4d55e1de7744b31
+  Its source is the AROS source tree as of that nightly:
+    https://github.com/aros-development-team/AROS   (the AROS source tree)
+    https://aros.sourceforge.io/                    (the AROS project)
+    https://sourceforge.net/projects/aros/files/    (nightly binaries and
+                                                     source snapshots)
+  The AROS project rotates its nightly builds: on 2026-10-13 the 20260921
+  folder was no longer listed on SourceForge.
+
+Fetched from the archive above on 2026-09-25 (tools/aros/fetch.sh); copied
+into the repository on 2026-10-13 after re-verifying every hash.
