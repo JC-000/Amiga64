@@ -47,10 +47,11 @@ File Service`. `doctor` then stops at that single `FAIL device` line. If
 the setting is not found at all, the `FTP service` line is a WARN,
 "unknown".
 
-**"/Temp" warning.** Each program start leaves a firmware file in the
+**"/Temp" warning.** Each program start creates a firmware file in the
 device's `/Temp` (one per `run`, two with sound; two or three per
-`resume`), and the harness deletes the older ones under its lock, keeping
-the newest. So 0 or 1 file is normal. Two or more mean the clean-up is
+`resume`). The U64E's 3.15 firmware deletes them itself; on the C64U
+(1.1.0) the harness deletes the older ones under its lock, keeping the
+newest. So 0 or 1 file is normal. Two or more mean the clean-up is
 failing; a full `/Temp` can crash a C64 Ultimate, and a power cycle
 clears it.
 

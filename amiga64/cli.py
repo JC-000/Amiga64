@@ -49,7 +49,7 @@ def _host(a, cfg: dict, prompter: C.Prompter | None) -> tuple[str, str]:
     if host is None:
         if prompter is None:
             raise C.ConfigError("no device address: give --host, set AMIGA64_HOST, or run "
-                                "`amiga64 run` once to be asked")
+                                "`amiga64 doctor` or `amiga64 run` in a terminal to be asked")
         host, src = prompter.ask_host(), "prompt"
     return host, src
 

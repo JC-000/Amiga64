@@ -142,9 +142,11 @@ Paths of the form `<name>/build/evidence/...` are local run logs that
 are not in the repository (see the note under "Documentation" in the
 [README](../../README.md#documentation)).
 
-1. **Leftover files in the Ultimate's `/Temp`.** The firmware keeps a
-   file for every program start: `run` leaves 1 (2 with sound), `resume`
-   2 (3 with sound), `doctor` none. The harness sweeps them under its
+1. **Leftover files in the Ultimate's `/Temp`.** The firmware creates a
+   file for every program start: `run` creates 1 (2 with sound), `resume`
+   2 (3 with sound), `doctor` none. The U64E's 3.15 firmware collects them
+   itself (GideonZ/1541ultimate#686); the C64U's 1.1.0 predates that fix,
+   so there the harness sweeps them under its
    lock and keeps the newest; amiga64 cannot see the sweep's result, so
    `doctor`'s `/Temp` count is the signal. A zero-leak start was tried
    and parked. The harness already verifies the program before it types
