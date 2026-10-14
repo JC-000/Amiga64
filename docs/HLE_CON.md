@@ -1,5 +1,9 @@
 # Console input (W5-K)
 
+> **Historical (Wave 17).** This is the Waves 5-6 design of the HLE console input, kept for its reasoning and
+> measurements. The current description is [docs/emulation/HLE.md](emulation/HLE.md); where they differ,
+> [docs/CONTRACTS.md](CONTRACTS.md) and the code win. It still describes program mode as built; the statements that are out of date are listed in that file.
+
 Owner: w5-con (Wave 5). Code: `runtime/ops/hle_con.s`. Contract:
 `docs/WAVE5_BRIEF.md` C2 and its amendment. Tests: `tests/run_con.py`,
 `host/tests/test_hle_con.py`, `fixtures/c/con_*.c`,

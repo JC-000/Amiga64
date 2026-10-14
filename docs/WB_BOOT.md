@@ -1,5 +1,10 @@
 # Booting Workbench from floppy on the AROS ROM: what it costs
 
+> **Note (Wave 17).** The Amiga64 wall-clock times here are pre-implementation
+> [EST] figures (the instruction counts are [MODEL], §1 is FS-UAE). The measured boot on the devices (HLE trackdisk, trimmed script,
+> 7-window code cache) is in [docs/HARDWARE.md](HARDWARE.md) "Workbench 3.1
+> from the ADF": 130.5 s on a C64U at 64 MHz, 147-155 s on a U64E at 48 MHz.
+
 Wave 6 follow-up (WB-measure). The question: should Amiga64 target
 Workbench 1.3 or 3.1 on the open-source AROS m68k ROM, and how long would
 either boot take? This is a measurement document. Nothing in `runtime/`

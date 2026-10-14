@@ -1,0 +1,145 @@
+# Testing
+
+Almost every behaviour in this project is pinned by a test that was seen
+to fail before the code made it pass ("red first"), and every package was
+attacked by an independent reviewer before it merged (WAVE4_BRIEF C5,
+carried through every later brief). This page says what the layers are
+and how to run them.
+
+## The pieces
+
+| Layer | What it checks | Needs |
+|---|---|---|
+| **host tests** (`host/tests/`, and the host-only tests under `tests/`; pytest) | the Python tools and every host reference model; many 6502 modules on an in-process 6502 + REU model (`test_td.py`, `test_snap_file.py`, …) | Python only |
+| **VICE legs** (`tests/*.py --backend vice`; the `aros_*` tools default to VICE, the older drivers to `auto`, which follows `C64_BACKEND`) | the real runner PRG in `x64sc` with a 16 MB REU, driven through the harness's binary monitor | VICE, cc65 |
+| **hardware legs** (`--backend u64`) | the same runner on a U64E or C64U over the network | a device, the harness |
+| **golden vectors** | one 68000 instruction per case against SingleStepTests | VICE (or a device) |
+| **the AROS reference oracle** | vbcc programs on Amiga64 vs on AROS in FS-UAE | FS-UAE, the AROS ROM, vbcc |
+| **the boot model** (`tools/s3probe/aros_boot_model.py`) | a host model of an A500 booting the AROS ROM, the reference for serial text and screens | the s3probe venv (`tools/s3probe/setup_venv.sh`), the ROM |
+| **mutants** (`--mutants`, per package, at most 10) | that a test has teeth: each mutant build must fail | as the leg |
+
+c64-test-harness is the only way any tool touches VICE or a device: it
+owns VICE's lifecycle, the binary monitor, the Ultimate's REST client, the
+SocketDMA REU write, device storage, and the cross-process **DeviceLock**.
+Its usage is in the harness's own documentation.
+
+## Everyday commands
+
+```sh
+make host-test            # pytest
+make runtime              # build/runner.prg, .lbl, .map, stamped
+make vice-test            # golden + hand vectors in VICE
+make rescheck             # the address-claim checker
+make vectors && python3 -m host.handvec --out build/vectors-hand   # inputs of the gate
+sh tests/rec_gate.sh build build/gate     # the full VICE gate, one log per step
+```
+
+`tests/rec_gate.sh` runs, in order: host tests, the runtime build, the
+golden vectors (4 VICE instances), the hand vectors, `run_program`,
+`run_hello`, rescheck, the `FETCH_DIRECT` variant build, `rec_budget`,
+`bss_boot`, `rec_wrap`, `rec_apisweep`, the supervisor vectors and their
+leak check, `perf_cycles`, and the REC mutant matrix. Its exit status is
+the number of failed steps.
+
+The recorded host suite at the end of Wave 16 was **2110 passed, 11
+skipped**, run as `python3 -m pytest -q host/tests tests`
+(`w16-e2e2/build/evidence/w16-e4/PROGRESS.md` "FIX ROUND 2"); `make
+host-test` runs a bare `pytest -q` with the `pyproject.toml` test path.
+
+## Golden vectors
+
+`host/vectors.py` samples SingleStepTests 680x0 JSON (pinned commit,
+seeded, 50 per opcode by default) into binary batches, dropping cases that
+take exceptions or touch the I/O banks. `tests/run_vectors.py` writes each
+case into `buf_case`, calls `test_run_case` (one `emu_step`), and compares
+every register, the SR and every expected memory byte. Current counts:
+5129 golden, 63 hand (`host/handvec.py`), and the supervisor set
+(`python3 -m host.vectors --set super`, plus `SUPERHAND`) run by
+`tests/run_super_vectors.py` (CONTRACTS "Vector sets").
+
+## Program-mode legs
+
+`tests/run_program.py` (the loader), `run_hello.py`, `run_vbcc.py`
+(compiled C programs; vbcc from `tools/vbcc/install.sh`, outside the
+repo), `run_dos.py` (files), `run_con.py` (keyboard). The oracle,
+`tests/aros_oracle.py`, compares the vbcc programs against AROS in FS-UAE
+(docs/ORACLE.md); it is a second opinion, not a gate.
+
+## Machine-mode legs
+
+| Tool | Legs (main) | Proves |
+|---|---|---|
+| `tests/aros_boot.py` | `m1`, `m2`, `m3`, `ablate`, `lat`, `poll`, `s0` | AROS boots: the serial text equals the boot model's byte for byte up to "romtaginit done"; the insert-disk screen equals one of the model's conversions |
+| `tests/aros_resume.py` | `mid`, `m3`, `m3file` | suspend and resume, REU-resident and through a file, with every refusal |
+| `tests/aros_wb.py` | `w`, `nohle`, `resume`, `e2e`, `demo-boot`, `demo`, `modwb`, `aud`, `audres`, `cost` | Workbench from the ADF; scripted mouse to the disk icon; the attended demos; ModPlayer launched from Workbench |
+| `tests/run_paula.py` | VICE legs and `--hw u64` | Paula's model on VICE, pitch/level/timing on the U64E through the audio stream |
+| `tests/run_modwb.py` | `--leg model`, `--leg vice` | the ModPlayer launcher under a small exec stub and a model |
+
+Run times differ by orders of magnitude: a VICE AROS boot to the
+insert-disk screen takes about 174 s of warp at `s` = 9 (PERF (l)); a
+Workbench leg on a device about 2.5 minutes to the Workbench plus the
+lock wait and staging.
+
+## Rules for device legs
+
+These rules are binding for every agent and every tool (every wave brief,
+"Operating rules"):
+
+- **Only through the harness**: the DeviceLock and `u64_hold`
+  (`tests/bench/u64_session.py`), which snapshots the full device
+  configuration on entry and restores it on exit; the hold's final re-read
+  must say IDENTICAL.
+- **No raw REST, curl or FTP**, and never the Ultimate's on-screen menu
+  (opening it during a hold once wedged a C64U until a power cycle,
+  docs/HARDWARE.md "Wave 14 hardware findings").
+- Never `pkill`/`killall`; stop only processes you started.
+- Long runners reinstall `signal.default_int_handler`, give every leg a
+  deadline, turn SIGTERM into the restore path, and write DONE markers.
+- One holder per device at a time; the DeviceLock queue decides.
+- The device's own address comes from `U64_HOST`; `U64_BASELINE_ON_ENTRY=0`
+  disables the harness's factory baseline on entry, which the recorded
+  sessions used.
+
+## Device quirks that affect tests
+
+- On the U64E, host reads of a running C64's RAM can race the guest; the
+  serial capture brackets every ring read with two count reads
+  (`tests/aros_boot.Machine.serial`), and a
+  stale-read effect under heavy REU DMA is not ruled out (docs/HARDWARE.md
+  "Reading a running C64's RAM over REST at 48 MHz").
+- The C64U on WiFi refused the UDP audio stream; on ethernet it works.
+- The rig keyboard's LED board hides the first key hold after about two
+  minutes idle; attended keyboard tests start with a SHIFT tap
+  (docs/HARDWARE.md "Test-rig note").
+- The project's Wave 13 joystick has Up stuck closed (`--stuck 0x01`).
+
+## Reference models
+
+| Model | Mirrors |
+|---|---|
+| `host/chipset_ref.py` | custom registers, copper, blitter, interrupts, CIAs, machine time |
+| `host/c2v_ref.py` | the display decision, the conversion, the colour rule, the LUT |
+| `host/inp_ref.py` | the input scan, ramp, 1351 decode, hysteresis, queue |
+| `host/paula_ref.py` | the Paula model, `cfg_r16`, the sampler RATE |
+| `host/mod_ref.py` | the MOD replay's Paula writes and `mod_view` per tick |
+| `host/snapfmt.py` | the snapshot format and the build ID |
+| `tools/s3probe/aros_boot_model.py` | an A500 running the AROS ROM (serial, screens, instruction counts) |
+| `tests/chip_oracle.py` | FS-UAE as the reference for blits and chip-register effects |
+
+Where a model and FS-UAE disagreed, the model was corrected only with a
+supervisor ruling, recorded in CONTRACTS (for example the BLTBDAT shift,
+"Blitter (S3.6)").
+
+## Writing a new test
+
+1. Write the test and run it against the unchanged code: it must fail.
+   Keep that output.
+2. Implement until it passes.
+3. Add a mutant (a deliberately broken build or input) that the test must
+   kill, when the test could otherwise pass vacuously.
+4. Run the full gate, not a filtered subset.
+
+Sources: Makefile; `tests/rec_gate.sh`; `tests/README.md`; CONTRACTS "Test
+vector pipeline", "Vector sets"; docs/ORACLE.md; docs/WAVE4_BRIEF.md C5;
+docs/WAVE13-17 briefs "Operating rules"; docs/HARDWARE.md; the leg lists in
+each tool's module docstring and `main()`.

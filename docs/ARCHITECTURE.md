@@ -1,5 +1,9 @@
 # Architecture
 
+> **Historical (Wave 17).** This is the research-phase strategy record (M0-M3 era), kept for its reasoning and
+> measurements. The current description is [docs/emulation/OVERVIEW.md](emulation/OVERVIEW.md); where they differ,
+> [docs/CONTRACTS.md](CONTRACTS.md) and the code win.
+
 Status: initial research phase. Nothing here is settled; this document tracks the strategy space and the decisions as we make them.
 
 ## Problem statement
