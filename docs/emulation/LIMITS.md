@@ -163,12 +163,15 @@ are not in the repository (see the note under "Documentation" in the
    machines. Derived only: on PAL, guest time would run about 4% slower
    and the player's tempo would be about 4% off
    ([docs/guide/DEVICES.md](../guide/DEVICES.md) "Supported devices").
-3. **A Workbench session driven by the 1351 at 64 MHz on the C64U** with
-   the user is not confirmed. The 1351's pots read the full range at
-   64 MHz (docs/HARDWARE.md "The 1351 mouse at turbo"), and the ModPlayer
-   e2e drives Workbench with the scripted mouse, but the attended session
-   is still recorded as "to be confirmed" (the pre-Wave-17 README's
-   Wave 14 row, git `a9fd1cc:README.md`).
+3. **Workbench is fiddly to use at this speed.** The user's own session
+   on the C64U at 64 MHz, with the 1351 mouse, joystick and ModPlayer
+   (2026-10-14, the final demo), worked: the mouse was fine, and the song
+   played and returned to Workbench. But the disk window redraws itself
+   from scratch a few times while it fills, a double-click during a redraw
+   is lost, and possibly double-clicks need to be slower than usual (not
+   pinned down). Icon labels are hard to read in the fitted view (the
+   known compressed-text issue; F1 gives the 1:1 view). No change was
+   made; the guide tells users what to expect (QUICKSTART step 6).
 4. **Networks that filter ICMP** (c64-test-harness #536). The harness
    checks that the device is alive with `ping` before it takes the lock.
    Where ICMP is blocked it can report a reachable device as

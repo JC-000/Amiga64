@@ -31,8 +31,8 @@ amiga64 run
 ```
 
 `doctor` asks for your device's address the first time (in a terminal)
-and saves it. Then double-click the Workbench disk, double-click
-**ModPlayer**, and listen. (The repository is private until it is published; the install
+and saves it. Then double-click the Workbench disk (Workbench3.1), find **ModPlayer**
+just to the right of the Expansion drawer, double-click it, and listen. (The repository is private until it is published; the install
 line is the one to use then.) The full walkthrough is [docs/guide/QUICKSTART.md](docs/guide/QUICKSTART.md).
 
 ## Documentation
