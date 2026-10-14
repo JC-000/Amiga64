@@ -12,7 +12,7 @@ proportional mode moves it one count for one count. The code is
 
 | C64 | Amiga |
 |---|---|
-| joystick in port 2: directions | mouse movement (JOY0DAT counters) |
+| joystick in port 2 (by default; port 1 when the 1351 is in port 2, see below): directions | mouse movement (JOY0DAT counters) |
 | joystick fire | left mouse button (CIA-A PRA /FIR0) |
 | 1351 movement | mouse movement, 1:1 |
 | 1351 left button | left mouse button |
@@ -85,7 +85,7 @@ catches up several frames moves one frame's step.
 - **Decode.** Per axis, d = (v − old) mod 128 as a signed 7-bit value / 2;
   Y is negated (the 1351 counts up, the Amiga down). Scale 1:1.
 - **Idle hysteresis (W16-I).** A 1351 at rest can flicker between two
-  adjacent values (measured on the user's mouse on the C64U: POTX
+  adjacent values (measured on the user's mouse on the C64U at 64 MHz: POTX
   `$C9/$CA`, POTY `$AB/$AC`). A one-count step *against* the direction of
   the last move is held, so the pointer does not wiggle; slow moves keep
   every count; a lone one-count reversal stays held (one count of

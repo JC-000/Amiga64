@@ -14,7 +14,7 @@ network. Most of the first run's time is the boot.
 | Device | a **C64 Ultimate** or an **Ultimate 64 Elite** | tested: U64E firmware 3.15, C64U firmware 1.1.0, both NTSC ([DEVICES.md](DEVICES.md)) |
 | Storage on the device | a USB stick (U64E, `/USB1`) or an SD card (C64U, `/SD`) | about 1 MB for the disk image, about 6 MB more for a saved session |
 | Network | the device and your computer on one network | the U64E was tested wired; the C64U on WiFi and on ethernet |
-| Computer | macOS or Linux, **Python 3.11 or newer** | Windows is not supported yet |
+| Computer | macOS or Linux, **Python 3.11 or newer**, **git**, and access to github.com | `pip` fetches amiga64 and its c64-test-harness dependency from GitHub with git; Windows is not supported yet |
 | Workbench | your own **Workbench 3.1 ADF** (an 880 KB floppy image) | not included and never uploaded anywhere but your own device ([DISKS_AND_FILES.md](DISKS_AND_FILES.md)) |
 | Input | a joystick in port 2, and/or a Commodore 1351 mouse | the 1351 must be switched on for the session, see step 5 ([DEVICES.md](DEVICES.md)) |
 | Sound | the C64's audio output connected | the music player uses the Ultimate's sampler |
@@ -30,12 +30,16 @@ python3 -m venv ~/amiga64-venv && . ~/amiga64-venv/bin/activate
 pip install "git+https://github.com/JC-000/Amiga64@v0.17.0"
 ```
 
-or from a clone:
+or from a clone, in the same virtual environment (create and activate it
+as above first):
 
 ```sh
 git clone https://github.com/JC-000/Amiga64 && cd Amiga64
 pip install .
 ```
+
+Both ways need `git` and access to github.com: the c64-test-harness
+dependency is installed from its GitHub repository.
 
 ## 2. Put your Workbench disk where it is found
 
@@ -62,18 +66,23 @@ Python, c64-test-harness, the prebuilt binaries, the AROS ROM, your ADF
 disk (whether ModPlayer and your staged files fit). With the device (one
 short session; the C64 is reset when it is released) it also checks the
 model and firmware (U64E 3.15 and C64U 1.1.0 are the tested ones), the
-speed, the 16 MB REU, the Command Interface, the audio sampler, the
-device's **DMA service** and **FTP service** (both must be on: a FAIL
-otherwise; the C64U switches its DMA service off at every power-on),
-leftover firmware files in `/Temp` (0 or 1 is normal, 2 or more is a
-WARN), the storage
-volume, your ADF and a saved session on the device, and that the device
-settings came back as they were. The first
-time it asks for your device's address (an IP address or host name) and
-saves it in `~/.config/amiga64/config.toml`. You can also give it with
-`--host ADDRESS` or the environment variable `AMIGA64_HOST`. Prompts appear
-only when you run it in a terminal; otherwise a missing setting is an
-error that names the option to use.
+device lock key it uses ([DEVICES.md](DEVICES.md#other-harness-tools-on-the-same-device)),
+the speed (it must be one of the device's CPU Speed choices), the 16 MB
+REU, the Command Interface, the audio sampler, the device's **DMA
+service** (a FAIL when it is off; the C64U switches it off at every
+power-on) and **FTP service** (when it is off, `doctor` stops at a
+single `FAIL device` line that says so; when the setting cannot be found
+the line is a WARN, "unknown"), leftover firmware files in `/Temp` (0 or
+1 is normal, 2 or more is a WARN), the storage volume, your ADF on the
+device (a WARN if a copy there is incomplete, see step 4), a saved
+session, and that the device settings came back as they were.
+
+If no address is set yet and you run `doctor` in a terminal, it asks for
+your device's address (an IP address or host name) and, once the check
+has reached the device, saves it in `~/.config/amiga64/config.toml`. You
+can also give it with `--host ADDRESS` or the environment variable
+`AMIGA64_HOST`. Without a terminal nothing is asked: a missing address is
+a `FAIL device` line that names `--host` and `AMIGA64_HOST`.
 
 If your device has a network password, put it in the environment variable
 `U64_PASSWORD` or in the config file; it is never taken from the command
@@ -90,18 +99,28 @@ What happens:
 1. The first time, it asks once before copying your ADF to
    `<volume>/amiga64/wb-<12 hex digits>.adf` on the device ("Copy … (880 KB)
    to … on …? [Y/n]"; `--yes` skips the question). The digits come from
-   the image's SHA-256, and it never overwrites a file there. If the
-   device already holds the same image (for example as
-   `amiga-os-310-workbench.adf`), it reuses that file.
-2. It takes the device for the session: it waits up to 300 s if another
-   program is using it (then it stops: the device "is busy … try again later"), records every device setting, switches on the 16 MB REU, the
-   turbo speed (48 MHz on the U64E, 64 MHz on the C64U) and the settings
-   the session needs, and reboots the C64.
+   the image's SHA-256. If the device already holds the same image (for
+   example as `amiga-os-310-workbench.adf`), it reuses that file. It never
+   overwrites a file there, with one exception: if a file under its own
+   name is there with other bytes (a copy that was interrupted), it asks
+   "… is not a whole copy of … (an interrupted copy?). Replace it? [y/N]"
+   (the default is no; `--replace-adf` answers yes). Without a terminal
+   these questions are not asked: `run` stops with the question and
+   "(no terminal to ask on: give --yes)" (or `--replace-adf`).
+2. It takes the device for the session. If another program is using the
+   device, it waits for as long as that program keeps making progress. It
+   gives up only if the holder stops making progress for 300 s, or if the
+   device changes hands too often while it waits ("the Ultimate at … stayed
+   busy (…); try again later"). It records every device setting, switches
+   on the 16 MB REU, the turbo speed (48 MHz on the U64E, 64 MHz on the
+   C64U, or `--mhz N`, which must be one of the device's CPU Speed
+   choices) and the settings the session needs, and reboots the C64.
 3. It loads the emulator, copies the AROS ROM and your disk into the REU,
    and boots. You see AROS's start-up screens on the C64.
-4. **The Workbench appears after about 2-3 minutes.** Measured with
-   `amiga64 run`: 135 s on a C64U at 64 MHz, 180 s on a U64E at 48 MHz.
-   It then prints how to use it.
+4. **The Workbench appears after about 2-4 minutes** (the CLI says
+   "about 2-4 minutes"). Measured with `amiga64 run`: about 135 s on a
+   C64U at 64 MHz and about 180 s on a U64E at 48 MHz. It then prints how
+   to use it.
 5. It then hands the joystick (and the mouse) to you and keeps running
    until you press **Ctrl-C** in the terminal, or for `--minutes N`.
    Sound is on when the device has the sampler setting; `--no-audio`
@@ -109,7 +128,10 @@ What happens:
 6. When it ends it slows the C64 back to 1 MHz, reboots it, puts every
    device setting back as it found it, and prints where its log and report
    are (`~/.local/state/amiga64/holds/<date-time>-run/`, or under
-   `$XDG_STATE_HOME` or `AMIGA64_STATE_DIR`).
+   `$XDG_STATE_HOME` or `AMIGA64_STATE_DIR`). A Ctrl-C during the
+   boot also ends the session through this restore; the report
+   (`session.json`) then says `"ended_by": "interrupted"`, and `amiga64`
+   exits with status 130.
 
 ## 5. Use Workbench
 
@@ -127,8 +149,8 @@ What happens:
   at full detail and follows the pointer. F1 again goes back.
 - The fitted view shows the top 200 lines of the Amiga screen.
 - No other keys reach the Amiga: you cannot type into AROS.
-- Everything is slow: the emulated 68000 runs at well under 1 MHz
-  equivalent, against the real Amiga's 7 MHz.
+- Everything is slow: the emulated 68000 runs at about 1 MHz equivalent
+  at best (less during the boot), against the real Amiga's 7 MHz.
 
 ## 6. Play some music
 
@@ -184,7 +206,9 @@ session runs.
 
 How it works inside: [docs/emulation/OVERVIEW.md](../emulation/OVERVIEW.md).
 
-Sources: docs/WAVE17_BRIEF.md (goal, rulings), W17-K's M0 design
-(`w17-k/build/evidence/w17-k/PROGRESS.md`), `tests/aros_wb.py`
+Sources: the CLI itself (`amiga64/cli.py`, `config.py`, `device.py`,
+`adf.py`, `session.py`), docs/WAVE17_BRIEF.md (goal, rulings), W17-K's M0
+design and device runs (`w17-k/build/evidence/w17-k/PROGRESS.md`), W17-K2's
+message list (`w17-k2/build/evidence/w17-k2/PROGRESS.md`), `tests/aros_wb.py`
 (`leg_demo_boot`, `session`, `make_disk`), CONTRACTS "Input", docs/HARDWARE.md
 "Workbench 3.1 from the ADF", `host/adf_files.py` (`modwb_image`).

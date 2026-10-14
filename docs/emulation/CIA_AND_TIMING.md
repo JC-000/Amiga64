@@ -109,7 +109,7 @@ livelock the guest. A firing is at most `4096 >> s` E ticks late
   interrupt deliverable "kicks", so it is taken at the next instruction
   boundary, as on a 68000. A drop of the CPU's mask by RTE, MOVE to SR or
   ANDI/EORI to SR has no hook in the core; it is seen within one poll
-  interval, max(`$0400`, 256 E << s) φ2, while something is pending
+  interval, max(`$0400`, 256 E << s) φ2 capped at `$FFFF`, while something is pending
   (measured 543-563 E at `s` = 4, 127-128 E at `s` = 9; CONTRACTS
   "Recognition latency"). A real 68000 takes it at once.
 - **STOP** waits for the next event when an interrupt can still come, and
@@ -133,7 +133,8 @@ and alarm, and a plain SDR.
   14188-E frame).
 - **Not modelled:** the PB6/PB7 timer outputs and the serial shift
   register. Port pins that the emulator drives itself are the trackdisk's
-  drive lines on CIA-A PRA bits 2-5 and the mouse buttons on bits 6-7
+  drive lines on CIA-A PRA bits 2-5 and the left mouse button on bit 6
+  (bit 7 is held high; the right button is read through POTINP)
   ([STORAGE.md](STORAGE.md), [INPUT.md](INPUT.md)).
 
 ## Telling a guest program the real time: the profile block
@@ -166,9 +167,10 @@ there for the host ([PAULA.md](PAULA.md)).
 - A copper instruction costs about 545 6502 cycles [MEASURED VICE]; a
   copper list longer than a guest frame slows the guest roughly in
   proportion but never stops it (CONTRACTS "Copper", "Cost").
-- The frame hooks can grow by about 300 cycles at idle before the
-  `run_irq` `lag` leg (a periodic client at P = 3200 φ2, `s` = 0) starts
-  to drift (CONTRACTS "Frame-hook budget").
+- The frame hooks stay safe with up to about 300 extra cycles at idle; a
+  600-cycle hook sits at the edge where the `run_irq` `lag` leg (a
+  periodic client at P = 3200 φ2, `s` = 0) would flake (CONTRACTS
+  "Frame-hook budget").
 - The suspend check costs 31 φ2 cycles per guest frame (PERF "Suspend hook
   cost").
 

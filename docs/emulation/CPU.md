@@ -36,6 +36,7 @@ authoritative map is `runtime/rc/zp.inc`.
 | `$58-$5F` | memory API arguments `m_addr`, `m_val` |
 | `$60-$77` | EA and ALU operands and scratch (`t_ea`, `t_op1`, `t_op2`, `t_res`, `t_tmp`) |
 | `$78-$79` | `st_halt`, `st_reason` |
+| `$7A-$7F` | core-internal: `ea_kind`, `ea_reg`, `ea_size`, `st_step`, `w_zacc`, `w_ptmp` |
 | `$80-$87` | fetch-window and REC-shadow state |
 | `$88-$94` | exception state: `st_exc`, the inactive SP `r_osp`, the instruction snapshot `st_ipc`/`st_iop`/`st_sp6`, the latched flag `st_exl` |
 | `$95-$99` | machine loop: `ev_pend`, `mach_frames` |
@@ -167,7 +168,8 @@ Measured on real hardware (docs/HARDWARE.md):
 | an idle guest loop in the player profile (`s` = 0) | 84.1k/s | HARDWARE "Paula on the U64 sampler" |
 
 On light code that is about a 0.8-1 MHz 68000 (HARDWARE finding 7);
-the AROS boot runs at roughly a third to a half of that rate. The A500
+the AROS boot runs at about 75-80% of that rate to m1, and at roughly a
+third to a half of it between m1 and m2. The A500
 runs at 7.09 MHz. The practical ceilings found on the U64E: an
 REU-controller register access costs about 1.7-1.9 µs at 8-24 MHz and
 0.9-1.0 µs at 32-48 MHz, so it stops scaling with the CPU clock, and bulk

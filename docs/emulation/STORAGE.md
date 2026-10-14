@@ -41,7 +41,10 @@ side of the emulator instead:
     `io_Error` = 0, and the device returns;
   - quick `CMD_WRITE`, `TD_FORMAT`, `TD_RAWWRITE` (and their `ETD_` forms):
     `io_Error` = 28 (TDERR_WriteProt);
-  - an offset or length beyond the image: `io_Error` = 20;
+  - an offset or length beyond the image, or either value at 16 MB or
+    more: `io_Error` = 20, nothing copied; a destination chunk in bank
+    `$BF` or `$DF` also ends the request with 20 (the chunks before it
+    were copied);
   - anything else (non-quick requests, motor, change state, protection
     status, geometry, change interrupts): passed to AROS's own trackdisk
     code, which sees a write-protected drive DF0 with a disk present.
@@ -89,13 +92,20 @@ the host's image. Measured LOAD_REU times for the ADF: 0.40 s on the U64E
 at 48 MHz (`/USB1`), 1.26 s on the C64U at 64 MHz (`/SD`) (docs/HARDWARE.md
 "Device storage legs").
 
-The file must already be on the device. In the test tools the name is
-fixed (`amiga-os-310-workbench.adf`, `tests/aros_wb.ADF_NAME`), and it was
-uploaded once by `tests/ureu_probe.py`'s `ensure_adf`: upload without
-overwrite, and if a file is already there, compare its SHA-256 with the
-local one and stop on a difference. The Wave 17 CLI uploads the user's ADF
-the same way, as `<vol>/amiga64/wb-<the first 12 hex digits of its
-SHA-256>.adf` (supervisor ruling) ([docs/guide/DISKS_AND_FILES.md](../guide/DISKS_AND_FILES.md)).
+The file must already be on the device. `tests/aros_wb.stage_disk` loads
+`<vol>/amiga64/<disk.adf_name>`; the test tools use the default name
+`amiga-os-310-workbench.adf` (`tests/aros_wb.ADF_NAME`), uploaded once by
+`tests/ureu_probe.py`'s `ensure_adf`: upload without overwrite, and if a
+file is already there, compare its SHA-256 with the local one and stop on
+a difference. The Wave 17 CLI has its own `ensure_adf`
+(`amiga64/device.py`) with the same rules. It first looks for the user's
+image on the device under `wb-<the first 12 hex digits of its
+SHA-256>.adf` and then under the tests' name, and reuses either one when
+its SHA-256 matches (`adf_candidates`). Otherwise it uploads the image
+as `wb-<12 hex digits>.adf` (supervisor ruling). It overwrites only an
+interrupted copy under that name, and only after asking
+(`run --replace-adf`)
+([docs/guide/DISKS_AND_FILES.md](../guide/DISKS_AND_FILES.md)).
 
 ## The overlay: changes on the REU copy only
 
@@ -151,7 +161,9 @@ and an REU range, close (CONTRACTS "UCI REU I/O"):
 - the Command Interface must be enabled; both devices keep it disabled in
   their saved settings, so sessions enable it inside the device hold,
   which restores it;
-- volumes: `/USB1` on the U64E, `/SD` on the C64U; never `/Flash` or
+- volumes: `/USB1` on the U64E and `/SD` on the C64U by default; the CLI
+  takes the first other writable volume when the default is missing, and
+  `--vol` picks one (`amiga64/device.choose_volume`). Never `/Flash` or
   `/Temp` (the tools refuse them).
 
 ## Snapshots: suspend and resume

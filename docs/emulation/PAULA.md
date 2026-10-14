@@ -43,7 +43,8 @@ use").
   One machine-loop event slot (**slot 6**) serves all four channels.
 - **Parking.** When the voice loops the block in hardware and the guest
   has not acknowledged the last AUDx interrupt, a block end needs no work;
-  the channel is then looked at only every half frame or so. A replay that
+  the channel is then looked at only every 1/2 to 1 frame (plus up to one
+block when blocks are longer than half a frame; `PARK_E` = 7094 E). A replay that
   ignores AUDx (most MOD players) costs little: 3.0% of the guest with four
   channels parked, measured on the U64E (HARDWARE "Paula on the U64
   sampler", leg `ips`).
@@ -59,7 +60,7 @@ Channel x is voice x (`$DF20 + 32x`; CONTRACTS "The sampler"):
 | RATE | (PER × 29563210 − 20761805) >> 24, clamped to 0..`$FFFF`: the nearest 160 ns step to PER × 281.937 ns |
 | VOL | min(vol, 63): the sampler's volume is 6 bits and 64 wraps to 0 |
 | PAN | 0 (left) for channels 0 and 3, 15 (right) for 1 and 2, the Amiga's sides |
-| REPEAT A/B + CTRL bit 1 | set while the latched next block is the tail of the voice's span, so the hardware loops Paula's repeat with no 6510 work |
+| REPEAT A/B + CTRL bit 1 | set while the latched next block starts inside the voice's span and ends exactly at its end, so the hardware loops Paula's repeat with no 6510 work |
 
 Otherwise the voice is reprogrammed by the 6510 at the block end. DMA off
 plays two zero bytes once (at `$DF4000`), because a stopped voice would

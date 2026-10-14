@@ -40,8 +40,9 @@ garbage.
 `host/hle_env.py` stages (guest map in [MEMORY.md](MEMORY.md)): a CLI
 `Process` and `CommandLineInterface` at `$000A40`/`$000480`, console
 FileHandles at `$000B30-$000B90`, a launch stub that enters the program
-with A0 = the argument string and D0 = its length, the exit word `$AFFF` as the final
-return address on the stack, and the HLE clock. The program loads at
+with A0 = the argument string and D0 = its length, the exit word `$AFFF`
+at `EXIT_ADDR` (`$000440`), whose address is the final return address on
+the stack, and the HLE clock. The program loads at
 `$010000` (`host/hunk.py` parses, `host/image.py` lays out and relocates).
 Its return code is D0 when it halts on the exit word.
 
@@ -53,7 +54,7 @@ lists (docs/HLE.md "What vbcc actually calls").
 
 | Library | Functions |
 |---|---|
-| exec | OpenLibrary (only `dos.library`, version ≤ 40), CloseLibrary (no-op), FindTask(NULL), AllocMem/FreeMem (first-fit heap with coalescing and checked frees, 7 MB), CreatePool/DeletePool/AllocPooled/FreePooled, AllocVec/FreeVec, StackSwap, SetSignal (no signals) |
+| exec | OpenLibrary (only `dos.library`, version ≤ 40; every other name, `exec.library` included, returns 0), CloseLibrary (no-op), FindTask(NULL), AllocMem/FreeMem (first-fit heap with coalescing and checked frees, 7 MB), CreatePool/DeletePool/AllocPooled/FreePooled, AllocVec/FreeVec, StackSwap, SetSignal (no signals) |
 | dos, console | Input, Output, Read, Write, IsInteractive; console output to the C64 text screen with scrolling; console input from the real keyboard (cooked lines, Ctrl-D or Ctrl-\ for EOF) |
 | dos, files | Open, Close, Read, Write, Seek, IoErr, DeleteFile, ChangeMode (the vc.lib case only) |
 | dos, other | GetVar (always "not found"), DateStamp (a call counter: one tick per call), SystemTagList (no shell: returns -1) |
@@ -95,9 +96,11 @@ and signals, AvailMem, Rename, Lock/Examine, NIL:/`*`/CONSOLE: through
 Open, libraries other than dos (math libraries for `%f` printf would be
 next), base-relative hunk relocations (rejected by `host/hunk.py`). A
 program that calls one of the missing library functions halts with the
-slot's name; OpenLibrary of another library returns 0, the special names
-fail through Open's normal error path, and `host/hunk.py` refuses
-base-relative relocations before the run. The full list
+slot's name; OpenLibrary of another library returns 0; and `host/hunk.py`
+refuses base-relative relocations before the run. Open takes names
+verbatim (docs/HLE_DOS.md "Names"), so on the RAM disk `NIL:`, `*` or
+`CONSOLE:` is an ordinary file name: MODE_NEWFILE creates a file with that
+name, and MODE_OLDFILE fails with 205 when no such file exists. The full list
 is docs/HLE.md "Still missing" and docs/HLE_DOS.md "Limitations".
 
 ## Out-of-date statements in the older HLE documents
@@ -106,6 +109,7 @@ is docs/HLE.md "Still missing" and docs/HLE_DOS.md "Limitations".
 |---|---|---|
 | docs/HLE.md "FileHandles", Read | console Read returns 0 (EOF): "there is no keyboard input yet" | keyboard input landed in Wave 5 (docs/HLE_CON.md) |
 | docs/HLE.md "Still missing" | "Keyboard input: Read on the console returns EOF" | same: done (docs/HLE_CON.md) |
+| `runtime/ops/hle.s` comment above `hle_read` | "kind 0/1/2 -> D0 = 0 (EOF: no keyboard input in this version; NIL:)" | console kinds 0/1 go to `hle_con_read` (the code below the comment); only the NIL kind returns 0 |
 | docs/HLE_DOS.md heading "ULTDOS backend: UCI mapping (HARDWARE-UNVALIDATED)" | unvalidated | validated on the U64E on 2026-09-24 (the same file's "Hardware validation" section) |
 | docs/HLE_DOS.md "Limitations", Integration | "needs WS-B1's hle.s routing for kinds ≥ $10" | merged in Wave 4: `hle.s` routes file kinds to `hle_dos_read`/`hle_dos_write` |
 | docs/HLE.md LVO table (DeletePool) and "Still missing" | the pool calls "need the pool wiring", "a merge step" | wired: `runtime/ops/hle.s` dispatches CreatePool/DeletePool/AllocPooled/FreePooled |
