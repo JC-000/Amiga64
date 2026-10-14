@@ -28,7 +28,7 @@ TESTED_FW = {"U64E": ("3.15",), "C64U": ("1.1.0",)}
 DIR = "amiga64"                          # <vol>/amiga64/ holds the ADF and the snapshot
 SNAP = "wb-snap.bin"
 TESTED_ADF_NAME = "amiga-os-310-workbench.adf"   # the name the tests use (tests/aros_wb.py)
-REU_ITEM, CI_ITEM = "REU Size", "Command Interface"
+REU_ITEM, CI_ITEM, SPEED_ITEM = "REU Size", "Command Interface", "CPU Speed"
 DMA_ITEM, FTP_ITEM = "Ultimate DMA Service", "FTP File Service"
 TEMP_MANAGED = re.compile(r"^temp[0-9a-fA-F]+$")      # firmware attachment files in /Temp
 TEMP_KEEP = 1         # the harness's sweep keeps the newest (temp_gc DEFAULT_KEEP / $U64_TEMP_GC_KEEP)
@@ -102,11 +102,18 @@ def choose_volume(writable: list[str], preferred: str, override: str | None) -> 
                       "or a microSD card (C64U) and try again")
 
 
+PING_DIRS = ("/sbin", "/usr/sbin")      # ping lives there; the harness runs a bare `ping`
+
+
 def set_env(host: str, password: str | None) -> None:
-    """The harness reads the device from U64_HOST/U64_PASSWORD."""
+    """The harness reads the device from U64_HOST/U64_PASSWORD.  W17-K2:
+    PATH gets /sbin and /usr/sbin (launchd, cron and `env -i` leave them out,
+    and the harness's liveness probe then calls a reachable device dead)."""
     os.environ["U64_HOST"] = host
     if password:
         os.environ["U64_PASSWORD"] = password
+    path = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    os.environ["PATH"] = os.pathsep.join(path + [d for d in PING_DIRS if d not in path])
 
 
 def find_item(full: dict, item: str) -> str | None:
@@ -147,6 +154,7 @@ def inspect_hold(hold: dict, det: Detected, storage, kind: str | None, mhz: int 
             det.notes.append(f"REU size choices unreadable: {e}")
     else:
         det.reu16 = False
+    check_speed(client, full, det, mhz)
     det.ci = find_item(full, CI_ITEM) is not None
     det.sampler = find_item(full, SAMPLER_ITEM) is not None
     det.dma, det.ftp = enabled(full, DMA_ITEM), enabled(full, FTP_ITEM)
@@ -178,6 +186,25 @@ def inspect_hold(hold: dict, det: Detected, storage, kind: str | None, mhz: int 
     return det
 
 
+def check_speed(client, full: dict, det: Detected, asked: int | None) -> None:
+    """W17-K2 (rev17-k #5): the session's speed must be one of the device's
+    CPU Speed choices, refused here rather than inside the session's hold.
+    Unreadable choices are a note (the harness checks again)."""
+    cat = find_item(full, SPEED_ITEM)
+    if cat is None:
+        return
+    try:
+        have = sorted({int(str(c).strip()) for c in client.get_config_choices(cat, SPEED_ITEM)
+                       if str(c).strip().isdigit()})
+    except Exception as e:              # noqa: BLE001 - reported, not fatal here
+        det.notes.append(f"CPU speed choices unreadable: {e}")
+        return
+    if have and det.mhz not in have:
+        why = "--mhz" if asked else f"the {det.kind} default (--kind/--mhz)"
+        raise DeviceError(f"{det.mhz} MHz ({why}): this device offers "
+                          f"{', '.join(map(str, have))} MHz; give --mhz with one of them")
+
+
 def probe(host: str, out: str, kind: str | None = None, mhz: int | None = None,
           vol: str | None = None, adf_sha: str | None = None,
           hold_fn=None, storage=None) -> Detected:
@@ -199,12 +226,22 @@ def probe(host: str, out: str, kind: str | None = None, mhz: int | None = None,
     return det
 
 
+def lock_key(host: str) -> tuple[str, bool]:
+    """(the harness's DeviceLock key for *host*, shared): a uid- key when the
+    harness's alias map (devices.toml / C64_DEVICE_ALIASES) lists the address,
+    else the address itself.  Local configuration only, no network."""
+    from c64_test_harness.backends.device_lock import normalize_device_host
+    key = normalize_device_host(host)
+    return key, key.startswith("uid-")
+
+
 def explain(host: str, e: BaseException) -> str:
     n = type(e).__name__
     s = str(e)
     if "DeviceLockTimeout" in n:
-        return (f"the Ultimate at {host} is busy (another amiga64 or a test holds it) and "
-                f"did not become free in {LOCK_TIMEOUT_S:.0f} s; try again later")
+        return (f"the Ultimate at {host} stayed busy (another program held it and stopped "
+                f"making progress for {LOCK_TIMEOUT_S:.0f} s, or it changed hands too often); "
+                f"try again later")
     if "FTP" in s and ("off" in s or "File Service" in s):
         return (f"the Ultimate at {host} has its FTP file service off; turn on "
                 f"'FTP File Service' in the network settings: {s}")
@@ -215,12 +252,22 @@ def explain(host: str, e: BaseException) -> str:
     return f"the Ultimate at {host}: {n}: {s}"
 
 
-def ensure_adf(host: str, vol: str, name: str, raw: bytes, storage=None) -> str:
+def ensure_adf(host: str, vol: str, name: str, raw: bytes, storage=None,
+               replace: bool = False) -> str:
     """The ADF on the device (inside a hold): uploaded when absent (never
-    overwritten), else verified by SHA-256.  -> "uploaded" or "present"."""
+    overwritten), else verified by SHA-256.  -> "uploaded" or "present".
+    *replace* (W17-K2, rev17-k #3): overwrite a broken copy, only under
+    amiga64's own name for these bytes (adf_name), never another file.
+    -> "replaced"."""
     if storage is None:
         import c64_test_harness as storage
     path = f"{vol}/{DIR}/{name}"
+    if replace:
+        if name != adf_name(hashlib.sha256(raw).hexdigest()):
+            raise DeviceError(f"{path} is not amiga64's own name for your ADF; amiga64 never "
+                              f"replaces it")
+        storage.storage_put_file(host, path, bytes(raw), overwrite=True, verify=True)
+        return "replaced"
     try:
         storage.storage_put_file(host, path, bytes(raw), overwrite=False, verify=True)
         return "uploaded"

@@ -10,6 +10,7 @@ metadata is in pyproject.toml.
 import os
 
 from setuptools import setup
+from setuptools.command.build_py import build_py
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 T = "amiga64._tree"
@@ -33,5 +34,14 @@ for d in ["host"] + subdirs("tests"):           # host/tests (the pytest suite) 
     package_dir[name] = d
     package_data[name] = ["*.s", "*.inc", "*.cfg"]
 
+class BuildPy(build_py):
+    """W17-K2: amiga64._tree maps to the repository root, whose only .py
+    file is this setup.py: it is not part of the runtime tree."""
+
+    def find_package_modules(self, package, package_dir):
+        return [m for m in super().find_package_modules(package, package_dir)
+                if (m[0], m[1]) != (T, "setup")]
+
+
 setup(packages=packages, package_dir=package_dir, package_data=package_data,
-      include_package_data=False)
+      include_package_data=False, cmdclass={"build_py": BuildPy})

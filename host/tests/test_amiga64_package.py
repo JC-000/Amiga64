@@ -22,17 +22,32 @@ def setup_kwargs() -> dict:
     got = {}
     fake = types.ModuleType("setuptools")
     fake.setup = lambda **kw: got.update(kw)
-    saved = sys.modules.get("setuptools")
-    sys.modules["setuptools"] = fake
+    bp = types.ModuleType("setuptools.command.build_py")
+    bp.build_py = type("build_py", (), {"find_package_modules": lambda self, p, d: STAND_IN_MODULES})
+    fakes = {"setuptools": fake, "setuptools.command": types.ModuleType("setuptools.command"),
+             "setuptools.command.build_py": bp}
+    saved = {n: sys.modules.get(n) for n in fakes}
+    sys.modules.update(fakes)
     try:
         spec = importlib.util.spec_from_file_location("_amiga64_setup", os.path.join(ROOT, "setup.py"))
         spec.loader.exec_module(importlib.util.module_from_spec(spec))
     finally:
-        if saved is None:
-            del sys.modules["setuptools"]
-        else:
-            sys.modules["setuptools"] = saved
+        for n, m in saved.items():
+            if m is None:
+                del sys.modules[n]
+            else:
+                sys.modules[n] = m
     return got
+
+
+STAND_IN_MODULES = [("amiga64._tree", "setup", "./setup.py"),
+                    ("amiga64._tree.host", "machine", "host/machine.py")]
+
+
+def test_the_tree_ships_no_setup_py():
+    """W17-K2 (rev17-k nit): the root's setup.py is not part of the tree."""
+    bp = setup_kwargs()["cmdclass"]["build_py"]
+    assert bp.find_package_modules(bp(), "x", "y") == [STAND_IN_MODULES[1]]
 
 
 def test_pyproject_metadata():
@@ -108,6 +123,8 @@ def test_the_wheel(tmp_path):
         for f in os.listdir(os.path.join(ROOT, "prebuilt")):
             assert f"amiga64/_tree/prebuilt/{f}" in names, f
     assert not any(n.startswith(("host/", "tests/", "amiga64/_tree/host/tests/")) for n in names)
+    assert not [n for n in names if n.startswith("amiga64/_tree/") and n.count("/") == 2
+                and n.endswith(".py")]                  # W17-K2: no _tree/setup.py (rev17-k nit)
     ep = next(n for n in names if n.endswith("entry_points.txt"))
     assert "amiga64 = amiga64.cli:main" in z.read(ep).decode()
     lic = [n for n in names if "/licenses/" in n]

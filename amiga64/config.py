@@ -204,8 +204,13 @@ class Prompter:
                 continue
             return p
 
-    def confirm(self, q: str) -> bool:
-        if self.yes:
+    def confirm(self, q: str, flag: str = "--yes", given: bool | None = None,
+                default: bool = True) -> bool:
+        """*given*: the flag that answers yes (default: --yes); *default*:
+        the answer to an empty line."""
+        if self.yes if given is None else given:
             return True
-        a = self._ask(f"{q} [Y/n] ", "--yes").lower()
-        return a in ("", "y", "yes")
+        if not self.tty:
+            raise ConfigError(f"{q} (no terminal to ask on: give {flag})")
+        a = self._ask(f"{q} {'[Y/n]' if default else '[y/N]'} ", flag).lower()
+        return a in ("y", "yes") or (default and a == "")

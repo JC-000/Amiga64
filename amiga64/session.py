@@ -61,6 +61,7 @@ class Plan:
     out: str = ""
     adf_name: str = D.TESTED_ADF_NAME
     upload: bool = False                 # put the ADF on <vol>/amiga64/ first
+    replace: bool = False                # ... replacing a broken copy of amiga64's own name
 
 
 def say(msg: str) -> None:
@@ -109,14 +110,17 @@ def make_disk(raw: bytes, player: bytes, mod: bytes, reqs: list[A.Request]):
     from host import adf_files as F
     from host import adf_overlay as O
     from tests import aros_modwb as MW
-    d = MW.ModDisk(raw, A.SCRIPT, player, mod, with_info=True, standin=False)
-    rep = A.Report()
-    if reqs:
-        e = F.DiskEdit(d.image)
-        rep = A.add(e, reqs)
-        img = e.data()
-        d.ov = F.overlay_of(raw, img, f"{A.SCRIPT}+modwb+files", d.ov.header, d.ov.data_blocks)
-        d.image = O.apply(raw, d.ov)
+    try:
+        d = MW.ModDisk(raw, A.SCRIPT, player, mod, with_info=True, standin=False)
+        rep = A.Report()
+        if reqs:
+            e = F.DiskEdit(d.image)
+            rep = A.add(e, reqs)
+            img = e.data()
+            d.ov = F.overlay_of(raw, img, f"{A.SCRIPT}+modwb+files", d.ov.header, d.ov.data_blocks)
+            d.image = O.apply(raw, d.ov)
+    except O.AdfError as e:             # W17-K2: rev17-k #2, never a traceback
+        raise SessionError(f"cannot build the session disk: {e} (amiga64 doctor)") from None
         if d.image != img:
             raise SessionError("internal: the session overlay does not reproduce the image")
     return d, rep
@@ -162,14 +166,17 @@ def _ready(plan: Plan, what: str) -> None:
         ("; Ctrl-C saves the session to the device first" if plan.save else ""))
 
 
-def run(plan: Plan, rom, disk) -> tuple[list[str], dict]:
-    """Boot the Workbench from *disk* and hold it for the user."""
+def run(plan: Plan, rom, disk, rep: dict | None = None) -> tuple[list[str], dict]:
+    """Boot the Workbench from *disk* and hold it for the user.  *rep*: the
+    report, filled as the session goes (the caller writes it even when the
+    session is interrupted)."""
     from tests import aros_resume as RS
     from tests import aros_wb as WB
     s = _speed(plan)
     _globals(plan, s)
-    rep: dict = {"backend": plan.backend, "host": plan.host, "mhz": plan.mhz, "vol": plan.vol,
-                 "adf_name": plan.adf_name, "mach_s": s}
+    rep = {} if rep is None else rep
+    rep.update(backend=plan.backend, host=plan.host, mhz=plan.mhz, vol=plan.vol,
+               adf_name=plan.adf_name, mach_s=s)
     snap = f"{plan.vol}/{D.DIR}/{D.SNAP}" if plan.save and plan.vol else None
     disk.adf_name = plan.adf_name       # tests/aros_wb.stage_disk loads <vol>/amiga64/<this>
 
@@ -178,7 +185,8 @@ def run(plan: Plan, rom, disk) -> tuple[list[str], dict]:
         WB.enable_ci(m, rep)
         if plan.upload:
             say(f"copying your ADF to {plan.vol}/{D.DIR}/{plan.adf_name} ...")
-            rep["adf"] = D.ensure_adf(plan.host, plan.vol, plan.adf_name, disk.raw)
+            rep["adf"] = D.ensure_adf(plan.host, plan.vol, plan.adf_name, disk.raw,
+                                      replace=plan.replace)
         sn = RS.Snap(m, m.prg, RS.rom_id(rom))
         say("booting AROS and your Workbench (" + ("VICE: many minutes" if m.vice else
                                                    "about 2-4 minutes") + ") ...")
@@ -201,13 +209,14 @@ def run(plan: Plan, rom, disk) -> tuple[list[str], dict]:
     return _session(plan, body), rep
 
 
-def resume(plan: Plan, rom) -> tuple[list[str], dict]:
-    """Resume <vol>/amiga64/wb-snap.bin and hold it for the user."""
+def resume(plan: Plan, rom, rep: dict | None = None) -> tuple[list[str], dict]:
+    """Resume <vol>/amiga64/wb-snap.bin and hold it for the user (*rep*: as run's)."""
     from tests import aros_wb as WB
     s = _speed(plan)
     _globals(plan, s)
     path = f"{plan.vol}/{D.DIR}/{D.SNAP}"
-    rep: dict = {"backend": plan.backend, "host": plan.host, "mhz": plan.mhz, "snap": path}
+    rep = {} if rep is None else rep
+    rep.update(backend=plan.backend, host=plan.host, mhz=plan.mhz, snap=path)
 
     def body(m) -> list[str]:
         WB.enable_ci(m, rep)

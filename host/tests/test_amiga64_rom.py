@@ -91,3 +91,51 @@ def test_source_notice_names_the_build_and_the_licence():
         t = f.read()
     arch, _ = machine._manifest(machine.MANIFEST)
     assert arch in t and "APL 1.1" in t and "github.com/aros-development-team/AROS" in t
+
+
+# --- W17-K2: rev17-k #4 and #6 -------------------------------------------------------
+
+@pytest.mark.parametrize("cache", [False, True])
+def test_a_broken_bundle_in_an_install_says_reinstall(tmp_path, cache):
+    """An installed package has no tools/aros/fetch.sh: the advice is to
+    reinstall, never to delete the bundle or run fetch.sh (rev17-k #4)."""
+    man, root, bundle = _setup(tmp_path, tamper_bundle="aros-rom.bin", cache=cache,
+                               tamper_cache="aros-rom.bin" if cache else None)
+    rom, why = machine.find_rom(man, root, bundle, checkout=False)
+    assert rom is None
+    assert why.startswith("broken install: ") and "reinstall amiga64" in why
+    assert "fetch.sh" not in why and "delete" not in why
+
+
+def test_no_bundle_in_an_install_says_reinstall(tmp_path):
+    man, root, bundle = _setup(tmp_path, bundle=False, cache=False)
+    rom, why = machine.find_rom(man, root, bundle, checkout=False)
+    assert rom is None and why.startswith("broken install: ") and "fetch.sh" not in why
+
+
+def test_a_broken_bundle_in_a_checkout_names_git_not_delete(tmp_path):
+    man, root, bundle = _setup(tmp_path, tamper_bundle="aros-rom.bin", cache=False)
+    rom, why = machine.find_rom(man, root, bundle, checkout=True)
+    assert rom is None and "SHA256 mismatch" in why and "third_party" in why
+    assert "delete the directory" not in why.split("bundle:")[1]
+
+
+def test_the_checkout_is_detected_by_fetch_sh(tmp_path, monkeypatch):
+    assert machine.is_checkout() is True                 # this tree is a checkout
+    monkeypatch.setattr(machine, "ROOT", str(tmp_path))  # an installed tree: no fetch.sh
+    (tmp_path / "tools" / "aros").mkdir(parents=True)
+    (tmp_path / "tools" / "aros" / "manifest.txt").write_text("")
+    assert machine.is_checkout() is False
+
+
+def test_source_notice_quotes_the_roms_git_revision():
+    """SOURCE.txt pins the source revision the ROM itself states (rev17-k #6);
+    only that version string is read from the ROM."""
+    with open(os.path.join(machine.BUNDLE, "aros-rom.bin"), "rb") as f:
+        rom = f.read()
+    stamp = b"Version Git 6a327488b5 (https://github.com/aros-development-team/AROS)\nbuilt on 2026-09-21."
+    assert stamp in rom
+    with open(os.path.join(machine.BUNDLE, "SOURCE.txt")) as f:
+        t = f.read()
+    assert "6a327488b5" in t and "Version Git 6a327488b5" in t
+    assert "github.com/aros-development-team/AROS/commit/6a327488b5" in t
