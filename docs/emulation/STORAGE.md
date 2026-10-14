@@ -102,8 +102,9 @@ a difference. The Wave 17 CLI has its own `ensure_adf`
 image on the device under `wb-<the first 12 hex digits of its
 SHA-256>.adf` and then under the tests' name, and reuses either one when
 its SHA-256 matches (`adf_candidates`). Otherwise it uploads the image
-as `wb-<12 hex digits>.adf` (supervisor ruling). It overwrites only an
-interrupted copy under that name, and only after asking
+as `wb-<12 hex digits>.adf` (supervisor ruling). It overwrites only a
+file under that name whose bytes differ (an interrupted copy, say), and
+only after asking
 (`run --replace-adf`)
 ([docs/guide/DISKS_AND_FILES.md](../guide/DISKS_AND_FILES.md)).
 

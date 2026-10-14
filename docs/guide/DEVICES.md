@@ -95,7 +95,7 @@ All in one folder, `<volume>/amiga64/` (amiga64 never writes to
 
 | File | Written by | Notes |
 |---|---|---|
-| your ADF, as `wb-<first 12 hex digits of its SHA-256>.adf` | `run`, the first time, after asking | if the same image is already there (also as `amiga-os-310-workbench.adf`) it is reused. Never overwritten, except an interrupted copy under this name, and only when you answer yes or pass `--replace-adf` |
+| your ADF, as `wb-<first 12 hex digits of its SHA-256>.adf` | `run`, the first time, after asking | if the same image is already there (also as `amiga-os-310-workbench.adf`) it is reused. Never overwritten, except a file under this name whose bytes differ (an interrupted copy, say), and only when you answer yes or pass `--replace-adf` |
 | `wb-snap.bin` | `run --save` | the saved session, about 6 MB |
 
 The C64U's SD card must be a card the firmware can use: in one case a
@@ -103,11 +103,13 @@ card listed as empty and refused `mkdir` until the user unlocked it and
 reformatted it as MBR + FAT32 (which of the two fixed it is not known) (docs/HARDWARE.md "Device storage legs on the U64E", its
 "C64U file legs" part).
 
-The firmware itself also leaves a file in `/Temp` each time a program is
+The firmware also creates a file in `/Temp` each time a program is
 started on the C64: one per `run` (two with sound) and two or three per
-`resume`. The harness deletes the older ones under its lock and keeps the
-newest, so `doctor` treats 0 or 1 as normal and warns at 2 or more (a
-full `/Temp` can crash a C64 Ultimate; a power cycle clears it).
+`resume`. The U64E's 3.15 firmware deletes them itself. The C64U's 1.1.0
+firmware does not, so the harness deletes the older ones under its lock
+and keeps the newest. `doctor` treats 0 or 1 as normal and warns at 2 or
+more (a full `/Temp` can crash a C64 Ultimate; `/Temp` is a RAM disk, so
+a power cycle clears it).
 
 ## Other harness tools on the same device
 

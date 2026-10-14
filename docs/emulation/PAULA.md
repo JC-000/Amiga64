@@ -44,7 +44,7 @@ use").
 - **Parking.** When the voice loops the block in hardware and the guest
   has not acknowledged the last AUDx interrupt, a block end needs no work;
   the channel is then looked at only every 1/2 to 1 frame (plus up to one
-block when blocks are longer than half a frame; `PARK_E` = 7094 E). A replay that
+  block when blocks are longer than half a frame; `PARK_E` = 7094 E). A replay that
   ignores AUDx (most MOD players) costs little: 3.0% of the guest with four
   channels parked, measured on the U64E (HARDWARE "Paula on the U64
   sampler", leg `ips`).
