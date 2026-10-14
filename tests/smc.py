@@ -23,7 +23,7 @@ import argparse
 import os
 import sys
 
-REPO = "/Users/someone/Documents/Amiga64"
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
 from host import image  # noqa: E402

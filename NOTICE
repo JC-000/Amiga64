@@ -19,6 +19,14 @@ third_party/aros/aros-rom.bin, third_party/aros/aros-ext.bin
   APL 1.1 are offered by the Amiga64 authors alone, not by the AROS Initial
   Developer or any AROS Contributor.
 
+fixtures/vectors/*.json.gz
+  Filtered, subsampled derivatives of the SingleStepTests/680x0 68000 test
+  sets (https://github.com/SingleStepTests/680x0, commit e0d5ece9).  That
+  repository carries no licence file; it publishes the tests "as an aid to
+  reimplementation".  They are used only by the test suite, and their status
+  is recorded in fixtures/vectors/UPSTREAM_LICENSE.  If you are the upstream
+  author and want them removed or relicensed, please open an issue.
+
 Not included
   Amiga64 does not include, and never uploads anywhere, any Commodore or
   Amiga, Inc. software.  You supply your own Workbench 3.1 disk image (ADF);
