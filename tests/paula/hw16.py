@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """W16-P hardware probe (one U64E hold, supervisor-approved 2026-10-12).
 
-    U64_HOST=10.43.23.81 U64_BASELINE_ON_ENTRY=0 python3 -m tests.paula.hw16 \
+    U64_HOST=192.0.2.81 U64_BASELINE_ON_ENTRY=0 python3 -m tests.paula.hw16 \
         --prg build/runner.prg --out build/evidence/w16-p/hw16
 
 Legs, in one DeviceLock hold (tests/bench/u64_session.u64_hold; config
@@ -30,7 +30,7 @@ IDENTICAL afterwards or exit 3):
            --mhz (phi2 = ticks/frame x the frame rate).
 Every voice is stopped by the 6510 before the hold restores, whatever happened.
 
-    U64_HOST=10.43.23.158 ... python3 -m tests.paula.hw16 --mhz 64 --legs df21,rbwin,cia ...
+    U64_HOST=192.0.2.158 ... python3 -m tests.paula.hw16 --mhz 64 --legs df21,rbwin,cia ...
 """
 
 from __future__ import annotations
@@ -132,7 +132,7 @@ def stream(client):
     from c64_test_harness.backends.u64_audio_capture import (
         AudioCapture, U64_NTSC_AUDIO_RATE_HZ)
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.connect((os.environ.get("U64_HOST", "10.43.23.81"), 80))
+    s.connect((os.environ["U64_HOST"], 80))      # the device address (required)
     ip = s.getsockname()[0]
     s.close()
     cap = AudioCapture(port=0, sample_rate=U64_NTSC_AUDIO_RATE_HZ)

@@ -1,4 +1,4 @@
-[19:16:03] kbd_echo MANUAL on 10.43.23.81, runs nosettle@48, fixed@48, poll 1s, prg build/w6-int/runner.prg
+[19:16:03] kbd_echo MANUAL on 192.0.2.81, runs nosettle@48, fixed@48, poll 1s, prg build/w6-int/runner.prg
 [19:16:03] firmware gate: Ultimate 64 Elite fw 3.15 git c47155b7 fpga 125 core 1.50 = resting build (git c47155b7, core 1.50): proceeding
 
 ========================================================================

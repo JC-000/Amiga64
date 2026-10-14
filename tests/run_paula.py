@@ -1314,7 +1314,7 @@ class HwRig(Rig):
             AudioCapture, U64_NTSC_AUDIO_RATE_HZ)
         client = self.t.client
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect((os.environ.get("U64_HOST", "10.43.23.81"), 80))
+        s.connect((os.environ["U64_HOST"], 80))      # the device address (required)
         ip = s.getsockname()[0]
         s.close()
         cap = AudioCapture(port=0, sample_rate=U64_NTSC_AUDIO_RATE_HZ)

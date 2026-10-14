@@ -490,14 +490,14 @@ def test_run_first_time(home, capsys, monkeypatch):
         return [], {}
     monkeypatch.setattr(S, "run", fake_run)
     monkeypatch.setattr(sys, "stdin", type("T", (io.StringIO,), {"isatty": lambda s: True})(
-        "10.43.23.81\ny\n"))
+        "192.0.2.81\ny\n"))
     rc, out, err = _run(["run", "--minutes", "0"], capsys)
     assert rc == 0, out + err
     p = calls["plan"]
-    assert (p.host, p.mhz, p.vol, p.upload, p.audio) == ("10.43.23.81", 48, "/USB1", True, True)
+    assert (p.host, p.mhz, p.vol, p.upload, p.audio) == ("192.0.2.81", 48, "/USB1", True, True)
     assert p.adf_name.startswith("wb-") and p.minutes == 0.0
     cfg = C.load()
-    assert cfg["device"]["host"] == "10.43.23.81"
+    assert cfg["device"]["host"] == "192.0.2.81"
     assert cfg["disk"]["adf"] == str(home / "adf" / "wb.adf")
     assert "Copy wb.adf (880 KB)" in out
 
@@ -863,11 +863,11 @@ def test_doctor_asks_for_the_address_on_a_terminal(home, capsys, monkeypatch):
     after a probe that worked."""
     seen = {}
     monkeypatch.setattr(D, "probe", lambda host, *a, **k: (seen.setdefault("host", host), _det())[1])
-    monkeypatch.setattr(sys, "stdin", _tty("10.43.23.81\n"))
+    monkeypatch.setattr(sys, "stdin", _tty("192.0.2.81\n"))
     rc, out, err = _run(["doctor"], capsys)
     assert rc == 0, out + err
-    assert seen["host"] == "10.43.23.81" and "Address of your Ultimate" in out
-    assert C.load()["device"]["host"] == "10.43.23.81"
+    assert seen["host"] == "192.0.2.81" and "Address of your Ultimate" in out
+    assert C.load()["device"]["host"] == "192.0.2.81"
 
 
 def test_doctor_saves_no_address_when_the_probe_fails(home, capsys, monkeypatch):
@@ -906,14 +906,14 @@ def test_doctor_names_the_lock_key(home, capsys, monkeypatch, tmp_path):
     monkeypatch.delenv("C64_DEVICE_ALIASES", raising=False)
     monkeypatch.setenv("C64_DEVICE_ALIASES_FILE", str(tmp_path / "none.toml"))
     DA._reset_alias_cache()
-    rc, out, err = _run(["doctor", "--host", "10.43.23.81"], capsys)
-    assert ("OK   device lock: 10.43.23.81 (address key; tools using another address for the "
+    rc, out, err = _run(["doctor", "--host", "192.0.2.81"], capsys)
+    assert ("OK   device lock: 192.0.2.81 (address key; tools using another address for the "
             "same device won't queue behind it)") in out
-    monkeypatch.setenv("C64_DEVICE_ALIASES", "601A96=10.43.23.81")
+    monkeypatch.setenv("C64_DEVICE_ALIASES", "ABC123=192.0.2.81")
     DA._reset_alias_cache()
-    rc, out, err = _run(["doctor", "--host", "10.43.23.81"], capsys)
+    rc, out, err = _run(["doctor", "--host", "192.0.2.81"], capsys)
     DA._reset_alias_cache()
-    assert ("OK   device lock: uid-601a96 (shared with other harness tools via devices.toml)"
+    assert ("OK   device lock: uid-abc123 (shared with other harness tools via devices.toml)"
             in out), out
 
 
@@ -924,7 +924,7 @@ def test_the_cli_passes_home_and_the_alias_settings_through(home, capsys, monkey
     """tonight's collision: a scratch HOME hid devices.toml and the lock fell
     back to the address key.  amiga64 never changes these variables."""
     want = {"HOME": str(tmp_path / "h"), "XDG_CONFIG_HOME": str(tmp_path / "x"),
-            "C64_DEVICE_ALIASES": "601a96=10.9.9.9", "C64_DEVICE_ALIASES_FILE": str(tmp_path / "d.toml")}
+            "C64_DEVICE_ALIASES": "abc123=10.9.9.9", "C64_DEVICE_ALIASES_FILE": str(tmp_path / "d.toml")}
     for k, v in want.items():
         monkeypatch.setenv(k, v)
     seen = []
@@ -983,7 +983,7 @@ def test_a_broken_alias_config_is_a_warning(home, capsys, monkeypatch):
     monkeypatch.setenv("C64_DEVICE_ALIASES", "not an alias list")
     DA._reset_alias_cache()
     try:
-        rc, out, err = _run(["doctor", "--host", "10.43.23.81"], capsys)
+        rc, out, err = _run(["doctor", "--host", "192.0.2.81"], capsys)
     finally:
         monkeypatch.delenv("C64_DEVICE_ALIASES")
         DA._reset_alias_cache()

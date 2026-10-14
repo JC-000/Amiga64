@@ -26,7 +26,7 @@ On VICE it is silent, but every Paula register effect and every replay tick is c
   - Never pkill or killall. Stop only PIDs you started.
   - No raw curl, FTP or REST, not even `/v1/info`.
   - Never open or rely on the Ultimate menu.
-- **Hardware: the U64E ONLY**, at 10.43.23.81, fw 3.15, normally 48 MHz. The C64U is away with the user; don't use it.
+- **Hardware: the U64E ONLY**, at 192.0.2.81, fw 3.15, normally 48 MHz. The C64U is away with the user; don't use it.
   - The U64E is shared with other projects (c64-https), so honour the DeviceLock queue.
   - **W15-P is the U64E's only owner in this wave.** W15-M and W15-U ask the supervisor first.
   - Every hold that maps the sampler sets `C64 and Cartridge Settings / Map Ultimate Audio $DF20-DFFF` inside the hold, and the hold restores it.

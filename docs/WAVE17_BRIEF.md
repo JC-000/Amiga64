@@ -36,8 +36,8 @@ Worktrees: `.claude/worktrees/w17-<pkg>`, branch `wave17/<pkg>`, created by the 
   - No raw REST, curl or FTP. Never use the Ultimate menu.
 - **Long runners:** reinstall `signal.default_int_handler`; give every leg a deadline; SIGTERM leads to the restore; write DONE markers you poll.
 - **Devices: both are free for this wave (user 2026-10-13).**
-  - **U64E** at 10.43.23.81: NTSC, 48 MHz, wired, volume /USB1.
-  - **C64U** at 10.43.23.26 (uid 5D2518, fw 1.1.0): NTSC, 64 MHz, **ethernet** (the UDP audio stream works), volume /SD.
+  - **U64E** at 192.0.2.81: NTSC, 48 MHz, wired, volume /USB1.
+  - **C64U** at 192.0.2.26 (uid DEF456, fw 1.1.0): NTSC, 64 MHz, **ethernet** (the UDP audio stream works), volume /SD.
   - Tell the supervisor before each hold. Only one agent holds a given device at a time, and the DeviceLock queue decides.
 - **Clean room, as before.**
   - No AROS source and no Commodore NDK/ROM sources.

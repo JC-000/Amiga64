@@ -736,7 +736,7 @@ Tell the operator before the first session:
 
 ```sh
 cd <your checkout>
-export U64_HOST=10.43.23.81
+export U64_HOST=192.0.2.81
 PRG=build/w6-int/runner.prg
 D=build/evidence/kbd-ab-$(date +%Y%m%d-%H%M%S)   # new per A/B (review9 F1)
 AB() {  # AB <pair> <runs> <poll>
@@ -867,7 +867,7 @@ controls can kill them**. The mutant totals are in
 The supervisor runs this with the user:
 
 ```sh
-U64_HOST=10.43.23.81 python3 -m tests.kbd_echo --prg build/<pkg>/runner.prg \
+U64_HOST=192.0.2.81 python3 -m tests.kbd_echo --prg build/<pkg>/runner.prg \
     --backend u64 --out-dir build/evidence/kbd-hw
 ```
 
