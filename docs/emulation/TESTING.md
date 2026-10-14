@@ -11,8 +11,8 @@ and how to run them.
 | Layer | What it checks | Needs |
 |---|---|---|
 | **host tests** (`host/tests/`, and the host-only tests under `tests/`; pytest) | the Python tools and every host reference model; many 6502 modules on an in-process 6502 + REU model (`test_td.py`, `test_snap_file.py`, …) | Python only |
-| **VICE legs** (`tests/*.py --backend vice`; the `aros_*` tools default to VICE, the older drivers to `auto`, which follows `C64_BACKEND`) | the real runner PRG in `x64sc` with a 16 MB REU, driven through the harness's binary monitor | VICE, cc65 |
-| **hardware legs** (`--backend u64`) | the same runner on a U64E or C64U over the network | a device, the harness |
+| **VICE legs** (`tests/*.py --backend vice`; the `aros_*` tools and `run_dos`, `run_inp`, `run_blt`, `run_cwin` default to VICE; `run_program`, `run_hello`, `run_vbcc`, `run_con`, `run_vectors` and `smc` default to `auto`, which follows `C64_BACKEND`) | the real runner PRG in `x64sc` with a 16 MB REU, driven through the harness's binary monitor | VICE, cc65 |
+| **hardware legs** (`--backend u64`; `run_paula` uses `--hw u64`) | the same runner on a U64E or C64U over the network | a device, the harness |
 | **golden vectors** | one 68000 instruction per case against SingleStepTests | VICE (or a device) |
 | **the AROS reference oracle** | vbcc programs on Amiga64 vs on AROS in FS-UAE | FS-UAE, the AROS ROM, vbcc |
 | **the boot model** (`tools/s3probe/aros_boot_model.py`) | a host model of an A500 booting the AROS ROM, the reference for serial text and screens | the s3probe venv (`tools/s3probe/setup_venv.sh`), the ROM |
@@ -69,7 +69,7 @@ repo), `run_dos.py` (files), `run_con.py` (keyboard). The oracle,
 
 | Tool | Legs (main) | Proves |
 |---|---|---|
-| `tests/aros_boot.py` | `m1`, `m2`, `m3`, `ablate`, `lat`, `poll`, `s0` | AROS boots: the serial text equals the boot model's byte for byte up to "romtaginit done"; the insert-disk screen equals one of the model's conversions |
+| `tests/aros_boot.py` | `m1`, `m2`, `m3`, `ablate`, `lat`, `poll`, `s0`, `wkhook`, `pix` | AROS boots: the serial text equals the boot model's byte for byte up to "romtaginit done"; the insert-disk screen equals one of the model's conversions |
 | `tests/aros_resume.py` | `mid`, `m3`, `m3file` | suspend and resume, REU-resident and through a file, with every refusal |
 | `tests/aros_wb.py` | `w`, `nohle`, `resume`, `e2e`, `demo-boot`, `demo`, `modwb`, `aud`, `audres`, `cost` | Workbench from the ADF; scripted mouse to the disk icon; the attended demos; ModPlayer launched from Workbench |
 | `tests/run_paula.py` | VICE legs and `--hw u64` | Paula's model on VICE, pitch/level/timing on the U64E through the audio stream |
@@ -96,9 +96,11 @@ These rules are binding for every agent and every tool (every wave brief,
 - Long runners reinstall `signal.default_int_handler`, give every leg a
   deadline, turn SIGTERM into the restore path, and write DONE markers.
 - One holder per device at a time; the DeviceLock queue decides.
-- The device's own address comes from `U64_HOST`; `U64_BASELINE_ON_ENTRY=0`
-  disables the harness's factory baseline on entry, which the recorded
-  sessions used.
+- In the test tools the device's address comes from `U64_HOST`
+  (the `amiga64` CLI looks at `--host`, then `AMIGA64_HOST`, then
+  `U64_HOST`, then its config file). `U64_BASELINE_ON_ENTRY=0` is
+  required (`tests/bench/u64_session.py`): it disables the harness's
+  factory baseline on entry.
 
 ## Device quirks that affect tests
 
@@ -107,7 +109,10 @@ These rules are binding for every agent and every tool (every wave brief,
   (`tests/aros_boot.Machine.serial`), and a
   stale-read effect under heavy REU DMA is not ruled out (docs/HARDWARE.md
   "Reading a running C64's RAM over REST at 48 MHz").
-- The C64U on WiFi refused the UDP audio stream; on ethernet it works.
+- The C64U on WiFi refused the UDP audio stream; on ethernet it works
+  (2026-10-13: 1814 packets, none dropped, in the `rbsil` leg;
+  `build/evidence/sup16/c64u-hw16-eth/run.log` in the w16-int worktree,
+  CONTRACTS "Silence at the end").
 - The rig keyboard's LED board hides the first key hold after about two
   minutes idle; attended keyboard tests start with a SHIFT tap
   (docs/HARDWARE.md "Test-rig note").
@@ -117,9 +122,9 @@ These rules are binding for every agent and every tool (every wave brief,
 
 | Model | Mirrors |
 |---|---|
-| `host/chipset_ref.py` | custom registers, copper, blitter, interrupts, CIAs, machine time |
+| `host/chipset_ref.py` | custom registers, copper, blitter, interrupts, CIAs, guest time and beam (`MachTime`) |
 | `host/c2v_ref.py` | the display decision, the conversion, the colour rule, the LUT |
-| `host/inp_ref.py` | the input scan, ramp, 1351 decode, hysteresis, queue |
+| `host/inp_ref.py` | the input scan, ramp, 1351 decode, hysteresis, the left button's edge queue (W14-M) |
 | `host/paula_ref.py` | the Paula model, `cfg_r16`, the sampler RATE |
 | `host/mod_ref.py` | the MOD replay's Paula writes and `mod_view` per tick |
 | `host/snapfmt.py` | the snapshot format and the build ID |

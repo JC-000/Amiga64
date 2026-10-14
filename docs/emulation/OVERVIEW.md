@@ -154,8 +154,9 @@ trimmed Startup-Sequence): **130.5 s** on the C64U at 64 MHz and
 from the ADF"). A saved session resumes from a file in 9.4-9.8 s (C64U) or
 about 3.8 s (U64E) to the same picture (same section).
 With the Wave 17 `amiga64 run` (the same path with the ModPlayer disk and
-real input) the Workbench was up after 135 s on the C64U and 180 s on the
-U64E, and `amiga64 resume` took 1.23 s and 6.45 s (W17-K's device runs,
+real input) the Workbench was up after about 180 s on the U64E and about
+135 s on the C64U, and the resume itself in `amiga64 resume` took 1.23 s
+on the U64E and 6.45 s on the C64U (W17-K's device runs,
 `w17-k/build/evidence/w17-k/PROGRESS.md` HANDOFF).
 
 Sources: `tests/aros_wb.py` (`session`, `enable_ci`, `map_sampler`,
@@ -195,8 +196,9 @@ Everything about this is in [CIA_AND_TIMING.md](CIA_AND_TIMING.md).
 | Guest programs | `fixtures/c/` (vbcc C), `fixtures/mod/` (MOD replay and UI), `fixtures/modwb/` (the Workbench launcher) | `host/modgen.py`, `host/mod_ref.py`, `host/ui_preview.py` | `tests/run_mod.py`, `run_modui.py`, `run_player.py`, `run_modwb.py`, `aros_modwb.py` |
 
 Link order matters: the Makefile links `chip.s`, `cia.s`, `cop.s`, `blt.s`,
-`disp.s`, `mach.s`, `inp.s`, `td.s`, `snap.s`, `ureu.s` last, in that
-order, so that adding to a later module never moves the earlier ones and
+`disp.s`, `mach.s`, `inp.s`, `td.s`, `snap.s`, `ureu.s` after the core,
+in that order (only the generated `dispatch.s` follows them, and it is
+pinned at `$0900` in its own DISPATCH segment), so that adding to a later module never moves the earlier ones and
 so that the snapshot image (`snap.s`) ends with every other module's BSS.
 The reasons are recorded in the Makefile comments and in each CONTRACTS
 section's "Link order" item.

@@ -77,7 +77,7 @@ Two consequences matter for the rest of the design:
    read the REU. No guest is known to do that.
 
 Tests: `tests/run_chip.py`, `host/tests/test_chip_hotpath.py`,
-`tests/run_pf.py` legs `lut-trap` and `dosbuf`.
+`tests/run_pf.py` legs `shim` (its `lut-trap` check) and `dosbuf`.
 
 ## The two guest maps
 

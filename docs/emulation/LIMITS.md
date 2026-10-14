@@ -12,13 +12,16 @@ it is documented in detail.
 - **Supported targets:** a C64 Ultimate or an Ultimate 64 Elite with the
   REU at 16 MB, driven from a macOS or Linux host. Windows is a documented
   non-goal for now (WAVE17 brief). VICE is a test vehicle, not a way to use
-  the emulator: it has no sampler and says nothing about speed.
+  the emulator: it has no sampler and says nothing about speed (`amiga64
+  run` keeps a hidden `--backend vice` for developers; it needs `x64sc`).
 - **Software:** AROS (bundled) as the Kickstart replacement, booting the
   user's own Workbench 3.1 ADF; Hunk executables in program mode; the
   project's own MOD player. Commercial games and demos that race the beam
   are out of scope (the pre-Wave-17 README's "Non-goals").
-- **Speed:** well under a 1 MHz 68000 ([CPU.md](CPU.md)). Guest time is
-  dilated ([CIA_AND_TIMING.md](CIA_AND_TIMING.md)).
+- **Speed:** about a 0.8-1 MHz 68000 on light code and less on the AROS
+  boot, measured on the U64E ([CPU.md](CPU.md), from docs/HARDWARE.md
+  finding 7 and PERF (l)). Guest time is dilated
+  ([CIA_AND_TIMING.md](CIA_AND_TIMING.md)).
 
 ## CPU
 
@@ -50,8 +53,8 @@ it is documented in detail.
 | copper and blitter DMA cycles, BBUSY | not modelled | same, "Blitter" |
 | blitter line mode | counted, draws nothing | CONTRACTS "Line mode" |
 | blitter D overlapping A/B/C within one row | row-wise, differs from FS-UAE | CONTRACTS "Not modelled" (blitter) |
-| display modes | lores 2 planes exact; hires 1-4 planes as a silhouette or the 1:1 view; everything else blank (HAM, dual playfield, lores 1/3/4/5 planes) | [CHIPSET.md](CHIPSET.md) |
-| BPLCON1 scroll, BPLCON2, horizontal window, colours 16-31 | ignored (except pointer colours 17-19; `disp_frame` copies DMACON through COLOR15) | docs/C2V.md "Decision" (written before 4-plane hires, it says colours 4-31), CONTRACTS "Display refresh" Inputs |
+| display modes | lores 2 planes exact; hires 1-4 planes as a silhouette or the 1:1 view; any other mode blank (for example HAM, dual playfield, lores with 1 or 3-6 planes, EHB included) | [CHIPSET.md](CHIPSET.md) |
+| BPLCON1 scroll, BPLCON2, horizontal window, colours 16-31 | ignored (except pointer colours 17-19; `disp_frame` copies DMACON through COLOR15) | CONTRACTS "Display refresh" Inputs (`disp_frame` copies the registers through COLOR15); docs/C2V.md "Decision" was written for 2-plane lores and says colours 4-31 |
 | CPU-drawn pixels | not tracked: redrawn only on a display-register change, a blit, or an epoch bump | CONTRACTS "Policy v0" |
 | colours | nearest of 16 VIC colours, then separated; hue may change | CONTRACTS "Colour choice" |
 | hires text in the fit view | half width: "visible, but too compressed to read" | docs/UI_READABLE.md |
@@ -76,7 +79,7 @@ it is documented in detail.
 
 | Item | State | Where |
 |---|---|---|
-| guest time | dilated: at `s` = 3 about 0.18 of A500 real time | [CIA_AND_TIMING.md](CIA_AND_TIMING.md) |
+| guest time | dilated: at `s` = 3 about 0.18 of A500 real time [derived: VERTB 9.0 Hz (CONTRACTS "Time at s = 3") over a PAL A500's 50 Hz] | [CIA_AND_TIMING.md](CIA_AND_TIMING.md) |
 | VERTB counting during a long conversion | fewer level-3 interrupts than frames | CONTRACTS "VERTBs during a conversion" |
 | CIA PB6/PB7 timer outputs, serial shift register | not modelled | CONTRACTS "CIA-A/B" |
 | STOP across a suspend | resumes running (one spurious wake-up) | CONTRACTS "STOP across a suspend" |
@@ -120,14 +123,75 @@ it is documented in detail.
   3.1 disk (Amiga Forever edition) was booted on the devices. The boot
   model and FS-UAE booted Workbench 3.1 Install and Workbench 1.3 to a
   Workbench too (docs/WB_BOOT.md §0), but never on Amiga64.
-- **The 1351 driving a whole Workbench session at 64 MHz** with the user
-  is recorded as still to be confirmed (the pre-Wave-17 README's Wave 14
-  row); this package
-  found no later record of that attended run. The ModPlayer e2e drives
-  Workbench with the scripted mouse.
-- **Hardware other than the two project devices**: one U64E (fw 3.15) and
-  one C64U (fw 1.1.0). Other firmware versions are untested.
-- A **Linux host**: no recorded session names one.
+- **The 1351 driving a whole Workbench session at 64 MHz**: see
+  [Open items](#open-items-carrying-it-forward).
+- **Hardware other than the two project devices**: one U64E and one C64U.
+  The U64E ran firmware 3.14d for the first M1 runs (docs/HARDWARE.md
+  "Device + setup") and 3.15 since, with several FPGA/core builds under
+  3.15 ([docs/guide/DEVICES.md](../guide/DEVICES.md)); the C64U ran 1.1.0.
+  Other firmware versions are untested.
+- A **Linux host** is untested: the development machine and the review
+  runs were macOS.
+
+## Open items: carrying it forward
+
+Wave 17 was the project's last planned wave. These items are still open
+when it ends; each line says what is known and where the evidence is.
+Anyone carrying the project forward can start here.
+Paths of the form `<name>/build/evidence/...` are local run logs that
+are not in the repository (see the note under "Documentation" in the
+[README](../../README.md#documentation)).
+
+1. **Leftover files in the Ultimate's `/Temp`.** The firmware keeps a
+   file for every program start: `run` leaves 1 (2 with sound), `resume`
+   2 (3 with sound), `doctor` none. The harness sweeps them under its
+   lock and keeps the newest; amiga64 cannot see the sweep's result, so
+   `doctor`'s `/Temp` count is the signal. A zero-leak start was tried
+   and parked. The harness already verifies the program before it types
+   `SYS`, but a body at or above `$A000` reads back as BASIC ROM
+   (c64-test-harness #532), so the tail cannot be checked before the
+   start. Our own full-body check after the start then failed, because
+   the runner rewrites itself once it runs (C64U: "differs at `$082A`").
+   A fix to #532 would make that post-start check unnecessary. Evidence:
+   the pinned counts in `host/tests/test_amiga64_budget.py`; W17-K's
+   `w17-k/build/evidence/w17-k/PROGRESS.md` "Known limits / backlog" and
+   `backlog-bprime/` beside it;
+   [the #532 comment](https://github.com/JC-000/c64-test-harness/issues/532#issuecomment-6167029092).
+2. **PAL machines are untested.** Everything was measured on NTSC
+   machines. Derived only: on PAL, guest time would run about 4% slower
+   and the player's tempo would be about 4% off
+   ([docs/guide/DEVICES.md](../guide/DEVICES.md) "Supported devices").
+3. **A Workbench session driven by the 1351 at 64 MHz on the C64U** with
+   the user is not confirmed. The 1351's pots read the full range at
+   64 MHz (docs/HARDWARE.md "The 1351 mouse at turbo"), and the ModPlayer
+   e2e drives Workbench with the scripted mouse, but the attended session
+   is still recorded as "to be confirmed" (the pre-Wave-17 README's
+   Wave 14 row, git `a9fd1cc:README.md`).
+4. **Networks that filter ICMP** (c64-test-harness #536). The harness
+   checks that the device is alive with `ping` before it takes the lock.
+   Where ICMP is blocked it can report a reachable device as
+   unreachable. amiga64 only makes sure `ping` is on `PATH`
+   (`amiga64/device.set_env`; W17-K2 fix 8). Evidence: the rev17-docs
+   quickstart run ("unreachable (ping failed)" with `/sbin` off `PATH`).
+5. **Split device-lock keys.** The harness locks `uid-<id>` only when its
+   alias map lists the address; otherwise it locks the address itself, and
+   tools that reach the same device under another key do not queue behind
+   each other ([docs/guide/DEVICES.md](../guide/DEVICES.md#other-harness-tools-on-the-same-device)).
+   In the rev17-docs review another tool reset the C64 in the middle of
+   a session this way. `amiga64 doctor` prints the key in use.
+6. **The C64U plays about 2 cents sharp** at the highest notes: a
+   per-device sampler RATE constant is measured but not applied
+   (docs/HARDWARE.md "The C64U's sampler").
+7. **A staged file that has disappeared from the host** is reported as
+   missing ("no such file or directory") without saying it is a staged
+   file (`amiga64 adf rm` removes it). This was a rev17-k review nit that
+   was not fixed (W17-K2's PROGRESS.md).
+8. **Unmeasured:** the φ2 frequency of either device as an absolute value
+   (taken as NTSC 1022727 Hz), and the keyboard's row recovery at turbo on
+   the U64E (CONTRACTS "Keys"); non-quick trackdisk writes are not proven
+   (CONTRACTS "Limit (writes)").
+9. **Not started:** M4, the ahead-of-time translator (README "Status"),
+   and Windows hosts.
 
 Sources: the documents and CONTRACTS sections named in each row; README
 "Non-goals" (git `a9fd1cc:README.md`); docs/WAVE17_BRIEF.md.

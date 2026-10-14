@@ -4,8 +4,15 @@ Start with `amiga64 doctor`. It checks your computer's side, the ROM,
 your disk and the device, prints one `OK`/`WARN`/`FAIL` line per check
 with a plain sentence, and exits with status 1 on any FAIL
 ([QUICKSTART.md](QUICKSTART.md) step 3 lists the checks). `amiga64 config`
-shows every setting and where it came from. This page explains the problems seen during development and
-what the underlying messages mean.
+shows every setting and where it came from. This page explains the
+problems seen during development and what the messages mean.
+
+**"amiga64: unexpected error: … (details: …/last-error.txt)".** Anything
+amiga64 does not have a plain message for is reported on one line, and
+the full traceback is written to `last-error.txt` in the state directory
+(`~/.local/state/amiga64/`, or `$XDG_STATE_HOME/amiga64/` or
+`AMIGA64_STATE_DIR`). Attach that file when you report the problem. A
+Ctrl-C prints "amiga64: interrupted" and exits with status 130.
 
 ## The device
 
@@ -16,17 +23,29 @@ for it. Sessions in the development logs waited from 0 s up to about
 30 minutes behind another project's work (docs/HARDWARE.md "Wave 5:
 run_dos on hardware": 1751 s).
 
-**"the Ultimate at … is busy … try again later".** The device did not
-become free within 300 s. Wait for the other program to finish.
+**"the Ultimate at … stayed busy (…); try again later".** The wait
+behind another program is extended for as long as that program keeps
+making progress; this message means the holder stopped making progress
+for 300 s, or the device changed hands too often while amiga64 waited
+([DEVICES.md](DEVICES.md#what-a-session-changes-on-the-device-and-puts-back)).
+Wait for the other program to finish, or find out why it hangs.
+
+**Another tool reset or used the device during a session.** Tools queue
+behind each other only when they lock the device under the same key. Look
+at `doctor`'s `device lock` line: an address key means that a tool which
+reaches the device by another address does not wait
+([DEVICES.md](DEVICES.md#other-harness-tools-on-the-same-device)).
 
 **"Ultimate DMA Service is off".** The disk is staged through the
 device's DMA service, so `doctor` reports a FAIL when it is off. Turn on
 `Network Settings / Ultimate DMA Service`; the C64 Ultimate switches it off
 at every power-on, so check it after each one.
 
-**"FTP file service off".** The ADF upload and the device checks use the
-device's FTP file service; turn on `FTP File Service` in the network
-settings.
+**"… has its FTP File Service off".** The ADF upload and the device
+checks use the device's FTP file service; turn on `Network Settings / FTP
+File Service`. `doctor` then stops at that single `FAIL device` line. If
+the setting is not found at all, the `FTP service` line is a WARN,
+"unknown".
 
 **"/Temp" warning.** Each program start leaves a firmware file in the
 device's `/Temp` (one per `run`, two with sound; two or three per
@@ -38,7 +57,18 @@ clears it.
 **The device is not reachable.** Check the address (`--host`,
 `AMIGA64_HOST`, `U64_HOST`, the config file; [DEVICES.md](DEVICES.md)) and
 that the Ultimate's network interface and its REST service are on. If the
-device has a network password, set `U64_PASSWORD`.
+device has a network password, set `U64_PASSWORD`. The harness checks
+that the device is alive with `ping` first: amiga64 adds `/sbin` and
+`/usr/sbin` to `PATH` so that `ping` is found, but on a network that
+filters ICMP a reachable device can still be reported unreachable
+(c64-test-harness issue #536; [Open items](../emulation/LIMITS.md#open-items-carrying-it-forward)).
+
+**"N MHz (…): this device offers …; give --mhz with one of them".** The
+session speed (`--mhz`, the config's `mhz`, or the default 48 MHz on a
+U64E and 64 MHz on a C64U) is not one of the device's CPU Speed choices.
+This also happens with `--kind C64U` on a U64E. A config value that is
+not a number is refused as "mhz '…' in …: not a number" (the same for
+`mouse_port`).
 
 **The device stopped responding during a session.** Do not open the
 Ultimate's on-screen menu while a session runs: on the C64U that wedged
@@ -56,10 +86,14 @@ section).
 **A session ends and the settings look changed.** The session restores
 every setting it snapshotted and compares them; its report says
 IDENTICAL when everything matched. If it does not, the report lists the
-differences. Every session (doctor, run, resume) keeps its log and report
-in `~/.local/state/amiga64/holds/<date-time>-<doctor|probe|run|resume>/`
-(`config_before.json`, `config_after.json`, `session.log`,
-`session.json`); `$XDG_STATE_HOME` or `AMIGA64_STATE_DIR` moves it.
+differences. Every device hold keeps its report in
+`~/.local/state/amiga64/holds/<date-time>-<doctor|probe|run|resume>/`
+(`config_before.json`, `config_after.json`); the `run` and `resume`
+folders also hold the session's `session.log` and `session.json` (the
+`probe` folder is the short check before a `run` or `resume`).
+`$XDG_STATE_HOME` or `AMIGA64_STATE_DIR` moves it. `session.json`'s
+`ended_by` is `ctrl-c`, `time` (`--minutes`) or `interrupted` (a Ctrl-C
+before the hand-over, or a SIGTERM; `amiga64` then exits with status 130).
 
 ## Storage
 
@@ -71,45 +105,65 @@ the two did is not known) (docs/HARDWARE.md "Device
 storage legs on the U64E", "C64U file legs"). `/Flash` and `/Temp` are
 never used.
 
-**The ADF on the device differs from yours** (`doctor`: a FAIL on "ADF on
-the device"). The device copy's name comes from your image
-(`wb-<12 hex digits of its SHA-256>.adf`), so a mismatch means that file
-on the device is damaged or was replaced. amiga64 never overwrites it:
-move it away on the device yourself (outside a session) and run again.
+**"… is not a whole copy of your ADF (an interrupted copy?)"** (`doctor`:
+a WARN on "ADF on the device"). The device copy's name comes from your
+image (`wb-<12 hex digits of its SHA-256>.adf`), so other bytes under
+that name mean an earlier copy was cut off (or the file was damaged).
+`amiga64 run` asks "Replace it? [y/N]"; answer `y`, or pass
+`--replace-adf` (needed without a terminal). Only that file is ever
+replaced; a file under another name, such as
+`amiga-os-310-workbench.adf`, is never touched.
 
 ## The ROM
 
 The AROS ROM is bundled and checked against pinned SHA-256 hashes every
 time (`tools/aros/manifest.txt`). A file that does not match is never
 used: `host/machine.find_rom` then tries the developer cache
-(`~/.cache/amiga64/aros/`, from `tools/aros/fetch.sh`) and fails if that
-does not verify either. Reinstall amiga64 if it reports a mismatch.
+(`~/.cache/amiga64/aros/`) and fails if that does not verify either.
+
+- In an installed amiga64 the message is "broken install: the bundled
+  AROS ROM: … ; reinstall amiga64". Reinstall it with pip.
+- In a git checkout the advice is "restore it: git checkout --
+  third_party/aros" (or, for the cache, run `tools/aros/fetch.sh`).
+
+`run` and `resume` print it as "amiga64: the AROS ROM: …".
 
 ## Your ADF
 
-The disk checks and their messages (`host/adf_overlay.py`,
-`host/adf_files.py`):
+The disk checks (`amiga64/adf.py` `check`; `doctor` shows them on its
+`Workbench ADF` line, `run` stops on them before it contacts the device):
 
 | Message | Meaning |
 |---|---|
-| `N bytes, not a DD ADF (901120)` | not an 880 KB floppy image (HD, compressed or truncated) |
-| `no DOS boot block` | a non-DOS disk (for example a game) |
-| `dostype DOS\N: only OFS/FFS (DOS\0-\3) are supported` | a directory-cache or long-name disk |
-| `root block 880: bad type or checksum` | a damaged image |
-| `root: bitmap not valid` | the disk's block bitmap is marked invalid; files cannot be added |
-| `S/Startup-Sequence: not on the disk` | the startup script cannot be replaced: not a Workbench disk |
-| `disk full: N blocks wanted, M free` | not enough room on the session copy |
-| `…: exists` | a file or drawer with that name is already on the disk (no overwrite) |
-| `…: bad name` / `not a Latin-1 name` | 1-30 characters, Latin-1, no `:` or `/` |
-| `…: no such drawer` | the target drawer does not exist |
+| "… is N bytes (an HD disk?); only DD disk images of 901,120 bytes are supported" | not an 880 KB floppy image (HD, compressed or truncated) |
+| "… has no DOS boot block: not an AmigaDOS disk" | a non-DOS disk (for example a game) |
+| "… is DOS\N (a directory cache disk): only OFS and FFS disks … are supported" | a directory-cache or long-name disk |
+| "…: the file system is inconsistent (…); repair it on an Amiga or an emulator first" | a damaged image (the underlying reason from `host/adf_overlay.py` / `host/adf_files.py` is in the brackets) |
+| "… is not a bootable Workbench disk: S/Startup-Sequence (…)" | the startup script cannot be replaced |
+| "…: this disk lacks Classes/DataTypes/amigaguide.datatype, which the ModPlayer overlay replaces; use a Workbench 3.1 disk" | the session needs that file's room for ModPlayer; `adf add --out` does not need it |
+
+`amiga64 adf add` refuses, one message per limit (`amiga64/adf.py`):
+
+| Message | Meaning |
+|---|---|
+| "Not enough room: X needs N blocks, the disk has M free (… bytes). amiga64 never deletes your files to make room" | the files do not fit |
+| "X already exists on the disk; amiga64 never overwrites a file there. Use --as NAME" | no overwrite |
+| "…: the name '…' is N characters; AmigaDOS names are 1 to at most 30 characters. Use --as NAME" (also: blank, a leading or trailing space, a control character, `:` or `/`, not Latin-1) | AmigaDOS name rules |
+| "--to X: no such drawer on the disk" / "--to X: not a drawer" | the target drawer must exist |
+| "… is a symbolic link: give the file it points to" / "…: only plain files and directories can be added" | links and special files are refused |
+| "…: no such file or directory" | the host path is missing (also for a staged file that was removed from your computer: `amiga64 adf rm` unstages it) |
+| "--as names one file: give one PATH with it" | `--as` with several paths |
+| "X already exists; --out writes a new file and never replaces one" | `--out` must name a new file |
+| "--out X: no such directory D" / "--out X: cannot write it (…)" | the folder for `--out` is missing or not writable |
 
 "Untested, may work" from `doctor` only means the image's SHA-256 is not
 on the tested list ([DISKS_AND_FILES.md](DISKS_AND_FILES.md)).
 
 ## Booting
 
-**It takes a long time.** About 135 s (C64U) to 180 s (U64E) to the Workbench is normal
-([DEVICES.md](DEVICES.md)); the screens before it are AROS's.
+**It takes a long time.** About 2-4 minutes to the Workbench is normal
+(measured: about 135 s on a C64U, about 180 s on a U64E;
+[DEVICES.md](DEVICES.md)); the screens before it are AROS's.
 
 **The pointer moves on its own, and the boot is slow.** A joystick with a
 switch stuck closed moves the mouse every frame. On the C64U in Wave 13
@@ -132,7 +186,7 @@ the default 0 means joystick only.
 | colours look wrong | 16 VIC colours; pens are kept distinct, but a pen can change hue | expected |
 | a keypress does nothing | only F1 and C= are read; there is no Amiga keyboard | expected |
 | the screen does not update after a program draws | CPU drawing is not tracked; the picture refreshes on display-register changes and blits | expected; the next such change redraws it |
-| everything is slow | the 68000 runs at well under 1 MHz equivalent | expected |
+| everything is slow | the 68000 runs at about 1 MHz equivalent at best | expected |
 
 ## Sound
 
@@ -185,8 +239,9 @@ reports, the session's folder under `~/.local/state/amiga64/holds/`,
 and what was on the screen. Never attach your ADF or a saved session file:
 both contain your Workbench disk.
 
-Sources: `host/adf_overlay.py`, `host/adf_files.py`, `host/machine.py`,
-`host/snapfmt.py`, `tests/aros_wb.py` (`map_sampler`, `session`),
-`tests/ureu_probe.ensure_adf`, `fixtures/modwb/modwb.s`, docs/HARDWARE.md,
-CONTRACTS "Suspend/resume", W17-K's draft refusal messages
-(`w17-k/amiga64/session.py` `SNAP_REFUSALS`).
+Sources: `amiga64/cli.py`, `adf.py`, `device.py`, `session.py`
+(`SNAP_REFUSALS`), `config.py`; `host/adf_overlay.py`, `host/adf_files.py`,
+`host/machine.py` (`find_rom`), `host/snapfmt.py`, `tests/aros_wb.py`
+(`map_sampler`, `session`), `fixtures/modwb/modwb.s`, docs/HARDWARE.md,
+CONTRACTS "Suspend/resume"; W17-K2's message list
+(`w17-k2/build/evidence/w17-k2/PROGRESS.md`).
