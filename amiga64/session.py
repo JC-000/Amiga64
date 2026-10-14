@@ -119,10 +119,10 @@ def make_disk(raw: bytes, player: bytes, mod: bytes, reqs: list[A.Request]):
             img = e.data()
             d.ov = F.overlay_of(raw, img, f"{A.SCRIPT}+modwb+files", d.ov.header, d.ov.data_blocks)
             d.image = O.apply(raw, d.ov)
+            if d.image != img:
+                raise SessionError("internal: the session overlay does not reproduce the image")
     except O.AdfError as e:             # W17-K2: rev17-k #2, never a traceback
         raise SessionError(f"cannot build the session disk: {e} (amiga64 doctor)") from None
-        if d.image != img:
-            raise SessionError("internal: the session overlay does not reproduce the image")
     return d, rep
 
 
