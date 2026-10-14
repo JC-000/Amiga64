@@ -161,7 +161,8 @@ def _ready(plan: Plan, what: str) -> None:
     inp = "the joystick in port 2" + (f" and the 1351 in port {plan.mouse_port}"
                                        if plan.mouse_port else "")
     how = (f"for {plan.minutes:g} min" if plan.minutes is not None else "until you press Ctrl-C")
-    say(f"{what}: use {inp}; double-click ModPlayer to hear Paula, click to return. "
+    say(f"{what}: use {inp}; open the Workbench3.1 disk, then double-click ModPlayer "
+        f"(right of the Expansion drawer) to hear Paula, click to return. "
         f"F1 toggles the 1:1 view. Running {how}" +
         ("; Ctrl-C saves the session to the device first" if plan.save else ""))
 

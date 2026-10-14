@@ -157,8 +157,16 @@ What happens:
 The session disk has three extra files in its root: **ModPlayer**, its
 icon, and **ModPlayer.mod**, a generated test song.
 
-1. Double-click the Workbench disk icon to open its window.
-2. Double-click the **ModPlayer** icon.
+1. Double-click the Workbench disk icon (**Workbench3.1**) to open its window.
+   (The Workbench screen shows only that disk and the RAM disk; the
+   player is inside the disk.)
+2. Find the **ModPlayer** icon just to the right of the **Expansion**
+   drawer. Its label is hard to read at this size, but Expansion's is
+   easy to spot. Double-click it.
+   While the window fills, Workbench may redraw it from scratch a few
+   times. A double-click that a redraw interrupts is lost, so double-click
+   between redraws, and try again if nothing happens. If clicks still do
+   not register, double-click a little more slowly.
 3. The player takes over the whole screen and plays the song through the
    Ultimate's sampler, Amiga Paula style, four channels.
 4. Click (fire or the left mouse button), or wait for the song's end, and

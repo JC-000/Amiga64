@@ -203,6 +203,13 @@ the default 0 means joystick only.
 
 ## ModPlayer
 
+**I can't find it, or double-clicking does nothing.** ModPlayer is inside
+the Workbench 3.1 disk: open the disk first. Its icon sits just to the
+right of the Expansion drawer, and its label is hard to read. While the
+window fills, Workbench redraws it from scratch a few times, and a redraw
+in the middle of a double-click loses it. Double-click between redraws,
+and a little more slowly if clicks still do not register.
+
 The player shows a requester and returns to Workbench without taking over
 when something is missing (its messages, `fixtures/modwb/modwb.s`):
 
