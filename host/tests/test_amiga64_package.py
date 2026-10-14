@@ -59,7 +59,7 @@ def test_pyproject_metadata():
     dep = [d for d in p["dependencies"] if d.startswith("c64-test-harness")]
     assert dep and "git+https://github.com/JC-000/c64-test-harness@" in dep[0]
     pin = dep[0].rsplit("@", 1)[1]
-    assert pin == "v0.13.0"                         # the tag (= 4f51020), supervisor 2026-10-13
+    assert pin == "v0.13.1"                         # the tag (= bc4ab0b), supervisor 2026-10-14
     assert not any(d.startswith("numpy") for d in p["dependencies"])     # optional only
     from amiga64 import __version__
     assert __version__ == p["version"]
