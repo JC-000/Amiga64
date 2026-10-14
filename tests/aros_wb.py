@@ -80,6 +80,9 @@ log = AB.log
 # --------------------------------------------------------------------------
 
 def wb_driver(labels_path: str, out_dir: str) -> tuple[bytes, dict]:
+    from host import prebuilt                                   # W17-B
+    if prebuilt.use(("ca65", "ld65"), "wbboot", lbl=labels_path):   # W17-B
+        return prebuilt.module("wbboot", labels_path), prebuilt.labels("wbboot")   # W17-B
     from c64_test_harness import Labels
     from tests.harness_util import lookup_label
     src = open(AB.DRV_SRC).read()
@@ -166,6 +169,13 @@ def build_module(src_path: str, org: int, end: int, id_off: int, labels_path: st
 
 
 def build_td(labels_path: str, out_dir: str, defines: tuple = ()) -> bytes:
+    from host import prebuilt                                   # W17-B
+    var = not TD_MUTANT[0] and not TD_DEFINES and tuple(defines) == ("TD_VARIANT=$5A",)   # W17-B
+    why = "" if var else " ".join(([f"--td-mutant {TD_MUTANT[0]}"] if TD_MUTANT[0] else [])
+                                  + list(TD_DEFINES) + list(defines))   # W17-B
+    if prebuilt.use(("ca65", "ld65"), "td_var" if var else "td", why and f"td {why}",
+                    labels_path):                               # W17-B
+        return prebuilt.module("td_var" if var else "td", labels_path)   # W17-B
     src = os.path.join(ROOT, "tests", "aros", "td.s")
     if TD_MUTANT[0]:                    # --td-mutant: host/tests/test_td.MUTANTS
         from host.tests.test_td import MUTANTS
@@ -200,6 +210,10 @@ def build_inpm2(labels_path: str, out_dir: str, src_path: str | None = None,
     """W14-M: the input module tests/aros/inpm.s in two segments: A at
     $C980-$C9FE, B at $CF00-$CFEF.  One ID, SHA-1[:4] of A + B with both
     ID fields (+3) zero, stamped in both.  Returns (a, b)."""   # W14-M
+    from host import prebuilt                                   # W17-B
+    why = " ".join(([src_path] if src_path else []) + list(defines))   # W17-B
+    if prebuilt.use(("ca65", "ld65"), "inpm", why and f"inpm {why}", labels_path):   # W17-B
+        return prebuilt.module("inpm", labels_path)             # W17-B
     from c64_test_harness import Labels                     # W14-M
     from tests.harness_util import lookup_label             # W14-M
     src_path = src_path or os.path.join(ROOT, "tests", "aros", "inpm.s")   # W14-M
@@ -433,8 +447,10 @@ class Disk:
                        "wbi": a.file_blocks(di)[0] if di else None}
 
 
-def stage_disk(m: WbMachine, disk: Disk, vol: str | None) -> dict:
-    """The image at TD_ADF, checked by aros_sum on the C64; then td_on."""
+def stage_disk(m: WbMachine, disk: Disk, vol: str | None, adf_name: str | None = None) -> dict:
+    """The image at TD_ADF, checked by aros_sum on the C64; then td_on.
+    W17-K: the device file is <vol>/amiga64/<adf_name>, else disk.adf_name
+    (the amiga64 CLI's wb-<sha12>.adf), else ADF_NAME (the tests' default)."""
     from tests.harness_util import call_runner
     t0 = time.monotonic()
     out: dict = {"script": disk.script, "overlay_blocks": [k for k, _ in disk.ov.blocks]}
@@ -445,7 +461,7 @@ def stage_disk(m: WbMachine, disk: Disk, vol: str | None) -> dict:
         m.load_driver()
         out["by"] = "test_load_chunk"
     else:
-        name = f"{vol}/amiga64/{ADF_NAME}".encode()
+        name = f"{vol}/amiga64/{adf_name or getattr(disk, 'adf_name', None) or ADF_NAME}".encode()   # W17-K
         call_runner(m.tg, m.lab("dosio_uci_init"), 30.0)
         m.w(m.lab("dosio_name"), name)
         m.w(m.lab("dosio_nlen"), bytes([len(name)]))

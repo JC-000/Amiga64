@@ -1,5 +1,9 @@
 # M2 — High-level emulation of AmigaOS
 
+> **Historical (Wave 17).** This is the Waves 4-5 design of the exec and console HLE, kept for its reasoning and
+> measurements. The current description is [docs/emulation/HLE.md](emulation/HLE.md); where they differ,
+> [docs/CONTRACTS.md](CONTRACTS.md) and the code win. It still describes program mode as built; the statements that are out of date are listed in that file.
+
 Owner: WS-B1 (m2-exec; M2-hle before it). Implements ARCHITECTURE.md
 strategy S4: library calls of a guest Hunk program are intercepted at the
 interpreter level and serviced natively on the C64. The current function

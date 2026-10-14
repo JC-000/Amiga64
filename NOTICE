@@ -1,0 +1,37 @@
+Amiga64
+=======
+
+Copyright (c) 2026 JC-000
+
+Amiga64's own code and documentation are licensed under the MIT License
+(LICENSE).  Some parts of this distribution are third-party works under
+their own licences; the MIT License does not apply to them.
+
+third_party/aros/aros-rom.bin, third_party/aros/aros-ext.bin
+  The AROS m68k ROM banks (AROS nightly2 20260921, amiga-m68k), unmodified.
+  Licensed under the AROS Public License, Version 1.1 (APL 1.1):
+  third_party/aros/LICENSE.  Third-party notices that ship with AROS:
+  third_party/aros/ACKNOWLEDGEMENTS.
+  The Source Code version of these files is available under the terms of
+  the APL 1.1 from the AROS project (https://github.com/aros-development-team/AROS);
+  third_party/aros/SOURCE.txt says exactly which build this is and where its
+  source is published.  Any terms of Amiga64's licence that differ from the
+  APL 1.1 are offered by the Amiga64 authors alone, not by the AROS Initial
+  Developer or any AROS Contributor.
+
+fixtures/vectors/*.json.gz
+  Filtered, subsampled derivatives of the SingleStepTests/680x0 68000 test
+  sets (https://github.com/SingleStepTests/680x0, commit e0d5ece9).  That
+  repository carries no licence file; it publishes the tests "as an aid to
+  reimplementation".  They are used only by the test suite, and their status
+  is recorded in fixtures/vectors/UPSTREAM_LICENSE.  If you are the upstream
+  author and want them removed or relicensed, please open an issue.
+
+Not included
+  Amiga64 does not include, and never uploads anywhere, any Commodore or
+  Amiga, Inc. software.  You supply your own Workbench 3.1 disk image (ADF);
+  the amiga64 tool copies it only to your own Ultimate's storage, and only
+  when you confirm.
+
+Dependencies installed by pip
+  c64-test-harness (MIT License), https://github.com/JC-000/c64-test-harness

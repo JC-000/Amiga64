@@ -1,120 +1,137 @@
 # Amiga64
 
-A translation layer for running Amiga 500 programs on the **C64 Ultimate** and **Ultimate 64 Elite**.
+**Amiga 500 software on a Commodore 64**, with the help of an Ultimate
+board: a C64 Ultimate or an Ultimate 64 Elite.
+
+Amiga64 is a 68000 interpreter and an Amiga chipset emulation written in
+6502 assembly. It boots the open-source AROS Kickstart replacement (bundled)
+and your own Workbench 3.1 floppy image to the Workbench screen, with the
+pointer on a joystick or a 1351 mouse and Paula's sound on the Ultimate's
+built-in sampler. A host program on your Mac or Linux computer sets up each
+session over the network.
+
+It is a proof that this is possible, not a fast or complete Amiga: the
+emulated 68000 runs at about 1 MHz equivalent at best against the A500's
+7 MHz, the display is converted to the VIC-II's 16 colours, and Workbench
+takes about 2-4 minutes to boot (`amiga64 run`: about 135 s on a C64U,
+about 180 s on a U64E).
+
+## Try it
+
+You need a C64 Ultimate or an Ultimate 64 Elite on your network with a USB
+stick (U64E) or SD card (C64U), Python 3.11+ and git on macOS or Linux
+with access to github.com (pip installs amiga64 and its c64-test-harness
+dependency from GitHub), and your own Workbench 3.1 ADF.
+
+```sh
+pip install "git+https://github.com/JC-000/Amiga64@v0.17.0"
+mkdir -p adf && cp /path/to/your/workbench-3.1.adf adf/
+amiga64 doctor
+amiga64 run
+```
+
+`doctor` asks for your device's address the first time (in a terminal)
+and saves it. Then double-click the Workbench disk (Workbench3.1), find **ModPlayer**
+just to the right of the Expansion drawer, double-click it, and listen. (The repository is private until it is published; the install
+line is the one to use then.) The full walkthrough is [docs/guide/QUICKSTART.md](docs/guide/QUICKSTART.md).
+
+## Documentation
+
+| For | Read |
+|---|---|
+| using it | [QUICKSTART](docs/guide/QUICKSTART.md), [DEVICES](docs/guide/DEVICES.md), [DISKS_AND_FILES](docs/guide/DISKS_AND_FILES.md), [TROUBLESHOOTING](docs/guide/TROUBLESHOOTING.md) |
+| how it works | [docs/emulation/OVERVIEW.md](docs/emulation/OVERVIEW.md), then [CPU](docs/emulation/CPU.md), [MEMORY](docs/emulation/MEMORY.md), [CHIPSET](docs/emulation/CHIPSET.md), [PAULA](docs/emulation/PAULA.md), [CIA_AND_TIMING](docs/emulation/CIA_AND_TIMING.md), [INPUT](docs/emulation/INPUT.md), [STORAGE](docs/emulation/STORAGE.md), [HLE](docs/emulation/HLE.md) |
+| what does not work, and what is still open | [docs/emulation/LIMITS.md](docs/emulation/LIMITS.md), its [Open items](docs/emulation/LIMITS.md#open-items-carrying-it-forward) |
+| developing it | [docs/emulation/TESTING.md](docs/emulation/TESTING.md), [docs/CONTRACTS.md](docs/CONTRACTS.md) (the binding interfaces), [docs/RESOURCES.md](docs/RESOURCES.md) (address claims) |
+| measurements | [docs/HARDWARE.md](docs/HARDWARE.md) (real devices), [docs/C2V.md](docs/C2V.md), [docs/WB_BOOT.md](docs/WB_BOOT.md), [docs/ORACLE.md](docs/ORACLE.md) |
+| history | the `docs/WAVE*_BRIEF.md` files (one per development wave); older design documents are marked "Historical" |
+
+Some docs cite evidence as `<name>/build/evidence/...` (for example
+`w17-k/build/evidence/w17-k/PROGRESS.md`). Those are the development
+machine's local run logs from that work's checkout. They were never
+committed, so treat such a citation as a record of where a number came
+from, not as a file you can open. Evidence you can rerun lives in
+`tests/` and `host/tests/`.
 
 ## Status
 
 | Milestone | State |
 |---|---|
-| **M0 — Hunk loader** | ✅ done (`m0-loader-green`) — Amiga Hunk executables parsed, relocated, staged into REU, and run end-to-end |
-| **M1 — 68000 interpreter** | ✅ done (`m1-vectors-green`, `hw-validated`) — full user-mode integer set, 5150 golden + 63 hand vectors green in VICE **and on real U64E hardware with zero divergence** (the current golden gate is the 5129-case subset without $BF/$DF cases, see `docs/CONTRACTS.md` "Vector sets") |
-| **M2 — AmigaOS HLE** | ✅ done — **vbcc-compiled C programs run to completion**: stdio incl. file I/O (`fopen` r/w/a/r+, `fseek`, `remove`), keyboard input on stdin, `malloc`/`free` on a real heap, pools, custom stacks, `getenv`/`time`/`system` |
-| M3 — Chipset shim | ✅ done — **a static Amiga playfield, pixel-exact on the VIC-II**: an HLE C program (`fixtures/c/pf_static.c`) builds a copper list, and the copper (`runtime/ops/cop.s`) plus the display refresh (`runtime/ops/disp.s`, c2v kernels) reproduce it byte-for-byte against the host reference (Wave 10). Built on: supervisor mode & exceptions (Wave 6), the $BF/$DF I/O trap (S3.1), the machine loop/time base (S3.2), interrupt delivery (S3.3) and CIA-A/B (S3.4). Plan: [`docs/S3_PLAN.md`](docs/S3_PLAN.md) |
-| S3.6/S3.7 — Blitter + AROS boot | ✅ done — **the open-source AROS ROM boots to its "insert disk" screen** on VICE and on a real U64E (48 MHz, ~90 s), pixel-matched to the boot model: the synchronous OCS blitter (`runtime/ops/blt.s`, FS-UAE-checked), a machine-mode memory profile (`runtime/rc/machine.inc`) and the boot milestones in `tests/aros_boot.py` (Wave 11). Workbench followed in Wave 13 ([`docs/WB_BOOT.md`](docs/WB_BOOT.md)) |
-| Wave 12 — visible screen, code cache, REU snapshots | ✅ done — the insert-disk screen is **visible** on hardware (contrast-preserving colours), a 7-window **code cache** (`runtime/core.s`), and **suspend/resume** of the whole machine to the REU or to a file on the Ultimate's storage (UCI `LOAD_REU`/`SAVE_REU`, `runtime/ops/snap.s`, `ureu.s`) |
-| Wave 13 — Workbench from floppy | ✅ done — **AROS boots the user's Workbench 3.1 disk to the Workbench screen** in ~130 s on a C64 Ultimate at 64 MHz: an HLE trackdisk serves reads from the ADF staged in the REU (`tests/aros/td.s`), a trimmed Startup-Sequence overlay, a **joystick** in port 2 drives the Amiga mouse (`runtime/ops/inp.s`), the pointer is drawn with VIC sprites (`tests/aros/spr.s`), and **F1** toggles a readable **1:1 view** (interlace aware). A saved Workbench session resumes from SD in ~10 s. End-to-end leg: `tests/aros_wb.py --legs e2e` |
-| Wave 14 — 1351 mouse, input polish, top-anchored view | 🟡 landed — the **1351 mouse** driver (120 Hz SID pot sampler, click queue so double-clicks survive, per-frame clamp) works in VICE and on hardware; its pot readings span the full range at 1 MHz and at the C64U's 64 MHz turbo (a ~1/4 compression seen once on 2026-10-11 was a transient device state, not reproduced on 2026-10-12; docs/HARDWARE.md). A Workbench session driven by the 1351 at 64 MHz is still to be confirmed with the user. The fit view now shows the **top** of the screen (title bar, menus, pointer start) |
-| M4 — AOT translator | not started |
+| M0: Hunk loader | done: Amiga Hunk executables parsed, relocated, staged into the REU and run |
+| M1: 68000 interpreter | done: the user-mode integer set (except TAS and MOVEP), validated against SingleStepTests vectors: the current 5129-case golden set and 63 hand vectors in VICE, and the 5150-case set it was cut from plus 48 hand vectors on a real U64E |
+| M2: AmigaOS HLE | done: vbcc-compiled C programs run without an OS, with stdio, files and keyboard input |
+| S3: chipset | done: supervisor mode and exceptions, interrupts, CIA-A/B, copper, a synchronous blitter, the planar-to-VIC display |
+| AROS boot | done: the AROS ROM boots to its insert-disk screen (Wave 11) |
+| Workbench | done: the user's Workbench 3.1 disk boots to the Workbench in about 130 s on a C64U at 64 MHz (Wave 13); suspend and resume through a file |
+| Input | done: joystick and 1351 mouse as the Amiga mouse; F1 for a 1:1 view (Waves 13-16) |
+| Audio | done: Paula's four channels on the Ultimate sampler, a clean-room MOD player with a readable UI (Wave 15), launched from a Workbench icon (Wave 16) |
+| Release kit | Wave 17: the `amiga64` command, prebuilt binaries, the bundled AROS ROM, these docs |
+| M4: ahead-of-time translator | not started |
 
-Measured on a real Ultimate 64 Elite (48 MHz turbo; the C64 Ultimate runs at 64 MHz): **~75–80k 68k instructions/sec** on an ALU mix and **~68k memory-bound** (+25% memory-bound / +43% read-modify-write since the REC-shadow memory API) — roughly a 0.5–1 MHz 68000. Details in [`docs/HARDWARE.md`](docs/HARDWARE.md); model in [`docs/PERF.md`](docs/PERF.md).
+## How it works, briefly
 
-Independent check: an **AROS reference oracle** (`tests/aros_oracle.py`, [`docs/ORACLE.md`](docs/ORACLE.md)) runs every vbcc test program in FS-UAE on the AROS ROM (fetched, never committed) and diffs it against Amiga64: 17 MATCH, 10 triaged DIFF, 1 SKIP.
-
-## Goal
-
-Enable (a useful subset of) Amiga 500 software — Motorola 68000 code targeting the OCS chipset and Kickstart-era AmigaOS — to execute on Ultimate series hardware, using the platform's strengths (16 MB REU, fast DMA, the Ultimate command interface, 48 MHz CPU turbo) to bridge the enormous gap between the two machines.
-
-## The gap we have to bridge
-
-| | Amiga 500 | C64 / Ultimate 64 |
-|---|---|---|
-| CPU | 68000 @ ~7.09 MHz, 16/32-bit | 6510 @ ~1 MHz, 8-bit (U64: up to 48 MHz turbo) |
-| RAM | 512 KB – 1 MB | 64 KB (+ up to 16 MB REU) |
-| Graphics | OCS: bitplanes, Copper, Blitter, 4096 colors | VIC-II: char/bitmap modes, 16 colors |
-| Sound | Paula: 4× 8-bit PCM DMA channels | SID: 3 synth voices (+ sample tricks) |
-| OS | Kickstart/AmigaOS in ROM | KERNAL |
-
-The strategy mix (S1 runtime interpretation + S4 OS-call HLE first; S3 chipset shim and S2 ahead-of-time translation later) is laid out in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-
-## How it works today
-
-A 68000 interpreter written in ca65 assembly runs on the C64 side: guest memory maps 1:1 onto the REU (24-bit address space), instruction fetch runs through a 256-byte window (one REU DMA per page), data accesses go through a REC-shadow memory API (1–4 REU register accesses per call instead of 9, with 512 KB REU-block straddles split correctly), all CCR flag logic is centralized in sized ALU primitives, and a generated 256-entry dispatch table routes opcodes to per-family handlers.
-
-AmigaOS library calls (`jsr -LVO(A6)`) land on A-line trap words planted in full exec/dos vector tables (fake V40 ExecBase/DOSBase) and are serviced natively in 6502 code (clean-room HLE):
-
-- **exec** — FindTask/Process, AllocMem/FreeMem on a first-fit heap with coalescing and checked frees, pools, AllocVec, StackSwap (`docs/HLE.md`).
-- **dos files** — Open/Close/Read/Write/Seek/ChangeMode/DeleteFile/IoErr over a 2 MB REU RAM disk by default, or (opt-in) the Ultimate's own storage via its command interface — hardware-validated (`docs/HLE_DOS.md`).
-- **console** — Write to the VIC-II text screen with scrolling; Read from the real keyboard (KERNAL-free matrix scan, cooked line editing, EOF on Ctrl-D) (`docs/HLE_CON.md`).
-- Unimplemented library calls halt with a precise name, e.g. `dos.library/ReadItem (LVO -810)`.
-
-Correctness is enforced by golden vectors: sampled [SingleStepTests](https://github.com/SingleStepTests/680x0) cases (Musashi-generated, hardware-accurate) execute instruction-by-instruction on the interpreter and every architectural bit is compared — plus hand-written vectors for ops the upstream suite doesn't cover, and a self-modifying-code suite for the fetch window.
-
-## Repository layout
-
-```
-docs/           ARCHITECTURE (strategy+milestones), CONTRACTS (binding ABI),
-                RESOURCES (zp/ram/guest ownership), PERF, HARDWARE, HLE,
-                HLE_DOS, HLE_CON, M0, WAVE*_BRIEF (per-wave contracts)
-host/           Python tools: hunk.py, image.py, fixturegen.py, vectors.py,
-                handvec.py, gen_dispatch.py, hle_env.py, hle_dos_env.py,
-                rescheck.py (+ tests)
-runtime/        6502/ca65: core.s (fetch/dispatch, REU memory API, EA, ALU),
-                ops/ (one instruction family per file; hle.s, hle_mem.s,
-                hle_con.s, hle_dos.s, dosio_ram.s, dosio_uci.s),
-                rc/ (resource-contract declarations), c64.cfg
-tests/          C64-side runner (runner.s, run_program.s), VICE/U64 drivers
-                (run_vectors, run_program, run_hello, run_vbcc, run_dos,
-                run_con, smc, rec_*, bss_boot), bench/, stub/
-tools/vbcc/     pinned, hash-verified vbcc toolchain installer (installs
-                outside the repo)
-fixtures/       Vendored vector samples, bench sweep data, C test programs
-                and HLE unit sources (own/free content only)
-```
+- The **68000** is interpreted in 6502 code. Its registers live in the
+  C64's zero page; its memory is the Ultimate's 16 MB REU, guest address =
+  REU offset. Code is fetched through a cache of seven 256-byte windows in
+  C64 RAM ([CPU](docs/emulation/CPU.md), [MEMORY](docs/emulation/MEMORY.md)).
+- The **custom chips** are trapped at their addresses: a copper without
+  beam timing, a blitter that finishes inside the register write, and a
+  converter that turns Amiga bitplanes into a VIC-II picture
+  ([CHIPSET](docs/emulation/CHIPSET.md)).
+- **Time** comes from the C64's CIA #2 counting φ2, slowed by a power of
+  two (`s`) so the interpreter keeps up; interrupts and CIA timers run on
+  it ([CIA_AND_TIMING](docs/emulation/CIA_AND_TIMING.md)).
+- The **floppy** is an ADF in the REU, served by patching AROS's
+  `trackdisk.device`; the user's file is never modified
+  ([STORAGE](docs/emulation/STORAGE.md)).
+- **Paula** channels play straight from the REU on the Ultimate's sampler
+  ([PAULA](docs/emulation/PAULA.md)).
+- Programs run without AROS get **HLE** exec/dos/console calls answered in
+  6502 code ([HLE](docs/emulation/HLE.md)).
 
 ## Development
 
-Toolchain: Python 3.11+, `ca65`/`ld65` (cc65), VICE `x64sc` with 16 MB REU, and the c64-test-harness for driving VICE or a real Ultimate 64 (REST). Interface contracts for all modules live in [`docs/CONTRACTS.md`](docs/CONTRACTS.md); zero-page/RAM/guest-memory ownership is machine-checked (`make rescheck`, see [`docs/RESOURCES.md`](docs/RESOURCES.md)).
+Toolchain for building from source: Python 3.11+, cc65 (`ca65`/`ld65`),
+VICE `x64sc` with a 16 MB REU for the tests, vbcc/vasm for the guest
+programs (`tools/vbcc/install.sh`, installed outside the repository), and
+[c64-test-harness](https://github.com/JC-000/c64-test-harness) for driving
+VICE or a device. Users of the prebuilt release need none of the build
+tools.
 
 ```sh
-make host-test    # host-side pytest suite
-make runtime      # build the interpreter/runner PRG (build/runner.prg)
-make vice-test    # full golden + hand vector suites in VICE (~35 s)
-make rescheck     # resource-contract checker
-sh tests/rec_gate.sh build build/gate            # the full gate, logged per step
-tools/vbcc/install.sh                            # vbcc toolchain (outside the repo)
-python3 -m tests.run_vbcc --prg build/runner.prg # compiled C programs (M2 exit bar)
-python3 -m tests.run_dos  --prg build/runner.prg # dos file I/O (add --backend u64 for hardware)
-python3 -m tests.run_con  --prg build/runner.prg # console keyboard input
+make host-test                          # pytest
+make runtime                            # build/runner.prg (+ .lbl, .map)
+make vice-test                          # golden + hand vectors in VICE
+make rescheck                           # address-claim checker
+sh tests/rec_gate.sh build build/gate   # the full VICE gate
 ```
 
-The drivers take `--backend u64` to run on a real Ultimate 64 (through the harness's device lock). Validated on hardware so far: the full 5150-case suite, hand vectors, `run_program`, `run_hello`, `run_vbcc` (Wave 4 regression) and `run_dos` (Wave 5, inside one lock session with the device config snapshotted and restored exactly). `run_con`'s keyboard path has an automated hardware smoke (`tests/kbd_echo.py`, 1 and 48 MHz, 47/47); the attended 48 MHz key test with positive controls is ready but not yet run (`docs/HLE_CON.md`). See `docs/HARDWARE.md`.
+Every change is tested red-first and reviewed by an independent agent; the
+device rules (only through the harness's device lock, every setting
+restored) are in [TESTING](docs/emulation/TESTING.md).
 
-## Non-goals (for now)
+## Licence and third-party material
 
-- Full-speed games or demos that race the beam on OCS.
-- Kickstart ROM emulation via proprietary ROM images — we target HLE and freely redistributable test programs. (The open-source AROS ROM is the boot target instead: it reaches its "insert disk" screen since Wave 11 and boots a user-owned Workbench 3.1 disk to the Workbench since Wave 13; see "Third-party material".)
+- **Amiga64's own code and documentation: MIT** ([LICENSE](LICENSE),
+  [NOTICE](NOTICE)).
+- **The AROS m68k ROM** (`third_party/aros/aros-rom.bin`, `aros-ext.bin`,
+  AROS nightly2 20260921, unmodified) is under the **AROS Public License
+  1.1**, not MIT. Its licence text, its acknowledgements and a note on
+  where its source code is published are next to it
+  (`third_party/aros/LICENSE`, `ACKNOWLEDGEMENTS`, `SOURCE.txt`). The AROS
+  source is at <https://github.com/aros-development-team/AROS>; the
+  20260921 nightly's SourceForge folder has been removed, so `SOURCE.txt`
+  names that tree with the build date and the archive's SHA-256.
+- **CPU test vectors** in `fixtures/vectors/` are filtered samples of
+  [SingleStepTests 680x0](https://github.com/SingleStepTests/680x0); see
+  `fixtures/vectors/UPSTREAM_LICENSE`.
+- **Never in the repository:** Kickstart ROMs, Workbench disks, commercial
+  Amiga software, the Amiga NDK. You supply your own Workbench ADF; the
+  `amiga64` tool copies it only to your own Ultimate's storage, and only
+  when you confirm (or pass `--yes`). Test music is generated by our own `host/modgen.py`.
+- The HLE and the guest programs (the MOD replay, its UI, ModPlayer) are
+  clean-room work from public documentation. No AROS source, Commodore
+  source or NDK material is in the repository; AROS is used only as the
+  unmodified binary ROM above.
 
-## Third-party material
-
-- **Never in the repo:** proprietary or commercial Amiga material — Kickstart
-  ROMs, Workbench disks, commercial software, the Amiga NDK.
-- **User-owned proprietary media** (e.g. Workbench floppies from the
-  maintainer's own hardware collection) may be used *locally* for private
-  testing only: imaged into a cache outside the repo, never committed, never
-  redistributed, and never required by the test suite.
-- **Open-licensed third-party components** (e.g. vbcc under its own terms,
-  AROS under the AROS Public License) are fetched by pinned, hash-verified
-  scripts into a non-repo cache (`tools/*/install.sh` pattern) with their
-  licence recorded; binaries are not committed. Code that translates or
-  modifies open-licensed sources keeps that licence and lives in clearly
-  separated files. Reading such sources as a reference carries no
-  obligation; HLE code stays clean-room.
-- **AROS m68k ROM (reference oracle only).** `tools/aros/fetch.sh` fetches a
-  pinned AROS nightly (APL 1.1) by exact URL and SHA256 into
-  `~/.cache/amiga64/aros/<hash>/`, together with its licence text and a
-  record of where the source is (`tools/aros/README.md`). The ROM is
-  never committed, never placed under `build/`, and never required by any
-  test. `tests/aros_oracle.py` boots it in FS-UAE to diff our vbcc programs
-  against a real AmigaOS-compatible system (`docs/ORACLE.md`), and
-  `tests/aros_boot.py` stages it into the REU at test time to boot it on
-  Amiga64 itself (skipping cleanly when the cache is absent).
+Windows hosts are not supported yet.

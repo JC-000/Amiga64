@@ -1,5 +1,9 @@
 # Console input (W5-K)
 
+> **Historical (Wave 17).** This is the Waves 5-6 design of the HLE console input, kept for its reasoning and
+> measurements. The current description is [docs/emulation/HLE.md](emulation/HLE.md); where they differ,
+> [docs/CONTRACTS.md](CONTRACTS.md) and the code win. It still describes program mode as built; the statements that are out of date are listed in that file.
+
 Owner: w5-con (Wave 5). Code: `runtime/ops/hle_con.s`. Contract:
 `docs/WAVE5_BRIEF.md` C2 and its amendment. Tests: `tests/run_con.py`,
 `host/tests/test_hle_con.py`, `fixtures/c/con_*.c`,
@@ -731,9 +735,9 @@ Tell the operator before the first session:
   Answer as you like: it is logged and does not count.
 
 ```sh
-cd /Users/someone/Documents/Amiga64/.claude/worktrees/w6-kbd  # or the merged tree
-export U64_HOST=10.43.23.81
-PRG=/Users/someone/Documents/Amiga64/build/w6-int/runner.prg
+cd <your checkout>
+export U64_HOST=192.0.2.81
+PRG=build/w6-int/runner.prg
 D=build/evidence/kbd-ab-$(date +%Y%m%d-%H%M%S)   # new per A/B (review9 F1)
 AB() {  # AB <pair> <runs> <poll>
   python3 -m tests.kbd_echo --prg $PRG --backend u64 --runs "$2" \
@@ -863,7 +867,7 @@ controls can kill them**. The mutant totals are in
 The supervisor runs this with the user:
 
 ```sh
-U64_HOST=10.43.23.81 python3 -m tests.kbd_echo --prg build/<pkg>/runner.prg \
+U64_HOST=192.0.2.81 python3 -m tests.kbd_echo --prg build/<pkg>/runner.prg \
     --backend u64 --out-dir build/evidence/kbd-hw
 ```
 

@@ -2530,28 +2530,33 @@ VICE legs `latch`, `blocks`, `irq`, `reload`, `lencache`, `pervol`, `park`,
     is taken.
   - **The hold (Ultimates):** `Map Ultimate Audio $DF20-DFFF` := Enabled
     inside the hold (restored by it), the runner reloaded, then the
-    **differential sampler proof**, measured on the **U64E only** [MEASURED
-    HW, U64E fw 3.15, `build/evidence/w16-p/hw16`; the C64U is not measured
-    yet: its hold is pending, so `--audio` on the C64U may stop INFRA until
-    then]: the 6510's copy of `$DF20-$DFFF` reads
-    `$00 $10` in all 112 pairs with the item Enabled; Disabled, the window
-    reads changing bus data (`$DF21` = `$00`; two reads differ), so `$DF21`
+    **differential sampler proof** [MEASURED HW, U64E fw 3.15,
+    `build/evidence/w16-p/hw16`; W17-D: measured 2026-10-13, C64U fw 1.1.0,
+    `build/evidence/sup16/c64u-hw16-eth/run.log` in the w16-int worktree]:
+    the 6510's copy of `$DF20-$DFFF` reads
+    `$00 $10` in all 112 pairs with the item Enabled; Disabled, the U64E's
+    window reads changing bus data (`$DF21` = `$00`; two reads differ) and
+    the C64U's reads `$FF` throughout (W17-D, same log), so `$DF21`
     alone is not the proof (on VICE the window is the REC's mirror). Without
     the proof the session stops (INFRA). **Silence at the end:** the
     session's closing `set_speed(1)` + reboot stops a voice that is still
     playing on the **U64E** (hw16 `rbsil`, by the UDP audio stream: a
     hardware-looped tone, 4394 rms, gone within ~0.3 s of the reboot
     request; 34 rms after, noise, no 259 Hz line); no init call is needed
-    (none is possible while `mach_run` runs). The C64U (no stream: WiFi) is
-    to be checked instrumentally (hw16 `rbwin`: the window idle, playing and
-    after the reboot).
+    (none is possible while `mach_run` runs). W17-D: measured 2026-10-13,
+    C64U fw 1.1.0, on ethernet (the stream works there): hw16 `rbsil`, a
+    playing voice at 4398.9 rms, 17.1 rms after the reboot
+    (`build/evidence/sup16/c64u-hw16-eth/run.log`, w16-int worktree).
   - **Time at s = 3** (both Ultimates): E = 1022727 / 8 = 127841 Hz,
     `cfg_r16` 2362, a guest frame 111 ms real (VERTB 9.0 Hz). `PARK_E` stays
     7094 E (55-111 ms real between parked looks: ~8x fewer per real second
     than at s = 0); a late acknowledge is reposted within one guest frame
     (111 ms real); the seam's lateness bound 4096 >> 3 = 512 E = 4 ms real.
     VICE (s = 9): `cfg_r16` 37 (1.3% rounding: the dry backend only).
-    **Not measured:** the C64U's phi2 at 64 MHz (assumed NTSC 1022727).
+    W17-D: the C64U's CIA counts phi2 unscaled at 64 MHz, measured
+    2026-10-13, C64U fw 1.1.0: 17095.0 ticks per NTSC frame at 64 MHz,
+    17094.0-17095.1 at 1 MHz (`build/evidence/sup16/c64u-hw16-eth/run.log`,
+    w16-int worktree); its absolute phi2 is taken as NTSC 1022727.
 - **The profile block and the app anchor (W16-P; rc machine.inc `prof
   $2DC000-$2DC0FF`).** A guest program cannot measure real time, so the host
   tells it. Guest `$2DC000-$2DC03F`, right after the staged ADF: plain REU

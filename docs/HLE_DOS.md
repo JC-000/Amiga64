@@ -1,5 +1,9 @@
 # HLE DOS: dos.library file I/O (WS-B2)
 
+> **Historical (Wave 17).** This is the Waves 4-5 design of the HLE dos.library file I/O, kept for its reasoning and
+> measurements. The current description is [docs/emulation/HLE.md](emulation/HLE.md); where they differ,
+> [docs/CONTRACTS.md](CONTRACTS.md) and the code win. It still describes program mode as built; the statements that are out of date are listed in that file.
+
 Owner: WS-B2 (`m2-dos`; post-merge round: `m2-post`). This covers
 dos.library file handles for guest programs: Open, Close, Read, Write, Seek,
 IoErr, DeleteFile and ChangeMode, with a backend seam.

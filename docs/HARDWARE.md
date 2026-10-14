@@ -12,9 +12,9 @@ and **windowed** (core with P1's instruction-stream fetch window, commit
 
 | Field | Value |
 |---|---|
-| Device | Ultimate 64 Elite, hostname `Ultimate-64-Elite-688004`, unique_id `601A96` |
+| Device | Ultimate 64 Elite, hostname `Ultimate-64-Elite-XXXXXX`, unique_id `ABC123` |
 | Firmware / FPGA / core | 3.14d / 122 / 1.49 |
-| Address | `http://10.43.23.81` (REST API v0.1 — the harness docs' `192.168.1.81` is stale) |
+| Address | `http://<device address>` (REST API v0.1; addresses in this repo are RFC 5737 placeholders) |
 | Backend | `--backend u64` via c64-test-harness `UnifiedManager` (automatic `DeviceLock`) |
 | REU | REST-configured Enabled / 16 MB for tests |
 | CPU speed | 1 MHz for all correctness suites; sweep via `CPU Speed` + `Turbo Control: Manual` |
@@ -661,7 +661,7 @@ chip clock, not sampled).** Mean ticks per video frame are identical to the
 PAL figure 19656 does not apply. CIA2 does not scale with the turbo clock, so
 a time base built on CIA ticks needs no speed correction.
 
-Conditions: U64E `Ultimate-64-Elite-688004`, firmware 3.15 (git c47155b7),
+Conditions: U64E `Ultimate-64-Elite-XXXXXX`, firmware 3.15 (git c47155b7),
 FPGA 125, core 1.50 (`GET /v1/info`, recorded after taking the DeviceLock).
 Device found at CPU Speed 48 / Turbo Control Manual (not the " 1" older
 sections of this file record); the whole config, all categories, was
@@ -718,7 +718,7 @@ item `C64 and Cartridge Settings / Map Ultimate Audio $DF20-DFFF`
 (default Disabled). The item takes effect at once: no C64 reset was needed
 (`$DF21` read `$10` about 1 s after the REST write).
 
-Conditions: U64E `Ultimate-64-Elite-688004`, firmware 3.15, **git f2e46946**
+Conditions: U64E `Ultimate-64-Elite-XXXXXX`, firmware 3.15, **git f2e46946**
 (not the c47155b7 of the W8-H and W7 sections: the device's build changed;
 the register behaviour below is what this build does), FPGA 125, core 1.50
 (`GET /v1/info`, recorded after taking the DeviceLock). NTSC. Config found
@@ -832,7 +832,7 @@ write) to the first poll that sees the status bit.
 
 ### The C64U's sampler (W16-A, 2026-10-13) [MEASURED HW]
 
-C64 Ultimate fw 1.1.0 / fpga 122 / core 1.49 (uid 5D2518), NTSC, UDP audio
+C64 Ultimate fw 1.1.0 / fpga 122 / core 1.49 (uid DEF456), NTSC, UDP audio
 stream at phi2 x 3/64; evidence `build/evidence/sup16/c64u-pitch/`.
 
 - **Sample time = (rate + 1) x 160 ns + 80 ns** (the U64E's: + 120 ns).
@@ -943,7 +943,7 @@ Not measured: 16-bit and interleave modes, voice 7, more than one voice
 playing at once, REU smaller than 16 MB, the effect of the mixer's pan items,
 sample content beyond frequency, and whether playing during heavy REU DMA
 under-runs audibly. Evidence is in `build/evidence/` (ignored by git); the
-reproduction is `U64_HOST=10.43.23.81 U64_BASELINE_ON_ENTRY=0 python3
+reproduction is `U64_HOST=192.0.2.81 U64_BASELINE_ON_ENTRY=0 python3
 tools/s3probe/sampler/sampler.py --backend u64 --out DIR`.
 
 ## Reading a running C64's RAM over REST at 48 MHz (W11-A, 2026-10-06)
@@ -1149,7 +1149,7 @@ Logs: `build/evidence/w12-reu/probe-*.log`, `probe/*/probe.json`.
 Runner build `d371b5987ec1cf7e`. Harness `c64-test-harness` master **c1a2095** (PR #526: `storage_put_file`,
 `storage_get_file`, `storage_delete_file`), every call under the DeviceLock
 (inside `u64_hold`); the Command Interface Enabled inside the hold, restored
-IDENTICAL. The C64U's file legs (on `/SD`, 2026-10-09) follow below. Logs: `build/evidence/w12-reu/probe-adf-10.43.23.81-{48,1}.log`,
+IDENTICAL. The C64U's file legs (on `/SD`, 2026-10-09) follow below. Logs: `build/evidence/w12-reu/probe-adf-192.0.2.81-{48,1}.log`,
 `u64e/final5.log` (m3file).
 
 | U64E fw 3.15 | 48 MHz | 1 MHz |
@@ -1281,7 +1281,7 @@ hold (`build/evidence/w13-wb/SESSION.log`).
 /SD` resumes it (guest running 7.6 s after the launch). It needs a PRG
 with the same build ID and the same td module.
 
-## Wave 14 hardware findings (2026-10-11, C64U 10.53.21.158, fw 1.1.0)
+## Wave 14 hardware findings (2026-10-11, C64U 198.51.100.158, fw 1.1.0)
 
 - **The 1351 mouse at turbo: RESOLVED, NOT REPRODUCED 2026-10-12.** On 2026-10-11 a genuine Commodore 1351 in port 1 read compressed pots at 64 MHz (`tests/run_inp.py --attended --mouse-diag`; evidence: the w14-mouse worktree's `build/evidence/w14-mouse/diag/run1.log`). On 2026-10-12 neither that same code nor `tests/run_mturbo.py` (W15) reproduced it, in any turbo mode or at any speed:
 
@@ -1314,7 +1314,7 @@ with the same build ID and the same td module.
   - **A still 1351 reads the same at every speed:** $CA / $AB (±1) under Off, Manual 64 and Turbo Registers indices 0 and 15, and after a drop to 1 MHz with any wait k = 0..3072 phi2 (M3-still).
   - Evidence: the w15-mdiag worktree's `build/evidence/w15-mdiag/`: `unattended.log` (M4, M5, M3-still), `attended.log` (M1, M3-moving), `m7.log`, `rerun1-console.log`, each with its `*-summary.json` and the `u64-*/config_before.json` / `config_after.json` pairs (every hold restored IDENTICAL).
   - Run commands (from the repo root, after `make runtime`):
-    - `U64_HOST=10.53.21.158 python3 -m tests.run_mturbo --prg build/runner.prg --backend u64 --unattended-only` runs M4, M5 and M3-still with the mouse untouched (~3 min).
+    - `U64_HOST=198.51.100.158 python3 -m tests.run_mturbo --prg build/runner.prg --backend u64 --unattended-only` runs M4, M5 and M3-still with the mouse untouched (~3 min).
     - `... --backend u64 --only m7 [--m7-windows abcdef]` runs M4 plus M7, config path vs register path, with the mouse moving left-right (~3 min attended).
     - `... --backend u64 [--skip-unattended]` runs M1 and M3-moving (~9 min attended).
     - `python3 -m tests.run_mturbo --prg build/runner.prg` is the VICE dry run.

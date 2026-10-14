@@ -1,9 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "amiga64-host"
-version = "0.0.1"
-description = "Host-side tools for the Amiga64 translation layer (Hunk loader, vector pipeline, dispatch generator)"
+name = "amiga64"
+version = "0.17.0"
+description = "Boot Workbench 3.1 on AROS on a C64 Ultimate or an Ultimate 64 Elite (68000 translation layer)"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "NOTICE", "third_party/aros/LICENSE"]
 requires-python = ">=3.11"
-dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: System :: Emulators",
+]
+dependencies = [
+    "c64-test-harness @ git+https://github.com/JC-000/c64-test-harness@v0.13.1",   # = bc4ab0b
+]
+
+[project.optional-dependencies]
+audio = ["numpy"]               # the audio-stream analysis of the Paula tests (not the run path)
+dev = ["pytest"]
+
+[project.scripts]
+amiga64 = "amiga64.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["host/tests"]

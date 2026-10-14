@@ -944,7 +944,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--backend", choices=["u64", "vice"], default="u64")
     ap.add_argument("--out", default=os.path.join(ROOT, "build", "evidence", "w10-hw"))
-    ap.add_argument("--host", default=os.environ.get("U64_HOST", "10.43.23.81"))
+    ap.add_argument("--host", default=os.environ.get("U64_HOST"), help="device address (or U64_HOST)")
     ap.add_argument("--analyze", help="re-judge a saved meas json, no device")
     ap.add_argument("--no-audio", action="store_true")
     ap.add_argument("--expect-version", type=lambda x: int(x, 0), default=0x10)
@@ -956,6 +956,8 @@ def main(argv=None) -> int:
     ap.add_argument("--expect-const-ns", type=float, default=120.0)
     ap.add_argument("--const-tol-ns", type=float, default=15.0)
     a = ap.parse_args(argv)
+    if a.backend == "u64" and not a.analyze and not a.host:
+        ap.error("give --host or set U64_HOST to your device's address")
     a.out = os.path.abspath(a.out)
     os.makedirs(a.out, exist_ok=True)
     logf = open(os.path.join(a.out, f"driver_{a.backend}.log"), "a")

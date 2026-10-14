@@ -18,11 +18,11 @@ Supervisor-authored, **binding**.
 ## Operating rules (all agents)
 
 - **Devices only through c64-test-harness.**
-  - VICE, the U64E (10.43.23.81) and the C64U (10.53.21.158) are started, driven and stopped only through the harness: its lifecycle, its DeviceLock, and `tests/bench/u64_session.u64_hold` (config snapshot and exact restore).
+  - VICE, the U64E (192.0.2.81) and the C64U (198.51.100.158) are started, driven and stopped only through the harness: its lifecycle, its DeviceLock, and `tests/bench/u64_session.u64_hold` (config snapshot and exact restore).
   - **Never `pkill` or `killall`. No raw `curl`, FTP or REST to a device, not even a read-only GET.**
   - Stop your own stuck run with the harness teardown or the exact PID the harness gave you.
 - **Hardware is queued, not scheduled.** Slow legs run whenever you need them, through the DeviceLock.
-  - **Default to the C64U at 64 MHz** (`U64_HOST=10.53.21.158 --mhz 64`).
+  - **Default to the C64U at 64 MHz** (`U64_HOST=198.51.100.158 --mhz 64`).
   - Use the U64E at 48 MHz as the cross-check before you report done.
   - The user is remote, so nobody watches the screens. Another session, `c64-test-harness-c2`, also uses both devices.
   - Every hold appends to `build/evidence/<pkg>/SESSION.log`, and the config must read back IDENTICAL.

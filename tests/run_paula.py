@@ -111,6 +111,11 @@ def build_aud(labels_path: str, out_dir: str, src: str | None = None,
     """The module in two segments; one ID (SHA-1[:4] of A + B with both ID
     fields zero) at A+3 and B+0.  Returns (a, b, labels).  *defines*:
     extra -D (the log build: AUD_LOG=<drv's aud_log>)."""
+    from host import prebuilt                                   # W17-B
+    why = " ".join(([src] if src else []) + list(defines))      # W17-B
+    if prebuilt.use(("ca65", "ld65"), "aud", why and f"aud {why}", labels_path):   # W17-B
+        a, b = prebuilt.module("aud", labels_path)              # W17-B
+        return a, b, prebuilt.labels("aud")                     # W17-B
     from tests.aros_wb import module_syms
     src = src or os.path.join(ROOT, "tests", "paula", "aud.s")
     os.makedirs(out_dir, exist_ok=True)
@@ -140,6 +145,8 @@ def build_aud(labels_path: str, out_dir: str, src: str | None = None,
 
 
 def build_drv(labels_path: str, out_dir: str) -> tuple[bytes, dict]:
+    from host import prebuilt                                   # W17-B: a test driver,
+    prebuilt.use(("ca65", "ld65"), None, "run_paula's driver tests/paula/drv.s")   # W17-B: never shipped
     os.makedirs(out_dir, exist_ok=True)
     base = os.path.join(out_dir, "drv")
     cfg = ("MEMORY { M: file = \"%s\", start = $%04X, size = $%04X; }\n"
@@ -1307,7 +1314,7 @@ class HwRig(Rig):
             AudioCapture, U64_NTSC_AUDIO_RATE_HZ)
         client = self.t.client
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect((os.environ.get("U64_HOST", "10.43.23.81"), 80))
+        s.connect((os.environ["U64_HOST"], 80))      # the device address (required)
         ip = s.getsockname()[0]
         s.close()
         cap = AudioCapture(port=0, sample_rate=U64_NTSC_AUDIO_RATE_HZ)

@@ -1,5 +1,10 @@
 # PERF — Analytic performance projection (M1 interpreter)
 
+> **Historical (Wave 17).** This is the analytic performance model of the M1 interpreter, with later per-wave cycle accounting, kept for its reasoning and
+> measurements. The current description is [docs/emulation/CPU.md](emulation/CPU.md) and [docs/HARDWARE.md](HARDWARE.md); where they differ,
+> [docs/CONTRACTS.md](CONTRACTS.md) and the code win. Its later sections, (f) onwards, are per-wave cycle accounting and
+> measurements; they remain valid as dated records of the builds they name.
+
 > **Measured reality now exists: see `docs/HARDWARE.md`** (real U64E, fw 3.14d,
 > raw data in `fixtures/bench/`). Headlines vs. this doc's estimates: 1 MHz
 > cycles/instr came out ~2× worse than the cycle-comment model; the 48 MHz

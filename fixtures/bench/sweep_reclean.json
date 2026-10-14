@@ -5,10 +5,10 @@
   "git_commit_hash": "bce4535e",
   "fpga_version": "125",
   "core_version": "1.4F",
-  "hostname": "Ultimate-64-Elite-688004",
-  "unique_id": "601A96",
-  "ethernet_mac": "02:15:41:68:80:04",
-  "wifi_mac": "FC:F5:C4:39:57:F8",
+  "hostname": "Ultimate-64-Elite-XXXXXX",
+  "unique_id": "ABC123",
+  "ethernet_mac": "xx:xx:xx:xx:xx:xx (redacted)",
+  "wifi_mac": "xx:xx:xx:xx:xx:xx (redacted)",
   "errors": []
  },
  "config_before": {

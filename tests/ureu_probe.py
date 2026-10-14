@@ -22,7 +22,7 @@ speed, reboot, the runner
   5. ask for one byte more than the file holds: the firmware answers "00"
      with the short count, ureu_ld must refuse (UREU_E_SHORT).
 
-    U64_HOST=10.53.21.158 python3 -m tests.ureu_probe --prg build/X/runner.prg
+    U64_HOST=198.51.100.158 python3 -m tests.ureu_probe --prg build/X/runner.prg
         --mhz 64 [--root /SD] [--out DIR]
 """
 

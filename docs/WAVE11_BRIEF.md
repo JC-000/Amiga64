@@ -20,7 +20,7 @@ Scratch goes only in `<scratchpad>/<pkg>/`. Run `make vectors` and
 
 ## Operating rules (all agents; from Waves 7–10)
 
-- **Devices only through c64-test-harness.** VICE, the U64E (10.43.23.81)
+- **Devices only through c64-test-harness.** VICE, the U64E (192.0.2.81)
   and the C64U are started, driven and stopped only through the harness.
   **Never `pkill`, `killall`, or launch `x64sc` yourself.** To stop your own
   stuck run, use the harness's teardown or the exact PID the harness gave
