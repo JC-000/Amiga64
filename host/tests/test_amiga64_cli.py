@@ -666,6 +666,20 @@ def test_make_disk_turns_an_adf_error_into_a_plain_one(monkeypatch):
     assert "amigaguide.datatype" in str(e.value) and "session disk" in str(e.value)
 
 
+def test_make_disk_refuses_an_overlay_that_loses_a_staged_file(tmp_path, monkeypatch):
+    # rev17-k r2 #1: the overlay self-check must run (it was dead code in bfad402)
+    from host import adf_files as F
+    from tests import aros_modwb as MW
+    raw = wbdisk()
+    base = MW.ModDisk(raw, A.SCRIPT, PLAYER, MOD, with_info=True, standin=False)
+    monkeypatch.setattr(F, "overlay_of", lambda *a, **k: base.ov)
+    f = tmp_path / "a.txt"
+    f.write_bytes(b"note")
+    with pytest.raises(S.SessionError) as e:
+        S.make_disk(raw, PLAYER, MOD, [A.Request(str(f))])
+    assert "does not reproduce the image" in str(e.value)
+
+
 def _own(home):
     return D.adf_name(hashlib.sha256((home / "adf" / "wb.adf").read_bytes()).hexdigest())
 
