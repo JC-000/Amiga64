@@ -25,11 +25,11 @@ Reads/writes of ``$DF1C-$DF1F`` go to :class:`UciDevice`, a model of
   from ``software/filesystem/file_system.cc`` ``get_error_string`` 28-77
   (no "NN," prefix) and the fixed ``dos.cc`` Messages 16-30 ("NN,TEXT").
 
-Firmware tree: ~/Documents/1541ultimate @ bce4535e, the U64E's fw 3.15 build
+Firmware tree: a 1541ultimate firmware checkout (github.com/GideonZ/1541ultimate) @ bce4535e, the U64E's fw 3.15 build
 (docs/HARDWARE.md).  Written against 880de4dd; W5-T re-checked every cited
 line at bce4535e: dos.cc, file_system.cc's strings, fs_errors_flags.h and
 command_protocol.vhd are unchanged, filemanager.cc and command_intf.cc moved
-(line numbers above are bce4535e's).  ~/Documents/1541u-315preview
+(line numbers above are bce4535e's).  a 1541ultimate 3.15-preview checkout
 (v3.15-84) has the same strings.  On 2026-09-24 21:52 the device reported
 git c47155b7 (core 1.50).  Against bce4535e that build also changes
 filemanager.cc (a successful open-for-write and its close now call the
@@ -1222,7 +1222,7 @@ def test_delete_lost_reply_reports_device_error(build):
 # =============================================================================
 # W5-T: status strings as firmware 3.15 answers them on the U64E
 # (build/hw-final-evidence/ultdos/ultdos_run2.log, 2026-09-24; firmware
-# ~/Documents/1541ultimate @ bce4535e = the device's 3.15 build)
+# a 1541ultimate firmware checkout (github.com/GideonZ/1541ultimate) @ bce4535e = the device's 3.15 build)
 # =============================================================================
 
 def _status(dev, msg):

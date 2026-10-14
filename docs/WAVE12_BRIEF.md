@@ -41,7 +41,7 @@ Supervisor-authored, **binding**.
   - No AROS source, ROM bytes or disassembly in the repo or in your reasoning.
   - **Do not open `~/.cache/amiga64/aros-src/`.**
   - The ROM and the ADFs are black boxes loaded at test time and never committed. Observing behaviour is fine: serial text, registers, the boot model's traces.
-  - The Ultimate firmware (GPL, `~/Documents/1541u-*` checkouts, c64-test-harness docs) MAY be read for interface facts. Cite the file and line.
+  - The Ultimate firmware (GPL, 1541ultimate checkouts, c64-test-harness docs) MAY be read for interface facts. Cite the file and line.
 - **Context economy.** Read this brief, the cited sections, the done-gate (`.serena/memories/task_completion.md`) and the source you change. Use grep and line ranges.
 
 ## Memory budget (C64 RAM; `make rescheck` enforces ownership)
@@ -107,7 +107,7 @@ User: *"You can save the state of the REU and for something with a long boot tim
 - **Storage:** C64U `/SD/amiga64/`, U64E `/USB1/amiga64/`. Never `/Flash` or `/Temp`.
 - Measure on the C64U (fw 1.1.0, 64 and 1 MHz) and the U64E (fw 3.15, 48 MHz): throughput, correctness by checksum, and the effect on a running guest at turbo.
 - **ADF upload:** no harness API exists. The harness owner is deciding between adding one and doing a one-off upload. **Do not write device storage, by any means, until the supervisor relays the answer.**
-  - The ADF is `~/Documents/Amiga Disk Images/amiga-os-310-workbench.adf`. It is never committed, and its content is a black box.
+  - The ADF is the user's own `amiga-os-310-workbench.adf`. It is never committed, and its content is a black box.
   - Until the upload is available, develop the 6502 path against VICE's fake UCI (`tests/run_dos.py build_fake_uci`). There is no harness-placed file to probe with (/Temp is a swept RAM disk, /Flash is off limits), so the device LOAD/SAVE probe waits for the storage decision (supervisor correction, 2026-10-08).
 - **Deliverable:** `ureu.s` loads a named file into a REU range and saves a REU range to a file. The AROS ROM can then be staged by the C64 from storage as an alternative to host staging. Host staging stays for VICE.
 

@@ -110,28 +110,10 @@ config before, restore it exactly after (see `docs/HARDWARE.md` — CPU Speed
 WS-B2's Ultimate DOS path is hardware-validated in a later supervisor-
 scheduled leg; in this wave it must be VICE-testable via its RAMDISK backend.
 
-## Local model (Qwen3.6-35B-A3B on the Air lab box)
+## Local model
 
-Available for **drafting and second opinions**, never as an authority:
-
-```sh
-LA_MAX_TOKENS=8192 LA_TIMEOUT=1200 \
-  ~/Documents/ebullientprism/tools/local-agent/invoke.sh --system "..." "prompt"
-```
-
-- 3 server slots shared by every agent on this machine; the server queues a
-  4th request natively. **At most ONE request in flight per agent**; expect
-  waits of minutes; ~40 t/s single, ~16 t/s under load. It is a reasoning
-  model (`<think>` eats tokens) — budget `LA_MAX_TOKENS` accordingly.
-- Good uses: drafting test tables / host-side pytest scaffolds, extracting
-  LVO/trap lists from disassembly, a first-pass diff scan whose every claim
-  you then verify, doc prose drafts. `reference/apply_edits.py` applies
-  SEARCH/REPLACE blocks if you ask for that format.
-- Rules: send only repo code/docs (never keys, never device credentials);
-  treat output as untrusted; nothing it writes lands without you reading it
-  and the gates passing. Say in your report where you used it and what it
-  caught or got wrong (we are building evidence on where it helps).
-- If the endpoint is down or slow, proceed without it — never block on it.
+A local model was available to the author for drafting and second opinions,
+never as an authority. Its setup is not part of this repository.
 
 ## Report (end of your run)
 

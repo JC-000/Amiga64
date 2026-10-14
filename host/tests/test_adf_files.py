@@ -23,7 +23,7 @@ from host import wbicon as W  # noqa: E402
 import adf as S  # noqa: E402
 
 BM = O.ROOT + 1                         # build_adf allocates from 882: 881 is free
-USER_ADF = os.path.expanduser("~/Documents/Amiga Disk Images/amiga-os-310-workbench.adf")
+USER_ADF = os.environ.get("AMIGA64_TEST_ADF") or os.path.expanduser("~/Amiga/amiga-os-310-workbench.adf")
 
 
 def with_bitmap(img: bytes) -> bytes:

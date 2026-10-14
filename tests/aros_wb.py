@@ -5,7 +5,7 @@ docs/WAVE13_BRIEF.md W1-W4; contract docs/CONTRACTS.md "HLE trackdisk and
 DF0"; design and observations build/evidence/w13-wb/PROGRESS.md.
 
 Needs the AROS ROM cache (tools/aros/fetch.sh) and the user's ADF
-(~/Documents/Amiga Disk Images/amiga-os-310-workbench.adf, read-only, never
+($AMIGA64_TEST_ADF, else ~/Amiga/amiga-os-310-workbench.adf; read-only, never
 copied into the repository or the evidence); without either every leg
 prints a SKIP line and the run exits 0.
 
@@ -59,7 +59,7 @@ from host import machine  # noqa: E402
 from tests import aros_boot as AB  # noqa: E402
 
 TD_ADF = 0x200000                    # rc machine.inc (checked against the labels' build below)
-ADF_LOCAL = os.path.expanduser("~/Documents/Amiga Disk Images/amiga-os-310-workbench.adf")
+ADF_LOCAL = os.environ.get("AMIGA64_TEST_ADF") or os.path.expanduser("~/Amiga/amiga-os-310-workbench.adf")
 ADF_NAME = "amiga-os-310-workbench.adf"
 EVID = os.path.join(ROOT, "build", "evidence", "w13-wb")
 MB_LIMIT = 0xC200                    # mboot $C000-$C1FF (machine-mode area layout)

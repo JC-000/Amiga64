@@ -52,7 +52,7 @@ User direction:
   - The ROM and the ADFs are black boxes loaded at test time and never committed. No disk bytes in the repo or in evidence beyond names, sizes, block numbers and checksums.
   - Observing behaviour is fine: serial text, registers, the boot model's traces, the existing `tools/s3probe` tools.
   - Public Amiga interface facts (the NDK: exec structures, IORequest field offsets, trackdisk command numbers, custom-chip and CIA register maps, the OFS/FFS on-disk format) are fine. Cite what you rely on.
-  - The Ultimate firmware (GPL, `~/Documents/1541u-*`) and the c64-test-harness docs may be read for interface facts. Cite the file and line.
+  - The Ultimate firmware (GPL, 1541ultimate checkouts) and the c64-test-harness docs may be read for interface facts. Cite the file and line.
 - **Context economy.** Read this brief, the cited sections, the done-gate (`.serena/memories/task_completion.md`) and the source you change. Use grep and line ranges.
 
 ## Memory budget (C64 RAM; `make rescheck` enforces ownership)

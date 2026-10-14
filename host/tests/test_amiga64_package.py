@@ -184,7 +184,7 @@ def test_clean_venv_install_imports_from_outside_the_repo(tmp_path):
     assert r.stdout.strip() == "amiga64 0.17.0", r.stderr
 
 
-USER_ADF = os.path.expanduser("~/Documents/Amiga Disk Images/amiga-os-310-workbench.adf")
+USER_ADF = os.environ.get("AMIGA64_TEST_ADF") or os.path.expanduser("~/Amiga/amiga-os-310-workbench.adf")
 
 
 def _installed_layout(site: str) -> str:

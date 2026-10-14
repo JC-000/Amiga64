@@ -1,5 +1,13 @@
 # AROS m68k ROM (reference oracle only, test-time only)
 
+> **Since Wave 17** the same pinned ROM files (`aros-rom.bin`,
+> `aros-ext.bin`, byte-identical to this manifest) are also **bundled** in
+> [`third_party/aros/`](../../third_party/aros/), unmodified, with their
+> APL 1.1 licence, acknowledgements and `SOURCE.txt`; that copy is what
+> `amiga64` boots (`host/machine.find_rom` prefers it and falls back to
+> this cache). `fetch.sh` remains for the oracle's FS-UAE side, which also
+> needs `C/Copy` and `C/Assign` from the ISO, and as a developer cache.
+
 `tools/aros/fetch.sh` fetches the AROS m68k ROM that the reference oracle
 (`tests/aros_oracle.py`, see `docs/ORACLE.md`) boots in FS-UAE. Nothing it
 fetches lives in the repository or under `build/`, and no test or gate
@@ -53,15 +61,18 @@ AROS is distributed under the **AROS Public License 1.1** (APL, derived from
 the MPL 1.1). The full text is in the cache as `LICENSE`, exactly as the
 archive ships it, next to `SOURCE.txt`.
 
-- We only **run** the unmodified binaries locally, as a test oracle. We do
-  not redistribute them: no ROM bytes, AROS binaries or AROS source are in
-  this repository, its `build/` tree or any artifact it publishes.
+- Only the two ROM files are redistributed, unmodified, in
+  `third_party/aros/` (with the licence, the acknowledgements and
+  `SOURCE.txt`). Everything else this script fetches (the ISO, `C/Copy`,
+  `C/Assign`) stays in the local cache. No AROS source is in this
+  repository.
 - AROS sources: <https://github.com/aros-development-team/AROS> (the tree
   the nightlies are built from). Source snapshots are also published next
   to the binaries under <https://sourceforge.net/projects/aros/files/nightly2/>.
-- If AROS material is ever redistributed (for example a future ROM-boot
-  milestone that ships a modified ROM), the APL applies to it: include the
-  licence text, keep the notices, and say where the source is (APL §3). That
-  material must also live in clearly separated files (README "Third-party
-  material"). HLE code stays clean-room. Reading the AROS sources as a
-  reference is fine; copying them into HLE code is not.
+- Any further AROS material that is redistributed (for example a modified
+  ROM) falls under the APL too: include the licence text, keep the
+  notices, say where the source is (APL §3), and keep it in clearly
+  separated files (README "Licence and third-party material").
+- The project's own code stays clean-room: since Wave 10 the briefs forbid
+  reading the AROS sources at all (the Wave 6 planning documents, S3_PLAN
+  and WB_BOOT, still cite AROS source files from that earlier analysis).

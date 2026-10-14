@@ -1,5 +1,9 @@
 # C2V: planar → VIC-II converter v0
 
+> **Historical (Wave 17).** This is the Wave 7 design of the converter, with later per-wave additions, kept for its reasoning and
+> measurements. The current description is [docs/emulation/CHIPSET.md](emulation/CHIPSET.md); where they differ,
+> [docs/CONTRACTS.md](CONTRACTS.md) and the code win. Statements such as "nothing calls the module yet" describe Wave 7.
+
 Wave 7, package W7-V. This is the converter half of `docs/S3_PLAN.md` §4
 "S3.5". There is no copper, no display-register decoding and no
 guest-visible behaviour change. Nothing calls the module yet. It is linked

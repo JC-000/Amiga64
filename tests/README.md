@@ -1,8 +1,13 @@
 # tests/ — M1 test execution (runner PRG + VICE driver)
 
+> **Historical (M1).** This is the M1-era note on the vector runner and
+> its stub core. The current overview of every test layer is
+> [docs/emulation/TESTING.md](../docs/emulation/TESTING.md); the runner
+> has since run on real devices too (docs/HARDWARE.md).
+
 Owner: D-harness. Everything here builds against `docs/CONTRACTS.md`; VICE is
-driven through the `c64-test-harness` package (`~/Documents/c64-test-harness`,
-see the `c64-test` skill).
+driven through the [c64-test-harness](https://github.com/JC-000/c64-test-harness)
+package (see its documentation).
 
 ## Entry points
 

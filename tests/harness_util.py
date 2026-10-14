@@ -1,7 +1,7 @@
 """Shared helpers for the Amiga64 test harness (tests/smoke.py, tests/run_vectors.py).
 
-VICE is driven through the c64-test-harness package (see the c64-test skill /
-~/Documents/c64-test-harness). Backend selection is kept switchable: everything
+VICE is driven through the c64-test-harness package (see
+https://github.com/JC-000/c64-test-harness). Backend selection is kept switchable: everything
 here talks to a c64_test_harness TestTarget or C64Transport, never to VICE
 process internals.
 """
