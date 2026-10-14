@@ -20,7 +20,7 @@ Supervisor-authored, **binding**.
 - **Devices only through c64-test-harness:** DeviceLock and `u64_hold`, with the config IDENTICAL afterwards.
   - Never pkill or killall.
   - No raw curl, FTP or REST.
-- **Hardware.** The C64U is at 10.53.21.158, 64 MHz; the U64E at 10.43.23.81 is the cross-check.
+- **Hardware.** The C64U is at 198.51.100.158, 64 MHz; the U64E at 192.0.2.81 is the cross-check.
 - **The user is often at the C64U.**
   - **Ask the supervisor before any C64U hold.**
   - Attended legs are run by the supervisor, who relays cues in chat. On-screen prompts are not seen; give long windows (≥ 15 s) and put every cue in the log.

@@ -1,4 +1,4 @@
-[17:24:20] kbd_echo MANUAL on 10.43.23.81, runs fixed@48, nosettle@48, nojoymask@48, fixed@1, prg build/w6-int/runner.prg
+[17:24:20] kbd_echo MANUAL on 192.0.2.81, runs fixed@48, nosettle@48, nojoymask@48, fixed@1, prg build/w6-int/runner.prg
 [17:24:20] firmware gate: Ultimate 64 Elite fw 3.15 git c47155b7 fpga 125 core 1.50 = resting build (git c47155b7, core 1.50): proceeding
 
 ========================================================================
@@ -129,16 +129,16 @@ cases on screen (upper-case charset); the hex code tells them apart.
 [17:25:47] ^C received: deferred until the restore is done and the lock released
 [17:25:47] ^C received: deferred until the restore is done and the lock released
 [17:25:48] ^C received: deferred until the restore is done and the lock released
-[17:25:56]   restore_state failed (attempt 1/1): Ultimate64TimeoutError('timeout after 10.0s: PUT http://10.43.23.81/v1/configs/U64%20Specific%20Settings/Turbo%20Control?value=Manual')
-[17:25:56]   re-read 1 failed (attempt 1/2): Ultimate64TimeoutError('connection failed: GET http://10.43.23.81/v1/configs: [Errno 64] Host is down')
-[17:25:56]   re-read 1 failed (attempt 2/2): Ultimate64TimeoutError('connection failed: GET http://10.43.23.81/v1/configs: [Errno 64] Host is down')
-[17:25:56]   re-read 2 failed (attempt 1/2): Ultimate64TimeoutError('connection failed: GET http://10.43.23.81/v1/configs: [Errno 64] Host is down')
-[17:25:56]   re-read 2 failed (attempt 2/2): Ultimate64TimeoutError('connection failed: GET http://10.43.23.81/v1/configs: [Errno 64] Host is down')
-[17:25:56]   C64 reset failed (attempt 1/1): Ultimate64TimeoutError('connection failed: PUT http://10.43.23.81/v1/machine:reset: [Errno 64] Host is down')
-[17:25:59]   final re-read failed (attempt 1/2): Ultimate64TimeoutError('connection failed: GET http://10.43.23.81/v1/configs: [Errno 64] Host is down')
-[17:25:59]   final re-read failed (attempt 2/2): Ultimate64TimeoutError('connection failed: GET http://10.43.23.81/v1/configs: [Errno 64] Host is down')
+[17:25:56]   restore_state failed (attempt 1/1): Ultimate64TimeoutError('timeout after 10.0s: PUT http://192.0.2.81/v1/configs/U64%20Specific%20Settings/Turbo%20Control?value=Manual')
+[17:25:56]   re-read 1 failed (attempt 1/2): Ultimate64TimeoutError('connection failed: GET http://192.0.2.81/v1/configs: [Errno 64] Host is down')
+[17:25:56]   re-read 1 failed (attempt 2/2): Ultimate64TimeoutError('connection failed: GET http://192.0.2.81/v1/configs: [Errno 64] Host is down')
+[17:25:56]   re-read 2 failed (attempt 1/2): Ultimate64TimeoutError('connection failed: GET http://192.0.2.81/v1/configs: [Errno 64] Host is down')
+[17:25:56]   re-read 2 failed (attempt 2/2): Ultimate64TimeoutError('connection failed: GET http://192.0.2.81/v1/configs: [Errno 64] Host is down')
+[17:25:56]   C64 reset failed (attempt 1/1): Ultimate64TimeoutError('connection failed: PUT http://192.0.2.81/v1/machine:reset: [Errno 64] Host is down')
+[17:25:59]   final re-read failed (attempt 1/2): Ultimate64TimeoutError('connection failed: GET http://192.0.2.81/v1/configs: [Errno 64] Host is down')
+[17:25:59]   final re-read failed (attempt 2/2): Ultimate64TimeoutError('connection failed: GET http://192.0.2.81/v1/configs: [Errno 64] Host is down')
 [17:25:59] config after (full, all categories): RE-READ FAILED
-[18:26:57] kbd_echo MANUAL on 10.43.23.81, runs fixed@48, nosettle@48, nojoymask@48, fixed@1, prg build/w6-int/runner.prg
+[18:26:57] kbd_echo MANUAL on 192.0.2.81, runs fixed@48, nosettle@48, nojoymask@48, fixed@1, prg build/w6-int/runner.prg
 [18:26:57] firmware gate: Ultimate 64 Elite fw 3.15 git c47155b7 fpga 125 core 1.50 = resting build (git c47155b7, core 1.50): proceeding
 
 ========================================================================
@@ -296,7 +296,7 @@ cases on screen (upper-case charset); the hex code tells them apart.
 [18:28:16] ^C received: deferred until the restore is done and the lock released
 [18:28:16] ^C received: deferred until the restore is done and the lock released
 [18:28:19] config after (full, all categories): IDENTICAL
-[18:28:21] kbd_echo MANUAL on 10.43.23.81, runs fixed@48, nosettle@48, nojoymask@48, fixed@1, prg build/w6-int/runner.prg
+[18:28:21] kbd_echo MANUAL on 192.0.2.81, runs fixed@48, nosettle@48, nojoymask@48, fixed@1, prg build/w6-int/runner.prg
 [18:28:21] firmware gate: Ultimate 64 Elite fw 3.15 git c47155b7 fpga 125 core 1.50 = resting build (git c47155b7, core 1.50): proceeding
 
 ========================================================================

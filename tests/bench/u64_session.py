@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """WS-A hardware session on the U64E: ONE DeviceLock hold for everything.
 
-    U64_HOST=10.43.23.81 U64_BASELINE_ON_ENTRY=0 python3 -m tests.bench.u64_session \
+    U64_HOST=192.0.2.81 U64_BASELINE_ON_ENTRY=0 python3 -m tests.bench.u64_session \
         --new build/ws-a/runner.prg --base build/base/runner.prg \
         --noinval build/ws-a-noinval/runner.prg
 

@@ -100,7 +100,7 @@ in the one fake DOSBase; an LVO is claimed by exactly one table.
    Report honestly: skipped steps, flaky results, and anything you could not
    verify go in the report, not under the rug.
 
-## Hardware (U64E at 10.43.23.81, `U64_HOST=10.43.23.81`)
+## Hardware (U64E at 192.0.2.81, `U64_HOST=192.0.2.81`)
 
 **WS-A is the only package allowed to touch the device this wave.** Always
 through the c64-test-harness (`DeviceLock` is automatic). Record the device

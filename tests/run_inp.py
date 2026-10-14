@@ -36,11 +36,11 @@ Legs:
 
     python3 -m tests.run_inp --prg build/X/runner.prg [--legs api,guest,real]
     python3 -m tests.run_inp --prg ... --mutants [--only m1,m2]
-    U64_HOST=10.53.21.158 python3 -m tests.run_inp --prg ... --backend u64 \
+    U64_HOST=198.51.100.158 python3 -m tests.run_inp --prg ... --backend u64 \
         [--mhz 64]                      # api, guest, noinj on the device
-    U64_HOST=10.53.21.158 python3 -m tests.run_inp --prg ... --attended \
+    U64_HOST=198.51.100.158 python3 -m tests.run_inp --prg ... --attended \
         --mouse 1 [--stuck 0x01]        # W14-M: the 1351 windows (CUE lines)
-    U64_HOST=10.53.21.158 python3 -m tests.run_inp --prg ... --attended \
+    U64_HOST=198.51.100.158 python3 -m tests.run_inp --prg ... --attended \
         [--seconds 60] [--mhz 64]       # the user moves the real stick, then
                                         # holds F3 alone, then C= alone (5 s each)
     ... --backend u64 --allow-held 0x01 # a hardware port with a stuck direction:

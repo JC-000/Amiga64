@@ -35,11 +35,11 @@ Attended (the supervisor relays the CUE lines; nothing shows on the C64):
       read at full speed, no drop; a window is COMPRESSED when POTX spans
       under 64 values.
 
-    U64_HOST=10.53.21.158 python3 -m tests.run_mturbo --prg build/runner.prg \
+    U64_HOST=198.51.100.158 python3 -m tests.run_mturbo --prg build/runner.prg \
         --backend u64 --unattended-only        # M4, M5, M3s (mouse untouched)
-    U64_HOST=10.53.21.158 python3 -m tests.run_mturbo --prg build/runner.prg \
+    U64_HOST=198.51.100.158 python3 -m tests.run_mturbo --prg build/runner.prg \
         --backend u64 [--skip-unattended]      # + the attended M1, M3m
-    U64_HOST=10.53.21.158 python3 -m tests.run_mturbo --prg build/runner.prg \
+    U64_HOST=198.51.100.158 python3 -m tests.run_mturbo --prg build/runner.prg \
         --backend u64 --only m7 [--m7-windows abcdef]   # M4 + the attended M7
     python3 -m tests.run_mturbo --prg build/runner.prg   # VICE dry run (fast)
     python3 -m tests.run_mturbo --from-log build/evidence/w14-mouse/diag/run1.log

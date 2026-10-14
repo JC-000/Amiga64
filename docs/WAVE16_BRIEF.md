@@ -33,8 +33,8 @@ Worktrees: `.claude/worktrees/w16-<pkg>`, branch `wave16/<pkg>`. Evidence goes i
   - Never use the Ultimate menu.
   - Long runners: SIGTERM leads to the restore; deadlines; DONE markers you poll.
 - **Devices:**
-  - **C64U** at 10.43.23.158 (uid 5d2518): NTSC, 64 MHz, the sampler present ($DF21 = $10), WiFi, so **no UDP audio stream**.
-  - **U64E** at 10.43.23.81: NTSC, 48 MHz, wired, so the audio stream works.
+  - **C64U** at 192.0.2.158 (uid def456): NTSC, 64 MHz, the sampler present ($DF21 = $10), WiFi, so **no UDP audio stream**.
+  - **U64E** at 192.0.2.81: NTSC, 48 MHz, wired, so the audio stream works.
   - Ask the supervisor before any hold. The supervisor runs attended legs with the user.
 - **Clean room.**
   - No AROS source (`~/.cache/amiga64/aros-src/`), no Commodore NDK or ROM sources, no MOD replay sources.
