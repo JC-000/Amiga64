@@ -1,5 +1,9 @@
 # S3 plan: chipset shim, VIC-II mapping and the AROS boot surface
 
+> **Historical (Wave 17).** This is the Wave 6 plan for the chipset and the AROS boot, kept for its reasoning and
+> measurements. The current description is [docs/emulation/CHIPSET.md](emulation/CHIPSET.md) and [docs/emulation/CIA_AND_TIMING.md](emulation/CIA_AND_TIMING.md); where they differ,
+> [docs/CONTRACTS.md](CONTRACTS.md) and the code win. Its [MODEL] and [EST] figures are pre-implementation estimates; measured results are in docs/PERF.md (l) and docs/HARDWARE.md.
+
 Wave 6, package W6-D (`docs/WAVE6_BRIEF.md` C5). This is a design document.
 Nothing in `runtime/` changes. It answers C5's four questions with evidence,
 and every number carries a tag that says where it comes from:
