@@ -4,9 +4,11 @@ The host side of ``runtime/rc/machine.inc`` (docs/CONTRACTS.md "Machine
 profile and AROS boot (S3.7)"): the guest map the AROS Kickstart
 replacement boots on, and the plan that stages it into the REU.
 
-Nothing here holds or writes ROM bytes into the repository: the ROM banks
-are read from the verified W6-O cache (``~/.cache/amiga64/aros/<sha>/``,
-tools/aros/fetch.sh, pinned by tools/aros/manifest.txt) at test time only.
+The ROM banks are read from the bundle in the repository (W17-K:
+``third_party/aros/``, the pinned binaries with their APL 1.1 LICENSE and
+SOURCE.txt) or, failing that, from the verified W6-O cache
+(``~/.cache/amiga64/aros/<sha>/``, tools/aros/fetch.sh); both are pinned by
+tools/aros/manifest.txt.  Nothing here writes ROM bytes anywhere.
 ``find_rom`` fails closed (a missing or mismatching file is never used) and
 reports why, so a caller can print a SKIP line and exit 0, as
 tests/aros_oracle.py does.
@@ -52,6 +54,7 @@ MANIFEST = os.path.join(ROOT, "tools", "aros", "manifest.txt")
 CACHE_ROOT = os.environ.get("AMIGA64_AROS_CACHE",
                             os.path.expanduser("~/.cache/amiga64/aros"))
 ROM_FILES = (("aros-ext.bin", AROS_EXT), ("aros-rom.bin", AROS_ROM))
+BUNDLE = os.path.join(ROOT, "third_party", "aros")   # W17-K: the bundled ROM
 
 
 @dataclass(frozen=True)
@@ -85,16 +88,8 @@ def _manifest(path: str) -> tuple[str, dict[str, str]]:
     return arch, files
 
 
-def find_rom(manifest: str = MANIFEST, root: str = CACHE_ROOT
-             ) -> tuple[Rom | None, str]:
-    """(Rom, "") when both banks are cached and verify, else (None, why)."""
-    try:
-        arch, files = _manifest(manifest)
-    except (OSError, ValueError) as e:
-        return None, f"manifest unreadable: {e}"
-    d = os.path.join(root, arch)
-    if not os.path.isdir(d):
-        return None, f"no AROS cache at {d} (run tools/aros/fetch.sh)"
+def _verified(d: str, files: dict[str, str], manifest: str) -> tuple[Rom | None, str]:
+    """(Rom, "") when both banks in *d* verify against *files*, else (None, why)."""
     data = {}
     for name, _addr in ROM_FILES:
         p = os.path.join(d, name)
@@ -111,6 +106,27 @@ def find_rom(manifest: str = MANIFEST, root: str = CACHE_ROOT
             return None, f"{name} is {len(b)} bytes, expected {BANK_SIZE}"
         data[name] = b
     return Rom(d, data["aros-ext.bin"], data["aros-rom.bin"]), ""
+
+
+def find_rom(manifest: str = MANIFEST, root: str = CACHE_ROOT, bundle: str = BUNDLE
+             ) -> tuple[Rom | None, str]:
+    """(Rom, "") when both banks verify, else (None, why).  W17-K: the
+    bundle (*bundle*) first, then the cache under *root*; a bundle file that
+    does not match the manifest is never used (the cache is tried)."""
+    try:
+        arch, files = _manifest(manifest)
+    except (OSError, ValueError) as e:
+        return None, f"manifest unreadable: {e}"
+    bwhy = f"no bundle at {bundle}"
+    if os.path.isdir(bundle):                           # W17-K
+        rom, bwhy = _verified(bundle, files, manifest)  # W17-K
+        if rom is not None:
+            return rom, ""
+    d = os.path.join(root, arch)
+    if not os.path.isdir(d):
+        return None, f"no AROS cache at {d} (run tools/aros/fetch.sh); bundle: {bwhy}"
+    rom, why = _verified(d, files, manifest)
+    return (rom, "") if rom is not None else (None, f"{why}; bundle: {bwhy}")
 
 
 def stage_plan(rom: Rom) -> list[tuple[int, bytes]]:

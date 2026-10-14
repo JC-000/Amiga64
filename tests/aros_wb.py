@@ -447,8 +447,10 @@ class Disk:
                        "wbi": a.file_blocks(di)[0] if di else None}
 
 
-def stage_disk(m: WbMachine, disk: Disk, vol: str | None) -> dict:
-    """The image at TD_ADF, checked by aros_sum on the C64; then td_on."""
+def stage_disk(m: WbMachine, disk: Disk, vol: str | None, adf_name: str | None = None) -> dict:
+    """The image at TD_ADF, checked by aros_sum on the C64; then td_on.
+    W17-K: the device file is <vol>/amiga64/<adf_name>, else disk.adf_name
+    (the amiga64 CLI's wb-<sha12>.adf), else ADF_NAME (the tests' default)."""
     from tests.harness_util import call_runner
     t0 = time.monotonic()
     out: dict = {"script": disk.script, "overlay_blocks": [k for k, _ in disk.ov.blocks]}
@@ -459,7 +461,7 @@ def stage_disk(m: WbMachine, disk: Disk, vol: str | None) -> dict:
         m.load_driver()
         out["by"] = "test_load_chunk"
     else:
-        name = f"{vol}/amiga64/{ADF_NAME}".encode()
+        name = f"{vol}/amiga64/{adf_name or getattr(disk, 'adf_name', None) or ADF_NAME}".encode()   # W17-K
         call_runner(m.tg, m.lab("dosio_uci_init"), 30.0)
         m.w(m.lab("dosio_name"), name)
         m.w(m.lab("dosio_nlen"), bytes([len(name)]))
