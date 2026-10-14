@@ -55,6 +55,14 @@ CACHE_ROOT = os.environ.get("AMIGA64_AROS_CACHE",
                             os.path.expanduser("~/.cache/amiga64/aros"))
 ROM_FILES = (("aros-ext.bin", AROS_EXT), ("aros-rom.bin", AROS_ROM))
 BUNDLE = os.path.join(ROOT, "third_party", "aros")   # W17-K: the bundled ROM
+CACHE_FIX = ("run tools/aros/fetch.sh", "delete the directory, re-run tools/aros/fetch.sh")
+BUNDLE_FIX = ("restore it: git checkout -- third_party/aros",) * 2    # W17-K2: in a checkout
+
+
+def is_checkout() -> bool:
+    """W17-K2: a clone has tools/aros/fetch.sh; an installed amiga64 does not
+    (so its messages never send the user to fetch.sh or into the bundle)."""
+    return os.path.isfile(os.path.join(ROOT, "tools", "aros", "fetch.sh"))
 
 
 @dataclass(frozen=True)
@@ -88,45 +96,57 @@ def _manifest(path: str) -> tuple[str, dict[str, str]]:
     return arch, files
 
 
-def _verified(d: str, files: dict[str, str], manifest: str) -> tuple[Rom | None, str]:
-    """(Rom, "") when both banks in *d* verify against *files*, else (None, why)."""
+def _verified(d: str, files: dict[str, str], manifest: str,
+              fix: tuple[str, str] | None = CACHE_FIX) -> tuple[Rom | None, str]:
+    """(Rom, "") when both banks in *d* verify against *files*, else (None, why).
+    *fix*: the advice for a missing / a mismatching file (None: none)."""
+    missing, bad = (f" ({x})" for x in fix) if fix else ("", "")
     data = {}
     for name, _addr in ROM_FILES:
         p = os.path.join(d, name)
         if name not in files:
             return None, f"{name} not pinned in {manifest}"
         if not os.path.isfile(p):
-            return None, f"{name} missing in {d} (run tools/aros/fetch.sh)"
+            return None, f"{name} missing in {d}{missing}"
         with open(p, "rb") as f:
             b = f.read()
         if hashlib.sha256(b).hexdigest() != files[name]:
-            return None, (f"{name} SHA256 mismatch in {d}: refusing to use it "
-                          f"(delete the directory, re-run tools/aros/fetch.sh)")
+            return None, f"{name} SHA256 mismatch in {d}: refusing to use it{bad}"
         if len(b) != BANK_SIZE:
             return None, f"{name} is {len(b)} bytes, expected {BANK_SIZE}"
         data[name] = b
     return Rom(d, data["aros-ext.bin"], data["aros-rom.bin"]), ""
 
 
-def find_rom(manifest: str = MANIFEST, root: str = CACHE_ROOT, bundle: str = BUNDLE
-             ) -> tuple[Rom | None, str]:
+def find_rom(manifest: str = MANIFEST, root: str = CACHE_ROOT, bundle: str = BUNDLE,
+             checkout: bool | None = None) -> tuple[Rom | None, str]:
     """(Rom, "") when both banks verify, else (None, why).  W17-K: the
     bundle (*bundle*) first, then the cache under *root*; a bundle file that
-    does not match the manifest is never used (the cache is tried)."""
+    does not match the manifest is never used (the cache is tried).
+    W17-K2: outside a checkout (*checkout*, default is_checkout()) a failure
+    is a broken install, and the advice is to reinstall."""
+    if checkout is None:
+        checkout = is_checkout()
     try:
         arch, files = _manifest(manifest)
     except (OSError, ValueError) as e:
         return None, f"manifest unreadable: {e}"
     bwhy = f"no bundle at {bundle}"
     if os.path.isdir(bundle):                           # W17-K
-        rom, bwhy = _verified(bundle, files, manifest)  # W17-K
+        rom, bwhy = _verified(bundle, files, manifest,  # W17-K
+                              BUNDLE_FIX if checkout else None)
         if rom is not None:
             return rom, ""
     d = os.path.join(root, arch)
-    if not os.path.isdir(d):
-        return None, f"no AROS cache at {d} (run tools/aros/fetch.sh); bundle: {bwhy}"
-    rom, why = _verified(d, files, manifest)
-    return (rom, "") if rom is not None else (None, f"{why}; bundle: {bwhy}")
+    if os.path.isdir(d):
+        rom, why = _verified(d, files, manifest)
+        if rom is not None:
+            return rom, ""
+    else:
+        why = f"no AROS cache at {d}" + (f" ({CACHE_FIX[0]})" if checkout else "")
+    if not checkout:                                    # W17-K2
+        return None, f"broken install: the bundled AROS ROM: {bwhy}; reinstall amiga64"
+    return None, f"{why}; bundle: {bwhy}"
 
 
 def stage_plan(rom: Rom) -> list[tuple[int, bytes]]:

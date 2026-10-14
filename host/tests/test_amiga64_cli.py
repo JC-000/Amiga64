@@ -326,7 +326,7 @@ def _plan(tmp_path, **kw):
 def test_run_chain(tmp_path, fake_wb, monkeypatch):
     ev, WB = fake_wb
     st = FakeStorage()
-    monkeypatch.setattr(D, "ensure_adf", lambda host, vol, name, raw: (ev.append(("adf", vol, name)),
+    monkeypatch.setattr(D, "ensure_adf", lambda host, vol, name, raw, **k: (ev.append(("adf", vol, name)),
                                                                         "uploaded")[1])
     disk = SimpleNamespace(raw=b"raw")
     fails, rep = S.run(_plan(tmp_path, upload=True, mouse_port=1, adf_name="x.adf"), "ROM", disk)
@@ -485,7 +485,7 @@ def test_run_first_time(home, capsys, monkeypatch):
     calls = {}
     monkeypatch.setattr(D, "probe", lambda host, out, kind, mhz, vol, adf_sha: _det(host=host))
 
-    def fake_run(plan, rom, disk):
+    def fake_run(plan, rom, disk, rep=None):
         calls["plan"] = plan
         return [], {}
     monkeypatch.setattr(S, "run", fake_run)
@@ -510,22 +510,13 @@ def test_run_declined_copy_does_nothing(home, capsys, monkeypatch):
     assert rc == 1 and "nothing copied" in out
 
 
-def test_run_refuses_a_different_adf_on_the_device(home, capsys, monkeypatch):
-    raw = (home / "adf" / "wb.adf").read_bytes()
-    name = D.adf_name(hashlib.sha256(raw).hexdigest())
-    monkeypatch.setattr(D, "probe", lambda *a, **k: _det(files={name: 901120}, adf_differs=[name]))
-    monkeypatch.setattr(S, "run", lambda *a: pytest.fail("never"))
-    rc, out, err = _run(["run", "--host", "h", "--yes"], capsys)
-    assert rc == 1 and "never overwrites" in err
-
-
 def test_run_without_sampler_runs_silent(home, capsys, monkeypatch):
     raw = (home / "adf" / "wb.adf").read_bytes()
     name = D.adf_name(hashlib.sha256(raw).hexdigest())
     monkeypatch.setattr(D, "probe", lambda *a, **k: _det(files={name: 1}, adf_use=name,
                                                           sampler=False))
     got = {}
-    monkeypatch.setattr(S, "run", lambda plan, rom, disk: (got.setdefault("p", plan), ([], {}))[1])
+    monkeypatch.setattr(S, "run", lambda plan, rom, disk, rep=None: (got.setdefault("p", plan), ([], {}))[1])
     rc, out, err = _run(["run", "--host", "h"], capsys)
     assert rc == 0 and got["p"].audio is False and got["p"].upload is False
 
@@ -533,7 +524,7 @@ def test_run_without_sampler_runs_silent(home, capsys, monkeypatch):
 def test_run_reuses_the_tests_copy(home, capsys, monkeypatch):
     monkeypatch.setattr(D, "probe", lambda *a, **k: _det(adf_use=D.TESTED_ADF_NAME))
     got = {}
-    monkeypatch.setattr(S, "run", lambda plan, rom, disk: (got.setdefault("p", plan), ([], {}))[1])
+    monkeypatch.setattr(S, "run", lambda plan, rom, disk, rep=None: (got.setdefault("p", plan), ([], {}))[1])
     rc, out, err = _run(["run", "--host", "h"], capsys)
     assert rc == 0 and got["p"].adf_name == D.TESTED_ADF_NAME and got["p"].upload is False
     assert "reusing /USB1/amiga64/amiga-os-310-workbench.adf" in out
@@ -591,7 +582,7 @@ def test_config_shows_sources_not_the_password(home, capsys, monkeypatch):
 def test_run_on_vice_needs_no_device(home, capsys, monkeypatch):
     monkeypatch.setattr(D, "probe", lambda *a, **k: pytest.fail("VICE needs no device"))
     got = {}
-    monkeypatch.setattr(S, "run", lambda plan, rom, disk: (got.setdefault("p", plan), ([], {}))[1])
+    monkeypatch.setattr(S, "run", lambda plan, rom, disk, rep=None: (got.setdefault("p", plan), ([], {}))[1])
     rc, out, err = _run(["run", "--backend", "vice", "--minutes", "0"], capsys)
     assert rc == 0, err
     p = got["p"]
@@ -639,3 +630,347 @@ def test_stage_disk_loads_the_named_file(monkeypatch):
         monkeypatch.setattr(WB.O, "reu_writes", lambda ov, base: [])
         WB.stage_disk(m, disk, "/USB1")
         assert m.writes[m.lab("dosio_name")] == want
+
+
+# --- W17-K2: the rev17-k fixes ---------------------------------------------------------
+
+def _tty(text):
+    return type("T", (io.StringIO,), {"isatty": lambda s: True})(text)
+
+
+def _no_dt_disk():
+    from host.tests.test_adf_files import blob, disk
+    return disk(True, {"Classes/DataTypes/other.datatype": blob(100)})
+
+
+def test_run_and_doctor_refuse_a_disk_without_the_datatype(home, capsys, monkeypatch):
+    """rev17-k #2: a plain message before any device contact, never a traceback."""
+    (home / "adf" / "wb.adf").write_bytes(_no_dt_disk())
+    monkeypatch.setattr(D, "probe", lambda *a, **k: pytest.fail("no device contact"))
+    rc, out, err = _run(["run", "--host", "192.0.2.1"], capsys)
+    assert rc == 1 and "lacks Classes/DataTypes/amigaguide.datatype" in err
+    assert "Traceback" not in out + err
+    rc, out, err = _run(["doctor", "--offline"], capsys)
+    assert rc == 1 and "FAIL Workbench ADF" in out and "use a Workbench 3.1 disk" in out
+
+
+def test_make_disk_turns_an_adf_error_into_a_plain_one(monkeypatch):
+    from host import adf_overlay as O
+    from tests import aros_modwb as MW
+
+    def boom(*a, **k):
+        raise O.AdfError("Classes/DataTypes/amigaguide.datatype: not on the disk")
+    monkeypatch.setattr(MW, "ModDisk", boom)
+    with pytest.raises(C.ConfigError) as e:
+        S.make_disk(wbdisk(), PLAYER, MOD, [])
+    assert "amigaguide.datatype" in str(e.value) and "session disk" in str(e.value)
+
+
+def _own(home):
+    return D.adf_name(hashlib.sha256((home / "adf" / "wb.adf").read_bytes()).hexdigest())
+
+
+def test_run_offers_to_replace_its_own_broken_copy(home, capsys, monkeypatch):
+    """rev17-k #3: wb-<sha12>.adf is amiga64's own; other bytes there can only
+    be an interrupted copy: replaced after a yes."""
+    name = _own(home)
+    monkeypatch.setattr(D, "probe", lambda *a, **k: _det(files={name: 4096}, adf_differs=[name]))
+    got = {}
+    monkeypatch.setattr(S, "run", lambda plan, rom, disk, rep=None: (got.setdefault("p", plan), ([], {}))[1])
+    monkeypatch.setattr(sys, "stdin", _tty("y\n"))
+    rc, out, err = _run(["run", "--host", "h"], capsys)
+    assert rc == 0, out + err
+    assert "not a whole copy" in out and "Replace it" in out
+    assert got["p"].upload is True and got["p"].replace is True and got["p"].adf_name == name
+
+
+@pytest.mark.parametrize("answer", ["n\n", "\n"])      # the default is no
+def test_run_declines_to_replace(home, capsys, monkeypatch, answer):
+    name = _own(home)
+    monkeypatch.setattr(D, "probe", lambda *a, **k: _det(files={name: 4096}, adf_differs=[name]))
+    monkeypatch.setattr(S, "run", lambda *a: pytest.fail("never"))
+    monkeypatch.setattr(sys, "stdin", _tty(answer))
+    rc, out, err = _run(["run", "--host", "h"], capsys)
+    assert rc == 1 and "nothing replaced" in out
+    assert not os.path.exists(C.config_path())          # declined: no settings written
+
+
+def test_run_without_a_terminal_names_the_replace_flag(home, capsys, monkeypatch):
+    name = _own(home)
+    monkeypatch.setattr(D, "probe", lambda *a, **k: _det(files={name: 4096}, adf_differs=[name]))
+    got = {}
+    monkeypatch.setattr(S, "run", lambda plan, rom, disk, rep=None: (got.setdefault("p", plan), ([], {}))[1])
+    rc, out, err = _run(["run", "--host", "h", "--yes"], capsys)      # --yes alone never replaces
+    assert rc == 1 and "--replace-adf" in err and not got
+    rc, out, err = _run(["run", "--host", "h", "--replace-adf"], capsys)
+    assert rc == 0, err
+    assert got["p"].upload is True and got["p"].replace is True
+
+
+def test_run_never_replaces_the_tests_copy(home, capsys, monkeypatch):
+    monkeypatch.setattr(D, "probe", lambda *a, **k: _det(files={D.TESTED_ADF_NAME: 901120},
+                                                          adf_differs=[D.TESTED_ADF_NAME]))
+    got = {}
+    monkeypatch.setattr(S, "run", lambda plan, rom, disk, rep=None: (got.setdefault("p", plan), ([], {}))[1])
+    rc, out, err = _run(["run", "--host", "h", "--yes"], capsys)
+    assert rc == 0, err
+    assert got["p"].adf_name == _own(home) and got["p"].upload and not got["p"].replace
+
+
+def test_ensure_adf_replaces_only_its_own_name():
+    raw = b"the user's adf"
+    own = D.adf_name(hashlib.sha256(raw).hexdigest())
+    st = FakeStorage(files={f"/USB1/amiga64/{own}": b"trunc", f"/USB1/amiga64/{D.TESTED_ADF_NAME}": b"t"})
+    assert D.ensure_adf("h", "/USB1", own, raw, storage=st, replace=True) == "replaced"
+    assert st.files[f"/USB1/amiga64/{own}"] == raw and st.puts[-1] == (f"/USB1/amiga64/{own}", True, True)
+    for name in (D.TESTED_ADF_NAME, "wb-000000000000.adf"):
+        with pytest.raises(D.DeviceError):
+            D.ensure_adf("h", "/USB1", name, raw, storage=st, replace=True)
+    assert st.files[f"/USB1/amiga64/{D.TESTED_ADF_NAME}"] == b"t"
+
+
+def test_doctor_names_the_replace_path(home, capsys, monkeypatch):
+    name = _own(home)
+    monkeypatch.setattr(D, "probe", lambda *a, **k: _det(files={name: 4096}, adf_differs=[name]))
+    rc, out, err = _run(["doctor", "--host", "h"], capsys)
+    assert "WARN ADF on the device" in out and "interrupted copy" in out and "--replace-adf" in out
+    assert rc == 0
+
+
+@pytest.mark.parametrize("v", ["0x100", "-1", "256", "x"])
+def test_stuck_is_validated_by_argparse(home, capsys, v):
+    with pytest.raises(SystemExit) as e:
+        cli.main(["run", "--stuck", v])
+    assert e.value.code == 2 and "--stuck" in capsys.readouterr().err
+
+
+def test_stuck_accepts_a_mask():
+    a = cli.parser().parse_args(["run", "--stuck", "0x1f"])
+    assert a.stuck == 0x1F
+
+
+SPEEDS_U64E = [" 1", " 2", " 3", " 4", " 5", " 6", " 8", "10", "12", "14", "16", "20", "24", "32",
+               "40", "48"]
+FULL_SPEED = dict(FULL, **{"U64 Specific Settings": {"CPU Speed": "48", "Turbo Control": "Off"}})
+
+
+class SpeedClient(FakeClient):
+    def __init__(self, speeds):
+        super().__init__()
+        self.speeds = speeds
+
+    def get_config_choices(self, cat, item):
+        return self.speeds if item == "CPU Speed" else super().get_config_choices(cat, item)
+
+
+@pytest.mark.parametrize("kw", [dict(mhz=64), dict(kind="C64U")])
+def test_probe_refuses_a_speed_the_device_lacks(tmp_path, kw):
+    """rev17-k #5: checked in the probe, before the session's hold."""
+    with pytest.raises(D.DeviceError) as e:
+        D.probe("h", str(tmp_path), hold_fn=fake_hold(U64E_INFO, full=FULL_SPEED,
+                                                      client=SpeedClient(SPEEDS_U64E)),
+                storage=FakeStorage(), **kw)
+    assert "64 MHz" in str(e.value) and "48" in str(e.value) and "--mhz" in str(e.value)
+    det = D.probe("h", str(tmp_path), mhz=40, hold_fn=fake_hold(U64E_INFO, full=FULL_SPEED,
+                                                                client=SpeedClient(SPEEDS_U64E)),
+                  storage=FakeStorage())
+    assert det.mhz == 40
+
+
+@pytest.mark.parametrize("section,key,val", [("device", "mhz", "x"), ("input", "mouse_port", "y")])
+def test_bad_config_values_are_plain(home, capsys, monkeypatch, section, key, val):
+    cfg = {"device": {"host": "h"}}
+    cfg.setdefault(section, {})[key] = val
+    C.save(cfg)
+    monkeypatch.setattr(D, "probe", lambda *a, **k: _det())
+    monkeypatch.setattr(S, "run", lambda *a: pytest.fail("never"))
+    rc, out, err = _run(["run", "--yes"], capsys)
+    assert rc == 1 and key in err and "Traceback" not in err
+
+
+def test_an_unexpected_error_is_one_line_and_logged(home, capsys, monkeypatch):
+    """Never a traceback (the hold restores the device first): one line, the
+    details in the state directory."""
+    monkeypatch.setattr(D, "probe", lambda *a, **k: _det(adf_use=_own(home)))
+
+    def boom(*a):
+        raise ValueError("speed 64 not supported")
+    monkeypatch.setattr(S, "run", boom)
+    rc, out, err = _run(["run", "--host", "h"], capsys)
+    assert rc == 1 and "Traceback" not in err
+    assert "speed 64 not supported" in err and "last-error.txt" in err
+    assert "Traceback" in open(os.path.join(C.state_dir(), "last-error.txt")).read()
+
+
+def test_ping_dirs_on_path(monkeypatch):
+    """rev17-k #8: the harness's liveness probe runs a bare `ping`."""
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    D.set_env("h", None)
+    parts = os.environ["PATH"].split(os.pathsep)
+    assert parts[:2] == ["/usr/bin", "/bin"] and "/sbin" in parts and "/usr/sbin" in parts
+    D.set_env("h", None)
+    assert os.environ["PATH"].split(os.pathsep).count("/sbin") == 1
+
+
+def test_doctor_ftp_unknown(home, capsys, monkeypatch):
+    monkeypatch.setattr(D, "probe", lambda *a, **k: _det(ftp=None))
+    rc, out, err = _run(["doctor", "--host", "h"], capsys)
+    assert "FTP service: unknown" in out and "FTP File Service enabled" not in out
+
+
+def test_an_interrupted_run_writes_its_report(home, capsys, monkeypatch):
+    monkeypatch.setattr(D, "probe", lambda *a, **k: _det(adf_use=_own(home)))
+
+    def run(plan, rom, disk, rep=None):
+        rep["boot"] = {"stage": "rom"}
+        raise KeyboardInterrupt
+    monkeypatch.setattr(S, "run", run)
+    rc, out, err = _run(["run", "--host", "h"], capsys)
+    assert rc == 130
+    import glob
+    import json
+    reps = glob.glob(os.path.join(C.state_dir(), "holds", "*-run", "session.json"))
+    assert len(reps) == 1
+    r = json.load(open(reps[0]))
+    assert r["ended_by"] == "interrupted" and r["boot"] == {"stage": "rom"}
+
+
+def test_a_declined_copy_saves_no_settings(home, capsys, monkeypatch):
+    monkeypatch.setattr(D, "probe", lambda *a, **k: _det())
+    monkeypatch.setattr(S, "run", lambda *a: pytest.fail("never"))
+    monkeypatch.setattr(sys, "stdin", _tty("n\n"))
+    rc, out, err = _run(["run", "--host", "h"], capsys)
+    assert rc == 1 and "nothing copied" in out
+    assert not os.path.exists(C.config_path()) and "saved your settings" not in out
+
+
+def test_doctor_asks_for_the_address_on_a_terminal(home, capsys, monkeypatch):
+    """rev17-docs A: like run, doctor asks on a terminal and saves the answer
+    after a probe that worked."""
+    seen = {}
+    monkeypatch.setattr(D, "probe", lambda host, *a, **k: (seen.setdefault("host", host), _det())[1])
+    monkeypatch.setattr(sys, "stdin", _tty("10.43.23.81\n"))
+    rc, out, err = _run(["doctor"], capsys)
+    assert rc == 0, out + err
+    assert seen["host"] == "10.43.23.81" and "Address of your Ultimate" in out
+    assert C.load()["device"]["host"] == "10.43.23.81"
+
+
+def test_doctor_saves_no_address_when_the_probe_fails(home, capsys, monkeypatch):
+    def probe(*a, **k):
+        raise D.DeviceError("cannot reach the Ultimate at 10.9.9.9")
+    monkeypatch.setattr(D, "probe", probe)
+    monkeypatch.setattr(sys, "stdin", _tty("10.9.9.9\n"))
+    rc, out, err = _run(["doctor"], capsys)
+    assert rc == 1 and "FAIL device: cannot reach" in out
+    assert not os.path.exists(C.config_path())
+
+
+def test_doctor_without_a_terminal_names_the_flag(home, capsys, monkeypatch):
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    monkeypatch.setattr(D, "probe", lambda *a, **k: pytest.fail("no address"))
+    rc, out, err = _run(["doctor"], capsys)
+    assert rc == 1 and "FAIL device: no device address" in out and "--host" in out
+
+
+def test_the_lock_wait_message_matches_the_harness():
+    """rev17-docs B: the harness extends the wait while the same live holder
+    makes progress; the message says what a timeout really means."""
+    e = type("DeviceLockTimeout", (TimeoutError,), {})("x")
+    m = D.explain("10.1.2.3", e)
+    assert "stayed busy" in m and "stopped making progress for 300 s" in m
+    assert "did not become free in" not in m
+
+
+# --- W17-K2 (supervisor): the DeviceLock key, and the environment untouched ----------------
+
+def test_doctor_names_the_lock_key(home, capsys, monkeypatch, tmp_path):
+    """The key the harness's DeviceLock uses for this address: a uid- key
+    when devices.toml (or C64_DEVICE_ALIASES) lists it, else the address."""
+    from c64_test_harness.backends import device_aliases as DA
+    monkeypatch.setattr(D, "probe", lambda *a, **k: _det())
+    monkeypatch.delenv("C64_DEVICE_ALIASES", raising=False)
+    monkeypatch.setenv("C64_DEVICE_ALIASES_FILE", str(tmp_path / "none.toml"))
+    DA._reset_alias_cache()
+    rc, out, err = _run(["doctor", "--host", "10.43.23.81"], capsys)
+    assert ("OK   device lock: 10.43.23.81 (address key; tools using another address for the "
+            "same device won't queue behind it)") in out
+    monkeypatch.setenv("C64_DEVICE_ALIASES", "601A96=10.43.23.81")
+    DA._reset_alias_cache()
+    rc, out, err = _run(["doctor", "--host", "10.43.23.81"], capsys)
+    DA._reset_alias_cache()
+    assert ("OK   device lock: uid-601a96 (shared with other harness tools via devices.toml)"
+            in out), out
+
+
+ENV_KEYS = ("HOME", "XDG_CONFIG_HOME", "C64_DEVICE_ALIASES", "C64_DEVICE_ALIASES_FILE")
+
+
+def test_the_cli_passes_home_and_the_alias_settings_through(home, capsys, monkeypatch, tmp_path):
+    """tonight's collision: a scratch HOME hid devices.toml and the lock fell
+    back to the address key.  amiga64 never changes these variables."""
+    want = {"HOME": str(tmp_path / "h"), "XDG_CONFIG_HOME": str(tmp_path / "x"),
+            "C64_DEVICE_ALIASES": "601a96=10.9.9.9", "C64_DEVICE_ALIASES_FILE": str(tmp_path / "d.toml")}
+    for k, v in want.items():
+        monkeypatch.setenv(k, v)
+    seen = []
+    monkeypatch.setattr(D, "probe", lambda *a, **k: (seen.append({k2: os.environ.get(k2) for k2 in ENV_KEYS}),
+                                                     _det(adf_use=_own(home)))[1])
+    monkeypatch.setattr(S, "run", lambda plan, rom, disk, rep=None: (
+        seen.append({k2: os.environ.get(k2) for k2 in ENV_KEYS}), ([], {}))[1])
+    for argv in (["doctor", "--host", "10.9.9.9"], ["run", "--host", "10.9.9.9"]):
+        _run(argv, capsys)
+    assert len(seen) == 3 and all(s == want for s in seen)
+    assert {k: os.environ.get(k) for k in ENV_KEYS} == want
+
+
+def _guarded(v) -> bool:
+    return isinstance(v, str) and (v in ("HOME", "XDG_CONFIG_HOME") or v.startswith("C64_DEVICE_ALIASES"))
+
+
+def env_writes(src: str) -> list:
+    """Writes to HOME, XDG_CONFIG_HOME or C64_DEVICE_ALIASES*: environ[k] = / del,
+    pop/setdefault/putenv/unsetenv(k), and any environ.update/clear (reads are fine)."""
+    import ast
+    out = []
+    for n in ast.walk(ast.parse(src)):
+        if isinstance(n, ast.Subscript) and isinstance(n.ctx, (ast.Store, ast.Del)) and \
+                isinstance(n.slice, ast.Constant) and _guarded(n.slice.value):
+            out.append((n.lineno, n.slice.value))
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+            if n.func.attr in ("pop", "setdefault", "putenv", "unsetenv") and n.args and \
+                    isinstance(n.args[0], ast.Constant) and _guarded(n.args[0].value):
+                out.append((n.lineno, n.func.attr))
+            if n.func.attr in ("update", "clear") and isinstance(n.func.value, ast.Attribute) \
+                    and n.func.value.attr == "environ":
+                out.append((n.lineno, "environ." + n.func.attr))
+    return out
+
+
+def test_no_code_writes_home_or_the_alias_settings():
+    import glob
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    bad = [(os.path.basename(p), w) for p in glob.glob(os.path.join(root, "amiga64", "*.py"))
+           for w in env_writes(open(p).read())]
+    assert bad == []
+
+
+@pytest.mark.parametrize("src", ["import os\nos.environ['HOME'] = '/tmp'\n",
+                                 "import os\nos.environ.pop('C64_DEVICE_ALIASES', None)\n",
+                                 "import os\ndel os.environ['XDG_CONFIG_HOME']\n",
+                                 "import os\nos.environ.update(HOME='/x')\n"])
+def test_the_env_scan_sees_writes(src):
+    assert env_writes(src)
+
+
+def test_a_broken_alias_config_is_a_warning(home, capsys, monkeypatch):
+    from c64_test_harness.backends import device_aliases as DA
+    monkeypatch.setattr(D, "probe", lambda *a, **k: _det())
+    monkeypatch.setenv("C64_DEVICE_ALIASES", "not an alias list")
+    DA._reset_alias_cache()
+    try:
+        rc, out, err = _run(["doctor", "--host", "10.43.23.81"], capsys)
+    finally:
+        monkeypatch.delenv("C64_DEVICE_ALIASES")
+        DA._reset_alias_cache()
+    assert "WARN device lock: key unknown" in out and rc == 0

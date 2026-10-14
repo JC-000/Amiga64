@@ -352,3 +352,55 @@ def test_the_staged_list_lives_in_the_config(tmp_path):
     assert cfg["device"]["host"] == "1.2.3.4"           # the rest of the file is kept
     A.Staged().clear()
     assert "staged" not in C.load() and C.load()["device"]["host"] == "1.2.3.4"
+
+
+# --- W17-K2: rev17-k #2 and #7 --------------------------------------------------------
+
+def test_inspect_needs_the_amigaguide_datatype(tmp_path):
+    """The ModPlayer overlay replaces it: a disk without it is refused at the
+    check, not with a traceback at the session image (rev17-k #2)."""
+    raw = disk(True, {"Classes/DataTypes/other.datatype": blob(100)})
+    with pytest.raises(A.AdfProblem) as e:
+        A.inspect(_adf(tmp_path, raw))
+    assert str(e.value).endswith(
+        "lacks Classes/DataTypes/amigaguide.datatype, which the ModPlayer overlay replaces; "
+        "use a Workbench 3.1 disk")
+
+
+@pytest.mark.parametrize("name,words", [
+    ("", ["0 characters"]),
+    (" ", ["blank"]),
+    ("   ", ["blank"]),
+    (" x", ["space"]),
+    ("x ", ["space"]),
+    ("ab\x01c", ["control character"]),
+    ("tab\there", ["control character"]),
+    ("del\x7f", ["control character"]),
+    ("c1\x85", ["control character"]),
+])
+def test_names_blank_spaced_or_with_control_characters(tmp_path, name, words):
+    f = _file(tmp_path, "ok", b"1")
+    with pytest.raises(A.AddError) as e:
+        A.session_image(wbdisk(), PLAYER, MOD, [A.Request(f, as_name=name)])
+    msg = str(e.value).split(": the name ", 1)[1]       # not the host path (the test's name)
+    for w in words:
+        assert w in msg
+    assert "--as" in msg
+
+
+def test_out_into_a_missing_directory_is_a_plain_error(tmp_path):
+    p = _adf(tmp_path, wbdisk())
+    f = _file(tmp_path, "z.txt", b"zz")
+    out = str(tmp_path / "nope" / "dir" / "x.adf")
+    with pytest.raises(A.AddError) as e:
+        A.write_out(p, [A.Request(f)], out)
+    assert "no such directory" in str(e.value) and str(tmp_path / "nope" / "dir") in str(e.value)
+
+
+def test_out_needs_no_amigaguide_datatype(tmp_path):
+    """--out adds no ModPlayer, so it takes a disk the session refuses."""
+    p = _adf(tmp_path, disk(True, {"Classes/DataTypes/other.datatype": blob(100)}))
+    out = str(tmp_path / "new.adf")
+    A.write_out(p, [A.Request(_file(tmp_path, "z.txt", b"zz"))], out)
+    a = O.Adf(open(out, "rb").read())
+    assert a.read_file(a.lookup("z.txt")) == b"zz"

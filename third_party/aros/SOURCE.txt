@@ -9,6 +9,7 @@ What these files are
   modification of it.
 
   Build:     AROS nightly2 20260921, amiga-m68k boot ISO
+  Source:    AROS git commit 6a327488b5 (the ROM's own version string)
   Archive:   https://downloads.sourceforge.net/project/aros/nightly2/20260921/Binaries/AROS-20260921-amiga-m68k-boot-iso.zip
   SHA-256:   981817b3421a6ed245d0e259712bb876fd2e279930e4e5d2b4d55e1de7744b31 (the archive)
   Members:   aros-amiga-m68k.iso!boot/amiga/aros-rom.bin, aros-ext.bin; the
@@ -28,7 +29,15 @@ Source code (APL 1.1 section 3.6)
   of 2026-09-21 ("nightly2 20260921"), amiga-m68k target, whose binary
   archive has the SHA-256
     981817b3421a6ed245d0e259712bb876fd2e279930e4e5d2b4d55e1de7744b31
-  Its source is the AROS source tree as of that nightly:
+  Its source is the AROS source tree at the revision the ROM itself states.
+  aros-rom.bin carries this version string (quoted from the ROM bytes, at
+  offset 0x1F21E; nothing else is read from the ROM):
+    Version Git 6a327488b5 (https://github.com/aros-development-team/AROS)
+    built on 2026-09-21.
+  So the source is git commit 6a327488b5 of the AROS repository
+  (6a327488b5efcdb33aaeba23295705d63ee90d57 in full, checked on GitHub on
+  2026-10-13):
+    https://github.com/aros-development-team/AROS/commit/6a327488b5
     https://github.com/aros-development-team/AROS   (the AROS source tree)
     https://aros.sourceforge.io/                    (the AROS project)
     https://sourceforge.net/projects/aros/files/    (nightly binaries and

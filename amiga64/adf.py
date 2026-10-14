@@ -69,7 +69,8 @@ def read(path: str) -> bytes:
         raise AdfProblem(f"{path}: cannot read it ({e.strerror})") from None
 
 
-def check(raw: bytes, path: str = "the ADF") -> AdfInfo:
+def check(raw: bytes, path: str = "the ADF", session: bool = True) -> AdfInfo:
+    """*session*: the disk must also take the ModPlayer overlay (not for --out)."""
     if len(raw) != O.ADF_SIZE:
         hd = " (an HD disk?)" if len(raw) == 2 * O.ADF_SIZE else ""
         raise AdfProblem(f"{path} is {len(raw):,} bytes{hd}; only DD disk images of "
@@ -94,6 +95,9 @@ def check(raw: bytes, path: str = "the ADF") -> AdfInfo:
     except O.AdfError as e:
         raise AdfProblem(f"{path} is not a bootable Workbench disk: S/Startup-Sequence "
                          f"({e})") from None
+    if session and O.Adf(raw).lookup(MODWB_DROP) is None:     # W17-K2: rev17-k #2
+        raise AdfProblem(f"{path}: this disk lacks {MODWB_DROP}, which the ModPlayer overlay "
+                         f"replaces; use a Workbench 3.1 disk")
     sha = hashlib.sha256(raw).hexdigest()
     return AdfInfo(path, sha, raw[3], bool(raw[3] & 1), free, sha in TESTED, TESTED.get(sha, ""))
 
@@ -138,6 +142,14 @@ def check_name(name: str, where: str) -> None:
     if not 1 <= len(name) <= NAME_MAX:
         raise AddError(f"{where}: the name {name!r} is {len(name)} characters; AmigaDOS "
                        f"names are 1 to at most {NAME_MAX} characters. Use --as NAME")
+    if not name.strip():
+        raise AddError(f"{where}: the name {name!r} is blank. Use --as NAME")
+    if name != name.strip(" "):
+        raise AddError(f"{where}: the name {name!r} starts or ends with a space. Use --as NAME")
+    bad = next((c for c in name if ord(c) < 0x20 or 0x7F <= ord(c) < 0xA0), None)
+    if bad is not None:
+        raise AddError(f"{where}: the name {name!r} contains a control character "
+                       f"({ord(bad):#04x}). Use --as NAME")
     for c in ":/":
         if c in name:
             raise AddError(f"{where}: the name {name!r} contains {c!r}, which AmigaDOS "
@@ -203,7 +215,7 @@ def add(e: F.DiskEdit, reqs: list[Request]) -> Report:
     rep = Report()
     for r in reqs:
         to = _drawer(e, r.to)
-        name = r.as_name or os.path.basename(os.path.normpath(r.host))
+        name = r.as_name if r.as_name is not None else os.path.basename(os.path.normpath(r.host))
         _add_one(e, r.host, f"{to}/{name}" if to else name, rep)
     return rep
 
@@ -226,13 +238,19 @@ def write_out(src: str, reqs: list[Request], out: str) -> Report:
     overlay, no ModPlayer).  *out* must not exist."""
     if os.path.lexists(out):
         raise AddError(f"{out} already exists; --out writes a new file and never replaces one")
+    d = os.path.dirname(os.path.abspath(out))
+    if not os.path.isdir(d):
+        raise AddError(f"--out {out}: no such directory {d}")
     raw = read(src)
-    check(raw, src)
+    check(raw, src, session=False)
     e = F.DiskEdit(raw)
     rep = add(e, reqs)
     img = e.data()
     F.fsck(img)
-    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    try:
+        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except OSError as e:
+        raise AddError(f"--out {out}: cannot write it ({e.strerror})") from None
     with os.fdopen(fd, "wb") as f:
         f.write(img)
     return rep
@@ -269,7 +287,7 @@ class Staged:
 
     @staticmethod
     def disk_path(r: Request) -> str:
-        name = r.as_name or os.path.basename(os.path.normpath(r.host))
+        name = r.as_name if r.as_name is not None else os.path.basename(os.path.normpath(r.host))
         return f"{r.to.strip('/')}/{name}" if r.to.strip("/") else name
 
     def remove(self, dpath: str) -> int:

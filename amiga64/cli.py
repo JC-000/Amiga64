@@ -13,9 +13,11 @@ docs/WAVE17_BRIEF.md "W17-K"; the user guide is docs/guide/QUICKSTART.md.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import signal
 import sys
+import traceback
 from dataclasses import dataclass
 
 from amiga64 import __version__
@@ -71,7 +73,14 @@ def _overrides(a, cfg: dict) -> tuple[str | None, int | None, str | None]:
     vol = getattr(a, "vol", None) or C.get(cfg, "device", "volume")
     if kind and kind not in ("U64E", "C64U"):
         raise C.ConfigError(f"kind {kind!r}: U64E or C64U")
-    return kind, int(mhz) if mhz else None, vol
+    return kind, _int("mhz", mhz) if mhz else None, vol
+
+
+def _int(key: str, v) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        raise C.ConfigError(f"{key} {v!r} in {C.config_path()}: not a number") from None
 
 
 def _remember(cfg: dict, host_src: str, host: str, adf_src: str | None, adf: str | None) -> None:
@@ -155,8 +164,9 @@ def doctor_device(a, cfg: dict, ctx: dict) -> list[Check]:
     from amiga64 import adf as A
     from amiga64 import device as D
     out: list[Check] = []
+    pr = C.Prompter()                   # W17-K2 (rev17-docs A): asks only on a terminal
     try:
-        host, src = _host(a, cfg, None)
+        host, src = _host(a, cfg, pr if pr.tty else None)
     except C.ConfigError as e:
         return [Check(FAIL, "device", str(e))]
     kind, mhz, vol = _overrides(a, cfg)
@@ -168,7 +178,9 @@ def doctor_device(a, cfg: dict, ctx: dict) -> list[Check]:
         det = D.probe(host, D.hold_dir("doctor"), kind, mhz, vol, adf)
     except D.DeviceError as e:
         return [Check(FAIL, "device", str(e))]
+    _remember(cfg, src, host, None, None)
     out.append(Check(OK, "device", f"{det.product} ({det.kind}) at {host}"))
+    out.append(_lock_check(host))
     out.append(Check(OK if det.fw_tested else WARN, "firmware",
                      det.firmware + ("" if det.fw_tested else
                                      f" (untested; tested: {', '.join(D.TESTED_FW[det.kind])})")))
@@ -186,7 +198,9 @@ def doctor_device(a, cfg: dict, ctx: dict) -> list[Check]:
                      "Ultimate DMA Service enabled" if det.dma else
                      "Network Settings / Ultimate DMA Service is off: the disk cannot be staged. "
                      "Turn it on (the C64 Ultimate turns it off at every power-on)"))
-    out.append(Check(OK, "FTP service", "FTP File Service enabled"))
+    out.append(Check(OK, "FTP service", "FTP File Service enabled") if det.ftp else
+               Check(WARN, "FTP service", f"unknown (no '{D.FTP_ITEM}' setting found); amiga64 "
+                     f"needs it for the disk files"))
     n = len(det.temp_managed)
     out.append(Check(WARN if n > D.TEMP_KEEP else OK, "/Temp",
                      "no leftover firmware files" if n == 0 else
@@ -206,9 +220,10 @@ def doctor_device(a, cfg: dict, ctx: dict) -> list[Check]:
                              f"reusing {det.vol}/{D.DIR}/{det.adf_use}: same bytes as your ADF "
                              f"(so {own} is not copied)"))
         elif own in det.adf_differs:
-            out.append(Check(FAIL, "ADF on the device",
-                             f"{det.vol}/{D.DIR}/{own} differs from your ADF; amiga64 never "
-                             f"overwrites it: move it away on the device"))
+            out.append(Check(WARN, "ADF on the device",
+                             f"{det.vol}/{D.DIR}/{own} is not a whole copy of your ADF (an "
+                             f"interrupted copy?); `amiga64 run` offers to replace it "
+                             f"(--replace-adf without a terminal)"))
         else:
             out.append(Check(INFO, "ADF on the device",
                              f"not yet on {det.vol}/{D.DIR}/; `amiga64 run` copies it as {own} "
@@ -220,6 +235,19 @@ def doctor_device(a, cfg: dict, ctx: dict) -> list[Check]:
                      "restored exactly after the check" if det.restored
                      else "NOT restored exactly: see the report in " + os.path.dirname(D.hold_dir("x"))))
     return out
+
+
+def _lock_check(host: str) -> Check:
+    """W17-K2 (supervisor): the DeviceLock key, so a split key is visible."""
+    from amiga64 import device as D
+    try:
+        key, shared = D.lock_key(host)
+    except Exception as e:              # noqa: BLE001 - e.g. a broken devices.toml
+        return Check(WARN, "device lock", f"key unknown: {type(e).__name__}: {e}")
+    return Check(OK, "device lock",
+                 f"{key} (shared with other harness tools via devices.toml)" if shared else
+                 f"{key} (address key; tools using another address for the same device won't "
+                 f"queue behind it)")
 
 
 def cmd_doctor(a) -> int:
@@ -269,7 +297,7 @@ def _plan_device(a, cfg: dict, prompter: C.Prompter, adf_sha: str | None):
 
 def _mouse(a, cfg: dict) -> int:
     v = a.mouse_port if a.mouse_port is not None else C.get(cfg, "input", "mouse_port", 0)
-    if int(v) not in (0, 1, 2):
+    if _int("mouse_port", v) not in (0, 1, 2):
         raise C.ConfigError(f"mouse_port {v}: 0 (none), 1 or 2")
     return int(v)
 
@@ -287,7 +315,7 @@ def cmd_run(a) -> int:
     raw = A.read(path)
     rom, why = kit.rom()
     if rom is None:
-        raise C.ConfigError(f"broken install: the AROS ROM: {why}")
+        raise C.ConfigError(f"the AROS ROM: {why}")
     prg = kit.runner()
     disk, addrep = S.make_disk(raw, kit.player(), kit.song(), A.Staged().requests())
     if addrep.added:
@@ -303,25 +331,30 @@ def cmd_run(a) -> int:
         host, host_src, det = _plan_device(a, cfg, pr, info.sha256)
         plan.host, plan.mhz, plan.vol = host, det.mhz, det.vol
         plan.audio = plan.audio and bool(det.sampler)
-        _remember(cfg, host_src, host, adf_src, path)
         if det.adf_use:
             plan.adf_name = det.adf_use
             if det.adf_use != D.adf_name(info.sha256):
                 print(f"amiga64: reusing {det.vol}/{D.DIR}/{det.adf_use} (same bytes as your ADF)")
-        elif plan.adf_name in det.adf_differs:
-            raise C.ConfigError(f"{det.vol}/{D.DIR}/{plan.adf_name} on the device differs from "
-                                f"your ADF; amiga64 never overwrites it: move it away on the device")
+        elif plan.adf_name in det.adf_differs:  # our own name: only an interrupted copy (W17-K2)
+            if not pr.confirm(f"{det.vol}/{D.DIR}/{plan.adf_name} on {host} is not a whole copy "
+                              f"of {os.path.basename(path)} (an interrupted copy?). Replace it?",
+                              "--replace-adf", a.replace_adf, default=False):
+                print("amiga64: nothing replaced; the session needs the ADF on the device")
+                return 1
+            plan.upload = plan.replace = True
         else:
             if not pr.confirm(f"Copy {os.path.basename(path)} ({len(raw) // 1024} KB) to "
                               f"{det.vol}/{D.DIR}/{plan.adf_name} on {host}?"):
                 print("amiga64: nothing copied; the session needs the ADF on the device")
                 return 1
             plan.upload = True
+        _remember(cfg, host_src, host, adf_src, path)   # W17-K2: after the copy is agreed
         if a.save and D.SNAP in det.files:
             print(f"amiga64: --save replaces the saved session {det.vol}/{D.DIR}/{D.SNAP}")
     plan.out = D.hold_dir("run")
-    with S.logged(os.path.join(plan.out, "session.log")):
-        fails, rep = S.run(plan, rom, disk)
+    rep: dict = {}
+    with _reported(plan, rep), S.logged(os.path.join(plan.out, "session.log")):
+        fails, rep = S.run(plan, rom, disk, rep)
     return _finish(plan, rep, fails, "run")
 
 
@@ -333,7 +366,7 @@ def cmd_resume(a) -> int:
     pr = C.Prompter()
     rom, why = kit.rom()
     if rom is None:
-        raise C.ConfigError(f"broken install: the AROS ROM: {why}")
+        raise C.ConfigError(f"the AROS ROM: {why}")
     host, host_src, det = _plan_device(a, cfg, pr, None)
     if D.SNAP not in det.files:
         raise C.ConfigError(f"no saved session on {det.vol}/{D.DIR}/ (`amiga64 run --save` makes one)")
@@ -341,9 +374,23 @@ def cmd_resume(a) -> int:
     plan = S.Plan(backend="u64", prg=kit.runner(), host=host, mhz=det.mhz, vol=det.vol,
                   mouse_port=_mouse(a, cfg), minutes=a.minutes, audio=not a.no_audio and bool(det.sampler),
                   stuck=a.stuck, out=D.hold_dir("resume"))
-    with S.logged(os.path.join(plan.out, "session.log")):
-        fails, rep = S.resume(plan, rom)
+    rep: dict = {}
+    with _reported(plan, rep), S.logged(os.path.join(plan.out, "session.log")):
+        fails, rep = S.resume(plan, rom, rep)
     return _finish(plan, rep, fails, "resume")
+
+
+@contextlib.contextmanager
+def _reported(plan, rep: dict):
+    """W17-K2: an interrupted session still writes its session.json."""
+    from amiga64 import session as S
+    try:
+        yield
+    except KeyboardInterrupt:
+        rep["ended_by"] = "interrupted"
+        os.makedirs(plan.out, exist_ok=True)
+        S.write_report(plan, rep, ["interrupted"])
+        raise
 
 
 def _finish(plan, rep: dict, fails: list[str], what: str) -> int:
@@ -437,6 +484,16 @@ def cmd_config(a) -> int:
 # main
 # --------------------------------------------------------------------------
 
+def _mask(v: str) -> int:
+    try:
+        n = int(v, 0)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{v!r} is not a number") from None
+    if not 0 <= n <= 0xFF:
+        raise argparse.ArgumentTypeError(f"{v} is not a switch mask (0 to 0xff)")
+    return n
+
+
 def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="amiga64", description="Boot Workbench 3.1 on AROS on a "
                                  "C64 Ultimate or an Ultimate 64 Elite.")
@@ -466,13 +523,16 @@ def parser() -> argparse.ArgumentParser:
         p.add_argument("--minutes", type=float, default=None,
                        help="end after this many minutes (default: Ctrl-C)")
         p.add_argument("--no-audio", action="store_true", help="no Paula sound")
-        p.add_argument("--stuck", type=lambda v: int(v, 0), default=0,
-                       help="mask a stuck joystick switch (e.g. 0x01 = up)")
+        p.add_argument("--stuck", type=_mask, default=0,
+                       help="mask a stuck joystick switch (e.g. 0x01 = up; 0 to 0xff)")
         if name == "run":
             p.add_argument("--adf", help="your Workbench 3.1 ADF")
             p.add_argument("--save", action="store_true",
                            help="at the end, save the session to <vol>/amiga64/wb-snap.bin")
             p.add_argument("--yes", action="store_true", help="copy the ADF without asking")
+            p.add_argument("--replace-adf", action="store_true",
+                           help="replace an interrupted copy of the ADF on the device "
+                                "without asking (amiga64's own file only)")
             p.add_argument("--backend", choices=("u64", "vice"), default="u64",
                            help=argparse.SUPPRESS)      # vice: developers (needs x64sc)
         p.set_defaults(fn=fn)
@@ -516,6 +576,22 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         print("amiga64: interrupted", file=sys.stderr)
         return 130
+    except Exception as e:              # noqa: BLE001 - W17-K2: one line, never a traceback
+        print(f"amiga64: unexpected error: {type(e).__name__}: {e} "
+              f"(details: {_last_error()})", file=sys.stderr)
+        return 1
+
+
+def _last_error() -> str:
+    """The traceback of the error main() is handling, in the state directory."""
+    p = os.path.join(C.state_dir(), "last-error.txt")
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write(traceback.format_exc())
+    except OSError as e:
+        return f"not written: {e.strerror}"
+    return p
 
 
 if __name__ == "__main__":

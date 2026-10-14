@@ -22,28 +22,69 @@ from amiga64 import session as S
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LEAKING = {"run_prg", "load_prg", "run_crt", "sid_play", "mount_disk", "load_rom", "drive_load_rom",
-           "set_config_items_batch", "liveness_probe", "assert_healthy", "write_mem", "mod_play"}
-RUN_PATH = ["tests/aros_wb.py", "tests/aros_boot.py", "tests/aros_resume.py", "tests/aros_modwb.py",
-            "tests/run_vectors.py", "tests/harness_util.py", "tests/run_paula.py",
-            "tests/paula/hw16.py", "tests/bench/u64_session.py", "tests/run_program.py",
-            "tests/run_spr.py", "host/prebuilt.py"] + \
-           [os.path.join("amiga64", f) for f in sorted(os.listdir(os.path.join(ROOT, "amiga64")))
-            if f.endswith(".py")]
+           "set_config_items_batch", "liveness_probe", "assert_healthy", "write_mem", "mod_play",
+           # the harness wrappers around them (ultimate64_helpers): rev17-k #1
+           "run_prg_file", "load_prg_file", "mount_disk_file", "runner_health_check", "recover"}
+
+
+def scanned() -> list[str]:
+    """Every module a run can import: tests/**, host/* (not host/tests), amiga64/*."""
+    out = []
+    for top in ("tests", "host", "amiga64"):
+        for d, dirs, files in os.walk(os.path.join(ROOT, top)):
+            rel = os.path.relpath(d, ROOT)
+            dirs[:] = sorted(x for x in dirs if x != "__pycache__" and
+                             os.path.join(rel, x) != os.path.join("host", "tests"))
+            out += [os.path.join(rel, f) for f in sorted(files) if f.endswith(".py")]
+    return out
+
+
+def leak_sites(src: str) -> list[tuple[str, str]]:
+    """(enclosing function, name) for every reference to a LEAKING name:
+    calls, bare names, bound methods taken as values and imports alike."""
+    t = ast.parse(src)
+    owner = {}
+    for fn in ast.walk(t):                  # breadth first: a nested def overwrites its parent
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for n in ast.walk(fn):
+                if n is not fn:
+                    owner[n] = fn.name
+    sites = []
+    for n in ast.walk(t):
+        where = owner.get(n, "<module>")
+        if isinstance(n, ast.Attribute) and n.attr in LEAKING:
+            sites.append((where, n.attr))
+        elif isinstance(n, ast.Name) and n.id in LEAKING:
+            sites.append((where, n.id))
+        elif isinstance(n, (ast.ImportFrom, ast.Import)):
+            sites += [(where, a.name.rpartition(".")[2]) for a in n.names
+                      if a.name.rpartition(".")[2] in LEAKING]
+        elif isinstance(n, ast.Assign) and any(isinstance(x, ast.Attribute) and x.attr == "socket_dma"
+                                               for x in n.targets):
+            sites.append((where, "socket_dma ="))
+    return sites
 
 
 def test_the_only_leaking_call_site_is_prepare_target():
     sites = []
-    for rel in RUN_PATH:
-        t = ast.parse(open(os.path.join(ROOT, rel)).read())
-        for fn in [n for n in ast.walk(t) if isinstance(n, ast.FunctionDef)]:
-            for c in ast.walk(fn):
-                if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute) \
-                        and c.func.attr in LEAKING:
-                    sites.append((rel, fn.name, c.func.attr))
-                if isinstance(c, ast.Assign) and any(isinstance(x, ast.Attribute) and x.attr == "socket_dma"
-                                                     for x in c.targets):
-                    sites.append((rel, fn.name, "socket_dma ="))
+    for rel in scanned():
+        sites += [(rel,) + s for s in leak_sites(open(os.path.join(ROOT, rel)).read())]
     assert sorted(set(sites)) == [("tests/run_vectors.py", "prepare_target", "run_prg")]
+    assert len(sites) == 1
+
+
+@pytest.mark.parametrize("src", [
+    "from c64_test_harness.backends.ultimate64_helpers import runner_health_check\n"
+    "def f(c):\n    runner_health_check(c)\n",
+    "def f(tg):\n    post = tg.transport.client.run_prg\n    post(b'')\n",
+    "def f(c):\n    run_prg_file(c, 'x.prg')\n",
+    "from h import runner_health_check as rhc\ndef f(c):\n    rhc(c)\n",
+    "import c64_test_harness.backends.ultimate64_helpers as U\ndef f(c):\n    U.recover(c)\n",
+    "def f(c):\n    c.load_prg_file('x')\n",
+    "def f(t):\n    t.socket_dma = True\n",
+])
+def test_the_scan_sees_wrapped_aliased_and_bare_leaks(src):
+    assert leak_sites(src), src
 
 
 def test_prepare_target_leaks_exactly_one_request():
@@ -97,7 +138,6 @@ def rig(monkeypatch, tmp_path):
     transport = Dev("transport", log)
     transport.client = client
     tg = SimpleNamespace(transport=transport, backend="u64")
-    leaks = []
 
     @contextlib.contextmanager
     def hold(out, lock_timeout=None):
@@ -107,9 +147,9 @@ def rig(monkeypatch, tmp_path):
         finally:
             Lock.held = False
 
-    def prepare(target, prg):               # the real one's leak, counted
+    def prepare(target, prg):               # the real one's leak, through the fake client
         assert Lock.held, "prepare_target outside the hold"
-        leaks.append("run_prg")
+        target.transport.client.run_prg(b"\x01\x08")
     monkeypatch.setattr(US, "u64_hold", hold)
     monkeypatch.setattr(RV, "prepare_target", prepare)
     monkeypatch.setattr(UH, "reboot", lambda c: c.reboot())
@@ -160,7 +200,12 @@ def rig(monkeypatch, tmp_path):
     for n in ("AUDIO", "AUD_S", "DEMO_MOUSE", "STUCK", "AUD_HW"):
         monkeypatch.setattr(WB, n, list(getattr(WB, n)))
     monkeypatch.setattr(WB, "model_wb", WB.model_wb)
-    return SimpleNamespace(leaks=leaks, log=log, tmp=tmp_path)
+    return SimpleNamespace(log=log, tmp=tmp_path)
+
+
+def leaks(log: list[str]) -> list[str]:
+    """The fake device's log entries that leave a /Temp file."""
+    return [x for x in log if x.rpartition(".")[2] in LEAKING]
 
 
 def _plan(rig, audio, **kw):
@@ -172,7 +217,7 @@ def _plan(rig, audio, **kw):
 def test_run_budget(rig, audio, want):
     fails, _ = S.run(_plan(rig, audio, save=True), "ROM", SimpleNamespace(raw=b""))
     assert fails == []
-    assert len(rig.leaks) == want
+    assert leaks(rig.log) == ["client.run_prg"] * want
     assert not Lock.held
 
 
@@ -180,7 +225,7 @@ def test_run_budget(rig, audio, want):
 def test_resume_budget(rig, audio, want):
     fails, _ = S.resume(_plan(rig, audio), "ROM")
     assert fails == []
-    assert len(rig.leaks) == want
+    assert leaks(rig.log) == ["client.run_prg"] * want
 
 
 def test_doctor_budget_and_hold(tmp_path):
