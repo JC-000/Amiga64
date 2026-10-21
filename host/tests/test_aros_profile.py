@@ -176,11 +176,10 @@ def test_fletcher_reference_values():
     assert s == machine.fletcher(big[:65536] + big[65536:])
 
 
-def _fake_cache(tmp_path: Path, tamper: str | None = None) -> tuple[str, str]:
+def _fake_bundle(tmp_path: Path, tamper: str | None = None) -> tuple[str, str]:
     ext = bytes((i * 7) & 0xFF for i in range(machine.BANK_SIZE))
     rom = struct.pack(">II", 0x5A5AC3C3, 0x00F800D2) + bytes(machine.BANK_SIZE - 8)
-    arch = "ab" * 32
-    d = tmp_path / "cache" / arch
+    d = tmp_path / "bundle"
     d.mkdir(parents=True)
     (d / "aros-ext.bin").write_bytes(ext)
     (d / "aros-rom.bin").write_bytes(rom)
@@ -190,14 +189,13 @@ def _fake_cache(tmp_path: Path, tamper: str | None = None) -> tuple[str, str]:
         b = (d / tamper).read_bytes()
         (d / tamper).write_bytes(bytes([b[0] ^ 0xFF]) + b[1:])
     man = tmp_path / "manifest.txt"
-    man.write_text(f"archive|https://example.invalid/x.zip|{arch}\n" +
-                   "".join(f"file|{n}|x!{n}|{h}\n" for n, h in sha.items()))
-    return str(man), str(tmp_path / "cache")
+    man.write_text("".join(f"file|{n}|x!{n}|{h}\n" for n, h in sha.items()))
+    return str(man), str(d)
 
 
 def test_find_rom_and_plan(tmp_path):
-    man, root = _fake_cache(tmp_path)
-    rom, why = machine.find_rom(man, root)
+    man, bundle = _fake_bundle(tmp_path)
+    rom, why = machine.find_rom(man, bundle)
     assert rom is not None and why == ""
     assert rom.ssp == 0x5A5AC3C3 and rom.pc == 0x00F800D2
     plan = machine.stage_plan(rom)
@@ -209,22 +207,21 @@ def test_find_rom_and_plan(tmp_path):
 
 @pytest.mark.parametrize("tamper", ["aros-ext.bin", "aros-rom.bin"])
 def test_find_rom_fails_closed(tmp_path, tamper):
-    man, root = _fake_cache(tmp_path, tamper)
-    rom, why = machine.find_rom(man, root)
+    man, bundle = _fake_bundle(tmp_path, tamper)
+    rom, why = machine.find_rom(man, bundle)
     assert rom is None and "SHA256 mismatch" in why and tamper in why
 
 
 def test_find_rom_absent(tmp_path):
-    man, _ = _fake_cache(tmp_path)
-    rom, why = machine.find_rom(man, str(tmp_path / "nowhere"))
-    assert rom is None and "fetch.sh" in why
+    man, _ = _fake_bundle(tmp_path)
+    rom, why = machine.find_rom(man, str(tmp_path / "nowhere"), checkout=True)
+    assert rom is None and "no bundle" in why
     rom, why = machine.find_rom(str(tmp_path / "no-manifest"), str(tmp_path))
     assert rom is None and "manifest" in why
 
 
-def test_real_cache_if_present():
+def test_real_bundle():
     rom, why = machine.find_rom()
-    if rom is None:
-        pytest.skip(f"no AROS ROM cache: {why}")
+    assert rom is not None, why
     # the reset PC points into the Kickstart bank (the boot entry jumps there)
     assert machine.AROS_ROM <= rom.pc & 0xFFFFFF <= machine.AROS_ROM_END

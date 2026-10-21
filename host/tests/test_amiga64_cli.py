@@ -389,7 +389,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(kit, "player", lambda: PLAYER)
     monkeypatch.setattr(kit, "song", lambda: MOD)
     monkeypatch.setattr(kit, "runner", lambda: "/p/runner.prg")
-    monkeypatch.setattr(kit, "rom", lambda: (SimpleNamespace(cache="/x/third_party/aros"), ""))
+    monkeypatch.setattr(kit, "rom", lambda: (SimpleNamespace(bundle="/x/third_party/aros"), ""))
     return tmp_path
 
 

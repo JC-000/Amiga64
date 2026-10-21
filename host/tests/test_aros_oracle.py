@@ -205,53 +205,51 @@ def test_triage_categories():
 
 def test_skip_without_fs_uae(tmp_path, capsys):
     rc = ao.main(["--table", "--fs-uae", str(tmp_path / "no-fs-uae"),
-                  "--cache", str(tmp_path)])
+                  "--bundle", str(tmp_path)])
     out = capsys.readouterr().out
     assert rc == 0 and "SKIP" in out and "FS-UAE" in out
 
 
-def test_skip_without_cache(tmp_path, capsys):
+def test_skip_without_bundle(tmp_path, capsys):
     fake = tmp_path / "fs-uae"
     fake.write_text("#!/bin/sh\nexit 1\n")
     fake.chmod(0o755)
     rc = ao.main(["--table", "--fs-uae", str(fake),
-                  "--cache", str(tmp_path / "empty")])
+                  "--bundle", str(tmp_path / "empty")])
     out = capsys.readouterr().out
-    assert rc == 0 and "SKIP" in out and "fetch.sh" in out
+    assert rc == 0 and "SKIP" in out and "no AROS bundle" in out
 
 
-def _fake_cache(root, corrupt: str | None = None):
-    """A cache laid out per a manifest we write, with files whose hashes
+def _fake_bundle(root, corrupt: str | None = None):
+    """A bundle laid out per a manifest we write, with files whose hashes
     match (or, for `corrupt`, do not)."""
     files = {"aros-rom.bin": b"R" * 64, "aros-ext.bin": b"E" * 64,
              "LICENSE": b"APL", "C/Copy": b"copy"}
-    arc = "ab" * 32
-    lines = [f"archive|https://example.invalid/x.zip|{arc}"]
-    d = root / arc
+    lines = []
+    d = root / "bundle"
     for path, data in files.items():
-        lines.append(f"file|{path}|x.iso!{path}|{hashlib.sha256(data).hexdigest()}")
+        lines.append(f"file|{path}|x!{path}|{hashlib.sha256(data).hexdigest()}")
         (d / path).parent.mkdir(parents=True, exist_ok=True)
         (d / path).write_bytes(data + (b"!" if path == corrupt else b""))
-    (d / "SOURCE.txt").write_text("src")
     man = root / "manifest.txt"
     man.write_text("\n".join(lines) + "\n")
     return man, d
 
 
-def test_cache_verifies(tmp_path):
-    man, d = _fake_cache(tmp_path)
-    got, why = ao.find_cache(str(man), str(tmp_path))
+def test_bundle_verifies(tmp_path):
+    man, d = _fake_bundle(tmp_path)
+    got, why = ao.find_bundle(str(man), str(d))
     assert got == str(d), why
 
 
-def test_cache_hash_mismatch_fails_closed(tmp_path, capsys):
-    man, _ = _fake_cache(tmp_path, corrupt="aros-rom.bin")
-    got, why = ao.find_cache(str(man), str(tmp_path))
+def test_bundle_hash_mismatch_fails_closed(tmp_path, capsys):
+    man, d = _fake_bundle(tmp_path, corrupt="aros-rom.bin")
+    got, why = ao.find_bundle(str(man), str(d))
     assert got is None and "aros-rom.bin" in why and "mismatch" in why
     fake = tmp_path / "fs-uae"
     fake.write_text("#!/bin/sh\nexit 1\n")
     fake.chmod(0o755)
-    rc = ao.main(["--table", "--fs-uae", str(fake), "--cache", str(tmp_path),
+    rc = ao.main(["--table", "--fs-uae", str(fake), "--bundle", str(d),
                   "--manifest", str(man)])
     out = capsys.readouterr().out
     assert rc == 0 and "SKIP" in out and "mismatch" in out
@@ -259,9 +257,9 @@ def test_cache_hash_mismatch_fails_closed(tmp_path, capsys):
 
 def test_real_manifest_parses():
     m = ao.read_manifest(ao.MANIFEST)
-    assert m.url.startswith("https://") and len(m.sha256) == 64
     paths = {f.path for f in m.files}
-    assert {"aros-rom.bin", "aros-ext.bin", "LICENSE", "C/Copy"} <= paths
+    assert {"aros-rom.bin", "aros-ext.bin", "LICENSE", "C/Copy", "C/Assign"} <= paths
+    assert all(len(f.sha256) == 64 for f in m.files)
 
 
 # --- never part of the gate ----------------------------------------------------
@@ -288,13 +286,13 @@ def test_every_program_has_a_table_outcome(name):
 
 @pytest.fixture
 def fake_env(tmp_path, monkeypatch):
-    """main() with FS-UAE, cache and vbcc faked and run_aros scripted.
+    """main() with FS-UAE, the bundle and vbcc faked and run_aros scripted.
     Yields (script: AROS outcomes run_aros returns in order, calls: what
     was compiled and run, argv prefix)."""
     fake = tmp_path / "fs-uae"
     fake.write_text("#!/bin/sh\nexit 1\n")
     fake.chmod(0o755)
-    monkeypatch.setattr(ao, "find_cache", lambda *a: (str(tmp_path), ""))
+    monkeypatch.setattr(ao, "find_bundle", lambda *a: (str(tmp_path), ""))
     monkeypatch.setattr(run_vbcc, "vbcc_home", lambda: str(tmp_path))
     script: list = []
     calls: list = []
@@ -532,17 +530,17 @@ PINNED = ["aros-rom.bin", "aros-ext.bin", "LICENSE", "C/Copy"]
 
 
 @pytest.mark.parametrize("path", PINNED)
-def test_cache_hash_mismatch_in_any_pinned_file(tmp_path, path):    # R16
-    man, _ = _fake_cache(tmp_path, corrupt=path)
-    got, why = ao.find_cache(str(man), str(tmp_path))
+def test_bundle_hash_mismatch_in_any_pinned_file(tmp_path, path):   # R16
+    man, d = _fake_bundle(tmp_path, corrupt=path)
+    got, why = ao.find_bundle(str(man), str(d))
     assert got is None and path in why and "mismatch" in why
 
 
 @pytest.mark.parametrize("path", PINNED)
-def test_cache_missing_pinned_file_fails_closed(tmp_path, path):    # R17
-    man, d = _fake_cache(tmp_path)
+def test_bundle_missing_pinned_file_fails_closed(tmp_path, path):   # R17
+    man, d = _fake_bundle(tmp_path)
     (d / path).unlink()
-    got, why = ao.find_cache(str(man), str(tmp_path))
+    got, why = ao.find_bundle(str(man), str(d))
     assert got is None and path in why and "missing" in why
 
 
@@ -606,12 +604,12 @@ def fsuae(tmp_path):
 
 @pytest.fixture
 def cache(tmp_path):
-    """A fake cache + manifest with the two pinned commands, plus an
+    """A fake bundle + manifest with the two pinned commands, plus an
     UNPINNED file dropped into C/."""
     files = {"aros-rom.bin": b"R", "aros-ext.bin": b"E", "LICENSE": b"L",
              "C/Copy": b"copy", "C/Assign": b"assign"}
     d = tmp_path / "cache"
-    lines = ["archive|https://example.invalid/x.zip|" + "cd" * 32]
+    lines = []
     for pth, data in files.items():
         (d / pth).parent.mkdir(parents=True, exist_ok=True)
         (d / pth).write_bytes(data)

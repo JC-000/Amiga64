@@ -93,7 +93,7 @@ def chain_assigns(adf: str) -> str:
 
 
 def rom_dir() -> str | None:
-    c = glob.glob(os.path.expanduser("~/.cache/amiga64/aros/*/aros-rom.bin"))
+    c = glob.glob(os.path.join(REPO, "third_party", "aros", "aros-rom.bin"))
     return os.path.dirname(c[0]) if c else None
 
 

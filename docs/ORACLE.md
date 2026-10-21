@@ -10,12 +10,11 @@ triage, and the triage goes in the table below.
 ## Use
 
 ```sh
-tools/aros/fetch.sh                                   # once: pinned ROM → ~/.cache/amiga64/aros/
+# AROS: third_party/aros/ (ROM banks + C/Copy, C/Assign; tools/aros/manifest.txt)
 python3 -m tests.aros_oracle --prg build/<pkg>/runner.prg   # Amiga64 side run in VICE
 python3 -m tests.aros_oracle --table                        # Amiga64 side = run_vbcc expectations
     [--only hello,fio_rw] [--timeout 120] [--retries 1] [--json FILE] [--keep DIR] [--strict]
-AMIGA64_AROS_ORACLE=1 python3 -m pytest -q host/tests/test_aros_oracle_fsuae.py \
-    host/tests/test_aros_oracle_fetch.py                     # FS-UAE + fetch.sh legs
+AMIGA64_AROS_ORACLE=1 python3 -m pytest -q host/tests/test_aros_oracle_fsuae.py   # FS-UAE legs
 ```
 
 - Each program's line is one of:
@@ -42,15 +41,14 @@ AMIGA64_AROS_ORACLE=1 python3 -m pytest -q host/tests/test_aros_oracle_fsuae.py 
   cleanly** (prints one `SKIP aros_oracle:` line and exits 0) when it
   cannot run:
   - FS-UAE is absent (`FS_UAE` overrides `/Applications/FS-UAE.app/…/fs-uae`);
-  - the cache is absent, or a cached file fails its SHA256;
+  - a bundled AROS file (`third_party/aros/`) is missing or fails its SHA256;
   - vbcc is absent.
 - It is not part of `tests/rec_gate.sh`. The host-only tests
   (`host/tests/test_aros_oracle.py`) are part of `make host-test`. They need
   no emulator: `run_aros` is exercised against a fake FS-UAE (a script that
-  plays the boot script). The real FS-UAE legs and the `fetch.sh` harness
-  (`tools/aros/test_fetch.sh`, a fake local archive with no AROS bytes) are
-  opt-in (`AMIGA64_AROS_ORACLE=1`), so `make host-test` never boots an
-  emulator or runs curl.
+  plays the boot script). The real FS-UAE legs are opt-in
+  (`AMIGA64_AROS_ORACLE=1`), so `make host-test` never boots an emulator.
+  Nothing is downloaded: every AROS file the oracle uses is bundled.
 - `--keep DIR` keeps each AROS run directory: the script, the program's
   output, and RAM: as copied back. It leaves out `C/`, so AROS binaries
   never land under `build/`. `--json` writes the per-program report.
@@ -69,7 +67,7 @@ FS-UAE from it once (`tests/oracle/a500.fs-uae.in`):
   filesystem).
 
 Only the manifest's pinned `C/` files are copied to `DH0:C`, and
-`find_cache` has verified them. Anything else dropped into the cache's
+`find_bundle` has verified them. Anything else dropped into the bundle's
 `C/` is never booted.
 
 The boot script (`tests/oracle/Startup-Sequence.in`) does the following:
@@ -160,7 +158,7 @@ require exactly the pinned lines. They also require these to be UNTRIAGED:
 The SKIP set is pinned to `{tspin}`, so adding a SKIP is an explicit test
 change.
 
-Every `find_cache` check (a hash mismatch or a missing file) is tested for
+Every `find_bundle` check (a hash mismatch or a missing file) is tested for
 every pinned file.
 
 The fake-FS-UAE tests of `run_aros` cover:
@@ -183,9 +181,9 @@ The opt-in FS-UAE legs run `hello` on AROS and check that it MATCHes, that
 the same run against a wrong expectation is a DIFF, and that a binary with
 a patched string ("Jello") is a DIFF. They also check that `fio_seek`'s
 files make the round trip, that a kept run directory holds no AROS file,
-and that exit codes 1000, 70000 and -1 are recorded. The opt-in fetch
-harness checks 14 cases of `fetch.sh` failing closed, including an HTTP 404
-through `curl -f`.
+and that exit codes 1000, 70000 and -1 are recorded. (Until 2026-10-21 an
+opt-in harness also checked 14 fail-closed cases of the `fetch.sh`
+downloader, since removed; see "The AROS files" below.)
 
 Evidence is in `build/evidence/w6-oracle/`:
 - red: `red/01` (no module) and `red/02` (the verdict logic returns no
@@ -330,13 +328,16 @@ there are none.
   is fully buffered there. On Amiga64 it goes to the console.
   Differences in when output is flushed (see `system`, `putstr`) show up as
   reordering, not as lost output.
-- **The pin has rotated away** (20260921 404s since October 2026).
-  SourceForge deletes old nightlies. A machine with a verified cache keeps
-  working. On a new machine `fetch.sh` seeds the cache's ROM banks from
-  `third_party/aros/` (the same pinned SHA-256s), which is enough for the
-  ROM-model tests. `C/Copy` and `C/Assign` exist only in the archive, so
-  the FS-UAE legs stay unavailable (fail closed) until a re-pin. Re-pinning
-  to a newer nightly changes the ROM: re-run and re-baseline this table.
+- **The AROS files are bundled, not downloaded** (2026-10-21). SourceForge
+  deletes old nightlies (20260921 404s since October 2026), so the oracle
+  no longer fetches anything: the ROM banks (nightly 20260921) and the two
+  boot-script commands `C/Copy` and `C/Assign` (nightly 20261021; the
+  20260921 ones were gone) live in `third_party/aros/`, pinned by
+  `tools/aros/manifest.txt` and described in its SOURCE.txt. With the newer
+  commands the `--table` totals are unchanged (17 MATCH, 10 DIFF all
+  triaged, 1 SKIP). A nightly rotating away needs no maintenance. Moving
+  to a newer ROM is a deliberate change: replace the banks, re-pin, re-run
+  and re-baseline this table.
 - **FS-UAE headless on macOS** is not a documented FS-UAE mode, but the
   `headless` option works in 3.2.35. Every run is bounded by `--timeout`,
   and the emulator is killed at the end. One infrastructure stall was seen

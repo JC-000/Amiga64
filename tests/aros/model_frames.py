@@ -153,9 +153,9 @@ def wb_main(a) -> int:
     from adf import AdfImage
     from host import adf_overlay as O
     from host import c2v_ref as R
-    c = glob.glob(os.path.expanduser("~/.cache/amiga64/aros/*/aros-rom.bin"))
+    c = glob.glob(os.path.join(ROOT, "third_party", "aros", "aros-rom.bin"))
     if not c:
-        print("SKIP: no AROS ROM in ~/.cache/amiga64/aros (run tools/aros/fetch.sh)")
+        print("SKIP: no AROS ROM in third_party/aros (git checkout -- third_party/aros)")
         return 0
     with open(a.adf, "rb") as f:
         raw = f.read()
@@ -245,9 +245,9 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     if a.adf:
         return wb_main(a)
-    c = glob.glob(os.path.expanduser("~/.cache/amiga64/aros/*/aros-rom.bin"))
+    c = glob.glob(os.path.join(ROOT, "third_party", "aros", "aros-rom.bin"))
     if not c:
-        print("SKIP: no AROS ROM in ~/.cache/amiga64/aros (run tools/aros/fetch.sh)")
+        print("SKIP: no AROS ROM in third_party/aros (git checkout -- third_party/aros)")
         return 0
     scratch = os.path.join(os.path.dirname(os.path.abspath(a.out)), "model-run")
     os.makedirs(scratch, exist_ok=True)

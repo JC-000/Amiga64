@@ -129,9 +129,8 @@ def doctor_offline(a, cfg: dict) -> tuple[list[Check], dict]:
     if rom is None:
         out.append(Check(FAIL, "AROS ROM", why))
     else:
-        where = "bundled (third_party/aros)" if os.path.basename(rom.cache) == "aros" \
-            and os.path.basename(os.path.dirname(rom.cache)) == "third_party" else f"cache {rom.cache}"
-        out.append(Check(OK, "AROS ROM", f"{where}, hashes match tools/aros/manifest.txt"))
+        out.append(Check(OK, "AROS ROM", "bundled (third_party/aros), hashes match "
+                         "tools/aros/manifest.txt"))
     try:
         path, src = _adf_path(a, cfg, None)
     except C.ConfigError as e:

@@ -35,7 +35,7 @@ run logs from the development machine that were never committed (README
 | `fixtures/` | guest-side sources and data: `c/` (vbcc test programs), `mod/` (the 68k MOD replay and its UI), `modwb/` (ModPlayer, the Workbench launcher), `inp/`, `vectors/` (SingleStepTests samples), `bench/` (recorded sweeps) |
 | `prebuilt/` | the shipped C64-side binaries and their `MANIFEST` (written by `make prebuilt`, never by hand) |
 | `third_party/aros/` | the AROS m68k ROM banks, unmodified, with `LICENSE` (APL 1.1), `ACKNOWLEDGEMENTS` and `SOURCE.txt` |
-| `tools/aros/` | `fetch.sh` and `manifest.txt`: the pinned ROM hashes, and a developer cache for the oracle |
+| `tools/aros/` | `manifest.txt`: the SHA-256 of every bundled AROS file in `third_party/aros/` (nothing is downloaded) |
 | `tools/vbcc/` | `install.sh`: the pinned vbcc, vasm and vlink, installed outside the repository |
 | `tools/s3probe/` | the Wave 6 boot model (`aros_boot_model.py`, an A500 model running the AROS ROM) and the FS-UAE probes |
 

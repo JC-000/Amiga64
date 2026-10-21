@@ -16,8 +16,8 @@ machine model the plan proposes for the C64 side:
   * beam position (VPOSR/VHPOSR) derived from the virtual cycle count.
 
 The CPU is Musashi via machine68k (tools/s3probe/setup_venv.sh builds it,
-outside the repo).  The ROM is read from the W6-O cache
-(~/.cache/amiga64/aros/<sha>/), never copied.  Outputs (evidence dir):
+outside the repo).  The ROM is read from the bundle
+(third_party/aros/), never copied.  Outputs (evidence dir):
 register-access table (first instruction index, R/W counts, CPU vs copper),
 instruction mix by opcode high byte, privileged/exception opcode counts,
 IRQ deliveries per level, blitter statistics, idle (STOP) time, and PNG
@@ -522,9 +522,9 @@ def main(argv=None):
     a = ap.parse_args(argv)
     rom_dir = a.rom_dir
     if not rom_dir:
-        c = glob.glob(os.path.expanduser("~/.cache/amiga64/aros/*/aros-rom.bin"))
+        c = glob.glob(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "third_party", "aros", "aros-rom.bin"))
         if not c:
-            print("SKIP: no AROS ROM in ~/.cache/amiga64/aros (run tools/aros/fetch.sh)")
+            print("SKIP: no AROS ROM in third_party/aros (git checkout -- third_party/aros)")
             return 0
         rom_dir = os.path.dirname(c[0])
     os.makedirs(a.out, exist_ok=True)

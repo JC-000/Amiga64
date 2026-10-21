@@ -4,7 +4,7 @@
 docs/WAVE11_BRIEF.md C2-C4, docs/S3_PLAN.md §3.2-§3.5 and §4 "S3.7";
 contract docs/CONTRACTS.md "Machine profile and AROS boot (S3.7)".
 
-Boot legs (need the AROS ROM cache, tools/aros/fetch.sh; without it they
+Boot legs (need the AROS ROM bundled in third_party/aros/; without it they
 print a SKIP line and the run exits 0, like tests/aros_oracle.py).  ONE
 boot per mach_s value: the REU is zeroed (tests/aros/mboot.s aros_fill),
 the two ROM banks and the overlay longs are staged (host/machine.py
@@ -1300,7 +1300,7 @@ def run(prg: str, legs: list[str], s, backend: str, timeout: float,
             rep["skip"] = why
             bl = []
         else:
-            rep["rom"] = {"cache": rom.cache, "ssp": f"${rom.ssp:08X}",
+            rep["rom"] = {"bundle": rom.bundle, "ssp": f"${rom.ssp:08X}",
                           "pc": f"${rom.pc:08X}"}
 
     def body_for(sv: int, which: list[str]):

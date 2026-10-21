@@ -63,7 +63,7 @@ def model_main(out: str) -> int:
     sys.path.insert(0, os.path.join(ROOT, "tests", "aros"))
     import aros_boot_model as M
     import model_frames as MF
-    c = glob.glob(os.path.expanduser("~/.cache/amiga64/aros/*/aros-rom.bin"))
+    c = glob.glob(os.path.join(ROOT, "third_party", "aros", "aros-rom.bin"))
     if not c:
         print("SKIP: no AROS ROM")
         return 0

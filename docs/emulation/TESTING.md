@@ -55,7 +55,7 @@ Opt-in host tests, skipped unless their variable is `1`:
 | `AMIGA64_VICE_TESTS` | `amiga64 run --backend vice --minutes 0` from a read-only installed tree (several minutes; needs `x64sc`, `prebuilt/`, and a Workbench 3.1 ADF, see `AMIGA64_TEST_ADF` below) |
 | `AMIGA64_NET_TESTS` | the clean-venv install test resolves the pinned harness tag from GitHub instead of copying in the local harness |
 | `AMIGA64_CHIP_ORACLE` | the live FS-UAE leg of the chipset reference (needs FS-UAE and vasm) |
-| `AMIGA64_AROS_ORACLE` | the AROS oracle's FS-UAE leg and the `tools/aros/fetch.sh` fail-closed checks |
+| `AMIGA64_AROS_ORACLE` | the AROS oracle's FS-UAE legs (FS-UAE and vbcc; the AROS files are bundled) |
 
 `AMIGA64_TEST_ADF` names your Workbench 3.1 ADF for the tests that need
 one (default `~/Amiga/amiga-os-310-workbench.adf`); those tests skip when

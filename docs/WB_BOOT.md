@@ -402,7 +402,7 @@ for d in 310-workbench 310-install 134-workbench; do for m in oracle plain; do
 # task 2: model runs (DMA, HLE, trimmed scripts, no-disk regression)
 sh $E/model/run_all.sh        # the script is listed in this section's text below
 python3 tools/s3probe/wb_summary.py $E/model/*-dma $E/model/*-hle --json $E/model/summary.json
-# host tests (synthetic ADF only; the two model legs skip without ROM cache/venv)
+# host tests (synthetic ADF only; the two model legs skip without the s3probe venv)
 python3 -m pytest -q host/tests/test_wb_disk.py
 ```
 

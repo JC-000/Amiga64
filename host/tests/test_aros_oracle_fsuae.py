@@ -1,7 +1,7 @@
 """W6-O: the AROS oracle end to end in FS-UAE (opt-in, never in the gate).
 
-Runs only with AMIGA64_AROS_ORACLE=1 AND FS-UAE, a verified ROM cache
-(tools/aros/fetch.sh) and vbcc present; otherwise every test skips.  The
+Runs only with AMIGA64_AROS_ORACLE=1 AND FS-UAE, the verified AROS bundle
+(third_party/aros/) and vbcc present; otherwise every test skips.  The
 teeth: a program run on AROS matches its expectation, and the same run
 against a wrong expectation, or a mutated binary, is a DIFF.
 """
@@ -25,7 +25,7 @@ def _why_not() -> str | None:
         return f"opt-in: set {OPT_IN}=1"
     if not os.access(ao.FS_UAE, os.X_OK):
         return f"FS-UAE not found at {ao.FS_UAE}"
-    cache, why = ao.find_cache()
+    cache, why = ao.find_bundle()
     if cache is None:
         return why
     try:
@@ -41,7 +41,7 @@ pytestmark = pytest.mark.skipif(_why_not() is not None,
 
 @pytest.fixture(scope="module")
 def cache():
-    return ao.find_cache()[0]
+    return ao.find_bundle()[0]
 
 
 @pytest.fixture(scope="module")

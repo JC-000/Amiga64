@@ -49,7 +49,7 @@ RATES = {
 def rom_modules(rom_dir: str | None = None):
     """[(start, end, name)] from the RomTags of the pinned ROM images."""
     if rom_dir is None:
-        c = glob.glob(os.path.expanduser("~/.cache/amiga64/aros/*/aros-rom.bin"))
+        c = glob.glob(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "third_party", "aros", "aros-rom.bin"))
         if not c:
             return []
         rom_dir = os.path.dirname(c[0])
