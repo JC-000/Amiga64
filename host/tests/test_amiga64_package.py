@@ -57,9 +57,9 @@ def test_pyproject_metadata():
     assert p["requires-python"] == ">=3.11" and p["license"] == "MIT"
     assert p["scripts"] == {"amiga64": "amiga64.cli:main"}
     dep = [d for d in p["dependencies"] if d.startswith("c64-test-harness")]
-    assert dep and "git+https://github.com/JC-000/c64-test-harness@" in dep[0]
-    pin = dep[0].rsplit("@", 1)[1]
-    assert pin == "v0.13.1"                         # the tag (= bc4ab0b), supervisor 2026-10-14
+    assert dep and dep[0].endswith("git+https://github.com/JC-000/c64-test-harness")
+    # unpinned since 2026-10-21 (the user): main tracks harness master; the
+    # v0.17.0 tag keeps the v0.13.1 pin as the known-good environment
     assert not any(d.startswith("numpy") for d in p["dependencies"])     # optional only
     from amiga64 import __version__
     assert __version__ == p["version"]

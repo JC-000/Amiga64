@@ -389,12 +389,8 @@ def _strip(case: dict[str, Any]) -> dict[str, Any]:
 
 
 def _deterministic_gz(payload: bytes) -> bytes:
-    import io
-
-    buf = io.BytesIO()
-    with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
-        gz.write(payload)
-    return buf.getvalue()
+    # gzip.compress keeps XFL=2 at level 9; GzipFile writes 0 from 3.15 on
+    return gzip.compress(payload, compresslevel=9, mtime=0)
 
 
 def encode_fixture(stem: str, cases: Sequence[dict[str, Any]],

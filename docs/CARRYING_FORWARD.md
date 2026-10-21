@@ -74,7 +74,7 @@ run logs from the development machine that were never committed (README
 | vlink | **0.18a** | linking them | the same |
 | vbcc | 0.9h patch 3 | the C test programs (`fixtures/c/`), not the shipped binaries | `tools/vbcc/README.md` |
 | VICE `x64sc` | with a 16 MB REU | the VICE legs | |
-| c64-test-harness | **v0.13.1** | every VICE and device access | `pyproject.toml` |
+| c64-test-harness | master (v0.17.0 pins **v0.13.1**) | every VICE and device access | `pyproject.toml` |
 | FS-UAE | | only the optional oracles | docs/ORACLE.md |
 
 `tools/vbcc/install.sh` installs vbcc, vasm and vlink under
@@ -431,10 +431,9 @@ These looked open in older documents and are done:
   [LIMITS](emulation/LIMITS.md).
 - **The harness is a separate project.**
   [c64-test-harness](https://github.com/JC-000/c64-test-harness) owns VICE,
-  the device clients, the DeviceLock and device storage. Amiga64 pins a
-  tagged release (v0.13.1). Report what Amiga64 needs from it there; do not
-  patch it locally. Moving the pin is a change of its own, tested against
-  the device legs.
+  the device clients, the DeviceLock and device storage. Amiga64 tracks its
+  master (the v0.17.0 tag pins v0.13.1, a known-good environment). Report
+  what Amiga64 needs from it there; do not patch it locally.
 - **Licence.** Amiga64's own code and documentation are MIT
   ([LICENSE](../LICENSE), [NOTICE](../NOTICE)); contributions are taken
   under the same licence. The AROS ROM in `third_party/aros/` stays under
