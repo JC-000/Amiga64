@@ -17,7 +17,7 @@ classifiers = [
     "Topic :: System :: Emulators",
 ]
 dependencies = [
-    "c64-test-harness @ git+https://github.com/JC-000/c64-test-harness@v0.13.1",   # = bc4ab0b
+    "c64-test-harness @ git+https://github.com/JC-000/c64-test-harness",   # tracks master; v0.17.0 pins v0.13.1
 ]
 
 [project.optional-dependencies]

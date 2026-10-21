@@ -330,10 +330,13 @@ there are none.
   is fully buffered there. On Amiga64 it goes to the console.
   Differences in when output is flushed (see `system`, `putstr`) show up as
   reordering, not as lost output.
-- **The pin will rotate away.** SourceForge deletes old nightlies. When
-  the pinned URL 404s, `fetch.sh` fails with a message, and until then the
-  oracle keeps working from the verified cache. Re-pinning to a newer
-  nightly can change AROS behaviour: re-run and re-baseline this table.
+- **The pin has rotated away** (20260921 404s since October 2026).
+  SourceForge deletes old nightlies. A machine with a verified cache keeps
+  working. On a new machine `fetch.sh` seeds the cache's ROM banks from
+  `third_party/aros/` (the same pinned SHA-256s), which is enough for the
+  ROM-model tests. `C/Copy` and `C/Assign` exist only in the archive, so
+  the FS-UAE legs stay unavailable (fail closed) until a re-pin. Re-pinning
+  to a newer nightly changes the ROM: re-run and re-baseline this table.
 - **FS-UAE headless on macOS** is not a documented FS-UAE mode, but the
   `headless` option works in 3.2.35. Every run is bounded by `--timeout`,
   and the emulator is killed at the end. One infrastructure stall was seen

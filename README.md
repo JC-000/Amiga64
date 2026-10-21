@@ -112,8 +112,8 @@ Toolchain for building from source: Python 3.11+, cc65 2.18 (`ca65`/`ld65`),
 VICE `x64sc` with a 16 MB REU for the tests, vbcc 0.9h with vasm 2.0f and
 vlink 0.18a for the guest programs (`tools/vbcc/install.sh`, installed
 outside the repository), and
-[c64-test-harness](https://github.com/JC-000/c64-test-harness) v0.13.1 for
-driving VICE or a device. Users of the prebuilt release need none of the
+[c64-test-harness](https://github.com/JC-000/c64-test-harness) (its master;
+the v0.17.0 release pins v0.13.1) for driving VICE or a device. Users of the prebuilt release need none of the
 build tools.
 
 ```sh

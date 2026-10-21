@@ -52,6 +52,45 @@ all_ok() {
 }
 if all_ok; then say "ok (cached)  $DEST"; exit 0; fi
 
+# 2026-10-21: SourceForge rotates nightlies away.  When the download fails,
+# install the manifest files that third_party/aros/ bundles (the ROM banks,
+# LICENSE, ACKNOWLEDGEMENTS: same pinned SHA256s) and return 0.  The files
+# only the archive has (C/Copy, C/Assign) stay missing, so the FS-UAE oracle
+# still fails closed (tests/aros_oracle.py find_cache); a re-pin fixes that.
+BUNDLE="$HERE/../../third_party/aros"
+seed_from_bundle() {
+  local f path want n=0
+  for f in "${FILES[@]}"; do
+    IFS='|' read -r _ path _member want <<<"$f"
+    sha_ok "$BUNDLE/$path" "$want" || continue
+    mkdir -p "$(dirname "$DEST/$path")"
+    cp "$BUNDLE/$path" "$DEST/$path"; chmod 0644 "$DEST/$path"
+    say "seeded       $path (third_party/aros)"; n=$((n + 1))
+  done
+  sha_ok "$DEST/aros-rom.bin" "$(want_of aros-rom.bin)" \
+    && sha_ok "$DEST/aros-ext.bin" "$(want_of aros-ext.bin)" || return 0
+  cat >"$DEST/SOURCE.txt" <<EOF
+AROS m68k ROM banks seeded by tools/aros/fetch.sh from the Amiga64 repo's
+third_party/aros/ (identical pinned SHA256s; see its SOURCE.txt), because
+$archive_url
+could not be downloaded.  Files only that archive has are absent.
+Seeded:    $(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+  for f in "${FILES[@]}"; do
+    IFS='|' read -r _ path _ want <<<"$f"
+    sha_ok "$DEST/$path" "$want" || say "MISSING      $path (archive only: the FS-UAE oracle needs a re-pin)"
+  done
+  say "ready (ROM only, $n file(s) from the bundle): $DEST"
+  exit 0
+}
+want_of() {
+  local f path want
+  for f in "${FILES[@]}"; do
+    IFS='|' read -r _ path _ want <<<"$f"
+    [ "$path" = "$1" ] && { echo "$want"; return; }
+  done
+}
+
 mkdir -p "$ROOT"
 WORK="$(mktemp -d "$ROOT/.fetch.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
@@ -61,7 +100,8 @@ if sha_ok "$zip" "$archive_sha"; then
 else
   say "download     $archive_url"
   curl -sSfL --retry 3 -o "$zip.part" "$archive_url" \
-    || { say "download failed (nightly rotated? re-pin tools/aros/manifest.txt)"; rm -f "$zip.part"; exit 1; }
+    || { rm -f "$zip.part"; say "download failed (nightly rotated)"; seed_from_bundle
+      say "re-pin tools/aros/manifest.txt"; exit 1; }
   if ! sha_ok "$zip.part" "$archive_sha"; then
     say "SHA256 MISMATCH for $(basename "$zip") — refusing to extract"
     say "  want $archive_sha"; say "  got  $(sha "$zip.part")"
