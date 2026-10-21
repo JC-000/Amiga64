@@ -280,8 +280,8 @@ VENV_PY = Path.home() / ".cache" / "amiga64" / "s3probe-venv" / "bin" / "python"
 
 
 def _model(tmp_path, *extra):
-    if not glob.glob(os.path.expanduser("~/.cache/amiga64/aros/*/aros-rom.bin")):
-        pytest.skip("no AROS ROM cache (tools/aros/fetch.sh)")
+    if not glob.glob(str(ROOT / "third_party" / "aros" / "aros-rom.bin")):
+        pytest.skip("no AROS ROM in third_party/aros")
     if not VENV_PY.exists():
         pytest.skip("no s3probe venv (tools/s3probe/setup_venv.sh)")
     img = tmp_path / "synth.adf"

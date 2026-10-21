@@ -14,8 +14,8 @@ runs twice:
   (screen, D0, halt reason, RAMDISK files read back).  With ``--table``, the
   run_vbcc expectations stand in for it (they are what the gate proves the
   runner produces).
-* **AROS** — in FS-UAE (A500, 68000, the pinned AROS ROM from
-  ``tools/aros/fetch.sh``, headless, warp) booting a host directory as DH0:
+* **AROS** — in FS-UAE (A500, 68000, the AROS ROM and C:
+  commands bundled in ``third_party/aros/``, headless, warp) booting a host directory as DH0:
   whose ``S:Startup-Sequence`` runs the program with ``<NIL: >`` a file,
   records ``$RC`` and copies RAM: back to the host.  Every run has a
   wall-clock timeout.
@@ -30,7 +30,7 @@ Verdicts: MATCH, RETRY-MATCH (matched only after a boot-script stall was
 re-run), DIFF (every difference listed; each line of a known DIFF carries
 its pinned docs/ORACLE.md category, any other line is NEW and the program
 UNTRIAGED), SKIP (with a written reason).
-The oracle is never part of the gate: without FS-UAE, the ROM cache (or
+The oracle is never part of the gate: without FS-UAE, the AROS bundle (or
 one that fails verification) or vbcc it prints a SKIP line and exits 0.
 Exit code: 1 on an untriaged DIFF or stale triage (with --strict also on
 any DIFF or RETRY-MATCH), else 0.
@@ -55,8 +55,7 @@ from tests.run_vbcc import SCREEN_COLS, SCREEN_ROWS, SPACE, Program
 
 PROJECT_ROOT = run_vbcc.PROJECT_ROOT
 MANIFEST = os.path.join(PROJECT_ROOT, "tools", "aros", "manifest.txt")
-CACHE_ROOT = os.environ.get("AMIGA64_AROS_CACHE",
-                            os.path.expanduser("~/.cache/amiga64/aros"))
+BUNDLE = os.path.join(PROJECT_ROOT, "third_party", "aros")
 FS_UAE = os.environ.get("FS_UAE",
                         "/Applications/FS-UAE.app/Contents/MacOS/fs-uae")
 SCREEN_SIZE = SCREEN_COLS * SCREEN_ROWS
@@ -310,36 +309,30 @@ def verdict(a64: Outcome, aros: Outcome) -> tuple[str, list[str]]:
     return ("DIFF" if diffs else "MATCH"), diffs
 
 
-# --- the pinned ROM cache ----------------------------------------------------
+# --- the pinned AROS bundle ---------------------------------------------------
 
 @dataclass
 class PinnedFile:
     path: str
-    member: str
+    origin: str
     sha256: str
 
 
 @dataclass
 class Manifest:
-    url: str
-    sha256: str
     files: list[PinnedFile] = field(default_factory=list)
 
 
 def read_manifest(path: str) -> Manifest:
-    m = None
     files = []
     with open(path) as f:
         for line in f:
             parts = line.strip().split("|")
-            if parts[0] == "archive" and len(parts) == 3:
-                m = Manifest(parts[1], parts[2])
-            elif parts[0] == "file" and len(parts) == 4:
+            if parts[0] == "file" and len(parts) == 4:
                 files.append(PinnedFile(*parts[1:]))
-    if m is None or not files:
+    if not files:
         raise ValueError(f"bad manifest {path}")
-    m.files = files
-    return m
+    return Manifest(files)
 
 
 def _sha256(path: str) -> str:
@@ -347,25 +340,25 @@ def _sha256(path: str) -> str:
         return hashlib.sha256(f.read()).hexdigest()
 
 
-def find_cache(manifest: str = MANIFEST, root: str = CACHE_ROOT
-               ) -> tuple[str | None, str]:
-    """(cache dir, "") when every pinned file is present and verifies,
+def find_bundle(manifest: str = MANIFEST, bundle: str = BUNDLE
+                ) -> tuple[str | None, str]:
+    """(bundle dir, "") when every pinned file is present and verifies,
     else (None, why).  Fails closed: a hash mismatch is never used."""
     try:
         m = read_manifest(manifest)
     except (OSError, ValueError) as e:
         return None, f"manifest unreadable: {e}"
-    d = os.path.join(root, m.sha256)
-    if not os.path.isdir(d):
-        return None, f"no AROS cache at {d} (run tools/aros/fetch.sh)"
+    if not os.path.isdir(bundle):
+        return None, f"no AROS bundle at {bundle}"
     for pf in m.files:
-        p = os.path.join(d, pf.path)
+        p = os.path.join(bundle, pf.path)
         if not os.path.isfile(p):
-            return None, f"{pf.path} missing in {d} (run tools/aros/fetch.sh)"
+            return None, (f"{pf.path} missing in {bundle} "
+                          f"(git checkout -- third_party/aros)")
         if _sha256(p) != pf.sha256:
-            return None, (f"{pf.path} SHA256 mismatch in {d}: refusing to use "
-                          f"it (delete the directory, re-run tools/aros/fetch.sh)")
-    return d, ""
+            return None, (f"{pf.path} SHA256 mismatch in {bundle}: refusing to "
+                          f"use it (git checkout -- third_party/aros)")
+    return bundle, ""
 
 
 # --- AROS in FS-UAE ------------------------------------------------------------
@@ -401,11 +394,11 @@ def _read_view(d: str) -> dict[str, bytes]:
     return view
 
 
-def run_aros(p: Program, blob: bytes, cache: str, fs_uae: str,
+def run_aros(p: Program, blob: bytes, bundle: str, fs_uae: str,
              timeout: float, keep: str | None = None,
              manifest: str = MANIFEST) -> Outcome:
     """Boot AROS in FS-UAE, run *blob* once, collect its outcome.  Only
-    the manifest's pinned (and find_cache-verified) C/ files are used."""
+    the manifest's pinned (and find_bundle-verified) C/ files are used."""
     commands = [f.path for f in read_manifest(manifest).files
                 if f.path.startswith("C/")]
     work = tempfile.mkdtemp(prefix=f"aros-{p.name}-")
@@ -415,7 +408,7 @@ def run_aros(p: Program, blob: bytes, cache: str, fs_uae: str,
             os.makedirs(os.path.join(hd, sub))
         for cmd in commands:
             dst = os.path.join(hd, cmd)
-            shutil.copy(os.path.join(cache, cmd), dst)
+            shutil.copy(os.path.join(bundle, cmd), dst)
             os.chmod(dst, 0o755)
         with open(os.path.join(hd, "bin", p.name), "wb") as f:
             f.write(blob)
@@ -428,8 +421,8 @@ def run_aros(p: Program, blob: bytes, cache: str, fs_uae: str,
         cfg = os.path.join(work, "run.fs-uae")
         with open(cfg, "w") as f:
             f.write(_template("a500.fs-uae").format(
-                rom=os.path.join(cache, "aros-rom.bin"),
-                ext=os.path.join(cache, "aros-ext.bin"),
+                rom=os.path.join(bundle, "aros-rom.bin"),
+                ext=os.path.join(bundle, "aros-ext.bin"),
                 hd=hd, base=os.path.join(work, "base")))
         done = os.path.join(hd, "o", "done.txt")
         t0 = time.monotonic()
@@ -473,7 +466,7 @@ def run_aros(p: Program, blob: bytes, cache: str, fs_uae: str,
         if keep:
             dst = os.path.join(keep, p.name)
             shutil.rmtree(dst, ignore_errors=True)
-            # hd/C (AROS commands) stays out: only the cache holds AROS
+            # hd/C (AROS commands) stays out: only third_party/aros holds AROS
             shutil.copytree(work, dst,
                             ignore=shutil.ignore_patterns("base", "C"))
         shutil.rmtree(work, ignore_errors=True)
@@ -547,7 +540,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="wall-clock limit per FS-UAE run (default 120 s)")
     ap.add_argument("--vice-timeout", type=float, default=1800.0)
     ap.add_argument("--fs-uae", default=FS_UAE)
-    ap.add_argument("--cache", default=CACHE_ROOT)
+    ap.add_argument("--bundle", default=BUNDLE)
     ap.add_argument("--manifest", default=MANIFEST)
     ap.add_argument("--out", default=os.path.join(PROJECT_ROOT, "build",
                                                   "vbcc-oracle"),
@@ -565,8 +558,8 @@ def main(argv: list[str] | None = None) -> int:
     if not (os.path.isfile(args.fs_uae) and os.access(args.fs_uae, os.X_OK)):
         print(f"SKIP aros_oracle: FS-UAE not found at {args.fs_uae}")
         return 0
-    cache, why = find_cache(args.manifest, args.cache)
-    if cache is None:
+    bundle, why = find_bundle(args.manifest, args.bundle)
+    if bundle is None:
         print(f"SKIP aros_oracle: {why}")
         return 0
     try:
@@ -586,7 +579,7 @@ def main(argv: list[str] | None = None) -> int:
     os.makedirs(args.out, exist_ok=True)
     blobs = {p.name: run_vbcc.compile_c(p.name, args.out, p.src, p.defines)
              for p in todo}
-    print(f"AROS cache {cache}\nFS-UAE {args.fs_uae}\n"
+    print(f"AROS bundle {bundle}\nFS-UAE {args.fs_uae}\n"
           f"Amiga64 side: {args.prg or 'run_vbcc expectations (--table)'}")
 
     skips = {n: SKIP[n] for n in names if n in SKIP}
@@ -605,7 +598,7 @@ def main(argv: list[str] | None = None) -> int:
             report.append({"name": p.name, "verdict": "SKIP",
                            "reason": skips[p.name]})
             continue
-        ar = run_aros(p, blobs[p.name], cache, args.fs_uae, args.timeout,
+        ar = run_aros(p, blobs[p.name], bundle, args.fs_uae, args.timeout,
                       args.keep, args.manifest)
         stalls = []
         # only a boot-script stall AFTER the program provably exited (its
@@ -613,7 +606,7 @@ def main(argv: list[str] | None = None) -> int:
         while ar.stalled and len(stalls) < args.retries:
             stalls.append(ar.halt)
             print(f"      {p.name}: {ar.halt}; retrying")
-            ar = run_aros(p, blobs[p.name], cache, args.fs_uae, args.timeout,
+            ar = run_aros(p, blobs[p.name], bundle, args.fs_uae, args.timeout,
                           args.keep, args.manifest)
         v, diffs = verdict(a64[p.name], ar)
         known, new, missing = triage_check(p.name, diffs)
@@ -660,7 +653,7 @@ def main(argv: list[str] | None = None) -> int:
           f"{counts['SKIP']} SKIP; {retried} program(s) retried")
     if args.json:
         with open(args.json, "w") as f:
-            json.dump({"cache": cache, "a64": args.prg or "table",
+            json.dump({"bundle": bundle, "a64": args.prg or "table",
                        "counts": counts, "untriaged": untriaged,
                        "retried": retried, "programs": report}, f, indent=1)
     strict_bad = ndiff or retry_match

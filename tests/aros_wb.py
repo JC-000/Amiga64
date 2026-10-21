@@ -4,7 +4,7 @@
 docs/WAVE13_BRIEF.md W1-W4; contract docs/CONTRACTS.md "HLE trackdisk and
 DF0"; design and observations build/evidence/w13-wb/PROGRESS.md.
 
-Needs the AROS ROM cache (tools/aros/fetch.sh) and the user's ADF
+Needs the AROS ROM (bundled in third_party/aros/) and the user's ADF
 ($AMIGA64_TEST_ADF, else ~/Amiga/amiga-os-310-workbench.adf; read-only, never
 copied into the repository or the evidence); without either every leg
 prints a SKIP line and the run exits 0.

@@ -1,6 +1,6 @@
 # tests/oracle/a500.fs-uae.in — FS-UAE config for one AROS oracle run
 # (tests/aros_oracle.py fills the {placeholders}).  A500, 68000, the pinned
-# AROS ROM banks from the cache (tools/aros/fetch.sh), 1 MB chip + 512 KB
+# AROS ROM banks bundled in third_party/aros/, 1 MB chip + 512 KB
 # slow + 8 MB Zorro II fast (the most a 68000 A500 takes), no floppy, the
 # run's host directory as the bootable DH0:, no window, no sound, warp.
 [fs-uae]

@@ -135,7 +135,7 @@ def test_the_wheel(tmp_path):
     r = subprocess.run([sys.executable, "-I", "-c",
                         "import sys; sys.path.insert(0, sys.argv[1]); from amiga64 import tree;"
                         "tree.activate(); from host import machine; rom, why = machine.find_rom();"
-                        "print(rom.cache if rom else why)", str(site)], capture_output=True, text=True)
+                        "print(rom.bundle if rom else why)", str(site)], capture_output=True, text=True)
     assert r.stdout.strip() == str(site / "amiga64" / "_tree" / "third_party" / "aros"), r.stderr
 
 

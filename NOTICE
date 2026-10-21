@@ -7,8 +7,11 @@ Amiga64's own code and documentation are licensed under the MIT License
 (LICENSE).  Some parts of this distribution are third-party works under
 their own licences; the MIT License does not apply to them.
 
-third_party/aros/aros-rom.bin, third_party/aros/aros-ext.bin
-  The AROS m68k ROM banks (AROS nightly2 20260921, amiga-m68k), unmodified.
+third_party/aros/aros-rom.bin, third_party/aros/aros-ext.bin,
+third_party/aros/C/Copy, third_party/aros/C/Assign
+  The AROS m68k ROM banks (AROS nightly2 20260921, amiga-m68k) and two AROS
+  shell commands used only by the developer oracle (nightly2 20261021),
+  unmodified.
   Licensed under the AROS Public License, Version 1.1 (APL 1.1):
   third_party/aros/LICENSE.  Third-party notices that ship with AROS:
   third_party/aros/ACKNOWLEDGEMENTS.

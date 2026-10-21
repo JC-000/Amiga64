@@ -36,8 +36,8 @@ def test_boot_model_uses_the_reference_classes():
 
 
 def _run(tmp_path, *args):
-    if not glob.glob(os.path.expanduser("~/.cache/amiga64/aros/*/aros-rom.bin")):
-        pytest.skip("no AROS ROM cache (tools/aros/fetch.sh)")
+    if not glob.glob(str(ROOT / "third_party" / "aros" / "aros-rom.bin")):
+        pytest.skip("no AROS ROM in third_party/aros")
     if not VENV_PY.exists():
         pytest.skip("no s3probe venv (tools/s3probe/setup_venv.sh)")
     out = tmp_path / "out"

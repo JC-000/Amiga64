@@ -119,13 +119,12 @@ replaced; a file under another name, such as
 
 The AROS ROM is bundled and checked against pinned SHA-256 hashes every
 time (`tools/aros/manifest.txt`). A file that does not match is never
-used: `host/machine.find_rom` then tries the developer cache
-(`~/.cache/amiga64/aros/`) and fails if that does not verify either.
+used, and `host/machine.find_rom` fails.
 
 - In an installed amiga64 the message is "broken install: the bundled
   AROS ROM: … ; reinstall amiga64". Reinstall it with pip.
 - In a git checkout the advice is "restore it: git checkout --
-  third_party/aros" (or, for the cache, run `tools/aros/fetch.sh`).
+  third_party/aros".
 
 `run` and `resume` print it as "amiga64: the AROS ROM: …".
 

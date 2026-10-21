@@ -1,5 +1,5 @@
-AROS m68k ROM banks bundled with Amiga64 (third_party/aros/)
-=============================================================
+AROS m68k files bundled with Amiga64 (third_party/aros/)
+========================================================
 
 What these files are
   aros-rom.bin and aros-ext.bin are the Amiga (m68k) Kickstart-replacement
@@ -47,3 +47,20 @@ Source code (APL 1.1 section 3.6)
 
 Fetched from the archive above on 2026-09-25 (tools/aros/fetch.sh); copied
 into the repository on 2026-10-13 after re-verifying every hash.
+
+C/Copy and C/Assign (added 2026-10-21)
+  Two AROS shell commands, the Executable form, redistributed UNMODIFIED.
+  Only the developer oracle (tests/aros_oracle.py, docs/ORACLE.md) uses
+  them, in its FS-UAE boot script; the amiga64 tool never does.
+  Build:     AROS nightly2 20261021, amiga-m68k boot ISO
+  Source:    AROS git commit bfe9b1cd67 (the version string of that build's
+             aros-rom.bin: "Version Git bfe9b1cd67 ... built on 2026-10-21")
+             https://github.com/aros-development-team/AROS/commit/bfe9b1cd67
+  Versions:  $VER: Copy 50.20 (02.10.2026), $VER: Assign 50.16 (16.10.2026)
+  Archive:   https://downloads.sourceforge.net/project/aros/nightly2/20261021/Binaries/AROS-20261021-amiga-m68k-boot-iso.zip
+  SHA-256:   1bc90afcad6a58e3c221ffdce7b67846c51766f2918fd9984b2baa4e5dc689d9 (the archive)
+  Members:   aros-amiga-m68k.iso!C/Copy, C/Assign.  That archive's LICENSE
+             and ACKNOWLEDGEMENTS are byte-identical to the ones here.
+  The 20260921 archive's own Copy and Assign had rotated off SourceForge;
+  with these the oracle's results are unchanged (17 MATCH, 10 triaged
+  DIFF, 1 SKIP on 2026-10-21).

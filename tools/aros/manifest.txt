@@ -1,21 +1,14 @@
-# tools/aros/manifest.txt — the pinned AROS m68k build used by the reference
-# oracle (tests/aros_oracle.py, docs/ORACLE.md).  Read by tools/aros/fetch.sh
-# and by the oracle.  The amiga-m68k ROM banks listed here are also bundled,
-# unmodified, under third_party/aros/ (W17-K); the archives are never committed.
+# tools/aros/manifest.txt — the SHA-256 of every AROS file bundled under
+# third_party/aros/ (APL 1.1; provenance in third_party/aros/SOURCE.txt).
+# host/machine.py find_rom verifies the ROM banks before staging them;
+# tests/aros_oracle.py find_bundle verifies all of them.  A file that does
+# not match is never used.  Nothing is downloaded: AROS rotates its nightly
+# builds away, so the bundle is the only copy the project relies on.
 #
-# archive|<exact URL>|<sha256 of the downloaded archive>
-#   The cache directory is ~/.cache/amiga64/aros/<that sha256>/.
-# file|<cache path>|<member inside the archive>|<sha256>
-#   A member "X!Y" is file Y inside the ISO image X (itself inside the zip).
-#
-# Pinned 2026-09-25: AROS nightly2 20260921, amiga-m68k boot ISO (the only
-# m68k nightly that still ships the ROM banks; the 20260925 set has just
-# the boot floppy).  SourceForge rotates nightlies: if the URL 404s, re-pin a
-# newer nightly here (all hashes) and re-baseline docs/ORACLE.md.
-archive|https://downloads.sourceforge.net/project/aros/nightly2/20260921/Binaries/AROS-20260921-amiga-m68k-boot-iso.zip|981817b3421a6ed245d0e259712bb876fd2e279930e4e5d2b4d55e1de7744b31
-file|aros-rom.bin|AROS-20260921-amiga-m68k-boot-iso/aros-amiga-m68k.iso!boot/amiga/aros-rom.bin|5f6a80d73b4339134f7a00046ee77912e2c6eac342caa950f402eceda0a74272
-file|aros-ext.bin|AROS-20260921-amiga-m68k-boot-iso/aros-amiga-m68k.iso!boot/amiga/aros-ext.bin|33d2c1fbe732033a265159d50e7cd364d5c9668dd5fffb4120ee1f5a1af44250
-file|LICENSE|AROS-20260921-amiga-m68k-boot-iso/LICENSE|825705f4b1240cf5b88f44ac745dc9d9ebaa71ac087e53bbd69a1c3064ceb9c8
-file|ACKNOWLEDGEMENTS|AROS-20260921-amiga-m68k-boot-iso/ACKNOWLEDGEMENTS|ec5529e08812014a4c8566f5d52a0d4ff42b0a1e84e87b009b283af6da9abfeb
-file|C/Copy|AROS-20260921-amiga-m68k-boot-iso/aros-amiga-m68k.iso!C/Copy|0c8017933e1c970e2bcca8a82b82ba957faae639a9a4e844e4aa89c7ed6d85f0
-file|C/Assign|AROS-20260921-amiga-m68k-boot-iso/aros-amiga-m68k.iso!C/Assign|65c8fa7e61c05d7dd2c768c91cf4b0cea27ac05e7eb7743c8c55becde8b7700c
+# file|<path under third_party/aros/>|<origin: build!member>|<sha256>
+file|aros-rom.bin|nightly2 20260921!boot/amiga/aros-rom.bin|5f6a80d73b4339134f7a00046ee77912e2c6eac342caa950f402eceda0a74272
+file|aros-ext.bin|nightly2 20260921!boot/amiga/aros-ext.bin|33d2c1fbe732033a265159d50e7cd364d5c9668dd5fffb4120ee1f5a1af44250
+file|LICENSE|nightly2 20260921!LICENSE|825705f4b1240cf5b88f44ac745dc9d9ebaa71ac087e53bbd69a1c3064ceb9c8
+file|ACKNOWLEDGEMENTS|nightly2 20260921!ACKNOWLEDGEMENTS|ec5529e08812014a4c8566f5d52a0d4ff42b0a1e84e87b009b283af6da9abfeb
+file|C/Copy|nightly2 20261021!C/Copy|4050937f945216e97d31a3c50617f929281affe3fcecec5ab9d4467ad1c7ad7d
+file|C/Assign|nightly2 20261021!C/Assign|09b271ebe22188b6ef6a6f9c5824dec054690a6f0de9eb08c165c746066e9f10
